@@ -11,12 +11,37 @@ from . import (audio, config, diarcache, diarize, merge, output, sanitize,
                punctuate, unknowns, verify)
 
 
-def _load_asr():
-    if config.ASR_BACKEND == "mlxwhisper":
+def _load_asr(strict=False):
+    backend = config.ASR_BACKEND
+    if backend.startswith("cloud:"):
+        if strict:
+            # sensitive recordings NEVER leave the machine, whatever the
+            # global engine setting says — strict mode always runs local
+            print("   strict mode: cloud transcription disabled for this file"
+                  " — using the local engine", flush=True)
+        else:
+            from . import asr_cloud
+            return asr_cloud
+    if backend == "mlxwhisper":
         from . import asr_mlxwhisper as asr
     else:
         from . import asr_parakeet as asr
     return asr
+
+
+def _transcribe_with_fallback(asr, wav, progress=None) -> dict:
+    """A cloud engine failing (network down, quota, bad key, size cap) must
+    degrade to the local engine, not kill the nightly run. Local engine
+    errors still propagate — there is nothing to fall back to."""
+    try:
+        return asr.transcribe(wav, progress=progress)
+    except Exception as e:
+        if not getattr(asr, "IS_CLOUD", False):
+            raise
+        print(f"   cloud transcription failed ({e}) — falling back to the "
+              "local engine", flush=True)
+        from . import asr_parakeet
+        return asr_parakeet.transcribe(wav, progress=progress)
 
 
 def _meeting_date(src: Path) -> str:
@@ -63,8 +88,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             report("converting", 1.0, dur)
 
         report("transcribing", 0.0)
-        asr = _load_asr()
-        asr_out = asr.transcribe(wav, progress=lambda f: report("transcribing", f))
+        asr = _load_asr(strict)
+        asr_out = _transcribe_with_fallback(
+            asr, wav, progress=lambda f: report("transcribing", f))
         # collapse ASR hallucination loops before anything downstream sees them
         words, loop_spans = sanitize.collapse_repeats(asr_out["words"])
 
