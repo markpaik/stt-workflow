@@ -111,10 +111,16 @@ def batch_pids():
 
 def stop_run(timeout: float = 8.0) -> dict:
     """Stop every batch process group; verify; escalate to SIGKILL.
-    Returns {"stopped": bool, "forced": bool, "survivors": [pid...]}."""
+    Also clears panel-queued runs — "Stop processing" must not be followed by
+    a queued job auto-starting seconds later.
+    Returns {"stopped": bool, "forced": bool, "survivors": [pid...],
+    "cleared_jobs": n}."""
+    from . import jobs
+    cleared = jobs.clear()
     groups = batch_groups()
     if not groups:
-        return {"stopped": False, "forced": False, "survivors": []}
+        return {"stopped": False, "forced": False, "survivors": [],
+                "cleared_jobs": cleared}
     for g in groups:
         try:
             os.killpg(g, signal.SIGTERM)
@@ -133,4 +139,5 @@ def stop_run(timeout: float = 8.0) -> dict:
                 pass
         time.sleep(0.5)
     status.end_run()
-    return {"stopped": True, "forced": forced, "survivors": batch_pids()}
+    return {"stopped": True, "forced": forced, "survivors": batch_pids(),
+            "cleared_jobs": cleared}

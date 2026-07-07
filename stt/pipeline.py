@@ -81,9 +81,16 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         verify_engine, verify_regions = None, None
         if do_verify and words:
             report("verifying", 0.0)
-            verify_regions, verify_engine = verify.run(
-                wav, words, asr_out["engine"], progress=lambda f: report("verifying", f))
-            verify.apply_flags(segments, verify_regions)
+            try:
+                verify_regions, verify_engine = verify.run(
+                    wav, words, asr_out["engine"], progress=lambda f: report("verifying", f))
+                verify.apply_flags(segments, verify_regions)
+            except Exception as e:
+                # verification is a bonus pass — its failure must never cost
+                # the transcript itself
+                print(f"   verify pass failed ({e}); transcript kept without "
+                      "second-opinion flags", flush=True)
+                verify_regions, verify_engine = None, None
     finally:
         wav.unlink(missing_ok=True)
 

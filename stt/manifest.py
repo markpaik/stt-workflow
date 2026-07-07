@@ -9,7 +9,9 @@ from . import config
 def load() -> dict:
     if config.MANIFEST_PATH.exists():
         try:
-            return json.loads(config.MANIFEST_PATH.read_text())
+            m = json.loads(config.MANIFEST_PATH.read_text())
+            m.setdefault("processed", {})  # a malformed file must not blank the queue
+            return m
         except json.JSONDecodeError:
             pass
     return {"processed": {}}

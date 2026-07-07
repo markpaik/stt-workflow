@@ -253,3 +253,12 @@ def test_minor_triage_and_bulk_accept(sandbox):
                                 "flags": ["id_mismatch"], "overlap": False})
     assert review.reapply_decisions("Mtg", rebuilt) == 1
     assert rebuilt["segments"][-1]["reviewed"] == "accepted"
+
+
+def test_insert_negative_time_clamped(sandbox):
+    _make_meeting(sandbox)
+    r = review.insert_segment("Mtg", -3.0, -2.0, "name:X", "early words")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    seg = d["segments"][r["index"]]
+    assert seg["start"] == 0.0 and seg["end"] > seg["start"]

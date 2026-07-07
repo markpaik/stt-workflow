@@ -22,7 +22,8 @@ def test_pause_resume_states(sandbox):
 
 def test_stop_with_nothing_running(sandbox):
     res = control.stop_run(timeout=0.5)
-    assert res == {"stopped": False, "forced": False, "survivors": []}
+    assert res == {"stopped": False, "forced": False, "survivors": [],
+                   "cleared_jobs": 0}
 
 
 def _spawn_fake_batch(sandbox):

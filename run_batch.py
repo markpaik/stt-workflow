@@ -195,9 +195,6 @@ def main():
         print("Another batch is already running; exiting (this is normal)."
               + (" The queued job stays queued." if args.job else ""))
         return 0
-    if args.job is not None:
-        from stt import jobs
-        jobs.remove(args.job)  # lock is ours — this job is now being served
 
     # graceful stop: abandon in-flight work safely and record a clean status.
     # CRITICAL: take the whole process group down with us — --parallel workers
@@ -215,7 +212,8 @@ def main():
     signal.signal(signal.SIGTERM, _terminate)
 
     if not args.dry_run and not args.ignore_battery and not battery_ok():
-        print(f"On battery below {config.BATTERY_FLOOR}% — skipping this run.")
+        print(f"On battery below {config.BATTERY_FLOOR}% — skipping this run."
+              + (" The queued job stays queued." if args.job else ""))
         return 0
 
     source, dest = Path(args.source), Path(args.dest)
@@ -272,6 +270,12 @@ def main():
             print(f"[would process] {src.name}")
         print(f"\n{len(todo)} to process, {skipped} already done.")
         return 0
+
+    if args.job is not None:
+        from stt import jobs
+        # claim only now, with every abort guard (lock, battery, folders, token)
+        # passed — an aborted run leaves the job queued for the panel to re-kick
+        jobs.remove(args.job)
 
     status.start_run([s.name for s in todo])
     base_opts = {"do_diarize": not args.no_diarize,
