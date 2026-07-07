@@ -132,6 +132,15 @@ def estimate_progress(entry: dict, n_active: int = 1):
     return overall, max(0.0, total - done)
 
 
+def clear_stage(name):
+    """Drop a file from the active display WITHOUT logging a 'recent' entry —
+    for post-processing stages (auto-summary) on files whose completion was
+    already recorded by finish_file."""
+    d = read()
+    if d.get("active", {}).pop(name, None) is not None:
+        _write(d)
+
+
 def finish_file(name, ok, summary=""):
     d = read()
     recent = d.get("recent", [])

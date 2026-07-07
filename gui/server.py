@@ -937,8 +937,8 @@ function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>'
 // entity turns back into a literal quote first. Backslash-escaping survives that decode step.
 function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
-const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing'];
-const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing'};
+const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
+const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
 function render(){
   const s=S;
@@ -960,7 +960,7 @@ function render(){
     const idx=STAGES.indexOf(a.stage);
     const pct=a.pct!=null?a.pct:null;
     return `<div class="row"><div class="grow"><div class="name">${esc(n.replace(/\.[^.]+$/,''))}</div>
-    <div class="stagechips">${STAGES.filter(st=>st!=='verifying'||a.stage==='verifying').map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
+    <div class="stagechips">${STAGES.filter(st=>(st!=='verifying'||a.stage==='verifying')&&(st!=='summarizing'||a.stage==='summarizing')).map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
     ${pct!=null?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
     </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left</div>`:'<span class="spin"></span>'}</div></div>`;
   }).join(''):(orphaned?'':'<div class="sub">Starting…</div>'))

@@ -27,6 +27,7 @@ STAGE_LABEL = {
     "diarizing": "Identifying speakers",
     "verifying": "Verifying (second opinion)",
     "writing": "Writing transcript",
+    "summarizing": "Writing summary",
     "done": "Done",
     "queued": "Queued",
 }
