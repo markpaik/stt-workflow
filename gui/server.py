@@ -786,11 +786,13 @@ mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;bor
     <button class="primary" id="runsel" onclick="runSelected()">Process selected</button>
     <button id="runall" onclick="runAll()">Process all new</button>
     <button id="runother" onclick="pickFiles()" title="Choose files from anywhere on disk">Other files…</button>
-    <label class="sub" style="margin-left:8px"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
-    <label class="sub" title="For sensitive recordings (hearings): never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
-    <label class="sub" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
     <span class="grow"></span>
     <button id="pausebtn"></button>
+  </div>
+  <div style="display:flex;gap:22px;margin-top:10px">
+    <label class="sub" style="white-space:nowrap"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
+    <label class="sub" style="white-space:nowrap" title="For sensitive recordings (hearings): never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
+    <label class="sub" style="white-space:nowrap" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
   </div>
   <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for hearings). “Verify” has a second engine listen too and flags the disagreements.</div>
   <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
@@ -831,8 +833,8 @@ mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;bor
 
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
-    <input type="text" id="mfilter" placeholder="Search everything said, or filter by title…"
-           oninput="render();scheduleSearch()" style="max-width:250px;font-size:13px"></h2>
+    <input type="text" id="mfilter" placeholder="Search words or titles…"
+           oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
   <div id="searchhits"></div>
   <div id="meetings" class="inset"></div>
 </div>
