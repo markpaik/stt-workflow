@@ -46,7 +46,7 @@ def test_list_flagged_only_unreviewed(sandbox):
 def test_accept_clears_flag_and_persists(sandbox):
     _make_meeting(sandbox)
     r = review.apply("Mtg", 1, "accept", start=5.0)
-    assert r == {"ok": True, "remaining": 0}
+    assert r["ok"] and r["remaining"] == 0
     d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
     seg = d["segments"][1]
     assert seg["flags"] == [] and seg["reviewed"] == "accepted"
@@ -57,18 +57,38 @@ def test_accept_clears_flag_and_persists(sandbox):
 
 
 def test_edit_text_and_reassign_speaker(sandbox):
+    """Reassigning the middle line to Mark makes all three lines one Mark
+    turn — the auto-merge folds them into a single segment."""
     _make_meeting(sandbox)
     r = review.apply("Mtg", 1, "edit", start=5.0,
                      text="Corrected words.", speaker_id="SPEAKER_00")
-    assert r["ok"]
+    assert r["ok"] and r["merged"] and r["index"] == 0
     d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
-    seg = d["segments"][1]
-    assert seg["text"] == "Corrected words." and seg["text_edited"]
+    assert len(d["segments"]) == 1
+    seg = d["segments"][0]
+    assert seg["text"] == "Clean opening turn. Corrected words. Clean closing turn."
+    assert seg["text_edited"]
     assert seg["speaker"] == "SPEAKER_00" and seg["name"] == "Mark"
-    # the word inside the segment follows the human's speaker call
+    assert seg["start"] == 0.0 and seg["end"] == 9.0
+    # the word inside the reassigned span follows the human's speaker call
     w = [w for w in d["words"] if w["word"] == "uncertain"][0]
     assert w["speaker"] == "SPEAKER_00"
-    assert "Mark: Corrected words." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    txt = (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    assert "Mark: Clean opening turn. Corrected words. Clean closing turn." in txt
+
+
+def test_reassign_does_not_merge_across_different_speakers(sandbox):
+    """A reassignment that does NOT create same-speaker adjacency leaves the
+    segment list untouched."""
+    _make_meeting(sandbox)
+    d0 = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d0["segments"][2]["speaker"] = "SPEAKER_01"  # closing turn now Speaker 2
+    d0["segments"][2]["name"] = None
+    (config.MEETINGS_DIR / "Mtg.json").write_text(json.dumps(d0))
+    r = review.apply("Mtg", 1, "edit", start=5.0, speaker_id="name:Omar")
+    assert r["ok"] and not r["merged"]
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    assert len(d["segments"]) == 3
 
 
 def test_stale_review_rejected(sandbox):
@@ -231,7 +251,9 @@ def test_find_voice_clip_unknown_key(sandbox):
 
 def test_review_decisions_survive_relabel(sandbox):
     """relabel rebuilds segments from the diar cache; recorded review decisions
-    must be re-applied so human work is never lost."""
+    must be re-applied so human work is never lost — including the auto-merge
+    the reassignment triggered, so the relabeled transcript keeps the same
+    single-turn shape the human saw when they saved."""
     _make_meeting(sandbox)
     review.apply("Mtg", 1, "edit", start=5.0, text="Human fixed this.",
                  speaker_id="SPEAKER_00")
@@ -242,8 +264,10 @@ def test_review_decisions_survive_relabel(sandbox):
 
     n = review.reapply_decisions("Mtg", data)
     assert n == 1
-    seg = data["segments"][1]
-    assert seg["text"] == "Human fixed this." and seg["speaker"] == "SPEAKER_00"
+    assert len(data["segments"]) == 1  # replay re-merges the run, like apply did
+    seg = data["segments"][0]
+    assert seg["text"] == "Clean opening turn. Human fixed this. Clean closing turn."
+    assert seg["speaker"] == "SPEAKER_00"
     assert seg["flags"] == [] and seg["reviewed"] == "edited"
 
 
@@ -347,6 +371,107 @@ def test_deleting_an_inserted_line_cannot_nuke_a_real_segment_on_relabel(sandbox
     assert "Clean closing turn." in texts   # the 6.0s real segment lives
     assert "Crosstalk line." not in texts   # the deleted insert stays deleted
     assert len(data["segments"]) == 3
+
+
+def _make_split_meeting(sandbox, base="Split"):
+    """Two turns; the first's text matches its word timings one-to-one so the
+    cut lands exactly between words."""
+    speakers = [
+        {"id": "SPEAKER_00", "name": "Mark", "display": "Mark", "match_score": 0.9},
+        {"id": "SPEAKER_01", "name": None, "display": "Speaker 2", "match_score": None},
+    ]
+    segments = [
+        {"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00", "name": "Mark",
+         "display": "Mark", "text": "alpha beta gamma delta", "flags": [], "overlap": False},
+        {"start": 4.0, "end": 6.0, "speaker": "SPEAKER_01", "name": None,
+         "display": "Speaker 2", "text": "next turn words", "flags": [], "overlap": False},
+    ]
+    words = ([{"start": float(i), "end": i + 0.9, "word": w, "speaker": "SPEAKER_00"}
+              for i, w in enumerate(["alpha", "beta", "gamma", "delta"])]
+             + [{"start": 4.2, "end": 5.8, "word": "nextturnwords", "speaker": "SPEAKER_01"}])
+    data = {"source_file": f"{base}.m4a", "duration_sec": 6.0, "strict": False,
+            "speakers": speakers, "segments": segments, "words": words}
+    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps(data))
+    (config.MEETINGS_DIR / f"{base}.txt").write_text("stub")
+    return data
+
+
+def test_split_reassigned_tail_merges_with_next_turn(sandbox):
+    """The headline repair: the diarizer glued the start of Speaker 2's turn
+    onto Mark's line. Split Mark's line, give the tail to Speaker 2 — the
+    tail auto-merges with Speaker 2's own following turn."""
+    _make_split_meeting(sandbox)
+    r = review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
+                             text_b="gamma delta", speaker_b="SPEAKER_01")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    assert len(d["segments"]) == 2
+    a, b = d["segments"]
+    assert a["text"] == "alpha beta" and a["speaker"] == "SPEAKER_00"
+    assert a["end"] == 1.95  # exactly between beta (ends 1.9) and gamma (starts 2.0)
+    assert b["text"] == "gamma delta next turn words" and b["speaker"] == "SPEAKER_01"
+    assert b["start"] == 1.95 and b["end"] == 6.0
+    # the reassigned words follow the tail's new speaker
+    by_word = {w["word"]: w["speaker"] for w in d["words"]}
+    assert by_word["alpha"] == by_word["beta"] == "SPEAKER_00"
+    assert by_word["gamma"] == by_word["delta"] == "SPEAKER_01"
+
+
+def test_split_same_speaker_stays_two_lines(sandbox):
+    """Splitting without reassigning is a deliberate two-line split — the
+    auto-merge must NOT quietly glue it back together."""
+    _make_split_meeting(sandbox)
+    r = review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
+                             text_b="gamma delta")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    assert len(d["segments"]) == 3
+    assert [s["text"] for s in d["segments"]] == [
+        "alpha beta", "gamma delta", "next turn words"]
+    assert d["segments"][0]["speaker"] == d["segments"][1]["speaker"] == "SPEAKER_00"
+
+
+def test_split_survives_relabel(sandbox):
+    """The split decision is keyed by time-of-cut: a relabel rebuild replays
+    it (including the tail's merge into the next turn)."""
+    _make_split_meeting(sandbox)
+    review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
+                         text_b="gamma delta", speaker_b="SPEAKER_01")
+    data = _make_split_meeting(sandbox)  # simulate relabel rebuild
+    n = review.reapply_decisions("Split", data)
+    assert n == 1
+    assert len(data["segments"]) == 2
+    a, b = data["segments"]
+    assert a["text"] == "alpha beta" and a["end"] == 1.95
+    assert b["text"] == "gamma delta next turn words" and b["speaker"] == "SPEAKER_01"
+
+
+def test_split_guards(sandbox):
+    _make_split_meeting(sandbox)
+    assert not review.split_segment("Split", 0, 0.0, "alpha beta", "  ")["ok"]
+    assert not review.split_segment("Split", 0, 0.0, "", "gamma")["ok"]
+    assert not review.split_segment("Split", 0, 0.0, "a", "b",
+                                    speaker_b="SPEAKER_99")["ok"]
+    assert not review.split_segment("Split", 0, start=99.0, text_a="a",
+                                    text_b="b")["ok"]  # stale guard
+    r = review.insert_segment("Split", 7.0, 8.0, "name:Omar", "added line")
+    assert r["ok"]
+    assert not review.split_segment("Split", r["index"], 7.0, "added", "line")["ok"]
+
+
+def test_split_edited_text_uses_proportional_cut(sandbox):
+    """A segment whose text no longer matches its word timings (human-edited)
+    still splits — at a duration-proportional estimate."""
+    _make_split_meeting(sandbox)
+    # segment 1 has one word entry vs three tokens: no one-to-one mapping
+    r = review.split_segment("Split", 1, start=4.0, text_a="next",
+                             text_b="turn words", speaker_b="name:Omar")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    segs = [s for s in d["segments"] if s["start"] >= 4.0]
+    assert len(segs) == 2
+    assert abs(segs[0]["end"] - (4.0 + 2.0 / 3)) < 0.01  # 1 of 3 tokens in
+    assert segs[1]["display"] == "Omar"
 
 
 def test_redo_archives_decisions(sandbox):

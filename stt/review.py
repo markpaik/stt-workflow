@@ -168,6 +168,56 @@ def _set_segment_speaker(data, seg, sp):
             w["speaker"] = sp["id"]
 
 
+def _merge_same_speaker_run(data, idx):
+    """Combine the run of consecutive same-speaker segments around segs[idx]
+    into one. The pipeline never emits same-speaker neighbors (assign_and_group
+    breaks segments only on speaker change), so adjacency like this exists
+    only because a human edit just created it — a reassignment healing a
+    misattribution, a split whose tail matches the next line, a deleted echo
+    between two halves of one turn — and in every case it reads as ONE turn.
+    Inserted lines never merge: they replay from their own decisions.
+
+    Pending review flags on absorbed neighbors survive (the human approved
+    the edited part, not the neighbors' flagged words). Returns
+    (index_of_merged_segment, parts_combined)."""
+    segs = data.get("segments", [])
+    if not (0 <= idx < len(segs)) or segs[idx].get("inserted"):
+        return idx, 1
+    spk = segs[idx].get("speaker")
+
+    def joins(s):
+        return s.get("speaker") == spk and not s.get("inserted")
+
+    lo, hi = idx, idx
+    while lo > 0 and joins(segs[lo - 1]):
+        lo -= 1
+    while hi + 1 < len(segs) and joins(segs[hi + 1]):
+        hi += 1
+    if lo == hi:
+        return idx, 1
+    parts = segs[lo:hi + 1]
+    merged = dict(parts[0])
+    merged["end"] = parts[-1]["end"]
+    merged["text"] = " ".join(p.get("text", "").strip() for p in parts).strip()
+    merged["text_edited"] = any(p.get("text_edited") for p in parts)
+    for k in ("speaker", "name", "display"):
+        merged[k] = segs[idx].get(k)
+    flags = list(dict.fromkeys(f for p in parts for f in (p.get("flags") or [])))
+    merged["flags"] = flags
+    merged["overlap"] = any(p.get("overlap") for p in parts)
+    alts = [a for p in parts for a in (p.get("alt") or [])]
+    if alts:
+        merged["alt"] = alts
+    else:
+        merged.pop("alt", None)
+    if flags:
+        merged.pop("reviewed", None)  # absorbed prompts still need a look
+    else:
+        merged["reviewed"] = "edited"
+    segs[lo:hi + 1] = [merged]
+    return lo, len(parts)
+
+
 def apply(base: str, index: int, action: str, start: float = None,
           text: str = None, speaker_id: str = None) -> dict:
     """Apply one review decision. action: 'accept' | 'edit'.
@@ -252,9 +302,15 @@ def _apply_locked(base, index, action, start, text, speaker_id) -> dict:
         _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
                                 "text": text if action == "edit" else None,
                                 "speaker_id": speaker_id if action == "edit" else None})
+    merged_at, n_merged = index, 1
+    if action == "edit" and speaker_id:
+        # the decision above is keyed to the segment's PRE-merge start, which
+        # is what the relabel replay will see on rebuilt (unmerged) segments
+        merged_at, n_merged = _merge_same_speaker_run(data, index)
     _rewrite(jpath, data)
     remaining = sum(1 for s in segs if s.get("flags") and not s.get("reviewed"))
-    return {"ok": True, "remaining": remaining}
+    return {"ok": True, "remaining": remaining, "index": merged_at,
+            "merged": n_merged > 1}
 
 
 def insert_segment(base: str, start: float, end: float, speaker_id: str,
@@ -315,8 +371,107 @@ def delete_segment(base: str, index: int, start: float = None) -> dict:
         else:
             _record_decision(base, {"start": seg["start"], "end": seg["end"],
                                     "action": "delete", "text": None, "speaker_id": None})
+        # removing an interjection between two halves of one person's turn
+        # leaves same-speaker neighbors touching — that reads as one turn
+        if 0 < index < len(segs) and segs[index - 1].get("speaker") == segs[index].get("speaker"):
+            _merge_same_speaker_run(data, index - 1)
         _rewrite(jpath, data)
         return {"ok": True}
+
+
+def split_segment(base: str, index: int, start: float, text_a: str, text_b: str,
+                  speaker_a: str = None, speaker_b: str = None) -> dict:
+    """Split one line in two — the tail (text_b) usually belongs to someone
+    the diarizer glued onto this speaker. The cut time comes from the
+    segment's own word timings (proportional fallback for edited text) and is
+    recorded in the decision, so the split survives every relabel by
+    time-of-cut. When a half's new speaker matches its neighbor, the
+    same-speaker auto-merge folds them together — the full repair for a
+    misattributed tail in one gesture."""
+    if not (text_a or "").strip() or not (text_b or "").strip():
+        return {"ok": False, "error": "both halves need some text"}
+    with lock_meeting(base):
+        jpath, data = _load(base)
+        segs = data.get("segments", [])
+        if not (0 <= index < len(segs)) and start is None:
+            return {"ok": False, "error": "segment index out of range"}
+        index, seg = _locate_segment(segs, index, start)
+        if seg is None:
+            return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
+        if seg.get("inserted"):
+            return {"ok": False, "error": "an added line has no word timings to split — edit it instead"}
+        sp_b = _resolve_speaker(data, speaker_b or seg["speaker"])
+        if sp_b is None:
+            return {"ok": False, "error": f"unknown speaker {speaker_b}"}
+        sp_a = _resolve_speaker(data, speaker_a) if speaker_a else None
+        if speaker_a and sp_a is None:
+            return {"ok": False, "error": f"unknown speaker {speaker_a}"}
+        orig_start, orig_end, orig_speaker = seg["start"], seg["end"], seg["speaker"]
+        at = _cut_time(data, seg, text_a, text_b)
+        b = _do_split(data, segs, index, at, text_a, text_b, sp_a, sp_b)
+        # replay note: speaker specs are stored as GIVEN (id or "name:<who>"),
+        # like edit decisions — a MANUAL_n id resolved now wouldn't exist on
+        # rebuilt data, but the spec re-resolves
+        _record_decision(base, {"start": orig_start, "end": orig_end,
+                                "action": "split", "cut": at,
+                                "text": text_a.strip(), "text_b": text_b.strip(),
+                                "speaker_id": speaker_a,
+                                "speaker_b": speaker_b or orig_speaker})
+        a_idx = _merge_split_halves(data, seg, b)
+        _rewrite(jpath, data)
+        remaining = sum(1 for s in segs if s.get("flags") and not s.get("reviewed"))
+        return {"ok": True, "index": a_idx, "remaining": remaining}
+
+
+def _cut_time(data, seg, text_a, text_b):
+    """Where in the audio the split lands. When the text still matches the
+    segment's ASR words one-to-one, cut exactly between word k-1 and word k;
+    for human-edited text, fall back to a character-proportional estimate."""
+    k = len(text_a.split())
+    n_tokens = k + len(text_b.split())
+    words = sorted((w for w in data.get("words", [])
+                    if seg["start"] <= w["start"] < seg["end"]
+                    and w.get("speaker") == seg.get("speaker")),
+                   key=lambda w: w["start"])
+    if len(words) == n_tokens and 0 < k < len(words):
+        return round((words[k - 1]["end"] + words[k]["start"]) / 2, 3)
+    frac = k / max(1, n_tokens)
+    return round(seg["start"] + frac * (seg["end"] - seg["start"]), 3)
+
+
+def _do_split(data, segs, i, at, text_a, text_b, sp_a, sp_b):
+    """Mutate segs[i] into the first half and insert the second after it."""
+    seg = segs[i]
+    at = min(max(float(at), seg["start"] + 0.05), seg["end"] - 0.05)
+    b = {"start": round(at, 3), "end": seg["end"], "speaker": seg["speaker"],
+         "name": seg.get("name"), "display": seg.get("display"),
+         "text": text_b.strip(), "attribution": seg.get("attribution", "diarized"),
+         "flags": [], "overlap": False, "text_edited": True, "reviewed": "edited"}
+    seg["end"] = round(at, 3)
+    seg["text"] = text_a.strip()
+    seg["text_edited"] = True
+    seg["reviewed"] = "edited"
+    seg["flags"] = []
+    seg["overlap"] = False
+    seg.pop("alt", None)
+    segs.insert(i + 1, b)
+    if sp_a:
+        _set_segment_speaker(data, seg, sp_a)
+    _set_segment_speaker(data, b, sp_b)
+    return b
+
+
+def _merge_split_halves(data, a_seg, b_seg):
+    """Run the same-speaker merge for both halves of a fresh split — but only
+    when the halves ended up with DIFFERENT speakers. Same-speaker halves are
+    a deliberate two-line split; auto-merging would silently undo it.
+    Returns the post-merge index of the first half's segment."""
+    segs = data.get("segments", [])
+    if b_seg is not None and a_seg.get("speaker") != b_seg.get("speaker"):
+        _merge_same_speaker_run(data, next(i for i, s in enumerate(segs) if s is a_seg))
+        _merge_same_speaker_run(data, next(i for i, s in enumerate(segs) if s is b_seg))
+    return next((i for i, s in enumerate(segs)
+                 if s is a_seg or (s["start"] <= a_seg["start"] < s["end"])), 0)
 
 
 def _drop_insert_decision(base: str, seg):
@@ -441,10 +596,25 @@ def reapply_decisions(base: str, data: dict) -> int:
         if seg is None:
             continue
         if dec["action"] == "delete":
+            i = next(j for j, s in enumerate(segs) if s is seg)
             segs.remove(seg)
             for w in data.get("words", []):
                 if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
                     w["speaker"] = None
+            if 0 < i < len(segs) and segs[i - 1].get("speaker") == segs[i].get("speaker"):
+                _merge_same_speaker_run(data, i - 1)
+            applied += 1
+            continue
+        if dec["action"] == "split":
+            sp_b = _resolve_speaker(data, dec.get("speaker_b") or "")
+            if sp_b is None:
+                continue
+            sp_a = (_resolve_speaker(data, dec["speaker_id"])
+                    if dec.get("speaker_id") else None)
+            i = next(j for j, s in enumerate(segs) if s is seg)
+            b = _do_split(data, segs, i, dec["cut"],
+                          dec.get("text") or "", dec.get("text_b") or "", sp_a, sp_b)
+            _merge_split_halves(data, seg, b)
             applied += 1
             continue
         if dec["action"] == "edit":
@@ -459,6 +629,9 @@ def reapply_decisions(base: str, data: dict) -> int:
         seg["overlap"] = False
         seg.pop("alt", None)
         applied += 1
+        if dec["action"] == "edit" and dec.get("speaker_id"):
+            _merge_same_speaker_run(
+                data, next(j for j, s in enumerate(segs) if s is seg))
     return applied
 
 
