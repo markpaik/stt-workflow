@@ -114,3 +114,60 @@ def test_spawn_chained_job_survives_a_real_immediate_crash(sandbox):
     else:
         text = (config.PROJECT_DIR / "logs" / "spawned.log").read_text()
     assert "simulated crash: bad stt.env" in text
+
+
+def test_auto_summarize_only_new_meetings(sandbox, monkeypatch):
+    """End-of-run auto-summary: drafts for meetings without an ai_summary,
+    skips ones that already have one, and never leaves a stale 'summarizing'
+    entry in the active status display."""
+    import json
+
+    from conftest import mfile
+    from stt import status, summarize
+
+    mfile("Fresh Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Fresh Mtg.m4a", "segments": [], "speakers": [], "words": []}))
+    mfile("Done Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Done Mtg.m4a", "ai_summary": "already have one",
+         "segments": [], "speakers": [], "words": []}))
+
+    calls = []
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
+
+    n = run_batch.auto_summarize(["Fresh Mtg.m4a", "Done Mtg.m4a"])
+    assert n == 1 and calls == ["Fresh Mtg"]
+    assert status.read().get("active", {}) == {}  # summarizing stage cleared
+
+
+def test_auto_summarize_skips_cleanly_without_llm(sandbox, monkeypatch):
+    from stt import summarize
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    called = []
+    monkeypatch.setattr(summarize, "suggest_title", lambda b: called.append(b))
+    assert run_batch.auto_summarize(["X.m4a"]) == 0
+    assert called == []
+
+
+def test_auto_summarize_one_failure_never_stops_the_rest(sandbox, monkeypatch):
+    import json
+
+    from conftest import mfile
+    from stt import status, summarize
+
+    for b in ("A Mtg", "B Mtg"):
+        mfile(b, ".json").write_text(json.dumps(
+            {"source_file": f"{b}.m4a", "segments": [], "speakers": [], "words": []}))
+    calls = []
+
+    def boom_then_ok(base):
+        calls.append(base)
+        if base == "A Mtg":
+            raise RuntimeError("LLM runner failed")
+        return {}
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", boom_then_ok)
+
+    n = run_batch.auto_summarize(["A Mtg.m4a", "B Mtg.m4a"])
+    assert n == 1 and calls == ["A Mtg", "B Mtg"]
+    assert status.read().get("active", {}) == {}  # cleared even after the failure

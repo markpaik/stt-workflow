@@ -107,6 +107,36 @@ def spawn_chained_job(job: dict):
     subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
+def auto_summarize(keys) -> int:
+    """Draft the AI title/summary for each newly-processed meeting at the end
+    of the run (local Qwen via .venv-llm), so the panel shows a description
+    without anyone clicking Summarize. Quietly skipped when the LLM venv
+    isn't installed; one meeting failing never breaks the others."""
+    import json as _json
+
+    from stt import status as st, summarize
+    if not keys:
+        return 0
+    if not summarize.available():
+        print("  (auto-summary skipped: local LLM not installed)")
+        return 0
+    n = 0
+    for key in keys:
+        base = Path(key).stem
+        try:
+            d = _json.loads(config.meeting_file(base, ".json").read_text())
+            if d.get("ai_summary"):
+                continue  # e.g. a re-queued file that was already summarized
+            st.set_stage(key, "summarizing")
+            summarize.suggest_title(base)
+            n += 1
+        except Exception as e:
+            print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
+        finally:
+            st.clear_stage(key)
+    return n
+
+
 def preflight_source(source: Path) -> bool:
     try:
         next(source.iterdir(), None)
@@ -339,6 +369,7 @@ def main():
         return base_opts
 
     processed = failed = 0
+    succeeded = []  # keys of files that fully processed (for auto-summary)
     n_workers = 2 if (args.parallel > 1 and len(todo) > 1) else 1
 
     def _record(res):
@@ -350,6 +381,7 @@ def main():
                          rates.current_asr_key(), n_active=n_workers)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
+            succeeded.append(res["key"])
             processed += 1
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
@@ -428,6 +460,11 @@ def main():
             print(f"[rescan] {len(more)} new recording(s) arrived during the run", flush=True)
             status.start_run([s.name for s in more])
             run_todo(more)
+
+    if not args.dry_run and succeeded:
+        n_sum = auto_summarize(succeeded)
+        if n_sum:
+            print(f"  auto-summarized {n_sum} meeting(s)", flush=True)
 
     # apply any naming done WHILE this batch ran: the GUI's relabel couldn't take
     # the lock, so it queued a flag — honor it now (we still hold the lock)
