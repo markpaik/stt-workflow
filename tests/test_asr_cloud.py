@@ -141,6 +141,10 @@ def test_local_failure_still_propagates(sandbox):
 
 
 def test_api_key_prefers_env_file_over_process_env(sandbox, monkeypatch):
+    # hermetic against the HOST: importing run_batch loads the machine's real
+    # stt.env into os.environ, so a genuinely-configured provider key (the
+    # panel writes one when the user adds theirs) must not leak in here
+    monkeypatch.delenv("STT_ELEVENLABS_KEY", raising=False)
     monkeypatch.setenv("STT_OPENAI_KEY", "from-process")
     assert asr_cloud.api_key("openai") == "from-process"
     (config.PROJECT_DIR / "stt.env").write_text("STT_OPENAI_KEY=from-file\n")

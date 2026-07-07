@@ -139,3 +139,38 @@ def test_progress_at_stamps_only_when_the_bar_moves(sandbox, monkeypatch):
     t["now"] = 1120.0
     st.set_stage("A.m4a", "diarizing", progress=0.87)  # moved — stamp updates
     assert st.read()["active"]["A.m4a"]["progress_at"] == 1120.0
+
+
+def test_eta_trusts_wall_clock_when_the_hook_goes_silent(sandbox, monkeypatch):
+    """pyannote's hook reports ~87% within minutes, then embeds/clusters
+    silently for most of the stage's wall time. The ETA must not read that
+    frozen 87% as '13% left': once elapsed-in-stage exceeds what the reported
+    fraction implies, the wall clock wins (capped below done)."""
+    from stt import status as st
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(st._time, "time", lambda: t["now"])
+    monkeypatch.setattr(st, "stage_estimates",
+                        lambda dur, n_active=1, verify=False, diarize=True:
+                        {"downloading": 0, "converting": 0, "transcribing": 0,
+                         "diarizing": 1000.0, "writing": 0})
+
+    st.set_stage("A.m4a", "diarizing", progress=0.87, duration=3600)
+    entry = st.read()["active"]["A.m4a"]
+
+    # 10s into a 1000s stage, hook already claims 87%: the clock bounds the
+    # credit — nearly the whole stage still lies ahead
+    t["now"] = 1010.0
+    pct, eta = st.estimate_progress(entry)
+    assert eta > 900
+
+    # 700s in, bar frozen at 0.87: ≈300s left, NOT the hook's 130
+    t["now"] = 1700.0
+    pct, eta = st.estimate_progress(entry)
+    assert 250 < eta < 350
+
+    # past the estimate: the hook's own remainder is all that's left, and it
+    # never claims done while the stage runs
+    t["now"] = 2500.0
+    pct, eta = st.estimate_progress(entry)
+    assert 20 <= eta <= 160 and pct < 1.0
