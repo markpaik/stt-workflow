@@ -9,6 +9,16 @@ and speaker_embeddings (centroids). Per the pipeline source, cluster i maps in
 order to SPEAKER_0i, so sorted labels align row-for-row with the centroid array —
 we assert that invariant instead of assuming it survives upgrades.
 
+KNOWN LIMITATION (accepted, no clean fix available): the assertion below only
+checks that the COUNT of centroids matches the count of labels — it cannot
+detect a future pyannote release that keeps the same speaker count but changes
+the row ORDER of speaker_embeddings relative to sorted(labels). That would
+attach every enrolled voice's name to the wrong cluster, silently — nothing
+would crash to reveal it. There's no independent ground truth available here
+to verify order against, so this is a documented risk to watch for on any
+pyannote upgrade (re-run the tuning/qa benchmark and confirm identified names
+are still correct), not something the code below actually guarantees.
+
 Overlap regions (>=2 simultaneous speakers, from the non-exclusive annotation) are
 returned so words there can be flagged, and are EXCLUDED from per-turn embeddings —
 overlapped audio contaminates the very identity evidence refinement leans on.
@@ -148,6 +158,9 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     centroids = getattr(out, "speaker_embeddings", None)
     if centroids is not None:
         centroids = np.asarray(centroids)
+        # count-only: catches a pyannote upgrade that changes how MANY
+        # centroids come back, but a same-count row REORDER would pass this
+        # silently — see the module docstring's "KNOWN LIMITATION" note.
         if len(centroids) != len(labels):
             raise RuntimeError(
                 f"centroid/label misalignment: {len(centroids)} centroids vs "

@@ -12,6 +12,7 @@ without touching the queue, so the job simply waits for the next kick.
 """
 import fcntl
 import json
+import os
 import time
 
 from . import config
@@ -28,7 +29,12 @@ def _mutate(fn):
         except (FileNotFoundError, json.JSONDecodeError):
             cur = []
         out, ret = fn(cur)
-        PATH.write_text(json.dumps(out, indent=2))
+        # atomic: a kill mid-write (forced quit, the SIGKILL escalation in
+        # stop_run itself) must never truncate this file — a truncated read
+        # degrades silently to "queue empty", dropping every pending job
+        tmp = PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(out, indent=2))
+        os.replace(tmp, PATH)
         return ret
 
 

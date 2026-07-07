@@ -52,15 +52,24 @@ def start_run(pending):
             "recent": read().get("recent", [])})
 
 
-def set_stage(name, stage, progress=None, duration=None):
+def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None):
     """progress: 0..1 within the current stage (None = unknown); duration: audio
-    seconds (sent once, then remembered)."""
+    seconds (sent once, then remembered). diarize/verify: this file's actual
+    settings (sent once, then remembered) — estimate_progress() needs to know
+    up front whether "diarizing"/"verifying" will happen at all, rather than
+    inferring it from whatever the CURRENT stage happens to be, which made the
+    ETA jump the instant a --no-diarize or verify-mode file reached a stage
+    the guess didn't anticipate."""
     d = read()
     active = d.get("active", {})
     prev = active.get(name, {})
     entry = {"stage": stage, "since": prev.get("since", _now())}
     if duration or prev.get("duration"):
         entry["duration"] = duration or prev.get("duration")
+    if diarize is not None or "diarize" in prev:
+        entry["diarize"] = diarize if diarize is not None else prev.get("diarize")
+    if verify is not None or "verify" in prev:
+        entry["verify"] = verify if verify is not None else prev.get("verify")
     if progress is not None:
         entry["progress"] = round(float(progress), 3)
     elif prev.get("stage") == stage and "progress" in prev:
@@ -71,20 +80,23 @@ def set_stage(name, stage, progress=None, duration=None):
     _write(d)
 
 
-def stage_estimates(duration: float, n_active: int = 1, verify: bool = False) -> dict:
+def stage_estimates(duration: float, n_active: int = 1, verify: bool = False,
+                    diarize: bool = True) -> dict:
     """Expected wall seconds per stage for `duration` seconds of audio.
     Rates are auto-calibrated medians from past runs (stt.rates), keyed by the
     CURRENTLY selected ASR model (read fresh from stt.env on every call) and
-    worker count; config defaults until real measurements exist. With verify,
-    the second engine's pass is included at that engine's own rate."""
+    worker count; config defaults until real measurements exist. diarize/verify
+    control whether those stages are budgeted for AT ALL — a --no-diarize or
+    non-verify run must never have their time counted in the total."""
     from . import rates
     est = {
         "downloading": 5.0,  # usually instant; real downloads show as slow stage
         "converting": duration / rates.convert_rate(),
         "transcribing": duration / rates.asr_rate(n_active=n_active),
-        "diarizing": duration / rates.diarize_rate(n_active),
         "writing": rates.writing_secs(),
     }
+    if diarize:
+        est["diarizing"] = duration / rates.diarize_rate(n_active)
     if verify:
         sec = "mlxwhisper:turbo" if rates.current_asr_key() == "parakeet" else "parakeet"
         est["verifying"] = duration / rates.asr_rate(sec, n_active)
@@ -104,8 +116,11 @@ def estimate_progress(entry: dict, n_active: int = 1):
     stage = entry.get("stage", "downloading")
     if stage not in STAGE_ORDER:
         return None, None
-    # a file only reports "verifying" when verify mode is actually on
-    est = stage_estimates(dur, n_active, verify=(stage == "verifying"))
+    # this file's ACTUAL settings, known from the start — not inferred from
+    # whichever stage it happens to be in right now
+    diarize = entry.get("diarize", True)
+    verify = entry.get("verify", False)
+    est = stage_estimates(dur, n_active, verify=verify, diarize=diarize)
     total = sum(est.values())
     idx = STAGE_ORDER.index(stage)
     done = sum(est.get(s, 0.0) for s in STAGE_ORDER[:idx])

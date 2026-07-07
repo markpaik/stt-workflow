@@ -71,3 +71,21 @@ def test_punctuation_spacing_cleaned():
     words = [_w(0, 1, "Hello"), _w(1, 2, ","), _w(2, 3, "world")]
     segs, _ = merge.assign_and_group(words, TURNS, NAMES)
     assert segs[0]["text"] == "Hello, world"
+
+
+def test_zero_duration_word_at_boundary_respects_previous_speaker():
+    """A zero-duration word (start==end, from 3-decimal rounding) sitting
+    exactly at a turn boundary can't produce a positive overlap either way —
+    it must still honor the previous-speaker tie-break like a normal
+    boundary word does, not silently default to whichever turn comes first
+    in the list regardless of context (non-deterministic misattribution)."""
+    # first word solidly in B -> prev_speaker becomes B; second word is a
+    # zero-duration point exactly at the A(0-5)/B(5-10) boundary
+    _, words = merge.assign_and_group([_w(6.0, 7.0), _w(5.0, 5.0)], TURNS, NAMES)
+    assert words[0]["speaker"] == "B"
+    assert words[1]["speaker"] == "B"  # ties to previous speaker, not turn A
+
+
+def test_zero_duration_word_inside_a_turn_is_assigned_to_it():
+    _, words = merge.assign_and_group([_w(2.0, 2.0)], TURNS, NAMES)
+    assert words[0]["speaker"] == "A"

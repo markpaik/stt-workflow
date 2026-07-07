@@ -41,8 +41,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     except Exception:
         dur = None
     report("converting", 0.0, dur)
-    audio.to_wav16k(src, wav)
     try:
+        # inside the try: a failed/partial conversion (disk full, corrupt
+        # source, killed mid-write) must still hit the finally below and
+        # clean up the scratch WAV, not leak it until the next batch's
+        # clean_scratch() — worse, it would leak on every bad file in a run.
+        audio.to_wav16k(src, wav)
         if dur is None:
             dur = audio.duration_sec(wav)
             report("converting", 1.0, dur)

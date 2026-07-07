@@ -122,8 +122,13 @@ def apply_flags(segments, regs):
     engine's candidate text so the review dialog can offer it."""
     n = 0
     for seg in segments:
+        # >= 0, not > 0: a zero-width region (a pure insertion with no
+        # inter-word gap, r["start"] == r["end"]) always computes an overlap
+        # of exactly 0 against ANY segment it sits inside — never negative
+        # unless it's genuinely outside the segment — so a strict > 0 check
+        # let every zero-width disagreement escape flagging entirely.
         hits = [r for r in regs
-                if min(seg["end"], r["end"]) - max(seg["start"], r["start"]) > 0]
+                if min(seg["end"], r["end"]) - max(seg["start"], r["start"]) >= 0]
         if not hits or seg.get("reviewed"):
             continue
         if FLAG not in seg.setdefault("flags", []):

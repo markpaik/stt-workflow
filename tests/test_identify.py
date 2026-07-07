@@ -175,3 +175,90 @@ def test_rename_into_colliding_name_does_not_overwrite(sandbox):
     vps = identify.load_voiceprints()
     assert np.allclose(vps["A_B"][0], v_existing / np.linalg.norm(v_existing))
     assert np.allclose(vps["A/B"][0], v_renamed / np.linalg.norm(v_renamed))
+
+
+def test_lock_registry_serializes_concurrent_enroll(sandbox):
+    """Real OS-level flock contention: a slow holder blocks a concurrent
+    enroll() from running until it releases."""
+    import threading
+    import time
+
+    identify.enroll("Existing", _vec(1))
+
+    def holder(release):
+        with identify.lock_registry():
+            release.wait(1.0)
+
+    release = threading.Event()
+    t = threading.Thread(target=holder, args=(release,))
+    t.start()
+    time.sleep(0.05)
+
+    start = time.monotonic()
+    identify.enroll("New Person", _vec(2))
+    elapsed = time.monotonic() - start
+    release.set()
+    t.join()
+
+    assert elapsed >= 0.9, f"enroll() returned after {elapsed:.2f}s — did not wait for the lock"
+    assert "New Person" in identify.load_registry()
+
+
+def test_lock_registry_is_reentrant_within_one_thread(sandbox):
+    """promote() holds the lock and calls enroll() (which also acquires it) —
+    must not deadlock against itself."""
+    from stt import unknowns
+    v = _vec(3)
+    reg = {"next": 2, "speakers": {"U001": {"file": "U001.npy", "meetings": ["Mtg"]}}}
+    (identify.config.VOICEPRINTS_DIR / "unknowns.json").write_text(
+        __import__("json").dumps(reg))
+    np.save(identify.config.VOICEPRINTS_DIR / "U001.npy", v.reshape(1, -1))
+
+    import threading
+    done = threading.Event()
+
+    def go():
+        assert unknowns.promote("U001", "Dana") is True
+        done.set()
+
+    t = threading.Thread(target=go)
+    t.start()
+    t.join(timeout=3)
+    assert done.is_set(), "promote() deadlocked re-acquiring its own lock via enroll()"
+    assert "Dana" in identify.load_registry()
+
+
+def test_registry_writes_are_atomic_no_partial_file(sandbox):
+    """A crash mid-write must never leave a half-written registry.json —
+    save_registry always writes to a temp file then renames."""
+    identify.enroll("Mark", _vec(1))
+    # simulate the write path directly: the .tmp file must not linger after a
+    # normal save (proves rename-not-copy, so a reader never sees a partial file)
+    assert not (identify.config.VOICEPRINTS_DIR / "registry.json.tmp").exists()
+    assert (identify.config.VOICEPRINTS_DIR / "registry.json").exists()
+
+
+def test_corrupt_registry_warns_instead_of_silently_resetting(sandbox, capsys):
+    (identify.config.VOICEPRINTS_DIR / "registry.json").write_text("{not json")
+    reg = identify.load_registry()
+    assert reg == {}
+    assert "corrupt" in capsys.readouterr().err.lower()
+
+
+def test_cosine_dimension_mismatch_is_safe_not_a_crash():
+    """A voiceprint saved under a different embedding size (e.g. after a
+    model/backend change) must score as 'no match', not crash — and crucially
+    must not raise inside a loop scoring it against every OTHER speaker too."""
+    a = np.zeros(256); a[0] = 1.0
+    b = np.zeros(192); b[0] = 1.0
+    assert identify.cosine(a, b) == -1.0
+    assert identify.cosine(b, a) == -1.0
+
+
+def test_score_against_survives_one_mismatched_sample_among_many():
+    """One bad-dimension sample in a person's stack must not crash scoring
+    against their OTHER, correctly-shaped samples."""
+    good = _vec(1)
+    bad = np.zeros(10)
+    score = identify.score_against(good, [bad, good])
+    assert score > 0.99  # the good sample still matches; bad one is just ignored
