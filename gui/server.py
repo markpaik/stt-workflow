@@ -637,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
                     _spawn([str(RUN_SH), "relabel", "--all"])
                 self._json({"ok": ok})
             elif u.path == "/api/merge_speakers":
-                # src/dst are "uid:U003" or "name:Toya"
+                # src/dst are "uid:U003" or "name:Jordan"
                 st_, sv = b["src"].split(":", 1)
                 dt_, dv = b["dst"].split(":", 1)
                 if st_ == "uid" and dt_ == "name":
@@ -897,7 +897,8 @@ mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;bor
 </style>
 <script>
 // theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint.
-(function(){const t=localStorage.getItem("stt_theme");
+(function(){const q=new URLSearchParams(location.search).get("theme");
+const t=q||localStorage.getItem("stt_theme");
 if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 </script></head><body>
 <div class="top">
@@ -1699,7 +1700,8 @@ async function saveCloudKeys(){
 }
 const THEME_META={auto:["◐","Theme: matching macOS — click for light"],
 light:["☀","Theme: light — click for dark"],dark:["☾","Theme: dark — click to match macOS"]};
-function themeNow(){return localStorage.getItem("stt_theme")||"auto"}
+function themeNow(){const q=new URLSearchParams(location.search).get("theme");
+  return q==="light"||q==="dark"?q:(localStorage.getItem("stt_theme")||"auto")}
 function applyTheme(t){
   if(t==="light"||t==="dark"){localStorage.setItem("stt_theme",t);document.documentElement.dataset.theme=t}
   else{localStorage.removeItem("stt_theme");delete document.documentElement.dataset.theme}
@@ -1712,6 +1714,11 @@ function cycleTheme(){
 applyTheme(themeNow());
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
-refresh();setInterval(refresh,2000);
+refresh().then(()=>{
+  // deep link: /?open=<meeting> opens that transcript directly
+  const o=new URLSearchParams(location.search).get('open');
+  if(o&&(S.meetings||[]).some(m=>m.base===o))openTranscript(o);
+});
+setInterval(refresh,2000);
 </script></body></html>
 """

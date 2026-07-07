@@ -10,7 +10,7 @@ from conftest import mfile
 def test_house_convention_mmddyyyy():
     assert dates.meeting_date("LT Meeting 05212026") == "2026-05-21"
     assert dates.meeting_date("Thrive ICD Omar 10242026") == "2026-10-24"
-    assert dates.meeting_date("Chrishele Thrive 03142025") == "2025-03-14"
+    assert dates.meeting_date("Jordan Thrive 03142025") == "2025-03-14"
 
 
 def test_yyyymmdd_accepted():

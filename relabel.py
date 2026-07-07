@@ -5,7 +5,7 @@ people (or after attribution-logic fixes) to update past meetings in seconds.
 
   ./run.sh relabel "LT Meeting 05212026"     # one meeting (basename, no extension)
   ./run.sh relabel --all                      # every meeting with a .diar.npz sidecar
-  ./run.sh relabel --strict "Brenda ..."      # sensitive: flag, don't guess
+  ./run.sh relabel --strict "Hearing ..."     # sensitive: flag, don't guess
 """
 import argparse
 import fcntl
