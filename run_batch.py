@@ -42,7 +42,7 @@ def _load_env_file():
 
 _load_env_file()
 
-from stt import config, control, icloud, manifest, rates, status  # noqa: E402
+from stt import config, control, icloud, jobs, manifest, rates, status  # noqa: E402
 
 
 def acquire_lock():
@@ -84,8 +84,8 @@ def job_spec_from_args(args, todo) -> dict:
     re-queue a --job run if it's interrupted before finishing (see
     _terminate() in main()) — manifest idempotency makes replaying it, files
     already done included, a safe no-op for anything that already succeeded."""
-    return {"files": args.files.split(",") if args.files else [],
-            "paths": args.paths.split(",") if args.paths else [],
+    return {"files": jobs.split_list(args.files) if args.files else [],
+            "paths": jobs.split_list(args.paths) if args.paths else [],
             "force": args.force, "strict": args.strict,
             "verify": args.verify, "parallel": args.parallel,
             "label": (", ".join(s.name for s in todo[:2])
@@ -274,14 +274,14 @@ def main():
 
     wanted = None
     if args.files:
-        wanted = {f.strip() for f in args.files.split(",") if f.strip()}
+        wanted = {f.strip() for f in jobs.split_list(args.files) if f.strip()}
 
     m = manifest.load()
     todo = []
     skipped = 0
     explicit_paths = set()
     if args.paths:
-        for raw in args.paths.split(","):
+        for raw in jobs.split_list(args.paths):
             p = Path(raw.strip()).expanduser()
             if p.is_file():
                 explicit_paths.add(p.resolve())

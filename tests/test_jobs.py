@@ -83,3 +83,27 @@ def test_crash_while_writing_tmp_leaves_the_real_queue_untouched(sandbox):
     assert jobs.PATH.read_text() == good_before
     assert [j["label"] for j in jobs.items()] == ["A"]
     tmp.unlink()
+
+
+def test_split_list_prefers_field_sep_falls_back_to_comma():
+    assert jobs.split_list("a" + jobs.FIELD_SEP + "b") == ["a", "b"]
+    assert jobs.split_list("a,b") == ["a", "b"]  # human-typed CLI convenience
+
+
+def test_join_list_survives_a_comma_in_a_real_filename():
+    """A filename containing a literal comma (plausible for a renamed voice-
+    memo export) must round-trip through spawn_args() -> argparse intact,
+    not silently split into two bogus names."""
+    joined = jobs.join_list(["Meeting, Part 1.m4a", "Normal.m4a"])
+    assert jobs.split_list(joined) == ["Meeting, Part 1.m4a", "Normal.m4a"]
+
+
+def test_spawn_args_comma_filename_round_trips_through_real_argparse(sandbox):
+    """End-to-end: spawn_args() output must survive being handed to
+    run_batch.py's ACTUAL argparse parser and split back out correctly."""
+    import run_batch
+    job = jobs.add({"files": ["Meeting, Part 1.m4a", "Normal.m4a"], "label": "x"})
+    args_list = jobs.spawn_args(job)
+    files_idx = args_list.index("--files") + 1
+    files_arg = args_list[files_idx]
+    assert run_batch.jobs.split_list(files_arg) == ["Meeting, Part 1.m4a", "Normal.m4a"]

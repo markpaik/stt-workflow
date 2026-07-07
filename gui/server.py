@@ -705,7 +705,9 @@ def check_updates():
     out = []
     for label, repo in MODEL_REPOS.items():
         try:
-            latest = api.model_info(repo).sha
+            # offline/stalled connections must not hang "Check updates"
+            # indefinitely — the button has no cancel
+            latest = api.model_info(repo, timeout=10).sha
             have = local.get(repo)
             out.append({"label": label, "repo": repo,
                         "cached": bool(have),
@@ -820,11 +822,11 @@ mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;bor
 .tseg .segbtn{opacity:0;flex:none;padding:1px 8px;font-size:12px;border-radius:6px}
 .tgap{height:8px;margin:0 8px;border-radius:6px;text-align:center;line-height:8px;
   font-size:11px;color:transparent;cursor:pointer;transition:all .12s}
-.tgap:hover{height:20px;line-height:20px;color:var(--accent);
+.tgap:hover,.tgap:focus-visible{height:20px;line-height:20px;color:var(--accent);
   background:color-mix(in srgb,var(--accent) 8%,transparent)}
 .tgap.editing{height:auto;line-height:normal;color:var(--ink);cursor:default;
   background:var(--chip);padding:10px}
-.tseg:hover .segbtn{opacity:1}
+.tseg:hover .segbtn,.tseg:focus-within .segbtn{opacity:1}
 .tseg.editing{cursor:default;background:var(--chip)}
 </style></head><body>
 <div class="top">
@@ -949,7 +951,7 @@ function render(){
   +(s.overall_eta_sec?`<div class="sub" style="padding-top:10px">Everything queued: ≈ ${fmtEta(s.overall_eta_sec)} remaining</div>`:'');
   // queued panel runs (redos / hand-picked) — waiting for the current run to finish
   const qjobs=(s.queued_jobs||[]).map(j=>
-    `<div class="row"><span style="width:17px"></span><div class="grow"><div class="name">↻ ${esc(j.label)}</div><div class="sub">requested run${j.strict?' · strict':''}${j.verify?' · verify':''}</div></div><span class="chip live">${s.running?'starts after current run':'starting…'}</span><button class="segbtn" title="Cancel this queued run" onclick="api('/api/unqueue',{at:${j.at}}).then(refresh)">✕</button></div>`).join('');
+    `<div class="row"><span style="width:17px"></span><div class="grow"><div class="name">↻ ${esc(j.label)}</div><div class="sub">requested run${j.strict?' · strict':''}${j.verify?' · verify':''}</div></div><span class="chip live">${s.running?'starts after current run':'starting…'}</span><button class="segbtn" title="Cancel this queued run" onclick="api('/api/unqueue',{at:${j.at}}).then(r=>{if(!r.ok)alert('Could not cancel — it may have already started.');refresh()})">✕</button></div>`).join('');
   // queue
   const newFiles=s.queue.filter(f=>!f.processed);
   $('#qcount').textContent=newFiles.length+' new';
@@ -1286,7 +1288,7 @@ async function openTranscript(base,target=null){
     <audio id="tva" controls src="/api/audio?base=${encodeURIComponent(base)}" style="flex:1"></audio>
     <button onclick="tvAddAt()" title="Add a line the pipeline missed, at the audio’s current position — pause where you heard it, then click">＋ Line at playhead</button>
   </div>
-  <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${TV.segs.map((g,i)=>tvRow(g,i)+tvGap(i)).join('')}</div>
+  <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${tvGap(-1)}${TV.segs.map((g,i)=>tvRow(g,i)+tvGap(i)).join('')}</div>
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="tvClose()">Close</button></div>`;
   dlg.showModal();
   dlg.onclose=tvClose;
@@ -1331,7 +1333,11 @@ function tvEdit(i,ev){
   spkWireNew($('#tvspk'));
 }
 function tvGap(i){
-  return `<div class="tgap" id="tg${i}" onclick="tvAddLine(${i})" title="Add a line here — a voice the pipeline missed">＋ add line</div>`;
+  return `<div class="tgap" id="tg${i}" tabindex="0" role="button"
+    aria-label="Add a line here — a voice the pipeline missed"
+    onclick="tvAddLine(${i})"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();tvAddLine(${i})}"
+    title="Add a line here — a voice the pipeline missed">＋ add line</div>`;
 }
 function tvFmt(t){const m=Math.floor(t/60),s=Math.floor(t%60);return m+':'+String(s).padStart(2,'0')}
 function tvParseT(v){
@@ -1341,7 +1347,8 @@ function tvParseT(v){
 }
 function tvAddLine(i,at=null){
   document.querySelectorAll('.tgap.editing').forEach(e=>{const k=+e.id.slice(2);e.outerHTML=tvGap(k)});
-  const g=TV.segs[i],start=at!=null?at:g.end;
+  const g=TV.segs[i];  // undefined for i=-1 (the gap before the first line)
+  const start=at!=null?at:(g?g.end:0);
   const el=$('#tg'+i);
   el.classList.add('editing');el.onclick=null;
   el.innerHTML=`<div style="text-align:left">

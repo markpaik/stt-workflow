@@ -156,13 +156,43 @@ def apply(base: str, index: int, action: str, start: float = None,
         return _apply_locked(base, index, action, start, text, speaker_id)
 
 
+def _locate_segment(segs, index, start):
+    """Resolve the segment a review decision targets. `index` is a snapshot
+    from when the client fetched its list; a relabel that ran since can shift
+    every later index by inserting/merging/nudging segments, so trusting the
+    index blindly risks silently editing the wrong line. `start` is the
+    client's cross-check.
+
+    Exact index + matching start (within STRICT) is the common case. If start
+    drifted past STRICT — e.g. a relabel nudged boundaries by re-running
+    diarization, not a structural change — fall back to locating this
+    segment by start-time proximity across the whole list (within WIDE)
+    instead of hard-rejecting a still-valid edit. No match within WIDE means
+    the transcript genuinely changed underneath the review; reject.
+
+    Returns (index, seg) or (None, None)."""
+    STRICT, WIDE = 0.25, 2.0
+    in_range = 0 <= index < len(segs)
+    if start is None:
+        return (index, segs[index]) if in_range else (None, None)
+    start = float(start)
+    if in_range and abs(segs[index]["start"] - start) <= STRICT:
+        return index, segs[index]
+    best_i, best_d = None, WIDE
+    for i, s in enumerate(segs):
+        d = abs(s["start"] - start)
+        if d < best_d:
+            best_i, best_d = i, d
+    return (best_i, segs[best_i]) if best_i is not None else (None, None)
+
+
 def _apply_locked(base, index, action, start, text, speaker_id) -> dict:
     jpath, data = _load(base)
     segs = data.get("segments", [])
-    if not (0 <= index < len(segs)):
+    if not (0 <= index < len(segs)) and start is None:
         return {"ok": False, "error": "segment index out of range"}
-    seg = segs[index]
-    if start is not None and abs(seg["start"] - float(start)) > 0.25:
+    index, seg = _locate_segment(segs, index, start)
+    if seg is None:
         return {"ok": False, "error": "transcript changed since review opened — reopen it"}
 
     if action == "accept":
@@ -239,10 +269,10 @@ def delete_segment(base: str, index: int, start: float = None) -> dict:
     with lock_meeting(base):
         jpath, data = _load(base)
         segs = data.get("segments", [])
-        if not (0 <= index < len(segs)):
+        if not (0 <= index < len(segs)) and start is None:
             return {"ok": False, "error": "segment index out of range"}
-        seg = segs[index]
-        if start is not None and abs(seg["start"] - float(start)) > 0.25:
+        index, seg = _locate_segment(segs, index, start)
+        if seg is None:
             return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
         segs.pop(index)
         for w in data.get("words", []):
@@ -420,14 +450,25 @@ def find_voice_clip(key: str, meeting: str = None):
         scored = [(identify.score_against(v, samples), label)
                   for label, v in cent_emb.items()]
         scored.sort(reverse=True)
-        if scored and scored[0][0] >= 0.5:
-            label = scored[0][1]
-            try:
-                d = json.loads(jf.read_text())
-            except json.JSONDecodeError:
-                continue
-            segs = [s for s in d.get("segments", []) if s.get("speaker") == label]
-            if segs:
-                seg = max(segs, key=lambda s: s["end"] - s["start"])
-                return base, max(0.0, seg["start"]), min(12.0, max(2.0, seg["end"] - seg["start"]))
+        if not scored:
+            continue
+        best_score, best_label = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else -1.0
+        # same open-set bar as every other identity decision in this codebase
+        # (config.NAMING_THRESHOLD/MARGIN) — a bare score with no runner-up
+        # check was the most permissive match anywhere in the system, and
+        # this one plays audio: a confidently-wrong match means the human
+        # hears the WRONG person's voice while trying to verify a name.
+        if not (best_score >= config.NAMING_THRESHOLD
+                and (best_score - second_score) >= config.NAMING_MARGIN):
+            continue
+        label = best_label
+        try:
+            d = json.loads(jf.read_text())
+        except json.JSONDecodeError:
+            continue
+        segs = [s for s in d.get("segments", []) if s.get("speaker") == label]
+        if segs:
+            seg = max(segs, key=lambda s: s["end"] - s["start"])
+            return base, max(0.0, seg["start"]), min(12.0, max(2.0, seg["end"] - seg["start"]))
     return None

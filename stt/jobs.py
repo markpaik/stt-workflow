@@ -20,6 +20,23 @@ from . import config
 PATH = config.PROJECT_DIR / "queued_jobs.json"
 _LOCK = config.PROJECT_DIR / "queued_jobs.lock"
 
+# ASCII record separator: joins/splits --files and --paths for the queued-job
+# CLI round-trip (spawn_args() here -> run_batch.py's argparse). A plain comma
+# silently corrupts the list if a real filename ever contains one; this
+# character effectively never appears in a filename or gets typed by hand.
+FIELD_SEP = "\x1e"
+
+
+def join_list(items) -> str:
+    return FIELD_SEP.join(items)
+
+
+def split_list(s: str) -> list:
+    """Parse a --files/--paths value. Prefers FIELD_SEP (what spawn_args()
+    emits); falls back to a plain comma so a human typing the flag by hand
+    (per this project's documented CLI usage) still works."""
+    return s.split(FIELD_SEP) if FIELD_SEP in s else s.split(",")
+
 
 def _mutate(fn):
     with open(_LOCK, "w") as lk:
@@ -76,9 +93,9 @@ def spawn_args(job: dict) -> list:
     args = ["caffeinate", "-i", "-s", str(config.PROJECT_DIR / "run.sh"),
             "batch", "--ignore-pause", "--job", str(job["at"])]
     if job.get("files"):
-        args += ["--files", ",".join(job["files"])]
+        args += ["--files", join_list(job["files"])]
     if job.get("paths"):
-        args += ["--paths", ",".join(job["paths"])]
+        args += ["--paths", join_list(job["paths"])]
     if job.get("force"):
         args += ["--force"]
     if job.get("strict"):

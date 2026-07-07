@@ -131,3 +131,33 @@ def test_same_origin_requests_still_work(running_server):
     assert status == 200 and body["ok"]
     status, body = _post(running_server, "/api/resume", {})  # no Origin at all: also allowed
     assert status == 200 and body["ok"]
+
+
+# ---------- check_updates() timeout ----------
+
+def test_check_updates_passes_a_timeout_to_hf_api(monkeypatch):
+    """An offline machine or a stalled connection must not hang "Check
+    updates" indefinitely — there is no cancel button. Verify HfApi.model_info
+    is actually called WITH a timeout, not just documented as having one."""
+    import huggingface_hub
+
+    calls = []
+
+    class FakeInfo:
+        sha = "abc123"
+
+    class FakeApi:
+        def model_info(self, repo, timeout=None, **kw):
+            calls.append(timeout)
+            return FakeInfo()
+
+    class FakeCache:
+        repos = []
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda: FakeCache())
+
+    result = srv.check_updates()
+    assert result["models"]  # at least one configured model repo
+    assert calls, "model_info was never called"
+    assert all(t is not None and t > 0 for t in calls)
