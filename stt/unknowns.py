@@ -173,6 +173,30 @@ def merge(uid_src: str, uid_dst: str) -> bool:
         return True
 
 
+def archive(uid: str) -> bool:
+    """Hide a one-time voice (focus-group participant, walk-in) from the
+    Speakers list WITHOUT forgetting it: samples and meeting links stay, so
+    matching keeps working (their number never gets reassigned to someone
+    else) and a later Restore brings them back for naming."""
+    with lock_registry():
+        reg = load()
+        if uid not in reg["speakers"]:
+            return False
+        reg["speakers"][uid]["archived"] = True
+        save(reg)
+        return True
+
+
+def restore(uid: str) -> bool:
+    with lock_registry():
+        reg = load()
+        if uid not in reg["speakers"]:
+            return False
+        reg["speakers"][uid].pop("archived", None)
+        save(reg)
+        return True
+
+
 def drop(uid: str) -> bool:
     """Forget an unknown (e.g. background voice you never want tracked)."""
     with lock_registry():

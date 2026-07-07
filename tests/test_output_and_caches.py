@@ -196,3 +196,21 @@ def test_registry_backup_survives_a_wipe(sandbox):
     assert bak.exists()
     saved = json.loads(bak.read_text())
     assert set(saved) == {"Alice", "Bob"}  # full pre-wipe registry, restorable
+
+
+def test_archive_hides_but_keeps_matching(sandbox):
+    """Archiving a one-time voice keeps it matchable: a later meeting with the
+    same voice reuses the SAME number instead of minting a new one (numbers
+    stay stable), and restore() brings the entry back for naming."""
+    from stt import unknowns
+    v = np.random.default_rng(9).normal(size=256)
+    uid = unknowns.assign({"S0": v}, {"S0": None}, "Focus Group A")["S0"]
+    assert unknowns.archive(uid)
+    assert unknowns.load()["speakers"][uid]["archived"] is True
+
+    again = unknowns.assign({"S0": v}, {"S0": None}, "Focus Group B")["S0"]
+    assert again == uid  # archived entry still matched, no duplicate speaker
+
+    assert unknowns.restore(uid)
+    assert "archived" not in unknowns.load()["speakers"][uid]
+    assert not unknowns.archive("U999")  # unknown uid: clean False

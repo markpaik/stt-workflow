@@ -88,6 +88,7 @@ def job_spec_from_args(args, todo) -> dict:
             "paths": jobs.split_list(args.paths) if args.paths else [],
             "force": args.force, "strict": args.strict,
             "verify": args.verify, "parallel": args.parallel,
+            "onetime": getattr(args, "one_time_speakers", False),
             "label": (", ".join(s.name for s in todo[:2])
                      + (f" +{len(todo) - 2} more" if len(todo) > 2 else "")) or "resumed run"}
 
@@ -225,7 +226,8 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     res = pipeline.process_file(
         src, dest_dir=dest, do_diarize=opts["do_diarize"], strict=opts["strict"],
         do_verify=opts.get("verify", False),
-        allowed_names=opts["allowed"], report=report)
+        allowed_names=opts["allowed"], report=report,
+        track_unknowns=opts.get("track_unknowns", True))
     if cur["stage"]:  # close out the final stage (writing ends when we return)
         stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (_time.monotonic() - cur["t"])
     outputs = [res["txt"], res["json"]] + ([res["emb"]] if res["emb"] else [])
@@ -269,6 +271,10 @@ def main():
     ap.add_argument("--verify", action="store_true",
                     help="second-opinion pass: another engine transcribes too and "
                          "engine disagreements are flagged for review")
+    ap.add_argument("--one-time-speakers", action="store_true",
+                    help="focus groups etc.: never register this run's unnamed "
+                         "voices in the global speaker list (transcript-local "
+                         "Speaker N labels only; enroll-from-meeting still works)")
     ap.add_argument("--speakers", help="comma-separated attendee names to allow")
     ap.add_argument("--ignore-battery", action="store_true")
     ap.add_argument("--ignore-pause", action="store_true",
@@ -393,6 +399,7 @@ def main():
     base_opts = {"do_diarize": not args.no_diarize,
                  "strict": args.strict or config.STRICT,
                  "verify": args.verify or config.VERIFY,
+                 "track_unknowns": not args.one_time_speakers,
                  "allowed": [s.strip() for s in args.speakers.split(",")] if args.speakers else None,
                  "do_move": config.MOVE_AFTER_SUCCESS and not args.keep_original}
 

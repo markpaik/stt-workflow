@@ -107,3 +107,10 @@ def test_spawn_args_comma_filename_round_trips_through_real_argparse(sandbox):
     files_idx = args_list.index("--files") + 1
     files_arg = args_list[files_idx]
     assert run_batch.jobs.split_list(files_arg) == ["Meeting, Part 1.m4a", "Normal.m4a"]
+
+
+def test_onetime_flag_round_trips_to_spawn_args(sandbox):
+    args = jobs.spawn_args({"at": 1.0, "files": ["A.m4a"], "onetime": True})
+    assert "--one-time-speakers" in args
+    args = jobs.spawn_args({"at": 1.0, "files": ["A.m4a"]})
+    assert "--one-time-speakers" not in args

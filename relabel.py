@@ -59,11 +59,12 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         turns, names, stats = diarize.build_attribution(
             raw_turns, turn_embeddings, cluster_names, vps if config.REFINE else {},
             cluster_centroids=cent_emb, words=words, strict=strict)
-        uid_map = unknowns.assign(cent_emb, cluster_names, base)
-        for label, uid in uid_map.items():
-            if label in names and not names[label].get("name"):
-                names[label]["global_id"] = uid
-                names[label]["display"] = unknowns.display(uid)
+        if not data.get("one_time_speakers"):
+            uid_map = unknowns.assign(cent_emb, cluster_names, base)
+            for label, uid in uid_map.items():
+                if label in names and not names[label].get("name"):
+                    names[label]["global_id"] = uid
+                    names[label]["display"] = unknowns.display(uid)
 
         labels = sorted(names.keys())
         segments, labeled_words = merge.assign_and_group(words, turns, names,

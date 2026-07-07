@@ -102,6 +102,8 @@ def spawn_args(job: dict) -> list:
         args += ["--strict"]
     if job.get("verify"):
         args += ["--verify"]
+    if job.get("onetime"):
+        args += ["--one-time-speakers"]
     if int(job.get("parallel", 1)) == 2:
         args += ["--parallel", "2"]
     return args
