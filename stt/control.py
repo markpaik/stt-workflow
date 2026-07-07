@@ -132,8 +132,10 @@ def stop_run(timeout: float = 8.0) -> dict:
             os.killpg(g, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-    deadline = time.time() + timeout
-    while time.time() < deadline and batch_pids():
+    # monotonic: a wall-clock jump (NTP correction mid-stop) must neither
+    # stretch nor cut short the grace window before SIGKILL escalation
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and batch_pids():
         time.sleep(0.3)
     forced = False
     if batch_pids():  # graceful didn't finish the job — force it
@@ -144,6 +146,16 @@ def stop_run(timeout: float = 8.0) -> dict:
             except (ProcessLookupError, PermissionError):
                 pass
         time.sleep(0.5)
+    # sweep AGAIN after death: a panel-spawned --job batch re-queues its
+    # claimed job from its SIGTERM handler (so a crash or shutdown never
+    # loses it) — and that re-add lands in the queue cleared above, since
+    # the handler only runs once our SIGTERM arrives. Without this second
+    # clear, the panel's idle self-heal kick would restart the very run the
+    # user just stopped, seconds later.
+    try:
+        jobs.clear()
+    except Exception:
+        pass
     status.end_run()
     return {"stopped": True, "forced": forced, "survivors": batch_pids(),
             "cleared_jobs": cleared}

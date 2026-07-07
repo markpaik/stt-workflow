@@ -378,8 +378,20 @@ def main():
                       f"file(s) one at a time", file=sys.stderr, flush=True)
                 for src in broken:
                     print(f"[processing] {src.name}", flush=True)
+                    # a FRESH single-worker pool per file, NOT an in-process
+                    # call: this workload just crashed a worker once. If the
+                    # crash is deterministic (a corrupt file hitting a native
+                    # bug in the ML libs, not a transient OOM-kill), an
+                    # in-process retry would segfault run_batch itself —
+                    # skipping the remaining retries and bypassing _terminate
+                    # (SIGSEGV, not SIGTERM), which loses a claimed job.
                     try:
-                        _record(process_one(str(src), str(dest), opts_for(src)))
+                        with ProcessPoolExecutor(max_workers=1) as rex:
+                            _record(rex.submit(process_one, str(src), str(dest),
+                                               opts_for(src)).result())
+                    except BrokenProcessPool:
+                        nonlocal_fail(src.name, RuntimeError(
+                            "crashed its worker process twice — file skipped"))
                     except Exception as e:
                         traceback.print_exc()
                         nonlocal_fail(src.name, e)

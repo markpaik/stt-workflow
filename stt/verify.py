@@ -145,8 +145,13 @@ def sidecar_path(base: str, dest_dir=None):
 
 
 def save_sidecar(base: str, regs, engine: str, dest_dir=None):
-    sidecar_path(base, dest_dir).write_text(json.dumps(
-        {"engine": engine, "regions": regs}, indent=2))
+    import os
+    p = sidecar_path(base, dest_dir)
+    # atomic: a kill mid-write must not leave a torn file that load_sidecar
+    # silently degrades to None (losing the verify pass's flags)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"engine": engine, "regions": regs}, indent=2))
+    os.replace(tmp, p)
 
 
 def load_sidecar(base: str):

@@ -13,9 +13,12 @@ version and is marked "text_edited" — we never pretend edited text came from A
 import contextlib
 import fcntl
 import json
+import threading
 import uuid
 
 from . import config, identify, output
+
+_meeting_lock_depth = threading.local()
 
 
 @contextlib.contextmanager
@@ -25,14 +28,32 @@ def lock_meeting(base: str):
     both mutate the SAME file with no other exclusion between them, so a save
     landing mid-relabel (or vice versa) used to silently lose whichever write
     finished last. Per-meeting, not a single global lock, so editing one
-    meeting never blocks browsing or editing another."""
+    meeting never blocks browsing or editing another.
+
+    Re-entrant WITHIN one thread, per meeting (mirrors identify.lock_registry):
+    flock isn't re-entrant, so a nested lock_meeting(base) on the same thread
+    would deadlock against itself. A per-base depth counter makes only the
+    outermost call take the real OS lock; another process/thread still
+    genuinely waits."""
+    held = getattr(_meeting_lock_depth, "held", None)
+    if held is None:
+        held = _meeting_lock_depth.held = {}
+    if held.get(base, 0) > 0:
+        held[base] += 1
+        try:
+            yield
+        finally:
+            held[base] -= 1
+        return
     lock_dir = config.MEETINGS_DIR / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"{base}.lock", "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
+        held[base] = 1
         try:
             yield
         finally:
+            held[base] = 0
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
@@ -168,22 +189,27 @@ def _locate_segment(segs, index, start):
     diarization, not a structural change — fall back to locating this
     segment by start-time proximity across the whole list (within WIDE)
     instead of hard-rejecting a still-valid edit. No match within WIDE means
-    the transcript genuinely changed underneath the review; reject.
+    the transcript genuinely changed underneath the review; reject. So does
+    an AMBIGUOUS match: recovery is only safe when the nearest candidate is
+    decisively nearest — a second segment nearly as close (within TIE) means
+    the stale start can no longer say which line the human meant, and
+    guessing risks editing (or deleting) the wrong one.
 
     Returns (index, seg) or (None, None)."""
-    STRICT, WIDE = 0.25, 2.0
+    STRICT, WIDE, TIE = 0.25, 2.0, 0.5
     in_range = 0 <= index < len(segs)
     if start is None:
         return (index, segs[index]) if in_range else (None, None)
     start = float(start)
     if in_range and abs(segs[index]["start"] - start) <= STRICT:
         return index, segs[index]
-    best_i, best_d = None, WIDE
-    for i, s in enumerate(segs):
-        d = abs(s["start"] - start)
-        if d < best_d:
-            best_i, best_d = i, d
-    return (best_i, segs[best_i]) if best_i is not None else (None, None)
+    dists = sorted((abs(s["start"] - start), i) for i, s in enumerate(segs))
+    if not dists or dists[0][0] >= WIDE:
+        return None, None
+    best_d, best_i = dists[0]
+    if len(dists) > 1 and (dists[1][0] - best_d) < TIE:
+        return None, None
+    return best_i, segs[best_i]
 
 
 def _apply_locked(base, index, action, start, text, speaker_id) -> dict:
@@ -278,10 +304,39 @@ def delete_segment(base: str, index: int, start: float = None) -> dict:
         for w in data.get("words", []):
             if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
                 w["speaker"] = None
-        _record_decision(base, {"start": seg["start"], "end": seg["end"],
-                                "action": "delete", "text": None, "speaker_id": None})
+        if seg.get("inserted"):
+            # a human-INSERTED line exists only because of its insert decision
+            # — erase that decision instead of recording a delete. Recording a
+            # timestamp-keyed delete is actively dangerous: _record_decision's
+            # proximity dedup discards the insert (same start), leaving an
+            # orphaned delete free to match — and destroy — a REAL segment
+            # within 0.3s on the next relabel replay.
+            _drop_insert_decision(base, seg)
+        else:
+            _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                                    "action": "delete", "text": None, "speaker_id": None})
         _rewrite(jpath, data)
         return {"ok": True}
+
+
+def _drop_insert_decision(base: str, seg):
+    """Remove the insert decision that created `seg` — matched by manual_id
+    when present, else by start proximity (inserts recorded before manual_id
+    existed)."""
+    p = _decisions_path(base)
+    if not p.exists():
+        return
+    try:
+        decisions = json.loads(p.read_text())
+    except json.JSONDecodeError:
+        return
+    mid = seg.get("manual_id")
+    keep = [d for d in decisions
+            if not (d.get("action") == "insert"
+                    and ((mid and d.get("manual_id") == mid)
+                         or (not mid and abs(d.get("start", -1e9) - seg["start"]) <= 0.25)))]
+    if len(keep) != len(decisions):
+        _write_decisions(p, keep)
 
 
 def _decisions_path(base: str):
@@ -334,7 +389,19 @@ def _record_decision(base: str, decision: dict):
     else:
         decisions = [d for d in decisions
                      if abs(d["start"] - decision["start"]) > 0.25] + [decision]
-    p.write_text(json.dumps(decisions, indent=2))
+    _write_decisions(p, decisions)
+
+
+def _write_decisions(p, decisions):
+    """Atomic: this file is the ONLY durable record of every human review
+    edit — a kill landing mid-write must never truncate it, because both
+    readers silently degrade a torn file to 'no decisions', which would lose
+    all accumulated human work on the next save and replay nothing on the
+    next relabel."""
+    import os
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(decisions, indent=2))
+    os.replace(tmp, p)
 
 
 def reapply_decisions(base: str, data: dict) -> int:

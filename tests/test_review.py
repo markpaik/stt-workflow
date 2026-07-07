@@ -114,10 +114,73 @@ def test_apply_recovers_by_start_time_when_relabel_shifts_index(sandbox):
     assert after[1]["text"] == "Clean opening turn."  # untouched
 
 
+def test_apply_rejects_ambiguous_recovery_instead_of_editing_a_decoy(sandbox):
+    """If a relabel BOTH nudged the intended segment past the strict tolerance
+    AND left another segment nearly as close to the stale start, no time-only
+    heuristic can say which line the human meant — the fallback must reject
+    (safe reopen) rather than guess, because guessing can edit or DELETE the
+    wrong line."""
+    _make_meeting(sandbox)
+    jpath = config.MEETINGS_DIR / "Mtg.json"
+    d = json.loads(jpath.read_text())
+    d["segments"][1]["start"] = 5.6  # intended line nudged to 5.6
+    # decoy at 5.3: past STRICT (no false fast-path hit) but CLOSER to the
+    # stale 5.0 than the intended line — nearest-wins would edit the decoy
+    decoy = {"start": 5.3, "end": 5.55, "speaker": "SPEAKER_00", "name": "Mark",
+             "display": "Mark", "text": "Decoy line.", "flags": [], "overlap": False}
+    d["segments"].insert(1, decoy)
+    jpath.write_text(json.dumps(d))
+
+    r = review.apply("Mtg", 1, "edit", start=5.0, text="Meant for the nudged line.")
+    assert not r["ok"] and "changed" in r["error"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert all(s["text"] != "Meant for the nudged line." for s in after)
+
+    r = review.delete_segment("Mtg", 1, start=5.0)
+    assert not r["ok"]
+    assert len(json.loads(jpath.read_text())["segments"]) == 4  # nothing deleted
+
+
 def test_bad_index_and_speaker(sandbox):
     _make_meeting(sandbox)
     assert not review.apply("Mtg", 42, "accept")["ok"]
     assert not review.apply("Mtg", 1, "edit", start=5.0, speaker_id="SPEAKER_99")["ok"]
+
+
+def test_record_decision_writes_atomically(sandbox, monkeypatch):
+    """{base}.reviews.json is the ONLY durable record of human review edits,
+    and BOTH readers silently degrade a torn file to 'no decisions' — so the
+    write must be tmp-then-os.replace, never a direct write_text. Spy on
+    os.replace to prove the mechanism is actually used."""
+    import os
+    _make_meeting(sandbox)
+    calls = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace",
+                        lambda src, dst: (calls.append((src, dst)),
+                                          real_replace(src, dst))[1])
+    review.apply("Mtg", 1, "accept", start=5.0)
+    dec_path = config.MEETINGS_DIR / "Mtg.reviews.json"
+    dec_calls = [(s, d) for s, d in calls if str(d) == str(dec_path)]
+    assert dec_calls, "reviews.json was never written via os.replace"
+    src, _ = dec_calls[0]
+    assert str(src).endswith(".tmp") and not __import__("pathlib").Path(src).exists()
+    assert json.loads(dec_path.read_text())[0]["action"] == "accept"
+
+
+def test_verify_sidecar_writes_atomically(sandbox, monkeypatch):
+    import os
+    from stt import verify
+    calls = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace",
+                        lambda src, dst: (calls.append((src, dst)),
+                                          real_replace(src, dst))[1])
+    verify.save_sidecar("Mtg", [{"start": 1.0, "end": 2.0}], "parakeet")
+    p = config.MEETINGS_DIR / "Mtg.verify.json"
+    sc = [(s, d) for s, d in calls if str(d) == str(p)]
+    assert sc and str(sc[0][0]).endswith(".tmp")
+    assert verify.load_sidecar("Mtg")["engine"] == "parakeet"
 
 
 def test_find_voice_clip_by_transcript(sandbox):
@@ -256,6 +319,36 @@ def test_insert_delete_and_manual_speaker_survive_relabel(sandbox):
     assert [s["start"] for s in data["segments"]] == sorted(s["start"] for s in data["segments"])
 
 
+def test_deleting_an_inserted_line_cannot_nuke_a_real_segment_on_relabel(sandbox):
+    """Deleting a human-inserted line must erase its INSERT decision, not
+    record a timestamp-keyed delete. The old path left an orphaned delete
+    (the proximity dedup discarded the insert), which on the next relabel
+    replay matched — and destroyed — a REAL segment starting within 0.3s of
+    where the inserted line had been."""
+    _make_meeting(sandbox)
+    # inserted line lands 0.1s after the real 6.0s segment — inside the
+    # 0.3s replay-matching window, the exact hazard
+    r = review.insert_segment("Mtg", 6.1, 7.0, "name:Omar", "Crosstalk line.")
+    assert r["ok"]
+    idx = r["index"]
+    r = review.delete_segment("Mtg", idx, start=6.1)
+    assert r["ok"]
+
+    # the sidecar must hold neither the insert (line shouldn't come back)
+    # nor a delete (nothing left for it to legitimately target)
+    decs = json.loads((config.MEETINGS_DIR / "Mtg.reviews.json").read_text())
+    assert all(d["action"] not in ("insert", "delete") for d in decs), decs
+
+    # relabel replay: every REAL segment survives, and the inserted line
+    # stays gone
+    data = _make_meeting(sandbox)  # simulate relabel rebuild
+    review.reapply_decisions("Mtg", data)
+    texts = [s["text"] for s in data["segments"]]
+    assert "Clean closing turn." in texts   # the 6.0s real segment lives
+    assert "Crosstalk line." not in texts   # the deleted insert stays deleted
+    assert len(data["segments"]) == 3
+
+
 def test_redo_archives_decisions(sandbox):
     """A redo re-diarizes: old cluster ids are meaningless, so decisions are
     archived (renamed .superseded), never half-applied and never deleted."""
@@ -341,6 +434,24 @@ def test_lock_meeting_serializes_same_meeting(sandbox):
 
     order = [e[0] for e in events]
     assert order == ["holder_in", "holder_out", "waiter_in"], order
+
+
+def test_lock_meeting_is_reentrant_within_a_thread(sandbox):
+    """Mirrors lock_registry: a nested lock_meeting(base) on the same thread
+    must not deadlock against itself (flock isn't re-entrant). The nested
+    acquire runs in a worker thread with a join timeout so a regression fails
+    the test instead of hanging the suite."""
+    done = threading.Event()
+
+    def nested():
+        with review.lock_meeting("Mtg"):
+            with review.lock_meeting("Mtg"):
+                done.set()
+
+    t = threading.Thread(target=nested, daemon=True)
+    t.start()
+    t.join(timeout=3)
+    assert done.is_set(), "nested lock_meeting deadlocked against itself"
 
 
 def test_lock_meeting_does_not_block_a_different_meeting(sandbox):
