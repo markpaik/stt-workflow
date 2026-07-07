@@ -75,7 +75,7 @@ def clean_scratch():
     if config.WORK_DIR.exists():
         for p in config.WORK_DIR.glob("*.wav"):
             p.unlink(missing_ok=True)
-    for p in config.MEETINGS_DIR.glob("*.tmp"):
+    for p in list(config.MEETINGS_DIR.glob("*.tmp")) + list(config.MEETINGS_DIR.glob("*/*.tmp")):
         p.unlink(missing_ok=True)
 
 
@@ -167,11 +167,11 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     outputs = [res["txt"], res["json"]] + ([res["emb"]] if res["emb"] else [])
 
     if src.suffix.lower() in config.VIDEO_EXTS:
-        dest_audio = dest / (src.stem + ".m4a")
+        dest_audio = config.meeting_file(src.stem, ".m4a", dest)
         if not dest_audio.exists():
             audio.extract_audio(src, dest_audio)
     else:
-        dest_audio = dest / src.name
+        dest_audio = config.meeting_file(src.stem, src.suffix, dest)
         if src.resolve() != dest_audio.resolve():
             shutil.copy2(src, dest_audio)
 
@@ -267,6 +267,10 @@ def main():
     dest.mkdir(parents=True, exist_ok=True)
     if not args.dry_run:
         clean_scratch()
+        # one-time flat->folder layout migration (idempotent, cheap when done)
+        n = config.migrate_flat_meetings(dest)
+        if n:
+            print(f"migrated {n} file(s) into per-meeting folders")
 
     if not args.dry_run and not args.no_diarize and not config.resolve_hf_token():
         print("Diarization needs a HuggingFace token (see README).", file=sys.stderr)

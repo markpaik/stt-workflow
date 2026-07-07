@@ -42,7 +42,7 @@ def query(q: str, limit: int = 40) -> dict:
     if len(q) < 3:
         return {"query": q, "hits": [], "total": 0}
     hits, total = [], 0
-    files = sorted(config.MEETINGS_DIR.glob("*.json"),
+    files = sorted((config.meeting_file(b, ".json") for b in config.meeting_bases()),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     for jpath in files:
         base = jpath.stem

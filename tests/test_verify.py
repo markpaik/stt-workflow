@@ -3,6 +3,7 @@ region merging, segment flagging, and the sidecar that survives relabels."""
 import json
 
 from stt import config, verify
+from conftest import mfile
 
 
 def _w(items):
@@ -108,7 +109,7 @@ def test_sidecar_roundtrip(sandbox):
     assert got["engine"] == "mlx-whisper/turbo" and got["regions"] == regs
     assert verify.load_sidecar("Nothing") is None
     # a corrupt sidecar degrades to None, never a crash
-    verify.sidecar_path("Bad").write_text("{nope")
+    mfile("Bad", ".verify.json").write_text("{nope")
     assert verify.load_sidecar("Bad") is None
 
 
@@ -122,14 +123,14 @@ def test_verify_flag_is_reviewable(sandbox):
     data = {"source_file": "Mtg.m4a", "duration_sec": 2.0, "strict": False,
             "speakers": [{"id": "SPEAKER_00", "name": "Mark", "display": "Mark"}],
             "segments": segments, "words": []}
-    (config.MEETINGS_DIR / "Mtg.json").write_text(json.dumps(data))
-    (config.MEETINGS_DIR / "Mtg.txt").write_text("stub")
+    (mfile("Mtg", ".json")).write_text(json.dumps(data))
+    (mfile("Mtg", ".txt")).write_text("stub")
 
     out = review.list_flagged("Mtg")
     assert out["items"][0]["alt"][0]["theirs"] == "renewed"
     r = review.apply("Mtg", 0, "edit", start=0.0, text="We renewed the dashboard")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     assert d["segments"][0]["flags"] == [] and "alt" not in d["segments"][0]
 
 

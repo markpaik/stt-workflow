@@ -45,7 +45,7 @@ def _known_base(base) -> bool:
     a file path. Deliberately a plain membership test (not path resolution):
     glob() can only ever return names of files actually inside meetings_dir."""
     return (isinstance(base, str) and bool(base)
-            and base in {p.stem for p in config.meetings_dir().glob("*.json")})
+            and base in set(config.meeting_bases()))
 
 ASR_CHOICES = [
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v2", "note": "fastest · lowest benchmark WER · English"},
@@ -178,13 +178,13 @@ def _meeting_meta(j: Path, dst_dir: Path):
         return _meet_cache[key]
     try:
         d = json.loads(j.read_text())
-        audio_p = next((dst_dir / f"{j.stem}{e}"
-                        for e in (".m4a", ".mp4", ".wav", ".mp3", ".aiff")
-                        if (dst_dir / f"{j.stem}{e}").exists()), None)
+        audio_p = config.meeting_audio(j.stem, dst_dir)
         from datetime import date as _date
         audio_mtime = (audio_p or j).stat().st_mtime
         meta = {"base": j.stem,
-                "date": dates.meeting_date(j.stem)
+                # stored date wins (stamped at process time, human-editable);
+                # filename/mtime derivation only for pre-migration jsons
+                "date": d.get("date") or dates.meeting_date(j.stem)
                         or _date.fromtimestamp(audio_mtime).isoformat(),
                 "minutes": round(d.get("duration_sec", 0) / 60),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
@@ -222,7 +222,8 @@ def gather_state():
     except Exception:
         pass
     meetings = []
-    for j in sorted(dst_dir.glob("*.json"),
+    for j in sorted((config.meeting_file(b, ".json", dst_dir)
+                     for b in config.meeting_bases(dst_dir)),
                     key=lambda p: p.stat().st_mtime, reverse=True):
         meta = _meeting_meta(j, dst_dir)
         if meta:
@@ -342,13 +343,15 @@ def set_folder(which: str, path: str):
     else:
         config.MEETINGS_DIR = p
         p.mkdir(parents=True, exist_ok=True)
+        try:
+            config.migrate_flat_meetings(p)  # a newly-picked folder may hold flat-layout meetings
+        except Exception:
+            pass
     return {"ok": True, "path": str(p)}
 
 
 def _meeting_audio(base: str):
-    dst = config.meetings_dir()
-    return next((dst / f"{base}{e}" for e in (".m4a", ".mp4", ".wav", ".mp3", ".aiff")
-                 if (dst / f"{base}{e}").exists()), None)
+    return config.meeting_audio(base)
 
 
 def _snippet_for(meeting: str, speaker_key: str):
@@ -440,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
                 base = q["base"]
                 if not self._require_base(base):
                     return
-                j = config.meetings_dir() / f"{base}.json"
+                j = config.meeting_file(base, ".json")
                 if not j.exists():
                     self._json({"error": "no transcript"}, 404)
                     return
@@ -463,10 +466,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/audio":
                 if not self._require_base(q.get("base")):
                     return
-                dst = config.meetings_dir()
-                audio_f = next((dst / f"{q['base']}{e}"
-                                for e in (".m4a", ".mp4", ".wav", ".mp3", ".aiff")
-                                if (dst / f"{q['base']}{e}").exists()), None)
+                audio_f = config.meeting_audio(q["base"])
                 if audio_f is None:
                     self._json({"error": "no audio"}, 404)
                     return
@@ -496,7 +496,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/txt":
                 if not self._require_base(q.get("base")):
                     return
-                f = config.meetings_dir() / f"{q['base']}.txt"
+                f = config.meeting_file(q["base"], ".txt")
                 body = f.read_bytes() if f.exists() else b""
                 self.send_response(200 if body else 404)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
@@ -592,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     from stt import diarcache
                     _, _, cent_emb, _ = diarcache.load(
-                        config.MEETINGS_DIR / f"{b['meeting']}.diar.npz")
+                        config.meeting_file(b["meeting"], ".diar.npz"))
                     identify.enroll(name, cent_emb[b["speaker"]], source=b["meeting"])
                     ok = True
                 if ok:
@@ -630,6 +630,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b["new"]))
+            elif u.path == "/api/set_date":
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                self._json(summarize.set_meeting_date(b["base"], b.get("date", "")))
             elif u.path == "/api/review":
                 if not self._require_base(b.get("base")):
                     return
@@ -657,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(b.get("base")):
                     return
                 if b["fmt"] == "reveal":
-                    f = config.meetings_dir() / f"{b['base']}.txt"
+                    f = config.meeting_file(b["base"], ".txt")
                     subprocess.run(["open", "-R", str(f)], capture_output=True)
                     self._json({"ok": f.exists()})
                 else:
@@ -725,6 +730,11 @@ def check_updates():
 
 
 def start_server():
+    try:
+        # one-time flat->folder layout migration + date backfill (idempotent)
+        config.migrate_flat_meetings()
+    except Exception:
+        pass  # the panel must still start; the batch retries the migration
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -1544,6 +1554,10 @@ function openRename(base){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Rename recording</h1>
   <p class="muted" style="margin-top:8px">Suggest a name from what was actually discussed (runs locally — nothing leaves this Mac), or type your own.</p>
   <input type="text" id="newname" value="${esc(base)}" style="width:100%;margin-top:10px">
+  <label class="sub" style="display:block;margin-top:10px">Meeting date
+    <input type="date" id="mdate" value="${esc((S.meetings.find(x=>x.base===base)||{}).date||'')}"
+      style="margin-left:8px;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:3px 6px">
+    <span class="muted" style="margin-left:6px">groups the list by month — fix it here if the recording was exported late</span></label>
   <div id="sumnote" class="muted" style="margin-top:8px"></div>
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:16px">
     <button onclick="suggest('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${S.llm_available?'✨ Suggest from content':'(local LLM not installed)'}</button>
@@ -1577,8 +1591,19 @@ async function suggest(base){
   else $('#sumnote').textContent=r.error||'Could not suggest a name.';
 }
 async function doRename(base){
-  const r=await api('/api/rename',{base,new:$('#newname').value.trim()});
-  if(r.ok){dlg.close();refresh()} else $('#sumnote').textContent=r.error||'Rename failed';
+  const m=S.meetings.find(x=>x.base===base)||{};
+  const nm=$('#newname').value.trim(),dt=$('#mdate').value;
+  let cur=base;
+  if(nm&&nm!==base){
+    const r=await api('/api/rename',{base,new:nm});
+    if(!r.ok){$('#sumnote').textContent=r.error||'Rename failed';return}
+    cur=nm;
+  }
+  if(dt&&dt!==m.date){
+    const r=await api('/api/set_date',{base:cur,date:dt});
+    if(!r.ok){$('#sumnote').textContent=r.error||'Date not saved';return}
+  }
+  dlg.close();refresh();
 }
 async function checkUpdates(){
   $('#updbtn').innerHTML='<span class="spin"></span>';

@@ -14,6 +14,7 @@ import pytest
 
 from gui import server as srv
 from stt import config
+from conftest import mfile
 
 
 @pytest.fixture
@@ -47,10 +48,10 @@ def _post(port, path, payload, headers=None):
 
 
 def _make_meeting(base):
-    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps({
+    (mfile(base, ".json")).write_text(json.dumps({
         "source_file": f"{base}.m4a", "duration_sec": 10.0, "strict": False,
         "speakers": [], "segments": [], "words": []}))
-    (config.MEETINGS_DIR / f"{base}.txt").write_text("stub")
+    (mfile(base, ".txt")).write_text("stub")
 
 
 # ---------- _known_base ----------

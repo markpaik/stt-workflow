@@ -140,13 +140,13 @@ def apply_flags(segments, regs):
 
 
 def sidecar_path(base: str, dest_dir=None):
-    from pathlib import Path
-    return Path(dest_dir or config.MEETINGS_DIR) / f"{base}.verify.json"
+    return config.meeting_file(base, ".verify.json", dest_dir)
 
 
 def save_sidecar(base: str, regs, engine: str, dest_dir=None):
     import os
     p = sidecar_path(base, dest_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
     # atomic: a kill mid-write must not leave a torn file that load_sidecar
     # silently degrades to None (losing the verify pass's flags)
     tmp = p.with_suffix(".json.tmp")

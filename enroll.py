@@ -25,7 +25,7 @@ from stt import config, identify
 
 
 def _meeting_embeddings(base: str) -> dict:
-    p = config.MEETINGS_DIR / f"{base}.emb.npz"
+    p = config.meeting_file(base, ".emb.npz")
     if not p.exists():
         raise SystemExit(
             f"No embeddings sidecar at {p}.\n"

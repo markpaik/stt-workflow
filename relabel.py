@@ -25,9 +25,9 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         # fresh, so it will come out with the latest names anyway
         print(f"  skip {base}: being processed right now (will get names itself)")
         return False
-    mdir = config.MEETINGS_DIR
-    jpath, tpath = mdir / f"{base}.json", mdir / f"{base}.txt"
-    dpath = mdir / f"{base}.diar.npz"
+    jpath = config.meeting_file(base, ".json")
+    tpath = config.meeting_file(base, ".txt")
+    dpath = config.meeting_file(base, ".diar.npz")
     if not jpath.exists():
         print(f"  skip {base}: missing .json")
         return False
@@ -113,8 +113,8 @@ PENDING_FLAG_NAME = "relabel_pending.flag"
 
 
 def all_bases():
-    return sorted(p.name[:-len(".diar.npz")]
-                  for p in config.MEETINGS_DIR.glob("*.diar.npz"))
+    return [b for b in config.meeting_bases()
+            if config.meeting_file(b, ".diar.npz").exists()]
 
 
 def relabel_all():

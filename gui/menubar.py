@@ -89,7 +89,7 @@ def gather():
     except Exception:
         queued_jobs = []
     try:
-        done_count = len(list(config.MEETINGS_DIR.glob("*.json")))
+        done_count = len(config.meeting_bases())
     except Exception:
         done_count = 0
     return {"running": running, "active": active, "queued": queued,
@@ -251,8 +251,8 @@ class STTMenuBar(rumps.App):
 
     def _open_recent(self, sender):
         name = getattr(sender, "_stt_name", "")
-        txt = config.MEETINGS_DIR / (Path(name).stem + ".txt")
-        subprocess.Popen(["open", str(txt if txt.exists() else config.MEETINGS_DIR)])
+        txt = config.meeting_file(Path(name).stem, ".txt")
+        subprocess.Popen(["open", str(txt if txt.exists() else config.meetings_dir())])
 
     def open_meetings(self, _):
         subprocess.Popen(["open", str(config.MEETINGS_DIR)])
