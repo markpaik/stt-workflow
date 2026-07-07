@@ -22,6 +22,31 @@ AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
 LABEL = "com.stt-workflow.batch"
 RUN_SH = config.PROJECT_DIR / "run.sh"
 
+_SAME_ORIGIN = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?(/|$)")
+
+
+def _origin_allowed(headers) -> bool:
+    """This panel is unauthenticated and binds 127.0.0.1, but that alone
+    doesn't stop a malicious page open in the same browser from driving it —
+    any site can fetch()/POST to localhost with no CORS preflight blocking a
+    simple request. A direct request (curl, CLI, typing the URL) carries no
+    Origin/Referer at all and is allowed; a request carrying either header
+    from anywhere else is rejected."""
+    for h in ("Origin", "Referer"):
+        v = headers.get(h)
+        if v and not _SAME_ORIGIN.match(v):
+            return False
+    return True
+
+
+def _known_base(base) -> bool:
+    """A meeting basename must name a real transcript on disk — the only
+    defense against a path-traversal `base` like '../../../etc/passwd' reaching
+    a file path. Deliberately a plain membership test (not path resolution):
+    glob() can only ever return names of files actually inside meetings_dir."""
+    return (isinstance(base, str) and bool(base)
+            and base in {p.stem for p in config.meetings_dir().glob("*.json")})
+
 ASR_CHOICES = [
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v2", "note": "fastest · lowest benchmark WER · English"},
     {"id": "mlxwhisper:large-v3", "label": "Whisper large-v3 (MLX)", "note": "best punctuation robustness · ~4x realtime"},
@@ -372,9 +397,21 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _require_base(self, base) -> bool:
+        """Validate `base` against real meeting basenames; on failure, send the
+        400 and tell the caller to stop. Every handler that turns a client-
+        supplied `base` into a file path must gate on this first."""
+        if _known_base(base):
+            return True
+        self._json({"error": "unknown meeting"}, 400)
+        return False
+
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
+        if not _origin_allowed(self.headers):
+            self._json({"error": "forbidden"}, 403)
+            return
         try:
             if u.path == "/":
                 body = HTML.encode()
@@ -386,7 +423,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/state":
                 self._json(gather_state())
             elif u.path == "/api/snippet":
-                f = _snippet_for(q.get("meeting", ""), q["speaker"])
+                meeting = q.get("meeting", "")
+                if meeting and not self._require_base(meeting):
+                    return
+                f = _snippet_for(meeting, q["speaker"])
                 if f is None:
                     self._json({"error": "no snippet"}, 404)
                     return
@@ -398,6 +438,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
             elif u.path == "/api/transcript":
                 base = q["base"]
+                if not self._require_base(base):
+                    return
                 j = config.meetings_dir() / f"{base}.json"
                 if not j.exists():
                     self._json({"error": "no transcript"}, 404)
@@ -419,6 +461,8 @@ class Handler(BaseHTTPRequestHandler):
                             "people": sorted(identify.load_registry().keys()),
                             "segments": segs})
             elif u.path == "/api/audio":
+                if not self._require_base(q.get("base")):
+                    return
                 dst = config.meetings_dir()
                 audio_f = next((dst / f"{q['base']}{e}"
                                 for e in (".m4a", ".mp4", ".wav", ".mp3", ".aiff")
@@ -450,6 +494,8 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/search":
                 self._json(search.query(q.get("q", "")))
             elif u.path == "/api/txt":
+                if not self._require_base(q.get("base")):
+                    return
                 f = config.meetings_dir() / f"{q['base']}.txt"
                 body = f.read_bytes() if f.exists() else b""
                 self.send_response(200 if body else 404)
@@ -458,10 +504,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             elif u.path == "/api/review":
+                if not self._require_base(q.get("base")):
+                    return
                 self._json(review.list_flagged(q["base"]))
             elif u.path == "/api/edits":
+                if not self._require_base(q.get("base")):
+                    return
                 self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
+                if not self._require_base(q.get("base")):
+                    return
                 from stt import summarize
                 self._json(summarize.suggest_title(q["base"]))
             elif u.path == "/api/check_updates":
@@ -473,6 +525,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
+        if not _origin_allowed(self.headers):
+            self._json({"error": "forbidden"}, 403)
+            return
         try:
             b = self._body()
             if u.path == "/api/run":
@@ -533,6 +588,8 @@ class Handler(BaseHTTPRequestHandler):
                 if b.get("uid"):
                     ok = unknowns.promote(b["uid"], name)
                 else:
+                    if not self._require_base(b.get("meeting")):
+                        return
                     from stt import diarcache
                     _, _, cent_emb, _ = diarcache.load(
                         config.MEETINGS_DIR / f"{b['meeting']}.diar.npz")
@@ -569,9 +626,13 @@ class Handler(BaseHTTPRequestHandler):
                     _spawn([str(RUN_SH), "relabel", "--all"])
                 self._json({"ok": ok})
             elif u.path == "/api/rename":
+                if not self._require_base(b.get("base")):
+                    return
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b["new"]))
             elif u.path == "/api/review":
+                if not self._require_base(b.get("base")):
+                    return
                 if b.get("action") == "accept_minor":
                     self._json(review.accept_minor(b["base"]))
                     return
@@ -587,6 +648,8 @@ class Handler(BaseHTTPRequestHandler):
                                         start=b.get("start"), text=b.get("text"),
                                         speaker_id=b.get("speaker")))
             elif u.path == "/api/export":
+                if not self._require_base(b.get("base")):
+                    return
                 if b["fmt"] == "reveal":
                     f = config.meetings_dir() / f"{b['base']}.txt"
                     subprocess.run(["open", "-R", str(f)], capture_output=True)
@@ -596,6 +659,8 @@ class Handler(BaseHTTPRequestHandler):
                     subprocess.run(["open", "-R", str(path)], capture_output=True)
                     self._json({"ok": True, "path": str(path)})
             elif u.path == "/api/retranscribe":
+                if not self._require_base(b.get("base")):
+                    return
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
                     [str(config.PROJECT_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
@@ -848,6 +913,11 @@ function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
 let S=null, selected=new Set();
 async function api(p,body){const r=await fetch(p,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+// For values embedded as a JS string literal INSIDE an onclick="..." attribute (e.g. onclick="f('${escJs(x)}')").
+// esc() alone breaks there: an apostrophe closes the JS string early, and HTML-entity-encoding it
+// (&#39;) doesn't help — the browser HTML-decodes the attribute before compiling it as JS, so the
+// entity turns back into a literal quote first. Backslash-escaping survives that decode step.
+function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing'};
@@ -887,7 +957,7 @@ function render(){
     const running=s.active&&s.active[f.name];
     const pend=(s.pending||[]).includes(f.name);
     const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':(f.video?'<span class="chip">video</span>':'');
-    const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${esc(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
+    const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${escJs(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
     const est=(!f.processed&&f.est_min)?` · ~${f.est_min} min to process`:'';
     return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}</div>`;
   }).join(''):(qjobs?'':'<div class="sub">Nothing in the iCloud folder.</div>'));
@@ -920,13 +990,13 @@ function render(){
     <button class="playbtn" data-key="${esc(e.name)}" onclick="playVoice(this)">▶</button>
     <div class="grow"><div class="name">${esc(e.name)}</div>
     <div class="sub" title="${esc((e.sources||[]).join(', '))}">${e.samples} voice sample${e.samples>1?'s':''}${e.sources&&e.sources.length?' · from '+esc(e.sources[e.sources.length-1])+(e.sources.length>1?' +'+(e.sources.length-1):''):''}</div></div>
-    <button onclick="openSpeakerActions('name:${esc(e.name)}','${esc(e.name)}','')">⋯</button></div>`).join('')||'<div class="sub">No one enrolled yet.</div>';
+    <button onclick="openSpeakerActions('name:${escJs(e.name)}','${escJs(e.name)}','')">⋯</button></div>`).join('')||'<div class="sub">No one enrolled yet.</div>';
   $('#unknowns').innerHTML=s.unknowns.map(u=>`<div class="row">
     <button class="playbtn" data-key="${u.uid}" data-meeting="${esc(u.meetings[0]||'')}" onclick="playVoice(this)">▶</button>
     <div class="grow"><div class="name">${esc(u.display)}</div>
     <div class="sub">heard in ${u.meetings.length} meeting${u.meetings.length>1?'s':''}</div></div>
-    <button class="primary" onclick="openName('${u.uid}','${esc(u.display)}','${esc(u.meetings[0]||'')}')">Who is this?</button>
-    <button onclick="openSpeakerActions('uid:${u.uid}','${esc(u.display)}','${esc(u.meetings[0]||'')}')">⋯</button></div>`).join('')
+    <button class="primary" onclick="openName('${escJs(u.uid)}','${escJs(u.display)}','${escJs(u.meetings[0]||'')}')">Who is this?</button>
+    <button onclick="openSpeakerActions('uid:${escJs(u.uid)}','${escJs(u.display)}','${escJs(u.meetings[0]||'')}')">⋯</button></div>`).join('')
     ||'<div class="sub" style="padding-top:8px">No unidentified voices right now.</div>';
   $('#relnote').style.display=s.relabel_pending?'block':'none';
   $('#relnote').textContent='Applying names to all transcripts… (moments)';
@@ -951,11 +1021,11 @@ function render(){
     return hdr+`<div class="row"><div class="grow">
     <div class="name">${esc(m.base)}</div>
     <div class="sub">${day?day+' · ':''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
-      ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${esc(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${esc(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
+      ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
-    <button class="primary" onclick="openTranscript('${esc(m.base)}')">Read</button>
-    <button onclick="openSummary('${esc(m.base)}')">Summary</button>
-    <button onclick="openMeetingMenu('${esc(m.base)}')" title="Export, rename, reprocess…">⋯</button>
+    <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
+    <button onclick="openSummary('${escJs(m.base)}')">Summary</button>
+    <button onclick="openMeetingMenu('${escJs(m.base)}')" title="Export, rename, reprocess…">⋯</button>
   </div>`}).join('')||`<div class="sub">${mq?'No transcript titles match “'+esc(mq)+'”.':'No transcripts yet — process something above.'}</div>`;
   _syncVoiceBtns();  // re-render rebuilt the ▶ buttons; restore ◼ on the playing one
 }
@@ -1018,7 +1088,7 @@ function scheduleSearch(){
       <div class="mgroup">Said in transcripts — ${r.total} match${r.total>1?'es':''}</div>
       <div class="inset" style="max-height:30vh;margin-bottom:10px">
       ${r.hits.map(h=>{const mm=Math.floor(h.start/60),ss=String(Math.floor(h.start%60)).padStart(2,'0');
-        return `<div class="tseg" onclick="openTranscript('${esc(h.base)}',${h.index})" title="Open the transcript at this moment">
+        return `<div class="tseg" onclick="openTranscript('${escJs(h.base)}',${h.index})" title="Open the transcript at this moment">
         <span class="t">${mm}:${ss}</span><span class="w">${esc(h.who)}</span>
         <span class="x">${hl(h.snippet)}<span class="sub"> — ${esc(h.base)}</span></span></div>`}).join('')}
       </div>`:`<div class="sub" style="padding:8px 0">Nothing in any transcript matches “${esc(r.query)}”.</div>`;
@@ -1032,22 +1102,22 @@ function openMeetingMenu(base){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
   <div class="row" style="margin-top:8px"><div class="grow"><div class="name">Export as Word</div>
     <div class="sub">Styled .docx → Downloads</div></div>
-    <button onclick="doExport('${esc(base)}','docx',this)">Export</button></div>
+    <button onclick="doExport('${escJs(base)}','docx',this)">Export</button></div>
   <div class="row"><div class="grow"><div class="name">Export as PDF</div>
     <div class="sub">Print-ready → Downloads</div></div>
-    <button onclick="doExport('${esc(base)}','pdf',this)">Export</button></div>
+    <button onclick="doExport('${escJs(base)}','pdf',this)">Export</button></div>
   <div class="row"><div class="grow"><div class="name">Copy transcript</div>
     <div class="sub">Plain text to the clipboard</div></div>
-    <button onclick="copyTxt('${esc(base)}',this)">Copy</button></div>
+    <button onclick="copyTxt('${escJs(base)}',this)">Copy</button></div>
   <div class="row"><div class="grow"><div class="name">Show files</div>
     <div class="sub">Reveal the .txt / .json in Finder</div></div>
-    <button onclick="api('/api/export',{base:'${esc(base)}',fmt:'reveal'})">Reveal</button></div>
+    <button onclick="api('/api/export',{base:'${escJs(base)}',fmt:'reveal'})">Reveal</button></div>
   <div class="row"><div class="grow"><div class="name">Rename</div>
     <div class="sub">Retitle this recording (updates all files)</div></div>
-    <button onclick="dlg.close();openRename('${esc(base)}')">Rename…</button></div>
+    <button onclick="dlg.close();openRename('${escJs(base)}')">Rename…</button></div>
   ${m.audio?`<div class="row" style="border:0"><div class="grow"><div class="name">Reprocess</div>
     <div class="sub">Re-run transcription + speakers from the stored audio</div></div>
-    <button onclick="dlg.close();openRedo('${esc(base)}','${esc(m.audio)}')">Redo…</button></div>`:''}
+    <button onclick="dlg.close();openRedo('${escJs(base)}','${escJs(m.audio)}')">Redo…</button></div>`:''}
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="dlg.close()">Close</button></div>`;
   dlg.showModal();
 }
@@ -1169,7 +1239,7 @@ async function openRedo(base,audio){
   <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoverify" class="checkbox" style="vertical-align:-3px"> verify — a second engine listens too; disagreements get flagged with both versions</label>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="dlg.close()">Cancel</button>
-    <button class="primary" onclick="api('/api/run',{paths:['${esc(audio)}'],force:true,strict:$('#redostrict').checked,verify:$('#redoverify').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
+    <button class="primary" onclick="api('/api/run',{paths:['${escJs(audio)}'],force:true,strict:$('#redostrict').checked,verify:$('#redoverify').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
   </div>`;
   dlg.showModal();
 }
@@ -1393,7 +1463,7 @@ function openSpeakerActions(key,display,meeting){
         return `<div class="row">
           ${src?`<button class="playbtn" data-key="${esc(enr.name)}" data-meeting="${esc(src)}" onclick="playVoice(this)">▶</button>`:'<span style="width:30px" title="Source unknown (enrolled before tracking)"></span>'}
           <div class="grow"><div class="sub">Sample ${i+1} — ${src?esc(src):'source unknown'}</div></div>
-          ${n>1?`<button title="Remove this sample (e.g. it came from a bad recording)" onclick="api('/api/remove_sample',{name:'${esc(enr.name)}',index:${i}}).then(r=>{if(!r.ok)alert(r.error||'failed');dlg.close();refresh()})">✕</button>`:''}
+          ${n>1?`<button title="Remove this sample (e.g. it came from a bad recording)" onclick="api('/api/remove_sample',{name:'${escJs(enr.name)}',index:${i}}).then(r=>{if(!r.ok)alert(r.error||'failed');dlg.close();refresh()})">✕</button>`:''}
         </div>`}).join('');
   }
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(display)}</h1>
@@ -1402,14 +1472,14 @@ function openSpeakerActions(key,display,meeting){
   ${isName?`
   <div class="row"><div class="grow"><div class="name">Rename</div><div class="sub">Fix the name everywhere</div></div>
     <input type="text" id="rname" value="${esc(display)}" style="width:150px">
-    <button onclick="const n=$('#rname').value.trim();if(n&&n!=='${esc(display)}')api('/api/rename_speaker',{name:'${esc(display)}',new:n}).then(()=>{dlg.close();refresh()})">Apply</button></div>`:''}
+    <button onclick="const n=$('#rname').value.trim();if(n&&n!=='${escJs(display)}')api('/api/rename_speaker',{name:'${escJs(display)}',new:n}).then(()=>{dlg.close();refresh()})">Apply</button></div>`:''}
   <div class="row"><div class="grow"><div class="name">Merge into…</div>
     <div class="sub">This voice is really the same person as</div></div>
-    <select id="mtarget">${others.map(o=>`<option value="${o.k}">${esc(o.d)}</option>`).join('')}</select>
-    <button ${others.length?'':'disabled'} onclick="api('/api/merge_speakers',{src:'${key}',dst:$('#mtarget').value}).then(()=>{dlg.close();refresh()})">Merge</button></div>
+    <select id="mtarget">${others.map(o=>`<option value="${esc(o.k)}">${esc(o.d)}</option>`).join('')}</select>
+    <button ${others.length?'':'disabled'} onclick="api('/api/merge_speakers',{src:'${escJs(key)}',dst:$('#mtarget').value}).then(()=>{dlg.close();refresh()})">Merge</button></div>
   <div class="row" style="border:0"><div class="grow"><div class="name">Remove</div>
     <div class="sub">${isName?'Un-enroll; their lines revert to Speaker N':'Forget this voice entirely'}</div></div>
-    <button class="danger" onclick="if(confirm('Remove ${esc(display)}?'))api(${isName?`'/api/remove_speaker',{name:'${esc(display)}'}`:`'/api/forget',{uid:'${key.split(':')[1]}'}`}).then(()=>{dlg.close();refresh()})">Remove</button></div>
+    <button class="danger" onclick="if(confirm('Remove ${escJs(display)}?'))api(${isName?`'/api/remove_speaker',{name:'${escJs(display)}'}`:`'/api/forget',{uid:'${escJs(key.split(':')[1])}'}`}).then(()=>{dlg.close();refresh()})">Remove</button></div>
   <div style="display:flex;justify-content:flex-end;margin-top:14px"><button onclick="dlg.close()">Close</button></div>`;
   dlg.showModal();
 }
@@ -1419,10 +1489,10 @@ function openRename(base){
   <input type="text" id="newname" value="${esc(base)}" style="width:100%;margin-top:10px">
   <div id="sumnote" class="muted" style="margin-top:8px"></div>
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:16px">
-    <button onclick="suggest('${esc(base)}')" ${S.llm_available?'':'disabled'}>${S.llm_available?'✨ Suggest from content':'(local LLM not installed)'}</button>
+    <button onclick="suggest('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${S.llm_available?'✨ Suggest from content':'(local LLM not installed)'}</button>
     <div style="display:flex;gap:8px">
       <button onclick="dlg.close()">Cancel</button>
-      <button class="primary" onclick="doRename('${esc(base)}')">Rename</button>
+      <button class="primary" onclick="doRename('${escJs(base)}')">Rename</button>
     </div>
   </div>`;
   dlg.showModal();
@@ -1432,7 +1502,7 @@ function openSummary(base){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
   <div id="sumbody" class="muted" style="margin-top:10px;max-height:300px;overflow:auto">${m.summary?esc(m.summary):'No summary yet — generate one below. Runs locally; nothing leaves this Mac.'}</div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-    <button onclick="genSummary('${esc(base)}')" ${S.llm_available?'':'disabled'}>${m.summary?'Regenerate':'✨ Generate summary'}</button>
+    <button onclick="genSummary('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${m.summary?'Regenerate':'✨ Generate summary'}</button>
     <button onclick="dlg.close()">Close</button>
   </div>`;
   dlg.showModal();

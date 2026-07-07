@@ -10,9 +10,30 @@ Word-preserving contract: an edited segment keeps its word-level timing entries
 (speaker labels update on reassign), but the segment text becomes the human's
 version and is marked "text_edited" — we never pretend edited text came from ASR.
 """
+import contextlib
+import fcntl
 import json
+import uuid
 
 from . import config, identify, output
+
+
+@contextlib.contextmanager
+def lock_meeting(base: str):
+    """Serialize a full read-modify-write of one meeting's json between the
+    GUI's review edits (this module) and relabel's rebuild (relabel.py) —
+    both mutate the SAME file with no other exclusion between them, so a save
+    landing mid-relabel (or vice versa) used to silently lose whichever write
+    finished last. Per-meeting, not a single global lock, so editing one
+    meeting never blocks browsing or editing another."""
+    lock_dir = config.MEETINGS_DIR / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"{base}.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def _load(base: str):
@@ -60,19 +81,20 @@ def list_flagged(base: str) -> dict:
 def accept_minor(base: str) -> dict:
     """Bulk-accept every minor flagged crumb (recorded as decisions, so they
     stay accepted across relabels). Substantial items remain for review."""
-    jpath, data = _load(base)
-    n = 0
-    for seg in data.get("segments", []):
-        if seg.get("flags") and not seg.get("reviewed") and is_minor(seg):
-            seg["reviewed"] = "accepted"
-            _record_decision(base, {"start": seg["start"], "end": seg["end"],
-                                    "action": "accept", "text": None, "speaker_id": None})
-            seg["flags"] = []
-            seg["overlap"] = False
-            seg.pop("alt", None)
-            n += 1
-    if n:
-        _rewrite(jpath, data)
+    with lock_meeting(base):
+        jpath, data = _load(base)
+        n = 0
+        for seg in data.get("segments", []):
+            if seg.get("flags") and not seg.get("reviewed") and is_minor(seg):
+                seg["reviewed"] = "accepted"
+                _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                                        "action": "accept", "text": None, "speaker_id": None})
+                seg["flags"] = []
+                seg["overlap"] = False
+                seg.pop("alt", None)
+                n += 1
+        if n:
+            _rewrite(jpath, data)
     remaining = sum(1 for s in data.get("segments", [])
                     if s.get("flags") and not s.get("reviewed"))
     return {"ok": True, "accepted": n, "remaining": remaining}
@@ -130,6 +152,11 @@ def apply(base: str, index: int, action: str, start: float = None,
     """Apply one review decision. action: 'accept' | 'edit'.
     Returns {"ok": bool, "remaining": int}. `start` sanity-checks the index
     against the file in case it changed since the list was fetched."""
+    with lock_meeting(base):
+        return _apply_locked(base, index, action, start, text, speaker_id)
+
+
+def _apply_locked(base, index, action, start, text, speaker_id) -> dict:
     jpath, data = _load(base)
     segs = data.get("segments", [])
     if not (0 <= index < len(segs)):
@@ -156,9 +183,19 @@ def apply(base: str, index: int, action: str, start: float = None,
     seg["flags"] = []
     seg["overlap"] = False
     seg.pop("alt", None)
-    _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
-                            "text": text if action == "edit" else None,
-                            "speaker_id": speaker_id if action == "edit" else None})
+    if seg.get("inserted") and seg.get("manual_id"):
+        # this line only exists because a human inserted it — there is no
+        # rebuilt segment for a plain accept/edit decision to attach to on the
+        # next relabel, so update the ORIGINAL insert decision in place
+        # (matched by manual_id) rather than recording a competing one keyed
+        # by timestamp, which would just make the line vanish on replay.
+        _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": "insert",
+                                "text": seg["text"], "speaker_id": seg["speaker"],
+                                "manual_id": seg["manual_id"]})
+    else:
+        _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
+                                "text": text if action == "edit" else None,
+                                "speaker_id": speaker_id if action == "edit" else None})
     _rewrite(jpath, data)
     remaining = sum(1 for s in segs if s.get("flags") and not s.get("reviewed"))
     return {"ok": True, "remaining": remaining}
@@ -172,45 +209,49 @@ def insert_segment(base: str, start: float, end: float, speaker_id: str,
     sidecar."""
     if not (text or "").strip():
         return {"ok": False, "error": "text is required"}
-    jpath, data = _load(base)
-    sp = _resolve_speaker(data, speaker_id)
-    if sp is None:
-        return {"ok": False, "error": f"unknown speaker {speaker_id}"}
-    start, end = max(0.0, float(start)), float(end)
-    if end <= start:
-        end = start + 1.0
-    seg = {"start": round(start, 3), "end": round(end, 3), "speaker": sp["id"],
-           "text": text.strip(), "attribution": "manual", "flags": [],
-           "overlap": False, "name": sp.get("name"), "display": sp["display"],
-           "text_edited": True, "inserted": True, "reviewed": "edited"}
-    segs = data.get("segments", [])
-    pos = next((i for i, s in enumerate(segs) if s["start"] > seg["start"]), len(segs))
-    segs.insert(pos, seg)
-    _record_decision(base, {"start": seg["start"], "end": seg["end"],
-                            "action": "insert", "text": seg["text"],
-                            "speaker_id": speaker_id})
-    _rewrite(jpath, data)
-    return {"ok": True, "index": pos}
+    with lock_meeting(base):
+        jpath, data = _load(base)
+        sp = _resolve_speaker(data, speaker_id)
+        if sp is None:
+            return {"ok": False, "error": f"unknown speaker {speaker_id}"}
+        start, end = max(0.0, float(start)), float(end)
+        if end <= start:
+            end = start + 1.0
+        manual_id = uuid.uuid4().hex[:12]
+        seg = {"start": round(start, 3), "end": round(end, 3), "speaker": sp["id"],
+               "text": text.strip(), "attribution": "manual", "flags": [],
+               "overlap": False, "name": sp.get("name"), "display": sp["display"],
+               "text_edited": True, "inserted": True, "reviewed": "edited",
+               "manual_id": manual_id}
+        segs = data.get("segments", [])
+        pos = next((i for i, s in enumerate(segs) if s["start"] > seg["start"]), len(segs))
+        segs.insert(pos, seg)
+        _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                                "action": "insert", "text": seg["text"],
+                                "speaker_id": speaker_id, "manual_id": manual_id})
+        _rewrite(jpath, data)
+        return {"ok": True, "index": pos}
 
 
 def delete_segment(base: str, index: int, start: float = None) -> dict:
     """Remove a line (echo, hallucination, misheard non-speech). Its words are
     detached from any speaker rather than deleted — the ASR record stays honest."""
-    jpath, data = _load(base)
-    segs = data.get("segments", [])
-    if not (0 <= index < len(segs)):
-        return {"ok": False, "error": "segment index out of range"}
-    seg = segs[index]
-    if start is not None and abs(seg["start"] - float(start)) > 0.25:
-        return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
-    segs.pop(index)
-    for w in data.get("words", []):
-        if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
-            w["speaker"] = None
-    _record_decision(base, {"start": seg["start"], "end": seg["end"],
-                            "action": "delete", "text": None, "speaker_id": None})
-    _rewrite(jpath, data)
-    return {"ok": True}
+    with lock_meeting(base):
+        jpath, data = _load(base)
+        segs = data.get("segments", [])
+        if not (0 <= index < len(segs)):
+            return {"ok": False, "error": "segment index out of range"}
+        seg = segs[index]
+        if start is not None and abs(seg["start"] - float(start)) > 0.25:
+            return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
+        segs.pop(index)
+        for w in data.get("words", []):
+            if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
+                w["speaker"] = None
+        _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                                "action": "delete", "text": None, "speaker_id": None})
+        _rewrite(jpath, data)
+        return {"ok": True}
 
 
 def _decisions_path(base: str):
@@ -252,9 +293,17 @@ def _record_decision(base: str, decision: dict):
         except json.JSONDecodeError:
             pass
     decision["at"] = datetime.now().isoformat(timespec="seconds")
-    # newest decision for the same segment wins
-    decisions = [d for d in decisions
-                 if abs(d["start"] - decision["start"]) > 0.25] + [decision]
+    # newest decision for the same segment wins. A manual_id (inserted lines)
+    # is matched exactly — start-time proximity would conflate an edit of an
+    # inserted line with the insert decision that created it and delete the
+    # insert, since both share the same timestamp; matching by manual_id keeps
+    # them as one decision that always replays as an insert.
+    mid = decision.get("manual_id")
+    if mid:
+        decisions = [d for d in decisions if d.get("manual_id") != mid] + [decision]
+    else:
+        decisions = [d for d in decisions
+                     if abs(d["start"] - decision["start"]) > 0.25] + [decision]
     p.write_text(json.dumps(decisions, indent=2))
 
 
@@ -278,6 +327,8 @@ def reapply_decisions(base: str, data: dict) -> int:
                    "text": dec.get("text") or "", "attribution": "manual",
                    "flags": [], "overlap": False, "text_edited": True,
                    "inserted": True, "reviewed": "edited"}
+            if dec.get("manual_id"):
+                seg["manual_id"] = dec["manual_id"]
             sp = _resolve_speaker(data, dec.get("speaker_id") or "")
             if sp:
                 seg["speaker"], seg["name"] = sp["id"], sp.get("name")

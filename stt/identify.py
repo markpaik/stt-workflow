@@ -34,6 +34,22 @@ def save_registry(reg: dict):
     _registry_path().write_text(json.dumps(reg, indent=2))
 
 
+def _unique_filename(stem: str, reg: dict) -> str:
+    """A `name.replace('/', '_')` sanitized stem can collide with an unrelated
+    person's file — "A/B" and "A_B" both sanitize to "A_B.npy". Disambiguate
+    against every file already claimed in the registry (the source of truth
+    for what's in use — not just an on-disk exists() check, since callers
+    already remove/never-added the current person's own entry before calling
+    this, so a legitimate re-enrollment is never blocked by itself)."""
+    claimed = {meta["file"] for meta in reg.values()}
+    fname = f"{stem}.npy"
+    n = 2
+    while fname in claimed:
+        fname = f"{stem}_{n}.npy"
+        n += 1
+    return fname
+
+
 def _l2(v):
     v = np.asarray(v, dtype=float)
     n = np.linalg.norm(v)
@@ -134,7 +150,7 @@ def rename_person(old: str, new: str) -> bool:
     if new in reg:
         return merge_people(old, new)
     meta = reg.pop(old)
-    newf = f"{new.replace('/', '_')}.npy"
+    newf = _unique_filename(new.replace("/", "_"), reg)
     (config.VOICEPRINTS_DIR / meta["file"]).rename(config.VOICEPRINTS_DIR / newf)
     meta["file"] = newf
     reg[new] = meta
@@ -205,7 +221,16 @@ def enroll(name: str, vector, replace: bool = False, source: str = None):
     the samples, so the GUI can show provenance and locate playable audio."""
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     reg = load_registry()
-    fname = f"{name.replace('/', '_')}.npy"
+    # reuse this person's OWN file if already enrolled — their filename may
+    # have been disambiguated at first enrollment, so recomputing it fresh
+    # here could drift from what the registry actually points at. A brand-new
+    # name gets one that can't collide with any OTHER enrolled person's file.
+    # reuse this person's OWN file if already enrolled — their filename may
+    # have been disambiguated at first enrollment, so recomputing it fresh
+    # here could drift from what the registry actually points at. A brand-new
+    # name gets one that can't collide with any OTHER enrolled person's file.
+    fname = reg[name]["file"] if name in reg else _unique_filename(
+        name.replace("/", "_"), reg)
     fpath = config.VOICEPRINTS_DIR / fname
     vector = _l2(vector)  # raises on zero/non-finite
 

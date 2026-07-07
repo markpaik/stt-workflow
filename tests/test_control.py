@@ -63,6 +63,33 @@ def test_group_stop_kills_orphanable_workers(sandbox):
             pass
 
 
+def test_stop_kills_even_when_job_queue_clear_fails(sandbox, monkeypatch):
+    """A broken queued_jobs.json write (disk full, permissions) must never
+    disable the kill switch — the process-group stop has to proceed regardless."""
+    from stt import jobs
+
+    def _boom():
+        raise OSError("disk full")
+    monkeypatch.setattr(jobs, "clear", _boom)
+
+    p = _spawn_fake_batch(sandbox)
+    pgid = os.getpgid(p.pid)
+    try:
+        d = status.read()
+        d.update(running=True, pgid=pgid)
+        status._write(d)
+
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == [] and res["cleared_jobs"] == 0
+        assert subprocess.run(["pgrep", "-g", str(pgid)],
+                              capture_output=True, text=True).stdout == ""
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def test_stale_pgid_of_foreign_group_ignored(sandbox):
     """A recycled pgid pointing at processes that are NOT ours must never be
     claimed (stop would kill innocent programs)."""
