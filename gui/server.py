@@ -14,8 +14,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from stt import (config, control, dates, export, identify, manifest, rates, review,
-                 search, status, unknowns)
+from stt import (config, control, dates, export, identify, jobs, manifest, rates,
+                 review, search, status, unknowns)
 
 PORT = 8737
 AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
@@ -125,6 +125,21 @@ def _est_duration(p: Path):
 
 _meet_cache = {}
 _relabel_kicked = {"at": 0.0}
+_jobs_kicked = {"at": 0.0}
+
+
+def _kick_jobs():
+    """Start the head queued job if nothing is running. The job is removed from
+    the queue only by the run_batch that wins the lock for it, so a lost race
+    just leaves it queued for the next kick (cooldown stops kick storms)."""
+    import time as _time
+    nxt = jobs.items()
+    if not nxt or control.snapshot()["pids"]:
+        return
+    if _time.monotonic() - _jobs_kicked["at"] < 15:
+        return
+    _jobs_kicked["at"] = _time.monotonic()
+    _spawn(jobs.spawn_args(nxt[0]))
 
 
 def _meeting_meta(j: Path, dst_dir: Path):
@@ -214,6 +229,8 @@ def gather_state():
         if _time.monotonic() - _relabel_kicked.get("at", 0) > 60:
             _relabel_kicked["at"] = _time.monotonic()
             _spawn([str(RUN_SH), "relabel", "--all"])
+    if not running:
+        _kick_jobs()  # self-heal: idle with queued jobs -> start the next one
     active = st.get("active", {}) if running else {}
     n_active = max(1, len(active))
     active_out, active_eta_sum = {}, 0.0
@@ -238,6 +255,9 @@ def gather_state():
             "active": active_out,
             "overall_eta_sec": overall_eta,
             "pending": st.get("pending", []) if running else [],
+            "queued_jobs": [{"at": j.get("at"), "label": j.get("label") or "run",
+                             "strict": j.get("strict"), "verify": j.get("verify")}
+                            for j in jobs.items()],
             "recent": st.get("recent", [])[:8],
             "paused": control.is_paused(),
             "queue": queue, "meetings": meetings,
@@ -439,6 +459,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             elif u.path == "/api/review":
                 self._json(review.list_flagged(q["base"]))
+            elif u.path == "/api/edits":
+                self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
                 from stt import summarize
                 self._json(summarize.suggest_title(q["base"]))
@@ -454,23 +476,23 @@ class Handler(BaseHTTPRequestHandler):
         try:
             b = self._body()
             if u.path == "/api/run":
+                # every run goes through the job queue: it starts immediately
+                # when the machine is idle, and WAITS (visible in the panel)
+                # when a batch is already running — a Redo is never lost.
                 files = b.get("files") or []
                 paths = b.get("paths") or []
-                args = [str(RUN_SH), "batch", "--ignore-pause"]
-                if files:
-                    args += ["--files", ",".join(files)]
-                if paths:
-                    args += ["--paths", ",".join(paths)]
-                if b.get("force"):
-                    args += ["--force"]
-                if b.get("strict"):
-                    args += ["--strict"]
-                if b.get("verify"):
-                    args += ["--verify"]
-                if int(b.get("parallel", 1)) == 2:
-                    args += ["--parallel", "2"]
-                _spawn(["caffeinate", "-i", "-s"] + args)
-                self._json({"ok": True})
+                names = files + [Path(p).name for p in paths]
+                label = (", ".join(names[:2]) + (f" +{len(names)-2} more" if len(names) > 2 else "")
+                         ) if names else "all new recordings"
+                busy = bool(control.snapshot()["pids"])
+                jobs.add({"files": files, "paths": paths, "force": bool(b.get("force")),
+                          "strict": bool(b.get("strict")), "verify": bool(b.get("verify")),
+                          "parallel": int(b.get("parallel", 1)), "label": label})
+                _jobs_kicked["at"] = 0.0  # a fresh click may bypass the cooldown
+                _kick_jobs()
+                self._json({"ok": True, "queued": busy})
+            elif u.path == "/api/unqueue":
+                self._json({"ok": jobs.remove(float(b["at"]))})
             elif u.path == "/api/pick_folder":
                 p = pick_folder(b.get("prompt", "Choose a folder"))
                 if p is None:
@@ -731,6 +753,12 @@ dialog.wide{max-width:680px}
 letter-spacing:.05em;padding:12px 0 2px}
 mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;border-radius:3px}
 .tseg .segbtn{opacity:0;flex:none;padding:1px 8px;font-size:12px;border-radius:6px}
+.tgap{height:8px;margin:0 8px;border-radius:6px;text-align:center;line-height:8px;
+  font-size:11px;color:transparent;cursor:pointer;transition:all .12s}
+.tgap:hover{height:20px;line-height:20px;color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.tgap.editing{height:auto;line-height:normal;color:var(--ink);cursor:default;
+  background:var(--chip);padding:10px}
 .tseg:hover .segbtn{opacity:1}
 .tseg.editing{cursor:default;background:var(--chip)}
 </style></head><body>
@@ -819,8 +847,8 @@ let S=null, selected=new Set();
 async function api(p,body){const r=await fetch(p,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 
-const STAGES=['downloading','converting','transcribing','diarizing','writing'];
-const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',writing:'Writing'};
+const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing'];
+const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing'};
 
 function render(){
   const s=S;
@@ -842,25 +870,28 @@ function render(){
     const idx=STAGES.indexOf(a.stage);
     const pct=a.pct!=null?a.pct:null;
     return `<div class="row"><div class="grow"><div class="name">${esc(n.replace(/\.[^.]+$/,''))}</div>
-    <div class="stagechips">${STAGES.map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
+    <div class="stagechips">${STAGES.filter(st=>st!=='verifying'||a.stage==='verifying').map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
     ${pct!=null?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
     </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left</div>`:'<span class="spin"></span>'}</div></div>`;
   }).join(''):(orphaned?'':'<div class="sub">Starting…</div>'))
   +(s.overall_eta_sec?`<div class="sub" style="padding-top:10px">Everything queued: ≈ ${fmtEta(s.overall_eta_sec)} remaining</div>`:'');
+  // queued panel runs (redos / hand-picked) — waiting for the current run to finish
+  const qjobs=(s.queued_jobs||[]).map(j=>
+    `<div class="row"><span style="width:17px"></span><div class="grow"><div class="name">↻ ${esc(j.label)}</div><div class="sub">requested run${j.strict?' · strict':''}${j.verify?' · verify':''}</div></div><span class="chip live">${s.running?'starts after current run':'starting…'}</span><button class="segbtn" title="Cancel this queued run" onclick="api('/api/unqueue',{at:${j.at}}).then(refresh)">✕</button></div>`).join('');
   // queue
   const newFiles=s.queue.filter(f=>!f.processed);
   $('#qcount').textContent=newFiles.length+' new';
-  $('#queue').innerHTML=s.queue.length?s.queue.map(f=>{
+  $('#queue').innerHTML=qjobs+(s.queue.length?s.queue.map(f=>{
     const running=s.active&&s.active[f.name];
     const pend=(s.pending||[]).includes(f.name);
     const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':(f.video?'<span class="chip">video</span>':'');
     const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${esc(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
     const est=(!f.processed&&f.est_min)?` · ~${f.est_min} min to process`:'';
     return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}</div>`;
-  }).join(''):'<div class="sub">Nothing in the iCloud folder.</div>';
+  }).join(''):(qjobs?'':'<div class="sub">Nothing in the iCloud folder.</div>'));
   $('#runsel').disabled=!selected.size||s.running;
   $('#runall').disabled=s.running||!newFiles.length;
-  $('#runother').disabled=s.running;
+  $('#runother').disabled=false;  // extra picks queue behind the current run now
   const selectable=newFiles.filter(f=>!(s.active&&s.active[f.name])&&!(s.pending||[]).includes(f.name));
   $('#selall').style.display=selectable.length>1?'inline':'none';
   $('#selall').textContent=selected.size>=selectable.length&&selectable.length?'Deselect all':'Select all';
@@ -1125,10 +1156,12 @@ async function stopRun(){
   }
   refresh();
 }
-function openRedo(base,audio){
+async function openRedo(base,audio){
+  const ed=await api('/api/edits?base='+encodeURIComponent(base));
   $('#dlg').classList.remove('wide');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Reprocess “${esc(base)}”</h1>
   <p class="muted" style="margin-top:8px">Re-runs transcription + speaker detection from the stored audio with the current model and speaker library. The existing transcript is replaced.</p>
+  ${ed.n?`<p class="muted" style="margin-top:8px;color:var(--warn,#c60)"><b>⚠ This meeting has ${ed.n} manual edit${ed.n>1?'s':''}</b> (corrections, added or removed lines). A redo rebuilds everything from the audio, so they will no longer apply — they’re archived to a “.reviews.superseded.json” file next to the transcript, not deleted.</p>`:''}
   <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for hearings)</label>
   <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoverify" class="checkbox" style="vertical-align:-3px"> verify — a second engine listens too; disagreements get flagged with both versions</label>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
@@ -1176,8 +1209,11 @@ async function openTranscript(base,target=null){
   $('#dlg').classList.add('wide');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
   <div class="sub" style="margin:6px 0 2px">${legend}${d.strict?' <span class="chip warn">strict</span>':''}</div>
-  <audio id="tva" controls src="/api/audio?base=${encodeURIComponent(base)}"></audio>
-  <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${TV.segs.map(tvRow).join('')}</div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <audio id="tva" controls src="/api/audio?base=${encodeURIComponent(base)}" style="flex:1"></audio>
+    <button onclick="tvAddAt()" title="Add a line the pipeline missed, at the audio’s current position — pause where you heard it, then click">＋ Line at playhead</button>
+  </div>
+  <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${TV.segs.map((g,i)=>tvRow(g,i)+tvGap(i)).join('')}</div>
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="tvClose()">Close</button></div>`;
   dlg.showModal();
   dlg.onclose=tvClose;
@@ -1214,7 +1250,6 @@ function tvEdit(i,ev){
       <span id="tvrx" class="sub"></span></div>
     <textarea id="tvta" style="width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:64px">${esc(g.text)}</textarea>
     <div style="display:flex;gap:6px;margin-top:6px">
-      <button onclick="tvAddLine(${i},event)" title="Add a line the pipeline missed here — e.g. a voice buried in crosstalk">＋ Add line below</button>
       <button onclick="tvDelete(${i},event)" title="Remove this line entirely (echo, noise heard as speech)">Remove line</button>
       <span class="grow"></span>
       <button onclick="tvPlaySpan(${i},event)">▶ Play span</button>
@@ -1222,28 +1257,47 @@ function tvEdit(i,ev){
       <button class="primary" onclick="tvSave(${i},event)">Save</button></div></div>`;
   spkWireNew($('#tvspk'));
 }
-function tvAddLine(i,ev){
-  ev.stopPropagation();
-  const g=TV.segs[i],nxt=TV.segs[i+1];
-  const end=Math.min(g.end+5,nxt?nxt.start:g.end+5);
-  const el=$('#ts'+i);
-  el.innerHTML=`<div style="flex:1;min-width:0">
-    <div class="sub" style="margin-bottom:6px">New line after ${Math.floor(g.end/60)}:${String(Math.floor(g.end%60)).padStart(2,'0')} — who said it?</div>
+function tvGap(i){
+  return `<div class="tgap" id="tg${i}" onclick="tvAddLine(${i})" title="Add a line here — a voice the pipeline missed">＋ add line</div>`;
+}
+function tvFmt(t){const m=Math.floor(t/60),s=Math.floor(t%60);return m+':'+String(s).padStart(2,'0')}
+function tvParseT(v){
+  const p=String(v).trim().split(':').map(Number);
+  if(p.some(isNaN))return null;
+  return p.reverse().reduce((acc,x,k)=>acc+x*Math.pow(60,k),0);
+}
+function tvAddLine(i,at=null){
+  document.querySelectorAll('.tgap.editing').forEach(e=>{const k=+e.id.slice(2);e.outerHTML=tvGap(k)});
+  const g=TV.segs[i],start=at!=null?at:g.end;
+  const el=$('#tg'+i);
+  el.classList.add('editing');el.onclick=null;
+  el.innerHTML=`<div style="text-align:left">
     <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-      <select id="tvnspk">${spkOptions(TV.speakers,TV.people,null)}</select></div>
+      <select id="tvnspk">${spkOptions(TV.speakers,TV.people,null)}</select>
+      <label class="sub">at <input id="tvnat" value="${tvFmt(start)}" style="width:56px;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:3px 6px;text-align:center"></label>
+      <span class="sub">(tip: pause the audio where you heard it — “＋ Line at playhead” fills this in)</span></div>
     <textarea id="tvnta" placeholder="What they said" style="width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:48px"></textarea>
     <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
-      <button onclick="tvPlaySpan(${i},event)">▶ Play span</button>
-      <button onclick="tvRestore(${i},event)">Cancel</button>
-      <button class="primary" onclick="tvSaveNew(${i},${g.end},${end},event)">Add</button></div></div>`;
+      <button onclick="tvSeek(Math.max(0,tvParseT($('#tvnat').value)-2))">▶ Listen here</button>
+      <button onclick="const k=${i};$('#tg'+k).outerHTML=tvGap(k)">Cancel</button>
+      <button class="primary" onclick="tvSaveNew()">Add</button></div></div>`;
   spkWireNew($('#tvnspk'));
+  $('#tvnta').focus();
 }
-async function tvSaveNew(i,start,end,ev){
-  ev.stopPropagation();
-  const spk=$('#tvnspk').value,text=$('#tvnta').value;
+function tvAddAt(){
+  const a=$('#tva'),t=a?a.currentTime:0;
+  let i=TV.segs.findIndex(g=>g.start>t)-1;
+  if(i<-1)i=TV.segs.length-1;
+  i=Math.max(0,i);
+  const el=$('#tg'+i);if(el)el.scrollIntoView({block:'center'});
+  tvAddLine(i,t);
+}
+async function tvSaveNew(){
+  const spk=$('#tvnspk').value,text=$('#tvnta').value,start=tvParseT($('#tvnat').value);
   if(spk==='__new__'){alert('Pick or name the speaker first.');return}
+  if(start==null){alert('Time should look like 12:34.');return}
   if(!text.trim()){alert('Type what they said.');return}
-  const r=await api('/api/review',{base:TV.base,action:'insert',start,end,speaker:spk,text});
+  const r=await api('/api/review',{base:TV.base,action:'insert',start,end:start+3,speaker:spk,text});
   if(!r.ok){alert(r.error||'failed');return}
   openTranscript(TV.base,r.index);
 }

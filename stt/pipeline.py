@@ -102,6 +102,13 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "overlap_spans": [[s, e] for s, e in overlaps],
         "refine_stats": diar["refine_stats"] if diar else None,
     }
+    # a redo invalidates old review decisions (new cluster ids) and any stale
+    # verify regions (new word timings) — archive/remove them, never half-apply
+    from . import review
+    review.archive_decisions(base, dest_dir=dest_dir)
+    if verify_regions is None:
+        verify.sidecar_path(base, dest_dir).unlink(missing_ok=True)
+
     output.write_txt(txt_path, segments, header=header)
     output.write_json(json_path, meta, speakers, segments, labeled_words)
     if verify_regions is not None:

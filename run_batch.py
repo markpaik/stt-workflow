@@ -180,6 +180,9 @@ def main():
     ap.add_argument("--ignore-battery", action="store_true")
     ap.add_argument("--ignore-pause", action="store_true",
                     help="run even while automatic processing is paused (manual runs)")
+    ap.add_argument("--job", type=float, default=None,
+                    help="queued-job id (panel): claimed from the queue once the "
+                         "lock is held, so a lost lock race never loses the job")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -189,8 +192,12 @@ def main():
 
     lock = acquire_lock()
     if lock is None:
-        print("Another batch is already running; exiting (this is normal).")
+        print("Another batch is already running; exiting (this is normal)."
+              + (" The queued job stays queued." if args.job else ""))
         return 0
+    if args.job is not None:
+        from stt import jobs
+        jobs.remove(args.job)  # lock is ours — this job is now being served
 
     # graceful stop: abandon in-flight work safely and record a clean status.
     # CRITICAL: take the whole process group down with us — --parallel workers
@@ -352,6 +359,17 @@ def main():
 
     status.end_run()
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
+
+    # chain into the next panel-queued job (a Redo clicked during this run).
+    # Release our lock FIRST so the child can take it; if something else wins
+    # the race instead, the job stays queued and the panel re-kicks it.
+    from stt import jobs
+    nxt = jobs.items()
+    if nxt:
+        lock.close()
+        print(f"Starting queued job: {nxt[0].get('label') or 'run'}", flush=True)
+        subprocess.Popen(jobs.spawn_args(nxt[0]), start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return 1 if failed else 0
 
 

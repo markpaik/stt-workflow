@@ -29,7 +29,9 @@ ab_out/
 gui.out.log
 gui.err.log
 
-# Locks / flags
+# Locks / flags / queued panel runs
+queued_jobs.json
+queued_jobs.lock
 batch.lock
 relabel.lock
 paused.flag

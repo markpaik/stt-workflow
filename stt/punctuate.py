@@ -37,6 +37,24 @@ def _normalize_for_model(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _repair_unk(out: str, norm: str) -> str:
+    """The model's SentencePiece vocab has no hyphen/dash: 'self-management'
+    comes back as '<unk>management'. Word counts still match 1:1, so restore
+    the ORIGINAL word at each <unk> position, keeping any punctuation the
+    model attached after it."""
+    if "<unk>" not in out:
+        return out
+    out_toks = out.split()
+    norm_toks = norm.split()
+    if len(out_toks) != len(norm_toks):
+        return out
+    for i, t in enumerate(out_toks):
+        if "<unk>" in t:
+            tail = re.search(r"[.,!?;:]*$", t).group()
+            out_toks[i] = norm_toks[i] + tail
+    return " ".join(out_toks)
+
+
 def restore(text: str) -> str:
     """Punctuate + truecase one segment of text. Word-preserving; fails open."""
     if not text or not text.strip():
@@ -49,6 +67,7 @@ def restore(text: str) -> str:
         results = model.infer([norm])
         sentences = results[0] if results else []
         out = " ".join(s.strip() for s in sentences if s.strip())
+        out = _repair_unk(out, norm)
         # safety: the model must not change the number of words
         if len(re.findall(r"\S+", _normalize_for_model(out))) != len(norm.split()):
             return text
