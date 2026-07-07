@@ -211,10 +211,12 @@ class STTMenuBar(rumps.App):
                                f"Processes still alive: {res['survivors']} — "
                                "try again or check the control panel.")
         else:
+            cq = (f" Cancelled {res['cleared_jobs']} queued run(s)."
+                  if res.get("cleared_jobs") else "")
             rumps.notification("STT workflow", "Stopped — verified",
                                ("Had to force-kill a stuck worker. " if res["forced"] else "")
                                + "Nothing left running; memory released. "
-                               "The in-flight file will re-run next time.")
+                               "The in-flight file will re-run next time." + cq)
 
     def toggle_pause(self, _):
         if control.is_paused():

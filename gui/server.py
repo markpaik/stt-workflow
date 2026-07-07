@@ -1149,10 +1149,11 @@ async function stopRun(){
   const b=$('#stopbtn');b.disabled=true;b.innerHTML='<span class="spin"></span> Stopping…';
   const r=await api('/api/stop',{});   // server verifies the whole group is gone
   b.disabled=false;b.textContent='Stop processing';
+  const cq=r.cleared_jobs?` Also cancelled ${r.cleared_jobs} queued run${r.cleared_jobs>1?'s':''}.`:'';
   if(r.survivors&&r.survivors.length){
     $('#stopnote').textContent='Some processes would not die (pids '+r.survivors.join(', ')+') — try again, or reboot if it persists.';
   }else{
-    $('#stopnote').textContent=r.forced?'Stopped (had to force-kill a stuck worker). Memory is released.':'Stopped and verified — nothing left running, memory released.';
+    $('#stopnote').textContent=(r.forced?'Stopped (had to force-kill a stuck worker). Memory is released.':'Stopped and verified — nothing left running, memory released.')+cq;
   }
   refresh();
 }

@@ -34,3 +34,28 @@ def test_corrupt_queue_degrades_to_empty(sandbox):
     assert jobs.items() == []
     jobs.add({"label": "ok"})  # and recovers on the next write
     assert len(jobs.items()) == 1
+
+
+def test_clear_drops_everything(sandbox):
+    jobs.add({"label": "A"})
+    jobs.add({"label": "B"})
+    assert jobs.clear() == 2
+    assert jobs.items() == []
+    assert jobs.clear() == 0
+
+
+def test_stop_run_clears_queued_jobs(sandbox):
+    """'Stop processing' must not be followed by a queued job auto-starting."""
+    from stt import control
+    jobs.add({"label": "A"})
+    res = control.stop_run()
+    assert res["cleared_jobs"] == 1 and jobs.items() == []
+
+
+def test_same_millisecond_adds_get_distinct_ids(sandbox, monkeypatch):
+    import stt.jobs as J
+    monkeypatch.setattr(J.time, "time", lambda: 1000.0)
+    J.add({"label": "A"})
+    J.add({"label": "B"})
+    ats = [j["at"] for j in J.items()]
+    assert len(set(ats)) == 2

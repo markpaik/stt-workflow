@@ -176,7 +176,7 @@ def insert_segment(base: str, start: float, end: float, speaker_id: str,
     sp = _resolve_speaker(data, speaker_id)
     if sp is None:
         return {"ok": False, "error": f"unknown speaker {speaker_id}"}
-    start, end = float(start), float(end)
+    start, end = max(0.0, float(start)), float(end)
     if end <= start:
         end = start + 1.0
     seg = {"start": round(start, 3), "end": round(end, 3), "speaker": sp["id"],

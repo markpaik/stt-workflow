@@ -110,6 +110,10 @@ def run(wav, primary_words, primary_engine, progress=None):
         from . import asr_parakeet as asr
         out = asr.transcribe(wav, progress=progress)
     sec_words, _ = sanitize.collapse_repeats(out["words"])
+    if len(sec_words) < 0.3 * max(len(primary_words), 1):
+        # the second engine clearly failed on this audio — flagging the entire
+        # transcript as "disagreement" would be noise, not signal
+        return [], out["engine"]
     return regions(primary_words, sec_words), out["engine"]
 
 

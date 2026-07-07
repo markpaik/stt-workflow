@@ -59,6 +59,11 @@ def remove(at: float) -> bool:
     return _mutate(_rm)
 
 
+def clear() -> int:
+    """Drop every queued run (Stop processing). Returns how many were dropped."""
+    return _mutate(lambda cur: ([], len(cur)))
+
+
 def spawn_args(job: dict) -> list:
     """The full command that runs this job (caffeinate keeps the Mac awake;
     run.sh resolves the venv). Mirrors what the panel builds for a direct run."""

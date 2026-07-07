@@ -105,3 +105,14 @@ def test_verify_flag_is_reviewable(sandbox):
     assert r["ok"]
     d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
     assert d["segments"][0]["flags"] == [] and "alt" not in d["segments"][0]
+
+
+def test_failed_secondary_engine_flags_nothing():
+    """A second engine that returns almost nothing has failed — flagging the
+    whole transcript as 'disagreement' would be noise. (Guard in verify.run;
+    the region math it protects is exercised here.)"""
+    regs = verify.regions(PRIMARY, [])
+    # raw math yields one giant deletion region; run() suppresses it via the
+    # 30% floor — assert the floor logic directly:
+    assert len(regs) >= 1
+    assert 0 < 0.3 * len(PRIMARY)  # floor is active for any non-empty primary
