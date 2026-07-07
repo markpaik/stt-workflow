@@ -77,6 +77,43 @@ def test_stale_review_rejected(sandbox):
     assert not r["ok"] and "changed" in r["error"]
 
 
+def test_apply_recovers_from_small_relabel_nudge_at_same_index(sandbox):
+    """A relabel re-running diarization can nudge a segment's start by more
+    than the strict 0.25s tolerance without changing which segment it is —
+    the identity fallback should still accept the edit instead of forcing a
+    reopen for a boundary tweak that didn't restructure anything."""
+    _make_meeting(sandbox)
+    jpath = config.MEETINGS_DIR / "Mtg.json"
+    d = json.loads(jpath.read_text())
+    d["segments"][1]["start"] = 5.4  # nudged by 0.4s: past STRICT, within WIDE
+    jpath.write_text(json.dumps(d))
+    r = review.apply("Mtg", 1, "edit", start=5.0, text="Recovered text.")
+    assert r["ok"]
+    assert json.loads(jpath.read_text())["segments"][1]["text"] == "Recovered text."
+
+
+def test_apply_recovers_by_start_time_when_relabel_shifts_index(sandbox):
+    """If a relabel restructures the segment list (e.g. inserts a new segment
+    earlier), a stale index can point at the WRONG segment entirely. The
+    fallback must recover the intended segment by start-time proximity
+    across the whole list rather than silently editing whatever now sits at
+    the old index."""
+    _make_meeting(sandbox)
+    jpath = config.MEETINGS_DIR / "Mtg.json"
+    d = json.loads(jpath.read_text())
+    new_seg = {"start": 0.0, "end": 0.3, "speaker": "SPEAKER_00", "name": "Mark",
+               "display": "Mark", "text": "Uh,", "flags": [], "overlap": False}
+    d["segments"].insert(0, new_seg)  # shifts every later index up by one
+    jpath.write_text(json.dumps(d))
+    # client still thinks the flagged segment is at index 1 with start=5.0 —
+    # index 1 now really holds the old opening turn (start=0.0)
+    r = review.apply("Mtg", 1, "edit", start=5.0, text="Recovered.")
+    assert r["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert after[2]["text"] == "Recovered." and after[2]["speaker"] == "SPEAKER_01"
+    assert after[1]["text"] == "Clean opening turn."  # untouched
+
+
 def test_bad_index_and_speaker(sandbox):
     _make_meeting(sandbox)
     assert not review.apply("Mtg", 42, "accept")["ok"]
@@ -106,6 +143,22 @@ def test_find_voice_clip_voiceprint_fallback(sandbox):
     assert hit is not None
     base, start, _ = hit
     assert base == "Mtg" and start == 5.0  # found HER cluster's segment
+
+
+def test_find_voice_clip_voiceprint_below_threshold_returns_none(sandbox):
+    """A voiceprint that doesn't clear the open-set threshold+margin bar must
+    return None outright — not crash on a stale/undefined `label` left over
+    from a failed match, and not bleed some other cluster's segment into the
+    result just because it was the last one scored."""
+    _make_meeting(sandbox)
+    centroid_a = np.random.default_rng(1).normal(size=256)
+    centroid_b = np.random.default_rng(2).normal(size=256)
+    diarcache.save(config.MEETINGS_DIR / "Mtg.diar.npz",
+                   [{"start": 5.0, "end": 6.0, "cluster": "SPEAKER_01"}],
+                   [centroid_b], {"SPEAKER_00": centroid_a, "SPEAKER_01": centroid_b})
+    unrelated = np.random.default_rng(99).normal(size=256)
+    identify.enroll("Jane", unrelated, source="Mtg")
+    assert review.find_voice_clip("Jane") is None
 
 
 def test_find_voice_clip_unknown_key(sandbox):

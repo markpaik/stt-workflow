@@ -25,6 +25,7 @@ STAGE_LABEL = {
     "converting": "Preparing audio",
     "transcribing": "Transcribing",
     "diarizing": "Identifying speakers",
+    "verifying": "Verifying (second opinion)",
     "writing": "Writing transcript",
     "done": "Done",
     "queued": "Queued",
@@ -67,8 +68,9 @@ def read_schedule():
 
 
 def gather():
-    """Combine live status + iCloud queue + meetings into one display model."""
-    from stt import manifest
+    """Combine live status + iCloud queue + panel-queued runs + meetings into
+    one display model."""
+    from stt import jobs, manifest
     st = status.read()
     running = (bool(st.get("running")) and _pid_alive(st.get("pid"))) or _batch_running()
     active = st.get("active", {}) if running else {}
@@ -83,10 +85,15 @@ def gather():
     except Exception:
         pass
     try:
+        queued_jobs = jobs.items()  # Redo / hand-picked runs waiting behind this one
+    except Exception:
+        queued_jobs = []
+    try:
         done_count = len(list(config.MEETINGS_DIR.glob("*.json")))
     except Exception:
         done_count = 0
     return {"running": running, "active": active, "queued": queued,
+            "queued_jobs": queued_jobs,
             "paused": control.is_paused(),
             "recent": st.get("recent", [])[:6], "done_count": done_count,
             "schedule": read_schedule()}
@@ -106,7 +113,8 @@ class STTMenuBar(rumps.App):
     def _signature(s):
         return (s["running"], s["paused"],
                 tuple(sorted((n, a["stage"]) for n, a in s["active"].items())),
-                tuple(s["queued"]), tuple((r["name"], r.get("ok")) for r in s["recent"]),
+                tuple(s["queued"]), tuple(j.get("at") for j in s.get("queued_jobs", [])),
+                tuple((r["name"], r.get("ok")) for r in s["recent"]),
                 (s["schedule"].get("hour"), s["schedule"].get("minute")))
 
     def refresh(self, _):
@@ -163,11 +171,15 @@ class STTMenuBar(rumps.App):
         items.append(rumps.separator)
 
         # --- queue ---
+        qj = s.get("queued_jobs", [])
+        qj_status = "starts after current run" if active else "starting…"
+        for j in qj[:8]:
+            items.append(_disabled(f"↻  {_short(j.get('label') or 'run', 30)}  —  {qj_status}"))
         for f in s["queued"][:8]:
             items.append(_disabled(f"○  {_short(f)}  —  queued"))
         if len(s["queued"]) > 8:
             items.append(_disabled(f"    +{len(s['queued']) - 8} more"))
-        if not active and not s["queued"]:
+        if not active and not s["queued"] and not qj:
             items.append(_disabled("○  Nothing waiting"))
 
         # --- recent ---
@@ -236,39 +248,6 @@ class STTMenuBar(rumps.App):
                          start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         rumps.notification("STT workflow", "Run started", "Processing any new recordings…")
-
-    def change_schedule(self, _):
-        sched = read_schedule()
-        default = (f"{sched['hour']:02d}:{sched['minute']:02d}"
-                   if sched.get("hour") is not None else "02:00")
-        resp = rumps.Window("Daily run time (24-hour, HH:MM):", "Daily schedule",
-                            default_text=default, ok="Save", cancel="Cancel",
-                            dimensions=(140, 22)).run()
-        if not resp.clicked or not resp.text.strip():
-            return
-        try:
-            hh, mm = (int(x) for x in resp.text.strip().split(":"))
-            assert 0 <= hh < 24 and 0 <= mm < 60
-        except Exception:
-            rumps.alert("Invalid time", "Use 24-hour HH:MM, e.g. 02:00")
-            return
-        self._write_schedule(hh, mm)
-        rumps.notification("STT workflow", "Schedule updated",
-                           f"Daily run set to {_fmt12(hh, mm)}")
-
-    def _write_schedule(self, hh, mm):
-        for p in (AGENT,):
-            if p.exists():
-                try:
-                    d = plistlib.loads(p.read_bytes())
-                    d["StartCalendarInterval"] = {"Hour": hh, "Minute": mm}
-                    p.write_bytes(plistlib.dumps(d))
-                except Exception:
-                    pass
-        if AGENT.exists():
-            uid = os.getuid()
-            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
-            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT)], capture_output=True)
 
     def _open_recent(self, sender):
         name = getattr(sender, "_stt_name", "")
