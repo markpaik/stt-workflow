@@ -396,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
                             "speakers": [s["display"] for s in d.get("speakers", [])],
                             "speaker_options": [{"id": s["id"], "display": s["display"]}
                                                 for s in d.get("speakers", [])],
+                            "people": sorted(identify.load_registry().keys()),
                             "segments": segs})
             elif u.path == "/api/audio":
                 dst = config.meetings_dir()
@@ -464,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
                     args += ["--force"]
                 if b.get("strict"):
                     args += ["--strict"]
+                if b.get("verify"):
+                    args += ["--verify"]
                 if int(b.get("parallel", 1)) == 2:
                     args += ["--parallel", "2"]
                 _spawn(["caffeinate", "-i", "-s"] + args)
@@ -549,6 +552,14 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/review":
                 if b.get("action") == "accept_minor":
                     self._json(review.accept_minor(b["base"]))
+                    return
+                if b.get("action") == "insert":
+                    self._json(review.insert_segment(b["base"], b["start"], b["end"],
+                                                     b["speaker"], b.get("text", "")))
+                    return
+                if b.get("action") == "delete":
+                    self._json(review.delete_segment(b["base"], int(b["index"]),
+                                                     start=b.get("start")))
                     return
                 self._json(review.apply(b["base"], int(b["index"]), b["action"],
                                         start=b.get("start"), text=b.get("text"),
@@ -749,10 +760,11 @@ mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;bor
     <button id="runother" onclick="pickFiles()" title="Choose files from anywhere on disk">Other files…</button>
     <label class="sub" style="margin-left:8px"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
     <label class="sub" title="For sensitive recordings (hearings): never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
+    <label class="sub" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
     <span class="grow"></span>
     <button id="pausebtn"></button>
   </div>
-  <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for hearings).</div>
+  <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for hearings). “Verify” has a second engine listen too and flags the disagreements.</div>
   <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
     <span class="chip" title="A rolling history — each new result pushes the oldest out; the 8 latest show here">last 20 kept</span></h2><div id="recent"></div></div>
 </div>
@@ -947,7 +959,7 @@ function selAll(){
   if(selected.size>=sel.length){selected.clear()}else{sel.forEach(n=>selected.add(n))}
   render();
 }
-function runOpts(){return {parallel:$('#par2').checked?2:1,strict:$('#strict').checked}}
+function runOpts(){return {parallel:$('#par2').checked?2:1,strict:$('#strict').checked,verify:$('#verify').checked}}
 function runSelected(){api('/api/run',{files:[...selected],...runOpts()}).then(()=>{selected.clear();refresh()})}
 function runAll(){api('/api/run',runOpts()).then(refresh)}
 async function pickFiles(){
@@ -1032,8 +1044,8 @@ async function openReview(base){
 }
 function renderReview(){
   const it=RV.items[RV.i];
-  const opts=RV.speakers.map(s=>`<option value="${s.id}" ${s.id===it.speaker?'selected':''}>${esc(s.display)}</option>`).join('');
   const minorLeft=RV.items.slice(RV.i).filter(x=>x.minor).length;
+  const alts=(it.alt||[]).map((a,k)=>`<div class="sub" style="margin-top:4px">Second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}” <button style="font-size:12px;padding:2px 8px" onclick="rvUseAlt(${k})" title="Swap the second engine’s version into the text below">Use it</button></div>`).join('');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Review — ${esc(RV.base)}</h1>
   <div class="sub" style="margin-top:4px;display:flex;gap:8px;align-items:center">
     <span>${RV.i+1} of ${RV.items.length} · ${esc(it.flags.join(', '))}${it.minor?' · minor':''}</span>
@@ -1041,9 +1053,10 @@ function renderReview(){
   <audio id="rva" controls src="/api/audio?base=${encodeURIComponent(RV.base)}"></audio>
   ${it.prev?`<div class="muted" style="margin-top:8px">…${esc(it.prev)}</div>`:''}
   <div style="display:flex;gap:8px;align-items:flex-start;margin:8px 0">
-    <select id="rvspk" title="Who actually said this?">${opts}</select>
+    <select id="rvspk" title="Who actually said this?">${spkOptions(RV.speakers,RV.people,it.speaker)}</select>
     <textarea id="rvtext" style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:60px">${esc(it.text)}</textarea>
   </div>
+  ${alts}
   ${it.next?`<div class="muted">${esc(it.next)}…</div>`:''}
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px">
     <button onclick="rvPlay()">▶ Play clip</button>
@@ -1053,7 +1066,16 @@ function renderReview(){
       <button class="primary" onclick="rvApply('edit')" title="Save the corrected speaker/text back to the transcript files">Save changes</button>
     </div>
   </div>`;
+  spkWireNew($('#rvspk'));
   rvPlay();
+}
+function rvUseAlt(k){
+  const a=RV.items[RV.i].alt[k],ta=$('#rvtext');
+  // "ours" is normalized tokens — match them loosely against the display text
+  const pat=a.ours.trim().split(/\s+/).map(t=>t.replace(/[.*+?^$()|[\]\\{}]/g,'\\$&')).join("[^A-Za-z0-9']+");
+  const re=pat?new RegExp(pat,'i'):null;
+  if(re&&re.test(ta.value))ta.value=ta.value.replace(re,a.theirs);
+  else ta.value=(ta.value+' '+a.theirs).trim();
 }
 function rvPlay(){
   const it=RV.items[RV.i],a=$('#rva');
@@ -1073,7 +1095,10 @@ async function rvAcceptMinor(){
 async function rvApply(action){
   const it=RV.items[RV.i];
   const body={base:RV.base,index:it.index,start:it.start,action};
-  if(action==='edit'){body.text=$('#rvtext').value;body.speaker=$('#rvspk').value}
+  if(action==='edit'){
+    const v=$('#rvspk').value;
+    if(v==='__new__'){alert('Pick or name the speaker first.');return}
+    body.text=$('#rvtext').value;body.speaker=v}
   const r=await api('/api/review',body);
   if(!r.ok){alert(r.error||'Save failed');return}
   rvNext();
@@ -1105,11 +1130,31 @@ function openRedo(base,audio){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Reprocess “${esc(base)}”</h1>
   <p class="muted" style="margin-top:8px">Re-runs transcription + speaker detection from the stored audio with the current model and speaker library. The existing transcript is replaced.</p>
   <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for hearings)</label>
+  <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoverify" class="checkbox" style="vertical-align:-3px"> verify — a second engine listens too; disagreements get flagged with both versions</label>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="dlg.close()">Cancel</button>
-    <button class="primary" onclick="api('/api/run',{paths:['${esc(audio)}'],force:true,strict:$('#redostrict').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
+    <button class="primary" onclick="api('/api/run',{paths:['${esc(audio)}'],force:true,strict:$('#redostrict').checked,verify:$('#redoverify').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
   </div>`;
   dlg.showModal();
+}
+// Speaker picker used by the viewer editor and the review dialog: this
+// meeting's speakers, then every enrolled person, then "New person…" —
+// so a voice the diarizer missed (crosstalk) can still be credited correctly.
+function spkOptions(speakers,people,sel){
+  const seen=new Set(speakers.map(s=>s.display));
+  let h=speakers.map(s=>`<option value="${s.id}" ${s.id===sel?'selected':''}>${esc(s.display)}</option>`).join('');
+  const others=(people||[]).filter(p=>!seen.has(p));
+  if(others.length)h+=`<optgroup label="Someone else">${others.map(p=>`<option value="name:${esc(p)}">${esc(p)}</option>`).join('')}</optgroup>`;
+  return h+`<option value="__new__">＋ New person…</option>`;
+}
+function spkWireNew(sel){
+  sel.addEventListener('change',()=>{
+    if(sel.value!=='__new__')return;
+    const nm=(prompt('Who said this? (name as it should appear in the transcript)')||'').trim();
+    if(!nm){sel.selectedIndex=0;return}
+    const o=document.createElement('option');o.value='name:'+nm;o.textContent=nm;
+    sel.insertBefore(o,sel.lastElementChild);sel.value='name:'+nm;
+  });
 }
 const HUES=['#0071e3','#34c759','#ff9f0a','#ff375f','#bf5af2','#64d2ff','#ffd60a','#ac8e68'];
 let tvTimer=null,TV=null;
@@ -1126,7 +1171,7 @@ async function openTranscript(base,target=null){
   const d=await api('/api/transcript?base='+encodeURIComponent(base));
   if(d.error){alert(d.error);return}
   const color={};d.speakers.forEach((w,i)=>color[w]=HUES[i%HUES.length]);
-  TV={base,segs:d.segments,speakers:d.speaker_options,color};
+  TV={base,segs:d.segments,speakers:d.speaker_options,people:d.people||[],color};
   const legend=d.speakers.map(w=>`<span class="chip"><span class="sdot" style="background:${color[w]}"></span>${esc(w)}</span>`).join(' ');
   $('#dlg').classList.add('wide');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
@@ -1158,21 +1203,57 @@ function tvClose(){if(tvTimer){clearInterval(tvTimer);tvTimer=null}TV=null;const
 function tvEdit(i,ev){
   ev.stopPropagation();
   const g=TV.segs[i],el=$('#ts'+i);
-  const opts=TV.speakers.map(s=>`<option value="${s.id}" ${s.id===g.speaker?'selected':''}>${esc(s.display)}</option>`).join('');
   el.onclick=null;el.classList.add('editing');
   el.innerHTML=`<div style="flex:1;min-width:0">
     <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
-      <select id="tvspk">${opts}</select>
+      <select id="tvspk">${spkOptions(TV.speakers,TV.people,g.speaker)}</select>
       <select id="tvengine" title="Which engine listens again — a different one from the original gives an independent second opinion">
         ${[['parakeet','Parakeet · fast'],['mlxwhisper:large-v3','Whisper v3 · thorough'],['mlxwhisper:turbo','Whisper turbo']].map(([v,l])=>`<option value="${v}" ${v===(S.model==='parakeet'?'mlxwhisper:large-v3':'parakeet')?'selected':''}>${l}</option>`).join('')}
       </select>
       <button onclick="tvRetrans(${i},event)" title="Listen to this span again with the chosen engine and propose corrected text">↻ Re-transcribe</button>
       <span id="tvrx" class="sub"></span></div>
     <textarea id="tvta" style="width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:64px">${esc(g.text)}</textarea>
-    <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button onclick="tvAddLine(${i},event)" title="Add a line the pipeline missed here — e.g. a voice buried in crosstalk">＋ Add line below</button>
+      <button onclick="tvDelete(${i},event)" title="Remove this line entirely (echo, noise heard as speech)">Remove line</button>
+      <span class="grow"></span>
       <button onclick="tvPlaySpan(${i},event)">▶ Play span</button>
       <button onclick="tvRestore(${i},event)">Cancel</button>
       <button class="primary" onclick="tvSave(${i},event)">Save</button></div></div>`;
+  spkWireNew($('#tvspk'));
+}
+function tvAddLine(i,ev){
+  ev.stopPropagation();
+  const g=TV.segs[i],nxt=TV.segs[i+1];
+  const end=Math.min(g.end+5,nxt?nxt.start:g.end+5);
+  const el=$('#ts'+i);
+  el.innerHTML=`<div style="flex:1;min-width:0">
+    <div class="sub" style="margin-bottom:6px">New line after ${Math.floor(g.end/60)}:${String(Math.floor(g.end%60)).padStart(2,'0')} — who said it?</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+      <select id="tvnspk">${spkOptions(TV.speakers,TV.people,null)}</select></div>
+    <textarea id="tvnta" placeholder="What they said" style="width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:48px"></textarea>
+    <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
+      <button onclick="tvPlaySpan(${i},event)">▶ Play span</button>
+      <button onclick="tvRestore(${i},event)">Cancel</button>
+      <button class="primary" onclick="tvSaveNew(${i},${g.end},${end},event)">Add</button></div></div>`;
+  spkWireNew($('#tvnspk'));
+}
+async function tvSaveNew(i,start,end,ev){
+  ev.stopPropagation();
+  const spk=$('#tvnspk').value,text=$('#tvnta').value;
+  if(spk==='__new__'){alert('Pick or name the speaker first.');return}
+  if(!text.trim()){alert('Type what they said.');return}
+  const r=await api('/api/review',{base:TV.base,action:'insert',start,end,speaker:spk,text});
+  if(!r.ok){alert(r.error||'failed');return}
+  openTranscript(TV.base,r.index);
+}
+async function tvDelete(i,ev){
+  ev.stopPropagation();
+  const g=TV.segs[i];
+  if(!confirm('Remove this line from the transcript? Its audio stays; only the text line goes.'))return;
+  const r=await api('/api/review',{base:TV.base,action:'delete',index:g.index,start:g.start});
+  if(!r.ok){alert(r.error||'failed');return}
+  openTranscript(TV.base);
 }
 function tvPlaySpan(i,ev){ev.stopPropagation();const g=TV.segs[i],a=$('#tva');
   if(!a)return;a.currentTime=Math.max(0,g.start-0.5);a.play();
@@ -1191,11 +1272,13 @@ async function tvRetrans(i,ev){
 }
 async function tvSave(i,ev){
   ev.stopPropagation();
-  const g=TV.segs[i];
+  const g=TV.segs[i],spk=$('#tvspk').value;
+  if(spk==='__new__'){alert('Pick or name the speaker first.');return}
   const r=await api('/api/review',{base:TV.base,index:g.index,start:g.start,
-    action:'edit',text:$('#tvta').value,speaker:$('#tvspk').value});
+    action:'edit',text:$('#tvta').value,speaker:spk});
   if(!r.ok){alert(r.error||'Save failed');return}
-  const sp=TV.speakers.find(s=>s.id===$('#tvspk').value);
+  if(spk.startsWith('name:')){openTranscript(TV.base,g.index);return}  // new person → fresh legend/colors
+  const sp=TV.speakers.find(s=>s.id===spk);
   g.text=$('#tvta').value;g.flags=[];g.edited=true;
   if(sp){g.who=sp.display;g.speaker=sp.id}
   tvRestore(i);
