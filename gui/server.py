@@ -243,6 +243,7 @@ def gather_state():
     unknown_list = []
     for uid, meta in sorted(reg["speakers"].items()):
         unknown_list.append({"uid": uid, "display": unknowns.display(uid),
+                             "archived": bool(meta.get("archived")),
                              "meetings": meta.get("meetings", [])})
     enrolled = [{"name": n, "samples": meta.get("n_samples", 1),
                  "sources": [s for s in meta.get("sources", []) if s and s != "?"]}
@@ -563,6 +564,7 @@ class Handler(BaseHTTPRequestHandler):
                 busy = bool(control.snapshot()["pids"])
                 jobs.add({"files": files, "paths": paths, "force": bool(b.get("force")),
                           "strict": bool(b.get("strict")), "verify": bool(b.get("verify")),
+                          "onetime": bool(b.get("onetime")),
                           "parallel": int(b.get("parallel", 1)), "label": label})
                 _jobs_kicked["at"] = 0.0  # a fresh click may bypass the cooldown
                 _kick_jobs()
@@ -657,6 +659,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b["new"]))
+            elif u.path == "/api/hide_unknown":
+                ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
+                      else unknowns.restore(b["uid"]))
+                self._json({"ok": ok})
             elif u.path == "/api/cloud_keys":
                 from stt import asr_cloud
                 updates = {}
@@ -947,6 +953,7 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <label class="sub" style="white-space:nowrap"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
     <label class="sub" style="white-space:nowrap" title="For sensitive recordings (hearings): never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
     <label class="sub" style="white-space:nowrap" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
+    <label class="sub" style="white-space:nowrap" title="Focus groups, interviews with people you'll never need to identify: their voices are NOT added to the Speakers list (and no voice samples are kept for them). The transcript still labels them Speaker 1, 2… and you can still enroll someone from the meeting later."><input type="checkbox" id="onetime" class="checkbox" style="vertical-align:-3px"> one-time speakers</label>
   </div>
   <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for hearings). “Verify” has a second engine listen too and flags the disagreements.</div>
   <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
@@ -1003,7 +1010,7 @@ const $=q=>document.querySelector(q);
 function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
   if(sec<3600)return Math.round(sec/60)+' min';
   return Math.floor(sec/3600)+'h '+String(Math.round(sec%3600/60)).padStart(2,'0')+'m'}
-let S=null, selected=new Set();
+let S=null, selected=new Set(), showHidden=false;
 async function api(p,body){const r=await fetch(p,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 // For values embedded as a JS string literal INSIDE an onclick="..." attribute (e.g. onclick="f('${escJs(x)}')").
@@ -1084,12 +1091,19 @@ function render(){
     <div class="grow"><div class="name">${esc(e.name)}</div>
     <div class="sub" title="${esc((e.sources||[]).join(', '))}">${e.samples} voice sample${e.samples>1?'s':''}${e.sources&&e.sources.length?' · from '+esc(e.sources[e.sources.length-1])+(e.sources.length>1?' +'+(e.sources.length-1):''):''}</div></div>
     <button onclick="openSpeakerActions('name:${escJs(e.name)}','${escJs(e.name)}','')">⋯</button></div>`).join('')||'<div class="sub">No one enrolled yet.</div>';
-  $('#unknowns').innerHTML=s.unknowns.map(u=>`<div class="row">
+  const vis=s.unknowns.filter(u=>!u.archived),hid=s.unknowns.filter(u=>u.archived);
+  $('#unknowns').innerHTML=vis.map(u=>`<div class="row">
     <button class="playbtn" data-key="${u.uid}" data-meeting="${esc(u.meetings[0]||'')}" onclick="playVoice(this)">▶</button>
     <div class="grow"><div class="name">${esc(u.display)}</div>
     <div class="sub">heard in ${u.meetings.length} meeting${u.meetings.length>1?'s':''}</div></div>
     <button class="primary" onclick="openName('${escJs(u.uid)}','${escJs(u.display)}','${escJs(u.meetings[0]||'')}')">Who is this?</button>
     <button onclick="openSpeakerActions('uid:${escJs(u.uid)}','${escJs(u.display)}','${escJs(u.meetings[0]||'')}')">⋯</button></div>`).join('')
+    +(hid.length?`<div class="sub" style="padding:8px 0 2px"><button class="link" onclick="showHidden=!showHidden;render()">${showHidden?'▾':'▸'} ${hid.length} hidden</button></div>`
+      +(showHidden?hid.map(u=>`<div class="row" style="opacity:.6">
+        <button class="playbtn" data-key="${u.uid}" data-meeting="${esc(u.meetings[0]||'')}" onclick="playVoice(this)">▶</button>
+        <div class="grow"><div class="name">${esc(u.display)}</div>
+        <div class="sub">hidden · heard in ${u.meetings.length} meeting${u.meetings.length>1?'s':''}</div></div>
+        <button onclick="api('/api/hide_unknown',{uid:'${escJs(u.uid)}',hide:false}).then(refresh)">Restore</button></div>`).join(''):''):'')
     ||'<div class="sub" style="padding-top:8px">No unidentified voices right now.</div>';
   $('#relnote').style.display=s.relabel_pending?'block':'none';
   $('#relnote').textContent='Applying names to all transcripts… (moments)';
@@ -1159,7 +1173,7 @@ function selAll(){
   if(selected.size>=sel.length){selected.clear()}else{sel.forEach(n=>selected.add(n))}
   render();
 }
-function runOpts(){return {parallel:$('#par2').checked?2:1,strict:$('#strict').checked,verify:$('#verify').checked}}
+function runOpts(){return {parallel:$('#par2').checked?2:1,strict:$('#strict').checked,verify:$('#verify').checked,onetime:$('#onetime').checked}}
 function runSelected(){api('/api/run',{files:[...selected],...runOpts()}).then(()=>{selected.clear();refresh()})}
 function runAll(){api('/api/run',runOpts()).then(refresh)}
 async function pickFiles(){
@@ -1353,9 +1367,10 @@ async function openRedo(base,audio){
   ${ed.n?`<p class="muted" style="margin-top:8px;color:var(--warn,#c60)"><b>⚠ This meeting has ${ed.n} manual edit${ed.n>1?'s':''}</b> (corrections, added or removed lines). A redo rebuilds everything from the audio, so they will no longer apply — they’re archived to a “.reviews.superseded.json” file next to the transcript, not deleted.</p>`:''}
   <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for hearings)</label>
   <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoverify" class="checkbox" style="vertical-align:-3px"> verify — a second engine listens too; disagreements get flagged with both versions</label>
+  <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoonetime" class="checkbox" style="vertical-align:-3px"> one-time speakers — don’t add this meeting’s unnamed voices to the Speakers list (focus groups)</label>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="dlg.close()">Cancel</button>
-    <button class="primary" onclick="api('/api/run',{paths:['${escJs(audio)}'],force:true,strict:$('#redostrict').checked,verify:$('#redoverify').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
+    <button class="primary" onclick="api('/api/run',{paths:['${escJs(audio)}'],force:true,strict:$('#redostrict').checked,verify:$('#redoverify').checked,onetime:$('#redoonetime').checked}).then(()=>{dlg.close();refresh()})">Reprocess</button>
   </div>`;
   dlg.showModal();
 }
@@ -1701,6 +1716,9 @@ function openSpeakerActions(key,display,meeting){
     <div class="sub">This voice is really the same person as</div></div>
     <select id="mtarget">${others.map(o=>`<option value="${esc(o.k)}">${esc(o.d)}</option>`).join('')}</select>
     <button ${others.length?'':'disabled'} onclick="api('/api/merge_speakers',{src:'${escJs(key)}',dst:$('#mtarget').value}).then(()=>{dlg.close();refresh()})">Merge</button></div>
+  ${isName?'':`<div class="row"><div class="grow"><div class="name">Hide from this list</div>
+    <div class="sub">One-time voice (focus group) — keep it matchable but out of the way; restore any time</div></div>
+    <button onclick="api('/api/hide_unknown',{uid:'${escJs(key.split(':')[1])}',hide:true}).then(()=>{dlg.close();refresh()})">Hide</button></div>`}
   <div class="row" style="border:0"><div class="grow"><div class="name">Remove</div>
     <div class="sub">${isName?'Un-enroll; their lines revert to Speaker N':'Forget this voice entirely'}</div></div>
     <button class="danger" onclick="if(confirm('Remove ${escJs(display)}?'))api(${isName?`'/api/remove_speaker',{name:'${escJs(display)}'}`:`'/api/forget',{uid:'${escJs(key.split(':')[1])}'}`}).then(()=>{dlg.close();refresh()})">Remove</button></div>

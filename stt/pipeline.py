@@ -69,7 +69,8 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
 
 def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                  strict=None, allowed_names=None, report=None, do_verify=None,
-                 num_speakers=None, min_speakers=None, max_speakers=None) -> dict:
+                 num_speakers=None, min_speakers=None, max_speakers=None,
+                 track_unknowns=True) -> dict:
     src = Path(src)
     report = report or (lambda *a, **k: None)
     strict = config.STRICT if strict is None else strict
@@ -116,12 +117,16 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                                    progress=lambda f: report("diarizing", f))
             turns, labels, names = diar["turns"], diar["labels"], diar["names"]
             overlaps = diar["overlaps"]
-            # stable global numbering for unknown voices across meetings
-            uid_map = unknowns.assign(diar["embeddings"], diar["cluster_names"], base)
-            for label, uid in uid_map.items():
-                if label in names and not names[label].get("name"):
-                    names[label]["global_id"] = uid
-                    names[label]["display"] = unknowns.display(uid)
+            if track_unknowns:
+                # stable global numbering for unknown voices across meetings
+                uid_map = unknowns.assign(diar["embeddings"], diar["cluster_names"], base)
+                for label, uid in uid_map.items():
+                    if label in names and not names[label].get("name"):
+                        names[label]["global_id"] = uid
+                        names[label]["display"] = unknowns.display(uid)
+            # else: one-time speakers (focus groups) — unnamed voices keep
+            # transcript-local "Speaker N" labels and are never registered
+            # globally; enrolling later from this meeting's caches still works
 
         report("writing", 0.2)
         spans = (diar["refine_stats"].get("spans", []) if diar else []) + loop_spans
@@ -162,6 +167,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
         "n_speakers": len(labels),
         "strict": strict,
+        "one_time_speakers": not track_unknowns,
         "punctuated": bool(config.PUNCTUATE),
         "verify_engine": verify_engine,
         "overlap_spans": [[s, e] for s, e in overlaps],

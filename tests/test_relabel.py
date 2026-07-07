@@ -101,3 +101,25 @@ def test_two_different_manual_people_across_sessions_get_distinct_ids(sandbox):
     manual = {s["id"]: s["display"] for s in data["speakers"]
               if str(s["id"]).startswith("MANUAL_")}
     assert manual == {"MANUAL_1": "Louise", "MANUAL_2": "Omar"}
+
+
+def test_one_time_speakers_flag_survives_relabel(sandbox):
+    """A meeting processed with 'one-time speakers' must NEVER register its
+    unnamed voices globally — including on every later relabel, which
+    otherwise re-runs unknown assignment and would quietly re-register the
+    focus group. A normal meeting on the same relabel path still registers."""
+    import relabel
+
+    from stt import unknowns
+
+    _seed_meeting("Focus Group")
+    d = json.loads(mfile("Focus Group", ".json").read_text())
+    d["one_time_speakers"] = True  # as stamped by pipeline --one-time-speakers
+    mfile("Focus Group", ".json").write_text(json.dumps(d))
+
+    assert relabel.relabel_one("Focus Group")
+    assert unknowns.load()["speakers"] == {}  # nothing registered
+
+    _seed_meeting("Normal Mtg")
+    assert relabel.relabel_one("Normal Mtg")
+    assert len(unknowns.load()["speakers"]) == 2  # control: normal path registers
