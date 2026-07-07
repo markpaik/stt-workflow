@@ -217,6 +217,29 @@ def _decisions_path(base: str):
     return config.MEETINGS_DIR / f"{base}.reviews.json"
 
 
+def count_decisions(base: str) -> int:
+    """How many saved human edits this meeting has (for the Redo warning)."""
+    p = _decisions_path(base)
+    try:
+        return len(json.loads(p.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+
+
+def archive_decisions(base: str, dest_dir=None) -> bool:
+    """A REDO rebuilds transcription AND diarization from scratch — the new
+    speaker cluster ids have no relation to the old ones, so replaying old
+    decisions could put words in the wrong mouths. Archive them instead
+    (nothing is deleted; the file is renamed .superseded)."""
+    from pathlib import Path
+    d = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
+    p = d / f"{base}.reviews.json"
+    if not p.exists():
+        return False
+    p.replace(d / f"{base}.reviews.superseded.json")
+    return True
+
+
 def _record_decision(base: str, decision: dict):
     """Review decisions persist in a sidecar so a later relabel (which rebuilds
     segments from the diarization cache) can NEVER silently erase human work."""

@@ -55,3 +55,16 @@ def test_two_separate_loops_both_flagged():
     assert len(spans) == 2
     texts = [w["word"] for w in out]
     assert texts.count("yes") == 3 and texts.count("right") == 3 and "middle" in texts
+
+
+def test_unk_between_letters_becomes_hyphen():
+    """Parakeet emits <unk> for out-of-vocab symbols — nearly always a dash."""
+    words = [_w(0, "a"), _w(1, "two<unk>year"), _w(2, "self<unk>management")]
+    out, _ = sanitize.collapse_repeats(words)
+    assert [w["word"] for w in out] == ["a", "two-year", "self-management"]
+
+
+def test_unk_elsewhere_is_dropped():
+    words = [_w(0, "tag"), _w(1, "<unk>team"), _w(2, "<unk>"), _w(3, "people.")]
+    out, _ = sanitize.collapse_repeats(words)
+    assert [w["word"] for w in out] == ["tag", "team", "people."]

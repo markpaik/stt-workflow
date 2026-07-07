@@ -2,7 +2,7 @@
 touch real voiceprints, manifests, status, or transcripts."""
 import pytest
 
-from stt import config, control, manifest, rates, status
+from stt import config, control, jobs, manifest, rates, status
 
 
 @pytest.fixture
@@ -21,6 +21,8 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")
     monkeypatch.setattr(rates, "RATES_LOG", d / "rates.jsonl")
+    monkeypatch.setattr(jobs, "PATH", d / "queued_jobs.json")
+    monkeypatch.setattr(jobs, "_LOCK", d / "queued_jobs.lock")
     monkeypatch.setattr(rates, "_cache", {"sig": None, "learned": None})
     monkeypatch.setattr(control, "_snap", {"t": 0.0, "pids": [], "mem_mb": 0})
     # HERMETIC process discovery: pgrep sees the REAL machine — without this,

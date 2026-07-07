@@ -62,3 +62,16 @@ def test_restore_segments_counts_changes(sandbox, monkeypatch):
     segs = [{"text": "fixed"}, {"text": ""}]
     n = punctuate.restore_segments(segs)
     assert n == 1 and segs[0]["text"] == "Fixed."
+
+
+def test_punctuator_unk_repaired_from_original():
+    """The punctuator's vocab lacks hyphens: 'self-management' round-trips as
+    '<unk>management'. The original word must be restored, punctuation kept."""
+    from stt import punctuate
+    norm = "we did self-management and a two-year plan"
+    out = "We did <unk>management. And a <unk>year plan."
+    fixed = punctuate._repair_unk(out, norm)
+    assert fixed == "We did self-management. And a two-year plan."
+    # untouched when counts mismatch (safety check rejects later anyway)
+    assert punctuate._repair_unk("<unk> b c", "one two") == "<unk> b c"
+    assert punctuate._repair_unk("clean text", norm) == "clean text"

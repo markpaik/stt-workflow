@@ -59,3 +59,14 @@ def test_estimate_progress_states(sandbox):
 
 def test_missing_status_file_reads_empty(sandbox):
     assert status.read() == {}
+
+
+def test_estimate_progress_verifying_stage(sandbox):
+    """Verify runs report a 'verifying' stage — ETA must keep working there,
+    and the extra pass must appear in the total only when actually verifying."""
+    plain, _ = status.estimate_progress({"stage": "transcribing", "duration": 600, "progress": 1.0})
+    f, eta = status.estimate_progress({"stage": "verifying", "duration": 600, "progress": 0.5})
+    assert f is not None and 0 < f < 1 and eta > 0
+    # non-verify estimates exclude the verifying stage entirely
+    assert "verifying" not in status.stage_estimates(600)
+    assert status.stage_estimates(600, verify=True)["verifying"] > 0

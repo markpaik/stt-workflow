@@ -201,6 +201,21 @@ def test_insert_delete_and_manual_speaker_survive_relabel(sandbox):
     assert [s["start"] for s in data["segments"]] == sorted(s["start"] for s in data["segments"])
 
 
+def test_redo_archives_decisions(sandbox):
+    """A redo re-diarizes: old cluster ids are meaningless, so decisions are
+    archived (renamed .superseded), never half-applied and never deleted."""
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="Human work.")
+    assert review.count_decisions("Mtg") == 1
+    assert review.archive_decisions("Mtg") is True
+    assert review.count_decisions("Mtg") == 0
+    assert (config.MEETINGS_DIR / "Mtg.reviews.superseded.json").exists()
+    # rebuilt data gets nothing reapplied — clean slate
+    data = _make_meeting(sandbox)
+    assert review.reapply_decisions("Mtg", data) == 0
+    assert review.archive_decisions("Mtg") is False  # nothing left to archive
+
+
 def test_retranscribe_engine_selection(sandbox):
     from stt import retranscribe
     import stt.asr_parakeet, stt.asr_mlxwhisper, os

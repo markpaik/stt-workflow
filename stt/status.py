@@ -71,21 +71,28 @@ def set_stage(name, stage, progress=None, duration=None):
     _write(d)
 
 
-def stage_estimates(duration: float, n_active: int = 1) -> dict:
+def stage_estimates(duration: float, n_active: int = 1, verify: bool = False) -> dict:
     """Expected wall seconds per stage for `duration` seconds of audio.
     Rates are auto-calibrated medians from past runs (stt.rates), keyed by the
-    currently selected ASR model and worker count; config defaults until then."""
+    CURRENTLY selected ASR model (read fresh from stt.env on every call) and
+    worker count; config defaults until real measurements exist. With verify,
+    the second engine's pass is included at that engine's own rate."""
     from . import rates
-    return {
+    est = {
         "downloading": 5.0,  # usually instant; real downloads show as slow stage
         "converting": duration / rates.convert_rate(),
         "transcribing": duration / rates.asr_rate(n_active=n_active),
         "diarizing": duration / rates.diarize_rate(n_active),
         "writing": rates.writing_secs(),
     }
+    if verify:
+        sec = "mlxwhisper:turbo" if rates.current_asr_key() == "parakeet" else "parakeet"
+        est["verifying"] = duration / rates.asr_rate(sec, n_active)
+    return est
 
 
-STAGE_ORDER = ["downloading", "converting", "transcribing", "diarizing", "writing"]
+STAGE_ORDER = ["downloading", "converting", "transcribing", "diarizing",
+               "verifying", "writing"]
 
 
 def estimate_progress(entry: dict, n_active: int = 1):
@@ -94,17 +101,18 @@ def estimate_progress(entry: dict, n_active: int = 1):
     dur = entry.get("duration")
     if not dur:
         return None, None
-    est = stage_estimates(dur, n_active)
-    total = sum(est.values())
     stage = entry.get("stage", "downloading")
     if stage not in STAGE_ORDER:
         return None, None
+    # a file only reports "verifying" when verify mode is actually on
+    est = stage_estimates(dur, n_active, verify=(stage == "verifying"))
+    total = sum(est.values())
     idx = STAGE_ORDER.index(stage)
-    done = sum(est[s] for s in STAGE_ORDER[:idx])
+    done = sum(est.get(s, 0.0) for s in STAGE_ORDER[:idx])
     frac_in = entry.get("progress")
     if frac_in is None:
         frac_in = 0.5  # mid-stage assumption when the engine gives no callback
-    done += est[stage] * min(1.0, max(0.0, frac_in))
+    done += est.get(stage, 0.0) * min(1.0, max(0.0, frac_in))
     overall = min(0.99, done / total)
     return overall, max(0.0, total - done)
 
