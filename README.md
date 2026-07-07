@@ -65,6 +65,12 @@ sidecar file and survive every relabel.
 
 ![Transcript viewer](docs/img/viewer.png)
 
+Splitting a line where the diarizer glued two people together: each half
+gets its own speaker, and a reassigned half merges into its matching
+neighbor automatically.
+
+![Splitting a line between two speakers](docs/img/split.png)
+
 **Review what the pipeline wasn't sure about.** Uncertain segments are
 flagged and triaged: substantial items first, sub-second crosstalk crumbs
 bulk-acceptable in one click. Each review item cues its exact audio span.
@@ -76,6 +82,8 @@ need human ears. **Strict mode** (for hearings and HR conversations) never
 guesses an uncertain speaker and never sends audio to any cloud engine,
 whatever the global settings say.
 
+![Reviewing a flagged segment with the second engine's candidate one click away](docs/img/review.png)
+
 **Summarize automatically, on-device.** At the end of every run, Qwen3-8B
 (4-bit, via MLX) drafts each new meeting's summary; it appears as the
 description line in the library, no clicks needed. The same model suggests
@@ -84,6 +92,8 @@ folder and every file in it. Each meeting stores a date (parsed from the
 filename at process time, correctable in the Rename dialog) that drives the
 month grouping. File timestamps are not trusted, because they reflect when
 Voice Memos exported the file, often weeks after the meeting.
+
+![Rename dialog with the meeting-date correction](docs/img/rename.png)
 
 ![Transcript library with summaries](docs/img/transcripts.png)
 
@@ -98,6 +108,8 @@ diarization, speaker naming, and voiceprints stay on-device, so cloud words
 still get local names. A cloud failure falls back to the local engine
 mid-run, and strict-mode recordings never upload. Keys are stored in
 `stt.env` (git-ignored, `chmod 600`) and never shown again.
+
+![Cloud transcription keys](docs/img/cloud-keys.png)
 
 **Export.** Word (.docx), PDF, clipboard, or the underlying `.txt` and
 structured `.json` (segment- and word-level timestamps, speakers, flags,
