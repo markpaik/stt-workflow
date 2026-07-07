@@ -785,109 +785,126 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>STT Workflow</title>
 <style>
-:root{--bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--sub:#86868b;--line:rgba(0,0,0,.08);
---accent:#0071e3;--accent-h:#0077ed;--ok:#34c759;--warn:#ff9f0a;--bad:#ff3b30;
---chip:rgba(120,120,128,.10);--inset:rgba(120,120,128,.06);--hairline:rgba(60,60,67,.12)}
-@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--ink:#f5f5f7;
---sub:#98989d;--line:rgba(255,255,255,.10);--chip:rgba(120,120,128,.22);
---inset:rgba(120,120,128,.10);--hairline:rgba(84,84,88,.5)}}
+:root{--bg:#fff;--card:#fff;--ink:#0d0d0d;--sub:#6f6f6f;--line:#e6e6e6;
+--accent:#635bff;--accent-h:#5851ea;--acc-ink:#fff;--ok:#107a3d;--warn:#a15c07;--bad:#d92d20;
+--chip:#f2f2f2;--inset:#fafafa;--hairline:#ececec}
+@media(prefers-color-scheme:dark){:root{--bg:#0a0a0a;--card:#111;--ink:#f2f2f2;
+--sub:#9a9a9a;--line:#262626;--chip:#1f1f1f;--inset:#161616;--hairline:#222;
+--accent:#7a73ff;--accent-h:#8b85ff;--acc-ink:#fff}}
+/* manual override (theme toggle): must win over the OS preference BOTH ways */
+:root[data-theme=dark]{--bg:#0a0a0a;--card:#111;--ink:#f2f2f2;
+--sub:#9a9a9a;--line:#262626;--chip:#1f1f1f;--inset:#161616;--hairline:#222;
+--accent:#7a73ff;--accent-h:#8b85ff;--acc-ink:#fff;color-scheme:dark}
+:root[data-theme=light]{--bg:#fff;--card:#fff;--ink:#0d0d0d;--sub:#6f6f6f;
+--line:#e6e6e6;--chip:#f2f2f2;--inset:#fafafa;--hairline:#ececec;
+--accent:#635bff;--accent-h:#5851ea;--acc-ink:#fff;color-scheme:light}
+.themebtn{width:32px;height:32px;border-radius:8px;padding:0;font-size:15px;
+display:flex;align-items:center;justify-content:center;flex:none}
 *{box-sizing:border-box;margin:0}
 html{scroll-behavior:smooth}
-body{font:15px/1.47 -apple-system,system-ui,"SF Pro Text",sans-serif;background:var(--bg);
-color:var(--ink);padding:0 28px 40px;max-width:880px;margin:0 auto;
+body{font:14.5px/1.55 -apple-system,system-ui,"Segoe UI",sans-serif;background:var(--bg);
+color:var(--ink);padding:0 28px 48px;max-width:880px;margin:0 auto;
 -webkit-font-smoothing:antialiased}
-h1{font:700 26px/1.2 -apple-system,system-ui,"SF Pro Display",sans-serif;letter-spacing:-.022em}
-h2{font-size:15px;font-weight:600;letter-spacing:-.01em;margin:0 0 8px;display:flex;
-align-items:center;gap:8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;
-padding:18px 20px;margin:16px 0;box-shadow:0 1px 2px rgba(0,0,0,.04)}
-.row{display:flex;align-items:center;gap:10px;padding:9px 0;
-border-bottom:.5px solid var(--hairline)}
+h1{font:700 22px/1.15 -apple-system,system-ui,sans-serif;letter-spacing:-.03em}
+h2{font:650 14px/1.2 -apple-system,system-ui,sans-serif;letter-spacing:-.015em;margin:0 0 12px;
+display:flex;align-items:center;gap:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:22px 24px;margin:18px 0}
+.row{display:flex;align-items:center;gap:10px;padding:10px 0;
+border-bottom:1px solid var(--hairline)}
 .row:last-child{border-bottom:0}
-.inset{background:var(--inset);border-radius:12px;padding:2px 12px;max-height:44vh;
-overflow-y:auto;overscroll-behavior:contain}
+.inset{background:var(--inset);border:1px solid var(--hairline);border-radius:10px;
+padding:2px 12px;max-height:44vh;overflow-y:auto;overscroll-behavior:contain}
 .grow{flex:1;min-width:0}.name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sub{color:var(--sub);font-size:13px}
-.chip{background:var(--chip);border-radius:20px;padding:2.5px 10px;font-size:12px;
-font-weight:500;color:var(--sub);white-space:nowrap}
-.chip.live{background:color-mix(in srgb,var(--accent) 13%,transparent);color:var(--accent)}
-.chip.done{background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok)}
-.chip.warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:#c93400}
-@media(prefers-color-scheme:dark){.chip.warn{color:var(--warn)}}
-button{font:inherit;font-size:14px;border:0;border-radius:8px;padding:6px 13px;
-cursor:pointer;background:var(--chip);color:var(--ink);transition:background .15s,transform .02s}
-button:hover{background:color-mix(in srgb,var(--chip) 60%,rgba(120,120,128,.24))}
-button:active{transform:scale(.97)}
-button.primary{background:var(--accent);color:#fff;font-weight:600}
-button.primary:hover{background:var(--accent-h)}
-button.danger{background:color-mix(in srgb,var(--bad) 11%,transparent);color:var(--bad)}
+.chip{background:transparent;border:1px solid var(--line);border-radius:99px;
+padding:2px 10px;font-size:12px;font-weight:500;color:var(--sub);white-space:nowrap;
+font-variant-numeric:tabular-nums}
+.chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
+.chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
+.chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
+button{font:inherit;font-size:13.5px;font-weight:500;border:1px solid var(--line);
+border-radius:8px;padding:6px 14px;cursor:pointer;background:var(--card);color:var(--ink);
+transition:background .15s,border-color .15s,transform .02s}
+button:hover{background:var(--chip);border-color:var(--sub)}
+button:active{transform:scale(.98)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);font-weight:600}
+button.primary:hover{background:var(--accent-h);border-color:var(--accent-h)}
+button.danger{background:transparent;border-color:color-mix(in srgb,var(--bad) 40%,transparent);color:var(--bad)}
 button:disabled{opacity:.4;cursor:default;transform:none}
-button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid
-color-mix(in srgb,var(--accent) 40%,transparent);outline-offset:1px}
-.link{background:none;padding:2px 4px;color:var(--accent);font-size:13px;font-weight:500}
-.link:hover{background:none;text-decoration:underline}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 35%,transparent);outline-offset:1px}
+.link{background:none;border:0;padding:2px 4px;color:var(--accent);font-size:13px;font-weight:500}
+.link:hover{background:none;text-decoration:underline;text-underline-offset:3px}
 input[type=text],select{font:inherit;background:var(--card);color:var(--ink);
-border:1px solid var(--hairline);border-radius:8px;padding:6px 10px;
-box-shadow:0 .5px 1.5px rgba(0,0,0,.06)}
-.top{display:flex;align-items:center;gap:13px;padding:20px 4px 12px;position:sticky;
-top:0;z-index:5;background:color-mix(in srgb,var(--bg) 78%,transparent);
-backdrop-filter:blur(22px) saturate(180%);-webkit-backdrop-filter:blur(22px) saturate(180%)}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--sub);flex:none}
+border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+.top{display:flex;align-items:center;gap:13px;padding:22px 4px 14px;position:sticky;
+top:0;z-index:5;background:color-mix(in srgb,var(--bg) 85%,transparent);
+backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+border-bottom:1px solid var(--hairline)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--sub);flex:none}
 .dot.run{background:var(--accent);animation:pulse 1.2s infinite}
 .dot.paused{background:var(--warn)}
-@keyframes pulse{50%{opacity:.35}}
-.bar{height:4px;border-radius:2px;background:var(--chip);overflow:hidden;margin-top:6px}
-.bar>i{display:block;height:100%;border-radius:2px;background:var(--accent);transition:width .6s}
+@keyframes pulse{50%{opacity:.3}}
+.bar{height:4px;border-radius:99px;background:var(--chip);overflow:hidden;margin-top:6px}
+.bar>i{display:block;height:100%;border-radius:99px;background:var(--accent);transition:width .6s}
 .stagechips{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
-.stagechips .s{font-size:11px;font-weight:500;padding:1.5px 9px;border-radius:10px;
-background:var(--chip);color:var(--sub)}
-.stagechips .s.on{background:var(--accent);color:#fff}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.stagechips .s{font-size:11px;font-weight:500;padding:2px 10px;border-radius:99px;
+border:1px solid var(--hairline);color:var(--sub)}
+.stagechips .s.on{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
 .checkbox{width:16px;height:16px;accent-color:var(--accent);flex:none}
-dialog{margin:auto;border:0;border-radius:18px;padding:24px;background:var(--card);color:var(--ink);
-box-shadow:0 24px 70px rgba(0,0,0,.35),0 0 0 .5px var(--line);max-width:440px;width:92%}
-dialog::backdrop{background:rgba(0,0,0,.32);backdrop-filter:blur(6px)}
-dialog h1{font-size:18px}
+dialog{margin:auto;border:1px solid var(--line);border-radius:14px;padding:26px;
+background:var(--card);color:var(--ink);
+box-shadow:0 20px 60px rgba(0,0,0,.2);max-width:440px;width:92%}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog h1{font-size:17px}
 .timegrid{display:flex;gap:8px;align-items:center;margin:14px 0}
 .seg{display:flex;background:var(--chip);border-radius:9px;padding:2px}
-.seg button{background:transparent;padding:5px 12px;border-radius:7px}
-.seg button.on{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.seg button{background:transparent;border:0;padding:5px 12px;border-radius:7px}
+.seg button.on{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.14)}
 audio{width:100%;height:34px;margin-top:8px;border-radius:8px}
-.muted{color:var(--sub);font-size:13px;line-height:1.5}
+.muted{color:var(--sub);font-size:13px;line-height:1.55}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);
 border-top-color:var(--accent);border-radius:50%;animation:rot .7s linear infinite;vertical-align:-2px}
 @keyframes rot{to{transform:rotate(360deg)}}
 .playbtn{width:30px;height:30px;border-radius:50%;padding:0;font-size:11px;
 display:flex;align-items:center;justify-content:center;flex:none}
-.playbtn:hover{background:var(--accent);color:#fff}
+.playbtn:hover{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
 dialog.wide{max-width:680px}
 .tseg{display:flex;gap:10px;padding:7px 8px;border-radius:8px;cursor:pointer;align-items:baseline}
-.tseg:hover{background:var(--chip)}
-.tseg.now{background:color-mix(in srgb,var(--accent) 10%,transparent)}
-.tseg.flagged{background:color-mix(in srgb,var(--warn) 9%,transparent)}
-.tseg .t{color:var(--sub);font-size:12px;font-variant-numeric:tabular-nums;flex:none;width:44px}
+.tseg:hover{background:var(--inset)}
+.tseg.now{background:color-mix(in srgb,var(--accent) 9%,transparent)}
+.tseg.flagged{background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.tseg .t{color:var(--sub);font-size:11.5px;font-family:ui-monospace,"SF Mono",Menlo,monospace;
+flex:none;width:46px}
 .tseg .w{font-weight:600;flex:none;width:118px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tseg .x{flex:1;min-width:0}
 .sdot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
 .toggle{min-width:52px}
-.mgroup{font-size:12px;font-weight:600;color:var(--sub);text-transform:uppercase;
-letter-spacing:.05em;padding:12px 0 2px}
-mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;border-radius:3px}
+.mgroup{font-size:11.5px;font-weight:600;color:var(--sub);text-transform:uppercase;
+letter-spacing:.08em;padding:14px 0 3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;border-radius:3px}
 .tseg .segbtn{opacity:0;flex:none;padding:1px 8px;font-size:12px;border-radius:6px}
 .tgap{height:8px;margin:0 8px;border-radius:6px;text-align:center;line-height:8px;
   font-size:11px;color:transparent;cursor:pointer;transition:all .12s}
 .tgap:hover,.tgap:focus-visible{height:20px;line-height:20px;color:var(--accent);
-  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+  background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .tgap.editing{height:auto;line-height:normal;color:var(--ink);cursor:default;
-  background:var(--chip);padding:10px}
+  background:var(--inset);padding:10px}
 .tseg:hover .segbtn,.tseg:focus-within .segbtn{opacity:1}
-.tseg.editing{cursor:default;background:var(--chip)}
-</style></head><body>
+.tseg.editing{cursor:default;background:var(--inset)}
+</style>
+<script>
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint.
+(function(){const t=localStorage.getItem("stt_theme");
+if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
+</script></head><body>
 <div class="top">
   <h1>STT Workflow</h1>
   <span id="statusdot" class="dot"></span><span id="statustext" class="sub"></span>
   <span class="grow"></span>
+  <button class="themebtn" id="themebtn" onclick="cycleTheme()" title=""></button>
   <span id="mem" class="chip" style="display:none" title="Memory held by transcription processes right now"></span>
   <span id="battery" class="chip"></span>
 </div>
@@ -1680,6 +1697,19 @@ async function saveCloudKeys(){
   if(!r.ok){alert(r.error||'Could not save');return}
   dlg.close();refresh();
 }
+const THEME_META={auto:["◐","Theme: matching macOS — click for light"],
+light:["☀","Theme: light — click for dark"],dark:["☾","Theme: dark — click to match macOS"]};
+function themeNow(){return localStorage.getItem("stt_theme")||"auto"}
+function applyTheme(t){
+  if(t==="light"||t==="dark"){localStorage.setItem("stt_theme",t);document.documentElement.dataset.theme=t}
+  else{localStorage.removeItem("stt_theme");delete document.documentElement.dataset.theme}
+  const b=$('#themebtn');if(b){b.textContent=THEME_META[t][0];b.title=THEME_META[t][1]}
+}
+function cycleTheme(){
+  const order=["auto","light","dark"];
+  applyTheme(order[(order.indexOf(themeNow())+1)%3]);
+}
+applyTheme(themeNow());
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh();setInterval(refresh,2000);
