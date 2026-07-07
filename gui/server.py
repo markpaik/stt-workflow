@@ -644,6 +644,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(review.delete_segment(b["base"], int(b["index"]),
                                                      start=b.get("start")))
                     return
+                if b.get("action") == "split":
+                    self._json(review.split_segment(
+                        b["base"], int(b["index"]), start=b.get("start"),
+                        text_a=b.get("text_a", ""), text_b=b.get("text_b", ""),
+                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b")))
+                    return
                 self._json(review.apply(b["base"], int(b["index"]), b["action"],
                                         start=b.get("start"), text=b.get("text"),
                                         speaker_id=b.get("speaker")))
@@ -1206,6 +1212,13 @@ async function rvApply(action){
     body.text=$('#rvtext').value;body.speaker=v}
   const r=await api('/api/review',body);
   if(!r.ok){alert(r.error||'Save failed');return}
+  if(r.merged){
+    // the reassignment folded neighbors into one turn — every later item's
+    // index/start in this pre-fetched list may now be stale; refetch
+    const d=await api('/api/review?base='+encodeURIComponent(RV.base));
+    RV.items=d.items;RV.i=0;
+    if(!RV.items.length){dlg.close();return}
+    renderReview();return}
   rvNext();
 }
 function rvNext(){
@@ -1275,7 +1288,12 @@ function tvRow(g,i){
   <button class="segbtn" onclick="tvEdit(${i},event)" title="Fix this line (speaker or text)">✎</button></div>`;
 }
 async function openTranscript(base,target=null){
-  if(dlg.open)dlg.close();
+  // re-render IN PLACE — a close()+showModal() pair races its own queued
+  // close event on a fast API: the old view's onclose fires after the new
+  // dialog opens, nulling TV and closing it (seen as a blank flash after
+  // any merge/split/insert reload)
+  if(tvTimer){clearInterval(tvTimer);tvTimer=null}
+  dlg.onclose=null;
   const d=await api('/api/transcript?base='+encodeURIComponent(base));
   if(d.error){alert(d.error);return}
   const color={};d.speakers.forEach((w,i)=>color[w]=HUES[i%HUES.length]);
@@ -1290,7 +1308,7 @@ async function openTranscript(base,target=null){
   </div>
   <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${tvGap(-1)}${TV.segs.map((g,i)=>tvRow(g,i)+tvGap(i)).join('')}</div>
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="tvClose()">Close</button></div>`;
-  dlg.showModal();
+  if(!dlg.open)dlg.showModal();
   dlg.onclose=tvClose;
   if(target!=null){
     const i=TV.segs.findIndex(g=>g.index===target);
@@ -1326,11 +1344,42 @@ function tvEdit(i,ev){
     <textarea id="tvta" style="width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:64px">${esc(g.text)}</textarea>
     <div style="display:flex;gap:6px;margin-top:6px">
       <button onclick="tvDelete(${i},event)" title="Remove this line entirely (echo, noise heard as speech)">Remove line</button>
+      <button onclick="tvSplitUI(${i},event)" title="Split this line in two — click inside the text where the second voice starts, then press this">✂ Split line</button>
       <span class="grow"></span>
       <button onclick="tvPlaySpan(${i},event)">▶ Play span</button>
       <button onclick="tvRestore(${i},event)">Cancel</button>
       <button class="primary" onclick="tvSave(${i},event)">Save</button></div></div>`;
   spkWireNew($('#tvspk'));
+}
+function tvSplitUI(i,ev){
+  ev.stopPropagation();
+  const ta=$('#tvta'),pos=ta.selectionStart||0,full=ta.value;
+  const a=full.slice(0,pos).trim(),b=full.slice(pos).trim();
+  if(!a||!b){alert('Click inside the text where the split should happen — some words before the cursor, some after — then press Split again.');return}
+  const g=TV.segs[i],el=$('#ts'+i);
+  const box='width:100%;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:8px;min-height:48px';
+  el.innerHTML=`<div style="flex:1;min-width:0">
+    <div class="sub" style="margin-bottom:6px">Splitting this line in two — set each half’s speaker. If a half matches its neighbor’s speaker, they join into one turn automatically.</div>
+    <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:6px">
+      <select id="tvsa">${spkOptions(TV.speakers,TV.people,g.speaker)}</select>
+      <textarea id="tvta1" style="${box}">${esc(a)}</textarea></div>
+    <div style="display:flex;gap:6px;align-items:flex-start">
+      <select id="tvsb">${spkOptions(TV.speakers,TV.people,g.speaker)}</select>
+      <textarea id="tvta2" style="${box}">${esc(b)}</textarea></div>
+    <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px">
+      <button onclick="tvRestore(${i},event)">Cancel</button>
+      <button class="primary" onclick="tvSplitSave(${i},event)">Split</button></div></div>`;
+  spkWireNew($('#tvsa'));spkWireNew($('#tvsb'));
+  $('#tvsb').focus();
+}
+async function tvSplitSave(i,ev){
+  ev.stopPropagation();
+  const g=TV.segs[i],sa=$('#tvsa').value,sb=$('#tvsb').value;
+  if(sa==='__new__'||sb==='__new__'){alert('Pick or name both speakers first.');return}
+  const r=await api('/api/review',{base:TV.base,action:'split',index:g.index,start:g.start,
+    text_a:$('#tvta1').value,text_b:$('#tvta2').value,speaker_a:sa,speaker_b:sb});
+  if(!r.ok){alert(r.error||'Split failed');return}
+  openTranscript(TV.base,r.index);
 }
 function tvGap(i){
   return `<div class="tgap" id="tg${i}" tabindex="0" role="button"
@@ -1411,6 +1460,7 @@ async function tvSave(i,ev){
   const r=await api('/api/review',{base:TV.base,index:g.index,start:g.start,
     action:'edit',text:$('#tvta').value,speaker:spk});
   if(!r.ok){alert(r.error||'Save failed');return}
+  if(r.merged){openTranscript(TV.base,r.index);return}  // rows changed: neighbors folded into one turn
   if(spk.startsWith('name:')){openTranscript(TV.base,g.index);return}  // new person → fresh legend/colors
   const sp=TV.speakers.find(s=>s.id===spk);
   g.text=$('#tvta').value;g.flags=[];g.edited=true;
