@@ -92,6 +92,21 @@ def job_spec_from_args(args, todo) -> dict:
                      + (f" +{len(todo) - 2} more" if len(todo) > 2 else "")) or "resumed run"}
 
 
+def spawn_chained_job(job: dict):
+    """Start the next panel-queued job at the end of a run, logging to the
+    same spawned.log the GUI's own _spawn() uses for the identical purpose —
+    stdout/stderr to DEVNULL would leave zero trace if this child dies
+    immediately (bad venv, a bad line in stt.env under set -euo pipefail)."""
+    from stt import jobs
+    logs_dir = config.PROJECT_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    log = open(logs_dir / "spawned.log", "a")
+    args = jobs.spawn_args(job)
+    log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
+    log.flush()
+    subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
+
+
 def preflight_source(source: Path) -> bool:
     try:
         next(source.iterdir(), None)
@@ -136,7 +151,8 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (now - cur["t"])
         if cur["stage"] != stage:
             cur["stage"], cur["t"] = stage, now
-        st.set_stage(k, stage, progress=progress, duration=duration)
+        st.set_stage(k, stage, progress=progress, duration=duration,
+                    diarize=opts["do_diarize"], verify=opts.get("verify", False))
 
     report("downloading")
     if not ic.materialize(src):
@@ -339,6 +355,8 @@ def main():
     def run_todo(batch):
         if args.parallel > 1 and len(batch) > 1:
             from concurrent.futures import ProcessPoolExecutor, as_completed
+            from concurrent.futures.process import BrokenProcessPool
+            broken = []
             with ProcessPoolExecutor(max_workers=args.parallel) as ex:
                 futs = {ex.submit(process_one, str(s), str(dest), opts_for(s)): s for s in batch}
                 for fut in as_completed(futs):
@@ -346,7 +364,24 @@ def main():
                     print(f"[processing] {src.name}", flush=True)
                     try:
                         _record(fut.result())
+                    except BrokenProcessPool:
+                        # a DIFFERENT file's worker crashed (segfault/OOM-kill)
+                        # and took the shared pool down with it — this file was
+                        # never actually attempted, so don't blame it for
+                        # someone else's crash; retry it alone once the broken
+                        # pool is fully torn down below
+                        broken.append(src)
                     except Exception as e:
+                        nonlocal_fail(src.name, e)
+            if broken:
+                print(f"  process pool crashed mid-run — retrying {len(broken)} "
+                      f"file(s) one at a time", file=sys.stderr, flush=True)
+                for src in broken:
+                    print(f"[processing] {src.name}", flush=True)
+                    try:
+                        _record(process_one(str(src), str(dest), opts_for(src)))
+                    except Exception as e:
+                        traceback.print_exc()
                         nonlocal_fail(src.name, e)
         else:
             for src in batch:
@@ -401,8 +436,7 @@ def main():
     if nxt:
         lock.close()
         print(f"Starting queued job: {nxt[0].get('label') or 'run'}", flush=True)
-        subprocess.Popen(jobs.spawn_args(nxt[0]), start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spawn_chained_job(nxt[0])
     return 1 if failed else 0
 
 

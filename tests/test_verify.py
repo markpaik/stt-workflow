@@ -70,6 +70,32 @@ def test_apply_flags_attaches_alt_and_skips_reviewed():
     assert "alt" not in segments[1] and segments[1]["flags"] == []  # reviewed: untouched
 
 
+def test_apply_flags_catches_zero_width_pure_insertion_region():
+    """A zero-width disagreement region (a pure insertion with no inter-word
+    gap, start==end) sitting squarely inside a segment computes overlap of
+    EXACTLY 0 against it — a strict > 0 test let it escape flagging
+    entirely, defeating the "flag every disagreement" guarantee."""
+    segments = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00",
+                "text": "We reviewed the dashboard", "flags": []}]
+    regs = [{"start": 1.0, "end": 1.0, "ours": "", "theirs": "carefully"}]
+    n = verify.apply_flags(segments, regs)
+    assert n == 1
+    assert verify.FLAG in segments[0]["flags"]
+    assert segments[0]["alt"][0]["theirs"] == "carefully"
+
+
+def test_apply_flags_still_excludes_regions_genuinely_outside_a_segment():
+    """The >= 0 fix must not make apply_flags match everything — a region
+    entirely outside a segment's span still correctly computes a NEGATIVE
+    overlap and is excluded."""
+    segments = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00",
+                "text": "We reviewed the dashboard", "flags": []}]
+    regs = [{"start": 10.0, "end": 10.0, "ours": "", "theirs": "unrelated"}]
+    n = verify.apply_flags(segments, regs)
+    assert n == 0
+    assert segments[0]["flags"] == []
+
+
 def test_secondary_engine_is_architecturally_different():
     assert verify.secondary_engine("mlx-community/parakeet-tdt-0.6b-v2") == ("mlxwhisper", "turbo")
     assert verify.secondary_engine("mlx-whisper/large-v3") == ("parakeet", None)

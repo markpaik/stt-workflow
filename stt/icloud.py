@@ -47,9 +47,13 @@ def materialize(path: Path, timeout: float = 900.0, poll: float = 1.0) -> bool:
         return True
     subprocess.run(["/usr/bin/brctl", "download", str(path)],
                    check=False, capture_output=True)
-    deadline = time.time() + timeout
+    # monotonic: a sleep/lid-close mid-download must not make wall-clock time
+    # jump on wake and spuriously blow the deadline for a download that was
+    # actually fine (the same bug class already fixed elsewhere — rates.py,
+    # run_batch.py's report() — for the identical reason)
+    deadline = time.monotonic() + timeout
     prev = None
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if _fully_present(path):
             sig = _stat_sig()
             if sig == prev:

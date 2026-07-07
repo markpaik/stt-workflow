@@ -143,3 +143,16 @@ def test_enroll_skips_near_duplicate_sample(sandbox):
     identify.enroll("Jane", v, source="M1")
     identify.enroll("Jane", v * 2.0, source="M1")  # same direction after L2 norm
     assert identify.load_registry()["Jane"]["n_samples"] == 1
+
+
+def test_materialize_deadline_uses_monotonic_not_wallclock(sandbox, monkeypatch):
+    """A sleep/lid-close during a long download makes wall-clock time jump on
+    wake; the poll deadline must be immune to that (same fix already applied
+    to rates.py and run_batch.py's report(), for the identical reason).
+    Proven by making time.time() raise: if materialize() still depends on it
+    for the deadline, this fails loudly instead of silently passing."""
+    def _boom():
+        raise AssertionError("materialize() must not call time.time() for its deadline")
+    monkeypatch.setattr(icloud.time, "time", _boom)
+    f = sandbox / "never_appears.m4a"
+    assert icloud.materialize(f, timeout=0.3, poll=0.1) is False

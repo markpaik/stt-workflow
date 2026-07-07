@@ -10,7 +10,12 @@ different rooms/meetings) and score by max cosine — single-meeting centroids a
 brittle across rooms, mics, and days. Embeddings are L2-normalized before storage
 so no single loud sample dominates.
 """
+import contextlib
+import fcntl
 import json
+import os
+import sys
+import threading
 from datetime import datetime
 
 import numpy as np
@@ -19,6 +24,47 @@ from . import config
 
 MAX_SAMPLES = 5
 
+_lock_depth = threading.local()
+
+
+@contextlib.contextmanager
+def lock_registry():
+    """Serialize ALL voiceprint registry mutation — identify.py's
+    registry.json AND unknowns.py's unknowns.json (promote() touches both) —
+    across the batch and relabel processes, which are designed to run
+    concurrently. Without this, two processes can race a read-modify-write of
+    either file and silently clobber a fresh enrollment or misnumber an
+    unknown speaker.
+
+    Re-entrant WITHIN one thread (promote() calls enroll() while already
+    holding the lock): flock itself isn't re-entrant, so a naive nested
+    acquire from the same process would deadlock against itself. A depth
+    counter makes only the outermost call take the real OS lock; a
+    concurrent call from another process/thread still genuinely waits for it."""
+    depth = getattr(_lock_depth, "n", 0)
+    if depth > 0:
+        _lock_depth.n = depth + 1
+        try:
+            yield
+        finally:
+            _lock_depth.n = depth
+        return
+    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config.VOICEPRINTS_DIR / ".registry.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        _lock_depth.n = 1
+        try:
+            yield
+        finally:
+            _lock_depth.n = 0
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _atomic_write(path, text: str):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
 
 def _registry_path():
     return config.VOICEPRINTS_DIR / "registry.json"
@@ -26,12 +72,22 @@ def _registry_path():
 
 def load_registry() -> dict:
     p = _registry_path()
-    return json.loads(p.read_text()) if p.exists() else {}
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError as e:
+        # a corrupt registry must be LOUD, not a silent reset to empty — every
+        # enrolled voiceprint would otherwise look freshly un-enrolled
+        print(f"WARNING: {p} is corrupt ({e}) — treating as empty. Voiceprint "
+              "files on disk are untouched; fix or restore the registry before "
+              "re-enrolling anyone.", file=sys.stderr)
+        return {}
 
 
 def save_registry(reg: dict):
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-    _registry_path().write_text(json.dumps(reg, indent=2))
+    _atomic_write(_registry_path(), json.dumps(reg, indent=2))
 
 
 def _unique_filename(stem: str, reg: dict) -> str:
@@ -73,8 +129,15 @@ def load_voiceprints() -> dict:
 
 def cosine(a, b) -> float:
     """NaN-safe cosine: returns -1.0 (never NaN) on invalid input, so a bad
-    embedding can never accidentally clear a `>= threshold` comparison."""
+    embedding can never accidentally clear a `>= threshold` comparison. A
+    dimension mismatch is exactly as invalid — without this check, one
+    voiceprint saved under a different embedding size (e.g. after a model
+    change) would raise inside np.dot for EVERY comparison against it, which
+    since this is called in an all-vs-all loop, poisons matching for every
+    speaker in every meeting, not just that one entry's owner."""
     a, b = np.asarray(a, float), np.asarray(b, float)
+    if a.shape != b.shape:
+        return -1.0
     if not (np.isfinite(a).all() and np.isfinite(b).all()):
         return -1.0
     na, nb = np.linalg.norm(a), np.linalg.norm(b)
@@ -143,75 +206,79 @@ def name_speakers(embeddings: dict, threshold: float = None, margin: float = Non
 def rename_person(old: str, new: str) -> bool:
     """Rename an enrolled person. If the new name already exists, this becomes a
     merge (their voice samples are combined)."""
-    new = new.strip()
-    reg = load_registry()
-    if old not in reg or not new:
-        return False
-    if new in reg:
-        return merge_people(old, new)
-    meta = reg.pop(old)
-    newf = _unique_filename(new.replace("/", "_"), reg)
-    (config.VOICEPRINTS_DIR / meta["file"]).rename(config.VOICEPRINTS_DIR / newf)
-    meta["file"] = newf
-    reg[new] = meta
-    save_registry(reg)
-    return True
+    with lock_registry():
+        new = new.strip()
+        reg = load_registry()
+        if old not in reg or not new:
+            return False
+        if new in reg:
+            return merge_people(old, new)
+        meta = reg.pop(old)
+        newf = _unique_filename(new.replace("/", "_"), reg)
+        (config.VOICEPRINTS_DIR / meta["file"]).rename(config.VOICEPRINTS_DIR / newf)
+        meta["file"] = newf
+        reg[new] = meta
+        save_registry(reg)
+        return True
 
 
 def merge_people(src: str, dst: str) -> bool:
     """Combine two enrolled entries that are really the same person: src's voice
     samples are folded into dst (rolling window), src is removed."""
-    reg = load_registry()
-    if src not in reg or dst not in reg or src == dst:
-        return False
-    s = np.load(config.VOICEPRINTS_DIR / reg[src]["file"])
-    d = np.load(config.VOICEPRINTS_DIR / reg[dst]["file"])
-    s = s.reshape(1, -1) if s.ndim == 1 else s
-    d = d.reshape(1, -1) if d.ndim == 1 else d
-    src_sources = reg[src].get("sources", ["?"] * s.shape[0])
-    dst_sources = reg[dst].get("sources", ["?"] * d.shape[0])
-    arr = np.vstack([d, s])[-MAX_SAMPLES:]
-    sources = (dst_sources + src_sources)[-MAX_SAMPLES:]
-    np.save(config.VOICEPRINTS_DIR / reg[dst]["file"], arr)
-    (config.VOICEPRINTS_DIR / reg[src]["file"]).unlink(missing_ok=True)
-    del reg[src]
-    reg[dst]["n_samples"] = int(arr.shape[0])
-    reg[dst]["sources"] = sources
-    save_registry(reg)
-    return True
+    with lock_registry():
+        reg = load_registry()
+        if src not in reg or dst not in reg or src == dst:
+            return False
+        s = np.load(config.VOICEPRINTS_DIR / reg[src]["file"])
+        d = np.load(config.VOICEPRINTS_DIR / reg[dst]["file"])
+        s = s.reshape(1, -1) if s.ndim == 1 else s
+        d = d.reshape(1, -1) if d.ndim == 1 else d
+        src_sources = reg[src].get("sources", ["?"] * s.shape[0])
+        dst_sources = reg[dst].get("sources", ["?"] * d.shape[0])
+        arr = np.vstack([d, s])[-MAX_SAMPLES:]
+        sources = (dst_sources + src_sources)[-MAX_SAMPLES:]
+        np.save(config.VOICEPRINTS_DIR / reg[dst]["file"], arr)
+        (config.VOICEPRINTS_DIR / reg[src]["file"]).unlink(missing_ok=True)
+        del reg[src]
+        reg[dst]["n_samples"] = int(arr.shape[0])
+        reg[dst]["sources"] = sources
+        save_registry(reg)
+        return True
 
 
 def remove_sample(name: str, index: int) -> bool:
     """Drop one voice sample (e.g. it came from a bad recording). Refuses to
     remove the last sample — remove the person instead."""
-    reg = load_registry()
-    if name not in reg:
-        return False
-    f = config.VOICEPRINTS_DIR / reg[name]["file"]
-    if not f.exists():
-        return False
-    arr = np.load(f)
-    arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
-    if not (0 <= index < arr.shape[0]) or arr.shape[0] <= 1:
-        return False
-    sources = reg[name].get("sources", ["?"] * arr.shape[0])
-    keep = [i for i in range(arr.shape[0]) if i != index]
-    np.save(f, arr[keep])
-    reg[name]["n_samples"] = len(keep)
-    reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
-    save_registry(reg)
-    return True
+    with lock_registry():
+        reg = load_registry()
+        if name not in reg:
+            return False
+        f = config.VOICEPRINTS_DIR / reg[name]["file"]
+        if not f.exists():
+            return False
+        arr = np.load(f)
+        arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
+        if not (0 <= index < arr.shape[0]) or arr.shape[0] <= 1:
+            return False
+        sources = reg[name].get("sources", ["?"] * arr.shape[0])
+        keep = [i for i in range(arr.shape[0]) if i != index]
+        np.save(f, arr[keep])
+        reg[name]["n_samples"] = len(keep)
+        reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
+        save_registry(reg)
+        return True
 
 
 def remove_person(name: str) -> bool:
     """Un-enroll someone (their turns revert to unknown numbering on relabel)."""
-    reg = load_registry()
-    if name not in reg:
-        return False
-    (config.VOICEPRINTS_DIR / reg[name]["file"]).unlink(missing_ok=True)
-    del reg[name]
-    save_registry(reg)
-    return True
+    with lock_registry():
+        reg = load_registry()
+        if name not in reg:
+            return False
+        (config.VOICEPRINTS_DIR / reg[name]["file"]).unlink(missing_ok=True)
+        del reg[name]
+        save_registry(reg)
+        return True
 
 
 def enroll(name: str, vector, replace: bool = False, source: str = None):
@@ -220,36 +287,34 @@ def enroll(name: str, vector, replace: bool = False, source: str = None):
     which recording the sample came from — kept as a rolling list aligned with
     the samples, so the GUI can show provenance and locate playable audio."""
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-    reg = load_registry()
-    # reuse this person's OWN file if already enrolled — their filename may
-    # have been disambiguated at first enrollment, so recomputing it fresh
-    # here could drift from what the registry actually points at. A brand-new
-    # name gets one that can't collide with any OTHER enrolled person's file.
-    # reuse this person's OWN file if already enrolled — their filename may
-    # have been disambiguated at first enrollment, so recomputing it fresh
-    # here could drift from what the registry actually points at. A brand-new
-    # name gets one that can't collide with any OTHER enrolled person's file.
-    fname = reg[name]["file"] if name in reg else _unique_filename(
-        name.replace("/", "_"), reg)
-    fpath = config.VOICEPRINTS_DIR / fname
-    vector = _l2(vector)  # raises on zero/non-finite
+    with lock_registry():
+        reg = load_registry()
+        # reuse this person's OWN file if already enrolled — their filename may
+        # have been disambiguated at first enrollment, so recomputing it fresh
+        # here could drift from what the registry actually points at. A
+        # brand-new name gets one that can't collide with any OTHER enrolled
+        # person's file.
+        fname = reg[name]["file"] if name in reg else _unique_filename(
+            name.replace("/", "_"), reg)
+        fpath = config.VOICEPRINTS_DIR / fname
+        vector = _l2(vector)  # raises on zero/non-finite
 
-    if name in reg and fpath.exists() and not replace:
-        arr = np.load(fpath)
-        if arr.ndim == 1:
-            arr = arr.reshape(1, -1)
-        if any(cosine(vector, row) > 0.999 for row in arr):
-            return fpath  # same sample again (e.g. re-promote after a relabel) — skip
-        prev_sources = reg[name].get("sources", ["?"] * arr.shape[0])
-        arr = np.vstack([arr, vector])
-        sources = (prev_sources + [source or "?"])[-MAX_SAMPLES:]
-        arr = arr[-MAX_SAMPLES:]
-    else:
-        arr = vector.reshape(1, -1)
-        sources = [source or "?"]
+        if name in reg and fpath.exists() and not replace:
+            arr = np.load(fpath)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            if any(cosine(vector, row) > 0.999 for row in arr):
+                return fpath  # same sample again (e.g. re-promote after a relabel) — skip
+            prev_sources = reg[name].get("sources", ["?"] * arr.shape[0])
+            arr = np.vstack([arr, vector])
+            sources = (prev_sources + [source or "?"])[-MAX_SAMPLES:]
+            arr = arr[-MAX_SAMPLES:]
+        else:
+            arr = vector.reshape(1, -1)
+            sources = [source or "?"]
 
-    reg[name] = {"file": fname, "dim": int(vector.shape[0]),
-                 "n_samples": int(arr.shape[0]), "sources": sources}
-    np.save(fpath, arr)
-    save_registry(reg)
-    return fpath
+        reg[name] = {"file": fname, "dim": int(vector.shape[0]),
+                     "n_samples": int(arr.shape[0]), "sources": sources}
+        np.save(fpath, arr)
+        save_registry(reg)
+        return fpath

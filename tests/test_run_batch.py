@@ -52,3 +52,65 @@ def test_job_spec_round_trips_through_the_real_queue(sandbox):
     assert jobs.items() == [added]
     args = jobs.spawn_args(added)
     assert "--paths" in args and "/x/A.m4a" in args and "--verify" in args
+
+
+def test_spawn_chained_job_logs_before_spawning(sandbox, monkeypatch):
+    """A crashed chained job used to leave zero trace (stdout/stderr to
+    DEVNULL). It must now be logged to the same spawned.log the GUI uses,
+    written BEFORE the subprocess starts (so even an instant crash is
+    recorded)."""
+    from stt import config, jobs
+    captured = {}
+
+    def fake_popen(args, **kw):
+        captured["args"] = args
+        captured["stdout"] = kw.get("stdout")
+        captured["stderr"] = kw.get("stderr")
+        # by the time Popen is called, the log line must already be on disk
+        captured["log_at_spawn_time"] = (config.PROJECT_DIR / "logs" / "spawned.log").read_text()
+        class _P:
+            pid = 4242
+        return _P()
+
+    monkeypatch.setattr(run_batch.subprocess, "Popen", fake_popen)
+
+    job = jobs.add({"paths": ["/x/A.m4a"], "verify": True, "label": "A.m4a"})
+    run_batch.spawn_chained_job(job)
+
+    assert "--paths" in captured["args"] and "/x/A.m4a" in captured["args"]
+    assert captured["stdout"] is not None and captured["stdout"] is captured["stderr"]
+    assert captured["stdout"] is not run_batch.subprocess.DEVNULL
+    assert "/x/A.m4a" in captured["log_at_spawn_time"]
+
+    log_file = config.PROJECT_DIR / "logs" / "spawned.log"
+    assert "/x/A.m4a" in log_file.read_text()
+
+
+def test_spawn_chained_job_survives_a_real_immediate_crash(sandbox):
+    """End-to-end with a REAL subprocess that exits immediately (simulating a
+    bad venv / bad stt.env) — the failure must be visible in spawned.log,
+    not silently swallowed by DEVNULL."""
+    import time
+    from stt import config, jobs
+
+    job = jobs.add({"paths": ["/x/A.m4a"], "label": "A.m4a"})
+    real_args = jobs.spawn_args(job)
+    # swap in a command that fails instantly, keeping spawn_chained_job's own
+    # logging plumbing exactly as production code exercises it
+    broken_args = ["/bin/sh", "-c", "echo 'simulated crash: bad stt.env' >&2; exit 1"]
+    import run_batch as rb
+    orig_spawn_args = jobs.spawn_args
+    jobs.spawn_args = lambda j: broken_args
+    try:
+        rb.spawn_chained_job(job)
+    finally:
+        jobs.spawn_args = orig_spawn_args
+
+    for _ in range(50):
+        text = (config.PROJECT_DIR / "logs" / "spawned.log").read_text()
+        if "simulated crash" in text:
+            break
+        time.sleep(0.05)
+    else:
+        text = (config.PROJECT_DIR / "logs" / "spawned.log").read_text()
+    assert "simulated crash: bad stt.env" in text

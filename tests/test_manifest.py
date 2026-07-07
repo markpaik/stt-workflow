@@ -1,5 +1,8 @@
 """manifest: idempotency across the states that bit us in real life —
 fresh file, processed, outputs deleted (self-heal), re-recorded file."""
+import os
+from pathlib import Path
+
 from stt import manifest
 
 
@@ -44,3 +47,35 @@ def test_corrupt_manifest_recovers(sandbox):
     config.MANIFEST_PATH.write_text("{not json")
     m = manifest.load()
     assert m == {"processed": {}}
+
+
+def test_save_uses_tmp_then_atomic_replace(sandbox, monkeypatch):
+    """save() must go through write-tmp-then-os.replace, not a direct write —
+    a plain write_text() can be interrupted mid-write, truncating the file a
+    concurrent reader (another process) sees; os.replace is atomic at the
+    filesystem level. Spy on os.replace to prove the mechanism is actually
+    used, not just documented in a comment."""
+    from stt import config
+    calls = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", lambda src, dst: (calls.append((src, dst)), real_replace(src, dst)))
+    manifest.save({"processed": {"a.m4a": {"mtime": 1.0, "outputs": []}}})
+    assert len(calls) == 1
+    src, dst = calls[0]
+    assert str(src).endswith(".tmp") and dst == config.MANIFEST_PATH
+    assert not Path(src).exists()  # renamed away, nothing left behind
+    assert manifest.load() == {"processed": {"a.m4a": {"mtime": 1.0, "outputs": []}}}
+
+
+def test_crash_while_writing_tmp_leaves_the_real_file_untouched(sandbox):
+    """The realistic crash window is DURING the tmp-file write (before the
+    atomic rename ever happens) — that must never corrupt the real file,
+    since os.replace is never reached."""
+    from stt import config
+    manifest.save({"processed": {"a.m4a": {"mtime": 1.0, "outputs": []}}})
+    good_before = config.MANIFEST_PATH.read_text()
+    tmp = config.MANIFEST_PATH.with_suffix(".json.tmp")
+    tmp.write_text('{"processed": {"b.m4')  # torn write, crash before replace
+    assert config.MANIFEST_PATH.read_text() == good_before
+    assert manifest.load() == {"processed": {"a.m4a": {"mtime": 1.0, "outputs": []}}}
+    tmp.unlink()

@@ -68,8 +68,12 @@ def restore(text: str) -> str:
         sentences = results[0] if results else []
         out = " ".join(s.strip() for s in sentences if s.strip())
         out = _repair_unk(out, norm)
-        # safety: the model must not change the number of words
-        if len(re.findall(r"\S+", _normalize_for_model(out))) != len(norm.split()):
+        # safety: the model may punctuate/truecase freely but must NEVER
+        # substitute a different word — checking only the token COUNT would
+        # let a same-count substitution ship silently into a transcript of a
+        # possibly sensitive conversation. Compare identity word-for-word,
+        # ignoring case/punctuation (exactly what the model is allowed to change).
+        if _normalize_for_model(out).split() != norm.split():
             return text
         return out or text
     except Exception:

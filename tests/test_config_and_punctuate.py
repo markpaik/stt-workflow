@@ -49,6 +49,20 @@ def test_punctuate_accepts_word_preserving_output(sandbox, monkeypatch):
     assert out == "Hello world. How are you?"
 
 
+def test_punctuate_rejects_same_count_word_substitution(sandbox, monkeypatch):
+    """The hard requirement is WORD identity, not just word count — a
+    same-count substitution (a real risk under distribution shift) must be
+    rejected exactly like an added/removed word, not shipped silently into a
+    transcript of a possibly sensitive conversation."""
+    class Substituter:
+        def infer(self, xs):
+            # same number of tokens as "yes we agreed to the settlement",
+            # but "settlement" silently became "disagreement"
+            return [["Yes, we agreed to the disagreement."]]
+    monkeypatch.setattr(punctuate, "_model", Substituter())
+    assert punctuate.restore("yes we agreed to the settlement") == "yes we agreed to the settlement"
+
+
 def test_punctuate_empty_passthrough(sandbox):
     assert punctuate.restore("") == ""
     assert punctuate.restore("   ") == "   "

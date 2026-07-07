@@ -1,5 +1,6 @@
 """A tiny JSON manifest of processed files, for idempotent re-runs."""
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,12 @@ def load() -> dict:
 
 
 def save(m: dict):
-    config.MANIFEST_PATH.write_text(json.dumps(m, indent=2))
+    # atomic: a kill mid-write must never leave a half-written manifest — a
+    # truncated read would make every already-processed file look brand new
+    # and get needlessly reprocessed
+    tmp = config.MANIFEST_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(m, indent=2))
+    os.replace(tmp, config.MANIFEST_PATH)
 
 
 def is_processed(m: dict, key: str, mtime: float) -> bool:

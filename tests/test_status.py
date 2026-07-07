@@ -70,3 +70,52 @@ def test_estimate_progress_verifying_stage(sandbox):
     # non-verify estimates exclude the verifying stage entirely
     assert "verifying" not in status.stage_estimates(600)
     assert status.stage_estimates(600, verify=True)["verifying"] > 0
+
+
+def test_no_diarize_run_never_budgets_diarizing_time(sandbox):
+    """A --no-diarize file's ETA must never include diarizing time — the old
+    bug budgeted it in unconditionally, so progress% lagged the whole run
+    then suddenly jumped once "writing" arrived (crediting a stage that was
+    never actually going to happen)."""
+    est_with = status.stage_estimates(600, diarize=True)
+    est_without = status.stage_estimates(600, diarize=False)
+    assert "diarizing" in est_with and "diarizing" not in est_without
+    assert sum(est_without.values()) < sum(est_with.values())
+
+    # a file that never reports diarize=True must see a STABLE percentage
+    # across the stages it actually goes through — no jump at "writing"
+    f_transcribing, _ = status.estimate_progress(
+        {"stage": "transcribing", "duration": 600, "progress": 1.0, "diarize": False})
+    f_writing, _ = status.estimate_progress(
+        {"stage": "writing", "duration": 600, "progress": 0.0, "diarize": False})
+    assert f_writing >= f_transcribing  # monotonic, no backward or absurd forward jump
+    assert f_writing - f_transcribing < 0.15  # no discontinuity from phantom stage credit
+
+
+def test_verify_mode_known_up_front_no_progress_jump(sandbox):
+    """A verify-mode file must show verifying's time in its ETA from the very
+    first stage, not just once "verifying" itself starts — otherwise the
+    percentage jumps backward the instant verifying begins."""
+    entry_early = {"stage": "transcribing", "duration": 600, "progress": 0.0, "verify": True}
+    entry_at_verify = {"stage": "verifying", "duration": 600, "progress": 0.0, "verify": True}
+    f_early, _ = status.estimate_progress(entry_early)
+    f_at_verify, _ = status.estimate_progress(entry_at_verify)
+    # transcribing must ALREADY account for verifying's time in its total —
+    # so crossing into "verifying" doesn't suddenly inflate the denominator
+    assert f_at_verify >= f_early
+
+    # without verify, the same audio's transcribing-stage % must be HIGHER
+    # (smaller total denominator) -- proving verify=True really did enlarge
+    # the total from the start, not just once "verifying" began
+    f_no_verify, _ = status.estimate_progress(
+        {"stage": "transcribing", "duration": 600, "progress": 0.0, "verify": False})
+    assert f_no_verify > f_early
+
+
+def test_set_stage_remembers_diarize_and_verify_across_calls(sandbox):
+    """diarize/verify are sent once (like duration) and must persist on
+    later set_stage() calls that don't repeat them."""
+    status.set_stage("f.m4a", "downloading", duration=600, diarize=False, verify=True)
+    status.set_stage("f.m4a", "converting")  # no diarize/verify passed here
+    entry = status.read()["active"]["f.m4a"]
+    assert entry["diarize"] is False and entry["verify"] is True

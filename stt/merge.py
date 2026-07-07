@@ -24,6 +24,19 @@ def _clean(text: str) -> str:
 
 def _assign(word, turns, prev_speaker):
     ws, we = word["start"], word["end"]
+    if we == ws:
+        # a zero-duration word (start==end after 3-decimal rounding) can
+        # never produce a positive overlap below, even sitting squarely
+        # inside a turn — ov comes out exactly 0 either way, indistinguishable
+        # from "no overlap at all" under a strict > comparison, so it always
+        # fell through to the nearest-turn distance fallback instead of the
+        # turn it's actually inside — non-deterministic at a speaker boundary.
+        containing = [t for t in turns if t["start"] <= ws <= t["end"]]
+        if containing:
+            for t in containing:
+                if t["speaker"] == prev_speaker:
+                    return t
+            return containing[0]
     best, best_ov = None, 0.0
     for t in turns:
         ov = min(we, t["end"]) - max(ws, t["start"])

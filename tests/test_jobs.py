@@ -59,3 +59,27 @@ def test_same_millisecond_adds_get_distinct_ids(sandbox, monkeypatch):
     J.add({"label": "B"})
     ats = [j["at"] for j in J.items()]
     assert len(set(ats)) == 2
+
+
+def test_mutate_uses_tmp_then_atomic_replace(sandbox, monkeypatch):
+    """_mutate() must go through write-tmp-then-os.replace, not a direct
+    write — spy on os.replace to prove the mechanism is actually used."""
+    import os
+    calls = []
+    real_replace = os.replace
+    monkeypatch.setattr(os, "replace", lambda src, dst: (calls.append((src, dst)), real_replace(src, dst)))
+    jobs.add({"label": "A"})
+    assert len(calls) == 1
+    src, dst = calls[0]
+    assert str(src).endswith(".tmp") and dst == jobs.PATH
+    assert not __import__("pathlib").Path(src).exists()
+
+
+def test_crash_while_writing_tmp_leaves_the_real_queue_untouched(sandbox):
+    jobs.add({"label": "A"})
+    good_before = jobs.PATH.read_text()
+    tmp = jobs.PATH.with_suffix(".json.tmp")
+    tmp.write_text('[{"label": "half-written')  # torn write, crash before replace
+    assert jobs.PATH.read_text() == good_before
+    assert [j["label"] for j in jobs.items()] == ["A"]
+    tmp.unlink()
