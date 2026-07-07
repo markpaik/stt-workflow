@@ -147,3 +147,41 @@ def test_api_key_prefers_env_file_over_process_env(sandbox, monkeypatch):
     assert asr_cloud.api_key("openai") == "from-file"
     assert asr_cloud.available("openai")
     assert not asr_cloud.available("scribe")
+
+
+def test_openai_size_cap_is_a_clear_error(sandbox, monkeypatch, tmp_path):
+    """A compressed upload over OpenAI's 25 MB cap must raise a readable
+    error BEFORE any HTTP call (the pipeline turns it into a local
+    fallback) — not surface as an opaque 413."""
+    import requests
+
+    big = tmp_path / "big.mp3"
+    with open(big, "wb") as f:
+        f.seek(asr_cloud.OPENAI_MAX_BYTES + 1)
+        f.write(b"\0")
+    monkeypatch.setattr(asr_cloud, "_compress_for_upload", lambda wav: big)
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("HTTP call should not happen")))
+    monkeypatch.setattr(config, "ASR_BACKEND", "cloud:openai")
+    monkeypatch.setenv("STT_OPENAI_KEY", "sk-test")
+    with pytest.raises(RuntimeError, match="25 MB"):
+        asr_cloud.transcribe(sandbox / "x.wav")
+
+
+def test_compress_for_upload_produces_small_mp3(sandbox, tmp_path):
+    """Real ffmpeg round-trip: the upload artifact is an MP3 (the one format
+    all three providers document) far smaller than the source WAV."""
+    import subprocess
+
+    from stt.audio import FFMPEG
+    wav = tmp_path / "t.wav"
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=10", "-ar", "16000",
+                    "-ac", "1", str(wav)], check=True, capture_output=True)
+    out = asr_cloud._compress_for_upload(wav)
+    try:
+        assert out.suffix == ".mp3"
+        assert 0 < out.stat().st_size < wav.stat().st_size / 3
+    finally:
+        out.unlink(missing_ok=True)
