@@ -1044,7 +1044,7 @@ function render(){
     return `<div class="row"><div class="grow"><div class="name">${esc(n.replace(/\.[^.]+$/,''))}</div>
     <div class="stagechips">${STAGES.filter(st=>(st!=='verifying'||a.stage==='verifying')&&(st!=='summarizing'||a.stage==='summarizing')).map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
     ${pct!=null?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
-    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">${a.progress_at&&Date.now()/1000-a.progress_at>120?'still working — this stage reports progress coarsely':'≈ '+fmtEta(a.eta_sec)+' left'}</div>`:'<span class="spin"></span>'}</div></div>`;
+    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left${a.progress_at&&Date.now()/1000-a.progress_at>120?'<br>still working — progress reports coarsely here':''}</div>`:'<span class="spin"></span>'}</div></div>`;
   }).join(''):(orphaned?'':'<div class="sub">Starting…</div>'))
   +(s.overall_eta_sec?`<div class="sub" style="padding-top:10px">Everything queued: ≈ ${fmtEta(s.overall_eta_sec)} remaining</div>`:'');
   // queued panel runs (redos / hand-picked) — waiting for the current run to finish
