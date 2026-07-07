@@ -89,3 +89,69 @@ def test_set_meeting_date(sandbox):
     assert json.loads(config.meeting_file("Mtg", ".json").read_text())["date"] == "2026-04-21"
     assert not summarize.set_meeting_date("Mtg", "yesterday")["ok"]
     assert not summarize.set_meeting_date("Nope", "2026-04-21")["ok"]
+
+
+def _fake_asr():
+    import types
+    return types.SimpleNamespace(transcribe=lambda wav, progress=None: {
+        "engine": "fake-asr", "text": "hello from the pipeline",
+        "words": [{"start": 0.2, "end": 0.6, "word": "hello"},
+                  {"start": 0.7, "end": 1.0, "word": "from"},
+                  {"start": 1.1, "end": 1.4, "word": "the"},
+                  {"start": 1.5, "end": 1.9, "word": "pipeline"}]})
+
+
+def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
+    """The user's flow: process a meeting, rename it AND correct its date in
+    the panel, then Redo. The reprocess must land everything in the RENAMED
+    folder (no resurrection of the old name anywhere), key the manifest by
+    the new audio, and keep the human's corrected date rather than
+    re-deriving one from the new filename."""
+    import subprocess
+
+    from stt import manifest, pipeline, summarize
+    from stt.audio import FFMPEG
+
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    # 1. original processing from a watched-folder file
+    src = tmp_path / "Team Sync 05012026.m4a"
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=3", "-ac", "1",
+                    "-c:a", "aac", str(src)], check=True, capture_output=True)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    assert res["json"].exists()
+    m = manifest.load()
+    manifest.mark(m, src.name, src.stat().st_mtime, [str(res["json"])])
+    manifest.save(m)
+    import shutil
+    shutil.copy2(src, config.meeting_file("Team Sync 05012026", ".m4a"))
+    d0 = json.loads(config.meeting_file("Team Sync 05012026", ".json").read_text())
+    assert d0["date"] == "2026-05-01"  # stamped from the filename convention
+
+    # 2. rename + human date correction, exactly as the panel does
+    r = summarize.rename_meeting("Team Sync 05012026", "Focus Group 06012026")
+    assert r["ok"]
+    r = summarize.set_meeting_date("Focus Group 06012026", "2026-06-15")
+    assert r["ok"]
+
+    # 3. Redo: the panel passes the STORED (renamed) audio path
+    stored = config.meeting_audio("Focus Group 06012026")
+    assert stored is not None and "Focus Group" in stored.name
+    res2 = pipeline.process_file(stored, dest_dir=config.MEETINGS_DIR,
+                                 do_diarize=False, do_verify=False)
+
+    # everything lives under the NEW name only
+    assert res2["json"] == config.meeting_file("Focus Group 06012026", ".json")
+    assert config.meeting_bases() == ["Focus Group 06012026"]
+    assert not config.meeting_dir("Team Sync 05012026").exists()
+
+    d = json.loads(res2["json"].read_text())
+    assert d["source_file"] == "Focus Group 06012026.m4a"
+    assert "hello from the pipeline" in " ".join(
+        s["text"] for s in d["segments"])
+    # the human's corrected date survives the reprocess — NOT re-derived from
+    # the new filename (which would say 2026-06-01)
+    assert d["date"] == "2026-06-15"
