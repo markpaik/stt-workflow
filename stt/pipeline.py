@@ -44,10 +44,22 @@ def _transcribe_with_fallback(asr, wav, progress=None) -> dict:
         return asr_parakeet.transcribe(wav, progress=progress)
 
 
-def _meeting_date(src: Path) -> str:
+def _meeting_date(src: Path, existing_json: Path = None) -> str:
+    """Reprocessing preserves an already-stored date: it was either stamped
+    from this same filename originally or corrected by a human in the panel —
+    a Redo must never silently undo that correction. Fresh files derive from
+    the filename convention, else the source mtime."""
+    import json as _json
     from datetime import date
 
     from . import dates
+    if existing_json is not None and existing_json.exists():
+        try:
+            kept = _json.loads(existing_json.read_text()).get("date")
+            if kept:
+                return kept
+        except (OSError, ValueError):
+            pass
     try:
         fallback = date.fromtimestamp(src.stat().st_mtime).isoformat()
     except OSError:
@@ -144,7 +156,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
         # often weeks after the meeting. Grouping and sorting read this
         # stored field; a human can correct it in the panel.
-        "date": _meeting_date(src),
+        "date": _meeting_date(src, json_path),
         "duration_sec": round(dur, 1),
         "asr_engine": asr_out["engine"],
         "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
