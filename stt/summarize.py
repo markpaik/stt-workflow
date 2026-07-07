@@ -6,6 +6,7 @@ Rename flow: suggest a title from the transcript, the user edits/approves, then
 rename_meeting() renames every artifact consistently.
 """
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +52,7 @@ def _generate(prompt: str, max_tokens: int = 2000) -> str:
 
 
 def _transcript_sample(base: str, max_chars: int = 9000) -> str:
-    txt = (config.MEETINGS_DIR / f"{base}.txt").read_text(encoding="utf-8")
+    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
     if len(txt) <= max_chars:
         return txt
     third = max_chars // 3
@@ -63,7 +64,7 @@ def _date_suffix(base: str) -> str:
     m = re.search(r"(\d{8})\s*$", base)
     if m:
         return m.group(1)
-    j = config.MEETINGS_DIR / f"{base}.json"
+    j = config.meeting_file(base, ".json")
     try:
         ts = json.loads(j.read_text()).get("generated_at", "")
         return datetime.fromisoformat(ts).strftime("%m%d%Y")
@@ -106,7 +107,7 @@ def suggest_title(base: str) -> dict:
     result = {"title": title, "summary": summary,
               "suggested_name": f"{title} {_date_suffix(base)}"}
     # persist so the panel can show it without regenerating
-    j = config.MEETINGS_DIR / f"{base}.json"
+    j = config.meeting_file(base, ".json")
     try:
         d = json.loads(j.read_text())
         d["ai_title"], d["ai_summary"] = title, summary
@@ -118,25 +119,29 @@ def suggest_title(base: str) -> dict:
 
 
 def rename_meeting(base: str, new_base: str) -> dict:
-    """Rename every artifact of a meeting (.txt/.json/.m4a/.emb.npz/.diar.npz)
-    atomically-ish; refuses collisions. Returns {ok, renamed: [...]}."""
+    """Rename a meeting: every file inside its folder (whatever the suffix —
+    transcript, audio, caches, review/verify sidecars) AND the folder itself,
+    so the on-disk name always matches what the GUI shows. Refuses
+    collisions. Returns {ok, renamed: [...]}."""
     new_base = re.sub(r'[<>:"/\\|?*]', "", new_base).strip()
     if not new_base or new_base == base:
         return {"ok": False, "error": "empty or unchanged name"}
-    exts = [".txt", ".json", ".m4a", ".emb.npz", ".diar.npz",
-            ".mp4", ".mov", ".wav", ".mp3"]
-    for ext in exts:
-        if (config.MEETINGS_DIR / f"{new_base}{ext}").exists():
-            return {"ok": False, "error": f"'{new_base}{ext}' already exists"}
+    old_dir = config.meeting_dir(base)
+    new_dir = config.meeting_dir(new_base)
+    if not old_dir.is_dir():
+        return {"ok": False, "error": f"no meeting folder for '{base}'"}
+    if new_dir.exists():
+        return {"ok": False, "error": f"'{new_base}' already exists"}
     renamed = []
-    for ext in exts:
-        src = config.MEETINGS_DIR / f"{base}{ext}"
-        if src.exists():
-            dst = config.MEETINGS_DIR / f"{new_base}{ext}"
-            src.rename(dst)
+    prefix = base + "."
+    for f in sorted(old_dir.iterdir()):
+        if f.is_file() and f.name.startswith(prefix):
+            dst = old_dir / (new_base + f.name[len(base):])
+            f.rename(dst)
             renamed.append(dst.name)
+    old_dir.rename(new_dir)
     # keep the source_file field coherent for future relabels
-    j = config.MEETINGS_DIR / f"{new_base}.json"
+    j = config.meeting_file(new_base, ".json")
     if j.exists():
         try:
             d = json.loads(j.read_text())
@@ -148,3 +153,26 @@ def rename_meeting(base: str, new_base: str) -> dict:
         except Exception:
             pass
     return {"ok": bool(renamed), "renamed": renamed}
+
+
+def set_meeting_date(base: str, date_str: str) -> dict:
+    """Correct a meeting's stored date (drives month grouping/sorting in the
+    panel). The pipeline stamps its best guess at process time; a human fixes
+    the odd one here — never by renaming files."""
+    from datetime import date as _date
+
+    from . import review
+    try:
+        iso = _date.fromisoformat(str(date_str).strip()).isoformat()
+    except ValueError:
+        return {"ok": False, "error": "date should look like 2026-07-04"}
+    j = config.meeting_file(base, ".json")
+    if not j.exists():
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    with review.lock_meeting(base):
+        d = json.loads(j.read_text())
+        d["date"] = iso
+        tmp = j.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+        os.replace(tmp, j)
+    return {"ok": True, "date": iso}

@@ -19,6 +19,17 @@ def _load_asr():
     return asr
 
 
+def _meeting_date(src: Path) -> str:
+    from datetime import date
+
+    from . import dates
+    try:
+        fallback = date.fromtimestamp(src.stat().st_mtime).isoformat()
+    except OSError:
+        fallback = date.today().isoformat()
+    return dates.meeting_date(src.stem) or fallback
+
+
 def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                  strict=None, allowed_names=None, report=None, do_verify=None,
                  num_speakers=None, min_speakers=None, max_speakers=None) -> dict:
@@ -27,12 +38,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     strict = config.STRICT if strict is None else strict
     do_verify = config.VERIFY if do_verify is None else do_verify
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
-    dest_dir.mkdir(parents=True, exist_ok=True)
     base = src.stem
-    txt_path = dest_dir / f"{base}.txt"
-    json_path = dest_dir / f"{base}.json"
-    emb_path = dest_dir / f"{base}.emb.npz"
-    diar_path = dest_dir / f"{base}.diar.npz"
+    config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+    txt_path = config.meeting_file(base, ".txt", dest_dir)
+    json_path = config.meeting_file(base, ".json", dest_dir)
+    emb_path = config.meeting_file(base, ".emb.npz", dest_dir)
+    diar_path = config.meeting_file(base, ".diar.npz", dest_dir)
 
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
     wav = config.WORK_DIR / f"{base}.16k.wav"
@@ -103,6 +114,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
 
     meta = {
         "source_file": src.name,
+        # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
+        # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
+        # often weeks after the meeting. Grouping and sorting read this
+        # stored field; a human can correct it in the panel.
+        "date": _meeting_date(src),
         "duration_sec": round(dur, 1),
         "asr_engine": asr_out["engine"],
         "diarizer": config.DIARIZATION_MODEL if do_diarize else None,

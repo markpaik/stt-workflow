@@ -7,6 +7,7 @@ import time
 import numpy as np
 
 from stt import config, diarcache, identify, review
+from conftest import mfile
 
 
 def _make_meeting(sandbox, base="Mtg", flag_seg=1):
@@ -28,8 +29,8 @@ def _make_meeting(sandbox, base="Mtg", flag_seg=1):
              + [{"start": 5.2, "end": 5.8, "word": "uncertain", "speaker": "SPEAKER_01"}])
     data = {"source_file": f"{base}.m4a", "duration_sec": 9.0, "strict": False,
             "speakers": speakers, "segments": segments, "words": words}
-    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps(data))
-    (config.MEETINGS_DIR / f"{base}.txt").write_text("stub")
+    (mfile(base, ".json")).write_text(json.dumps(data))
+    (mfile(base, ".txt")).write_text("stub")
     return data
 
 
@@ -47,11 +48,11 @@ def test_accept_clears_flag_and_persists(sandbox):
     _make_meeting(sandbox)
     r = review.apply("Mtg", 1, "accept", start=5.0)
     assert r["ok"] and r["remaining"] == 0
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     seg = d["segments"][1]
     assert seg["flags"] == [] and seg["reviewed"] == "accepted"
-    assert "Uncertain bit here." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
-    assert "[*]" not in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    assert "Uncertain bit here." in (mfile("Mtg", ".txt")).read_text()
+    assert "[*]" not in (mfile("Mtg", ".txt")).read_text()
     # nothing left to review
     assert review.list_flagged("Mtg")["items"] == []
 
@@ -63,7 +64,7 @@ def test_edit_text_and_reassign_speaker(sandbox):
     r = review.apply("Mtg", 1, "edit", start=5.0,
                      text="Corrected words.", speaker_id="SPEAKER_00")
     assert r["ok"] and r["merged"] and r["index"] == 0
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     assert len(d["segments"]) == 1
     seg = d["segments"][0]
     assert seg["text"] == "Clean opening turn. Corrected words. Clean closing turn."
@@ -73,7 +74,7 @@ def test_edit_text_and_reassign_speaker(sandbox):
     # the word inside the reassigned span follows the human's speaker call
     w = [w for w in d["words"] if w["word"] == "uncertain"][0]
     assert w["speaker"] == "SPEAKER_00"
-    txt = (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    txt = (mfile("Mtg", ".txt")).read_text()
     assert "Mark: Clean opening turn. Corrected words. Clean closing turn." in txt
 
 
@@ -81,13 +82,13 @@ def test_reassign_does_not_merge_across_different_speakers(sandbox):
     """A reassignment that does NOT create same-speaker adjacency leaves the
     segment list untouched."""
     _make_meeting(sandbox)
-    d0 = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d0 = json.loads((mfile("Mtg", ".json")).read_text())
     d0["segments"][2]["speaker"] = "SPEAKER_01"  # closing turn now Speaker 2
     d0["segments"][2]["name"] = None
-    (config.MEETINGS_DIR / "Mtg.json").write_text(json.dumps(d0))
+    (mfile("Mtg", ".json")).write_text(json.dumps(d0))
     r = review.apply("Mtg", 1, "edit", start=5.0, speaker_id="name:Omar")
     assert r["ok"] and not r["merged"]
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     assert len(d["segments"]) == 3
 
 
@@ -103,7 +104,7 @@ def test_apply_recovers_from_small_relabel_nudge_at_same_index(sandbox):
     the identity fallback should still accept the edit instead of forcing a
     reopen for a boundary tweak that didn't restructure anything."""
     _make_meeting(sandbox)
-    jpath = config.MEETINGS_DIR / "Mtg.json"
+    jpath = mfile("Mtg", ".json")
     d = json.loads(jpath.read_text())
     d["segments"][1]["start"] = 5.4  # nudged by 0.4s: past STRICT, within WIDE
     jpath.write_text(json.dumps(d))
@@ -119,7 +120,7 @@ def test_apply_recovers_by_start_time_when_relabel_shifts_index(sandbox):
     across the whole list rather than silently editing whatever now sits at
     the old index."""
     _make_meeting(sandbox)
-    jpath = config.MEETINGS_DIR / "Mtg.json"
+    jpath = mfile("Mtg", ".json")
     d = json.loads(jpath.read_text())
     new_seg = {"start": 0.0, "end": 0.3, "speaker": "SPEAKER_00", "name": "Mark",
                "display": "Mark", "text": "Uh,", "flags": [], "overlap": False}
@@ -141,7 +142,7 @@ def test_apply_rejects_ambiguous_recovery_instead_of_editing_a_decoy(sandbox):
     (safe reopen) rather than guess, because guessing can edit or DELETE the
     wrong line."""
     _make_meeting(sandbox)
-    jpath = config.MEETINGS_DIR / "Mtg.json"
+    jpath = mfile("Mtg", ".json")
     d = json.loads(jpath.read_text())
     d["segments"][1]["start"] = 5.6  # intended line nudged to 5.6
     # decoy at 5.3: past STRICT (no false fast-path hit) but CLOSER to the
@@ -180,7 +181,7 @@ def test_record_decision_writes_atomically(sandbox, monkeypatch):
                         lambda src, dst: (calls.append((src, dst)),
                                           real_replace(src, dst))[1])
     review.apply("Mtg", 1, "accept", start=5.0)
-    dec_path = config.MEETINGS_DIR / "Mtg.reviews.json"
+    dec_path = mfile("Mtg", ".reviews.json")
     dec_calls = [(s, d) for s, d in calls if str(d) == str(dec_path)]
     assert dec_calls, "reviews.json was never written via os.replace"
     src, _ = dec_calls[0]
@@ -197,7 +198,7 @@ def test_verify_sidecar_writes_atomically(sandbox, monkeypatch):
                         lambda src, dst: (calls.append((src, dst)),
                                           real_replace(src, dst))[1])
     verify.save_sidecar("Mtg", [{"start": 1.0, "end": 2.0}], "parakeet")
-    p = config.MEETINGS_DIR / "Mtg.verify.json"
+    p = mfile("Mtg", ".verify.json")
     sc = [(s, d) for s, d in calls if str(d) == str(p)]
     assert sc and str(sc[0][0]).endswith(".tmp")
     assert verify.load_sidecar("Mtg")["engine"] == "parakeet"
@@ -217,7 +218,7 @@ def test_find_voice_clip_voiceprint_fallback(sandbox):
     _make_meeting(sandbox)
     # transcript knows this cluster only as Speaker 2 (name=None)
     v = np.random.default_rng(7).normal(size=256)
-    diarcache.save(config.MEETINGS_DIR / "Mtg.diar.npz",
+    diarcache.save(mfile("Mtg", ".diar.npz"),
                    [{"start": 5.0, "end": 6.0, "cluster": "SPEAKER_01"}],
                    [v], {"SPEAKER_00": np.random.default_rng(8).normal(size=256),
                          "SPEAKER_01": v})
@@ -236,7 +237,7 @@ def test_find_voice_clip_voiceprint_below_threshold_returns_none(sandbox):
     _make_meeting(sandbox)
     centroid_a = np.random.default_rng(1).normal(size=256)
     centroid_b = np.random.default_rng(2).normal(size=256)
-    diarcache.save(config.MEETINGS_DIR / "Mtg.diar.npz",
+    diarcache.save(mfile("Mtg", ".diar.npz"),
                    [{"start": 5.0, "end": 6.0, "cluster": "SPEAKER_01"}],
                    [centroid_b], {"SPEAKER_00": centroid_a, "SPEAKER_01": centroid_b})
     unrelated = np.random.default_rng(99).normal(size=256)
@@ -286,16 +287,16 @@ def test_reassign_to_person_not_in_meeting(sandbox):
     _make_meeting(sandbox)
     r = review.apply("Mtg", 1, "edit", start=5.0, speaker_id="name:Louise")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     seg = d["segments"][1]
     assert seg["speaker"] == "MANUAL_1" and seg["display"] == "Louise"
     assert any(s["id"] == "MANUAL_1" and s["manual"] for s in d["speakers"])
     w = [w for w in d["words"] if w["word"] == "uncertain"][0]
     assert w["speaker"] == "MANUAL_1"
-    assert "Louise: Uncertain bit here." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    assert "Louise: Uncertain bit here." in (mfile("Mtg", ".txt")).read_text()
     # same name again resolves to the SAME entry, not MANUAL_2
     review.apply("Mtg", 0, "edit", start=0.0, speaker_id="name:Louise")
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     assert sum(1 for s in d["speakers"] if str(s["id"]).startswith("MANUAL_")) == 1
 
 
@@ -303,11 +304,11 @@ def test_insert_and_delete_line(sandbox):
     _make_meeting(sandbox)
     r = review.insert_segment("Mtg", 5.0, 6.0, "name:Omar", "Quick interjection.")
     assert r["ok"] and r["index"] == 2  # after the 5.0s segment (ties sort stable)
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     seg = d["segments"][r["index"]]
     assert seg["inserted"] and seg["display"] == "Omar" and seg["attribution"] == "manual"
     assert [s["start"] for s in d["segments"]] == sorted(s["start"] for s in d["segments"])
-    assert "Omar: Quick interjection." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    assert "Omar: Quick interjection." in (mfile("Mtg", ".txt")).read_text()
     # guards
     assert not review.insert_segment("Mtg", 1.0, 2.0, "name:X", "  ")["ok"]
     assert not review.insert_segment("Mtg", 1.0, 2.0, "SPEAKER_99", "hi")["ok"]
@@ -315,7 +316,7 @@ def test_insert_and_delete_line(sandbox):
     # delete the flagged line: words detach, decision recorded
     r = review.delete_segment("Mtg", 1, start=5.0)
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     assert all(s["text"] != "Uncertain bit here." for s in d["segments"])
     w = [w for w in d["words"] if w["word"] == "uncertain"][0]
     assert w["speaker"] is None
@@ -360,7 +361,7 @@ def test_deleting_an_inserted_line_cannot_nuke_a_real_segment_on_relabel(sandbox
 
     # the sidecar must hold neither the insert (line shouldn't come back)
     # nor a delete (nothing left for it to legitimately target)
-    decs = json.loads((config.MEETINGS_DIR / "Mtg.reviews.json").read_text())
+    decs = json.loads((mfile("Mtg", ".reviews.json")).read_text())
     assert all(d["action"] not in ("insert", "delete") for d in decs), decs
 
     # relabel replay: every REAL segment survives, and the inserted line
@@ -391,8 +392,8 @@ def _make_split_meeting(sandbox, base="Split"):
              + [{"start": 4.2, "end": 5.8, "word": "nextturnwords", "speaker": "SPEAKER_01"}])
     data = {"source_file": f"{base}.m4a", "duration_sec": 6.0, "strict": False,
             "speakers": speakers, "segments": segments, "words": words}
-    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps(data))
-    (config.MEETINGS_DIR / f"{base}.txt").write_text("stub")
+    (mfile(base, ".json")).write_text(json.dumps(data))
+    (mfile(base, ".txt")).write_text("stub")
     return data
 
 
@@ -404,7 +405,7 @@ def test_split_reassigned_tail_merges_with_next_turn(sandbox):
     r = review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
                              text_b="gamma delta", speaker_b="SPEAKER_01")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    d = json.loads((mfile("Split", ".json")).read_text())
     assert len(d["segments"]) == 2
     a, b = d["segments"]
     assert a["text"] == "alpha beta" and a["speaker"] == "SPEAKER_00"
@@ -424,7 +425,7 @@ def test_split_same_speaker_stays_two_lines(sandbox):
     r = review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
                              text_b="gamma delta")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    d = json.loads((mfile("Split", ".json")).read_text())
     assert len(d["segments"]) == 3
     assert [s["text"] for s in d["segments"]] == [
         "alpha beta", "gamma delta", "next turn words"]
@@ -467,7 +468,7 @@ def test_split_edited_text_uses_proportional_cut(sandbox):
     r = review.split_segment("Split", 1, start=4.0, text_a="next",
                              text_b="turn words", speaker_b="name:Omar")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Split.json").read_text())
+    d = json.loads((mfile("Split", ".json")).read_text())
     segs = [s for s in d["segments"] if s["start"] >= 4.0]
     assert len(segs) == 2
     assert abs(segs[0]["end"] - (4.0 + 2.0 / 3)) < 0.01  # 1 of 3 tokens in
@@ -482,7 +483,7 @@ def test_redo_archives_decisions(sandbox):
     assert review.count_decisions("Mtg") == 1
     assert review.archive_decisions("Mtg") is True
     assert review.count_decisions("Mtg") == 0
-    assert (config.MEETINGS_DIR / "Mtg.reviews.superseded.json").exists()
+    assert (mfile("Mtg", ".reviews.superseded.json")).exists()
     # rebuilt data gets nothing reapplied — clean slate
     data = _make_meeting(sandbox)
     assert review.reapply_decisions("Mtg", data) == 0
@@ -511,7 +512,7 @@ def test_minor_triage_and_bulk_accept(sandbox):
                              "flags": ["id_mismatch"], "overlap": False})
     import json as _json
     from stt import config as _config
-    (_config.MEETINGS_DIR / "Mtg.json").write_text(_json.dumps(data))
+    (mfile("Mtg", ".json")).write_text(_json.dumps(data))
 
     out = review.list_flagged("Mtg")
     assert [it["minor"] for it in out["items"]] == [False, True]  # major first
@@ -532,7 +533,7 @@ def test_insert_negative_time_clamped(sandbox):
     _make_meeting(sandbox)
     r = review.insert_segment("Mtg", -3.0, -2.0, "name:X", "early words")
     assert r["ok"]
-    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    d = json.loads((mfile("Mtg", ".json")).read_text())
     seg = d["segments"][r["index"]]
     assert seg["start"] == 0.0 and seg["end"] > seg["start"]
 

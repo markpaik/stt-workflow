@@ -2,6 +2,7 @@
 import json
 
 from stt import config, dates, export, search
+from conftest import mfile
 
 
 # ---------- dates ----------
@@ -36,7 +37,7 @@ def _mk(base, texts, sandbox):
                           "speaker": "SPEAKER_00", "display": "Speaker 1",
                           "text": tx, "flags": []} for i, tx in enumerate(texts)],
             "words": []}
-    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps(data))
+    (mfile(base, ".json")).write_text(json.dumps(data))
 
 
 def test_search_across_meetings(sandbox):
@@ -62,7 +63,7 @@ def test_search_cache_invalidates_on_change(sandbox):
     import os, time
     time.sleep(0.02)
     _mk("Mtg A", ["beta topic"], sandbox)
-    os.utime(config.MEETINGS_DIR / "Mtg A.json")
+    os.utime(mfile("Mtg A", ".json"))
     assert search.query("alpha")["total"] == 0
     assert search.query("beta topic")["total"] == 1
 
@@ -79,7 +80,7 @@ def _mk_full(sandbox):
                           "display": "Mark", "text": "Uncertain bit.",
                           "flags": ["overlap"]}],
             "words": []}
-    (config.MEETINGS_DIR / "Mtg 05212026.json").write_text(json.dumps(data))
+    (mfile("Mtg 05212026", ".json")).write_text(json.dumps(data))
 
 
 def test_html_export_escapes_and_marks(sandbox):

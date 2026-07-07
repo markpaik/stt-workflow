@@ -7,6 +7,7 @@ import json
 import numpy as np
 
 from stt import config, diarcache, review
+from conftest import mfile
 
 
 def _seed_meeting(base="Mtg"):
@@ -20,14 +21,14 @@ def _seed_meeting(base="Mtg"):
             "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Speaker 1"},
                          {"id": "SPEAKER_01", "name": None, "display": "Speaker 2"}],
             "segments": [], "words": words}
-    (config.MEETINGS_DIR / f"{base}.json").write_text(json.dumps(data))
-    (config.MEETINGS_DIR / f"{base}.txt").write_text("stub")
+    (mfile(base, ".json")).write_text(json.dumps(data))
+    (mfile(base, ".txt")).write_text("stub")
 
     rng = np.random.default_rng(3)
     raw_turns = [{"start": 0.0, "end": 5.0, "cluster": "SPEAKER_00"},
                  {"start": 5.0, "end": 9.0, "cluster": "SPEAKER_01"}]
     cent_emb = {"SPEAKER_00": rng.normal(size=256), "SPEAKER_01": rng.normal(size=256)}
-    diarcache.save(config.MEETINGS_DIR / f"{base}.diar.npz", raw_turns,
+    diarcache.save(mfile(base, ".diar.npz"), raw_turns,
                    [None, None], cent_emb)
     return data
 
@@ -39,23 +40,23 @@ def test_manual_speaker_survives_relabel_and_does_not_collide(sandbox):
     # a human names a voice the diarizer missed entirely (crosstalk)
     r = review.insert_segment("Mtg", 6.5, 7.5, "name:Louise", "Quick aside.")
     assert r["ok"]
-    before = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    before = json.loads((mfile("Mtg", ".json")).read_text())
     assert any(s["id"] == "MANUAL_1" and s["display"] == "Louise"
                for s in before["speakers"])
 
     assert relabel.relabel_one("Mtg") is True
-    after = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    after = json.loads((mfile("Mtg", ".json")).read_text())
     manual = [s for s in after["speakers"] if str(s["id"]).startswith("MANUAL_")]
     assert manual == [{"id": "MANUAL_1", "name": "Louise", "global_id": None,
                        "display": "Louise", "match_score": None, "manual": True}]
     assert any(s["text"] == "Quick aside." and s["display"] == "Louise"
               for s in after["segments"])
-    assert "Louise: Quick aside." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    assert "Louise: Quick aside." in (mfile("Mtg", ".txt")).read_text()
 
     # a SECOND relabel (e.g. after enrolling someone else) must reuse MANUAL_1,
     # never mint a fresh MANUAL_2 for the same person
     assert relabel.relabel_one("Mtg") is True
-    again = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    again = json.loads((mfile("Mtg", ".json")).read_text())
     manual_ids = [s["id"] for s in again["speakers"] if str(s["id"]).startswith("MANUAL_")]
     assert manual_ids == ["MANUAL_1"]
 
@@ -73,7 +74,7 @@ def test_editing_an_inserted_line_updates_it_in_place_not_a_new_decision(sandbox
     assert r2["ok"]
     assert review.count_decisions("Mtg") == 1  # still one decision, not two
 
-    decisions = json.loads((config.MEETINGS_DIR / "Mtg.reviews.json").read_text())
+    decisions = json.loads((mfile("Mtg", ".reviews.json")).read_text())
     assert len(decisions) == 1
     assert decisions[0]["action"] == "insert"
     assert decisions[0]["text"] == "Quick aside."
@@ -81,7 +82,7 @@ def test_editing_an_inserted_line_updates_it_in_place_not_a_new_decision(sandbox
 
     import relabel
     assert relabel.relabel_one("Mtg") is True
-    after = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    after = json.loads((mfile("Mtg", ".json")).read_text())
     texts = [s["text"] for s in after["segments"]]
     assert "Quick aside." in texts
     assert "Quikc aside." not in texts
@@ -96,7 +97,7 @@ def test_two_different_manual_people_across_sessions_get_distinct_ids(sandbox):
     review.insert_segment("Mtg", 8.0, 8.8, "name:Omar", "Second aside.")
     relabel.relabel_one("Mtg")
 
-    data = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    data = json.loads((mfile("Mtg", ".json")).read_text())
     manual = {s["id"]: s["display"] for s in data["speakers"]
               if str(s["id"]).startswith("MANUAL_")}
     assert manual == {"MANUAL_1": "Louise", "MANUAL_2": "Omar"}

@@ -117,6 +117,94 @@ def meetings_dir() -> Path:
     return Path(_env_file().get("STT_MEETINGS_DIR") or MEETINGS_DIR)
 
 
+# --- Per-meeting folder layout ---
+# Every meeting's artifacts live in their own folder:
+#   <meetings_dir>/<base>/<base>.json  (+ .txt, .m4a, .diar.npz, .emb.npz,
+#   .reviews.json, .verify.json, ...)
+# The folder AND the files carry the meeting name, so a rename in the GUI
+# renames both and everything stays greppable/openable from Finder.
+
+AUDIO_SUFFIXES = (".m4a", ".mp4", ".wav", ".mp3", ".aiff", ".mov")
+# sidecar jsons that are NOT a meeting's main transcript
+_SIDECAR_JSON = (".reviews.json", ".verify.json", ".reviews.superseded.json")
+
+
+def meeting_dir(base: str, dest_dir=None) -> Path:
+    return Path(dest_dir or meetings_dir()) / base
+
+
+def meeting_file(base: str, suffix: str, dest_dir=None) -> Path:
+    """One artifact of a meeting, e.g. meeting_file(b, ".json")."""
+    return meeting_dir(base, dest_dir) / f"{base}{suffix}"
+
+
+def meeting_bases(dest_dir=None) -> list:
+    """All meetings on disk: folders holding a matching <name>.json."""
+    d = Path(dest_dir or meetings_dir())
+    try:
+        return sorted(p.name for p in d.iterdir()
+                      if p.is_dir() and not p.name.startswith(".")
+                      and (p / f"{p.name}.json").exists())
+    except FileNotFoundError:
+        return []
+
+
+def meeting_audio(base: str, dest_dir=None):
+    """The meeting's stored audio file, or None."""
+    for e in AUDIO_SUFFIXES:
+        p = meeting_file(base, e, dest_dir)
+        if p.exists():
+            return p
+    return None
+
+
+def migrate_flat_meetings(dest_dir=None) -> int:
+    """One-time layout migration: move flat  <dir>/<base>.*  files into
+    per-meeting folders  <dir>/<base>/<base>.* . Idempotent and additive —
+    nothing is ever deleted or overwritten (os.replace within one directory
+    tree; a file already in place is left alone). Also stamps a "date" into
+    any meeting json missing one, so month grouping stops re-deriving it
+    from the filename on every panel poll."""
+    d = Path(dest_dir or meetings_dir())
+    if not d.exists():
+        return 0
+    moved = 0
+    bases = [j.stem for j in d.glob("*.json")
+             if not j.name.endswith(_SIDECAR_JSON)]
+    for base in bases:
+        folder = d / base
+        folder.mkdir(exist_ok=True)
+        for f in list(d.iterdir()):
+            if f.is_file() and f.name.startswith(base + "."):
+                os.replace(f, folder / f.name)
+                moved += 1
+    for base in meeting_bases(d):
+        _ensure_meeting_date(base, d)
+    return moved
+
+
+def _ensure_meeting_date(base: str, dest_dir=None):
+    """Backfill a stored "date" (ISO) into a meeting json that lacks one:
+    filename convention first, else the audio/json file mtime."""
+    import json as _json
+    from datetime import date as _date
+
+    from . import dates
+    j = meeting_file(base, ".json", dest_dir)
+    try:
+        data = _json.loads(j.read_text())
+    except (OSError, ValueError):
+        return
+    if data.get("date"):
+        return
+    src = meeting_audio(base, dest_dir) or j
+    data["date"] = (dates.meeting_date(base)
+                    or _date.fromtimestamp(src.stat().st_mtime).isoformat())
+    tmp = j.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False))
+    os.replace(tmp, j)
+
+
 def resolve_hf_token():
     """Return the HF token from env, or the cached CLI login, or None."""
     if HF_TOKEN:

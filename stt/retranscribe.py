@@ -32,9 +32,7 @@ def _asr_module(engine: str):
 
 
 def meeting_audio(base: str):
-    dst = config.MEETINGS_DIR
-    return next((dst / f"{base}{e}" for e in (".m4a", ".mp4", ".wav", ".mp3", ".aiff")
-                 if (dst / f"{base}{e}").exists()), None)
+    return config.meeting_audio(base)
 
 
 def retranscribe(base: str, start: float, end: float,

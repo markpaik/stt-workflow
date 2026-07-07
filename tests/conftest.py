@@ -5,6 +5,14 @@ import pytest
 from stt import config, control, jobs, manifest, rates, status
 
 
+def mfile(base, suffix):
+    """A meeting artifact's path in the per-meeting-folder layout, creating
+    the folder — what test fixtures use to build meetings on disk."""
+    p = config.meeting_file(base, suffix)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     d = tmp_path

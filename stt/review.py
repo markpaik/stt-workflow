@@ -45,7 +45,7 @@ def lock_meeting(base: str):
         finally:
             held[base] -= 1
         return
-    lock_dir = config.MEETINGS_DIR / ".locks"
+    lock_dir = config.meetings_dir() / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"{base}.lock", "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
@@ -58,7 +58,7 @@ def lock_meeting(base: str):
 
 
 def _load(base: str):
-    jpath = config.MEETINGS_DIR / f"{base}.json"
+    jpath = config.meeting_file(base, ".json")
     if not jpath.exists():
         raise FileNotFoundError(f"no transcript json for {base}")
     return jpath, json.loads(jpath.read_text())
@@ -495,7 +495,7 @@ def _drop_insert_decision(base: str, seg):
 
 
 def _decisions_path(base: str):
-    return config.MEETINGS_DIR / f"{base}.reviews.json"
+    return config.meeting_file(base, ".reviews.json")
 
 
 def count_decisions(base: str) -> int:
@@ -512,12 +512,10 @@ def archive_decisions(base: str, dest_dir=None) -> bool:
     speaker cluster ids have no relation to the old ones, so replaying old
     decisions could put words in the wrong mouths. Archive them instead
     (nothing is deleted; the file is renamed .superseded)."""
-    from pathlib import Path
-    d = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
-    p = d / f"{base}.reviews.json"
+    p = config.meeting_file(base, ".reviews.json", dest_dir)
     if not p.exists():
         return False
-    p.replace(d / f"{base}.reviews.superseded.json")
+    p.replace(config.meeting_file(base, ".reviews.superseded.json", dest_dir))
     return True
 
 
@@ -643,10 +641,8 @@ def find_voice_clip(key: str, meeting: str = None):
     haven't been relabeled yet (e.g. named mid-batch), fall back to VOICEPRINT
     matching against each source meeting's cached centroids — the person's name
     doesn't need to appear in any transcript for playback to work."""
-    dst = config.MEETINGS_DIR
-
     def _by_transcript(base):
-        j = dst / f"{base}.json"
+        j = config.meeting_file(base, ".json")
         if not j.exists():
             return None
         try:
@@ -661,9 +657,10 @@ def find_voice_clip(key: str, meeting: str = None):
         seg = max(segs, key=lambda s: s["end"] - s["start"])
         return base, max(0.0, seg["start"]), min(12.0, max(2.0, seg["end"] - seg["start"]))
 
+    all_bases = config.meeting_bases()
     candidates = ([meeting] if meeting else
-                  [j.stem for j in sorted(dst.glob("*.json"),
-                                          key=lambda p: p.stat().st_mtime, reverse=True)])
+                  sorted(all_bases, key=lambda b: config.meeting_file(b, ".json").stat().st_mtime,
+                         reverse=True))
     for base in candidates:
         hit = _by_transcript(base)
         if hit:
@@ -677,9 +674,9 @@ def find_voice_clip(key: str, meeting: str = None):
     if samples is None:
         return None
     sources = [s for s in reg[key].get("sources", []) if s and s != "?"]
-    for base in (sources[::-1] or [j.stem for j in dst.glob("*.json")]):
-        dcache = dst / f"{base}.diar.npz"
-        jf = dst / f"{base}.json"
+    for base in (sources[::-1] or all_bases):
+        dcache = config.meeting_file(base, ".diar.npz")
+        jf = config.meeting_file(base, ".json")
         if not dcache.exists() or not jf.exists():
             continue
         from . import diarcache

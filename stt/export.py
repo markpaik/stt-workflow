@@ -17,7 +17,7 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 def _load(base: str) -> dict:
-    return json.loads((config.MEETINGS_DIR / f"{base}.json").read_text())
+    return json.loads(config.meeting_file(base, ".json").read_text())
 
 
 def _fmt_ts(sec: float) -> str:
