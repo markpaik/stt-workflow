@@ -171,3 +171,43 @@ def test_auto_summarize_one_failure_never_stops_the_rest(sandbox, monkeypatch):
     n = run_batch.auto_summarize(["A Mtg.m4a", "B Mtg.m4a"])
     assert n == 1 and calls == ["A Mtg", "B Mtg"]
     assert status.read().get("active", {}) == {}  # cleared even after the failure
+
+
+def test_main_entrypoint_paths_flow_regression(tmp_path):
+    """Run the REAL entrypoint the panel's Redo spawns (fresh interpreter, not
+    an import), with --paths + --dry-run: parses the paths list and exits 0.
+    Regression for a shadowing bug: local `from stt import jobs` bindings
+    inside main() made module-level `jobs` unbound at the --paths parse, so
+    every panel-queued Redo crashed on spawn and sat in the queue forever —
+    while all unit tests (which never drive main()) stayed green."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _P
+
+    audio = tmp_path / "Redo Me 07012026.m4a"
+    audio.write_bytes(b"\x00" * 64)
+    env = {**__import__("os").environ,
+           "STT_ICLOUD_DIR": str(tmp_path / "src"),
+           "STT_MEETINGS_DIR": str(tmp_path / "dst"),
+           "PYTHONPATH": str(_P(run_batch.__file__).parent)}
+    (tmp_path / "src").mkdir()
+    r = subprocess.run(
+        [_sys.executable, run_batch.__file__, "--dry-run",
+         "--paths", str(audio), "--force"],
+        capture_output=True, text=True, timeout=60, env=env)
+    assert "UnboundLocalError" not in r.stderr, r.stderr
+    assert r.returncode == 0, r.stderr
+    if "already running" in r.stdout:
+        import pytest
+        pytest.skip("a real batch holds the single-instance lock right now")
+    assert "Redo Me 07012026.m4a" in r.stdout  # the path actually parsed
+
+
+def test_main_has_no_shadowed_module_imports():
+    """The lock-independent half of the regression: any `from stt import X`
+    INSIDE main() makes X local to the whole function, unbinding the
+    module-level name for every line above it. Assert none of the shared
+    modules appear in main()'s locals."""
+    shadowed = set(run_batch.main.__code__.co_varnames) & {
+        "config", "control", "icloud", "jobs", "manifest", "rates", "status"}
+    assert not shadowed, f"module names shadowed as locals in main(): {shadowed}"
