@@ -6,6 +6,7 @@ the same entrypoints the CLI uses, so the panel can never bypass the pipeline's
 locks and safety rails.
 """
 import json
+import os
 import plistlib
 import re
 import subprocess
@@ -51,6 +52,15 @@ ASR_CHOICES = [
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v2", "note": "fastest · lowest benchmark WER · English"},
     {"id": "mlxwhisper:large-v3", "label": "Whisper large-v3 (MLX)", "note": "best punctuation robustness · ~4x realtime"},
     {"id": "mlxwhisper:turbo", "label": "Whisper large-v3-turbo (MLX)", "note": "Whisper punctuation · ~9x realtime"},
+    # cloud engines: shown only once their key is set; words are transcribed
+    # off-device, but diarization + speaker naming stay local — and strict
+    # mode ALWAYS forces the local engine (sensitive audio never uploads)
+    {"id": "cloud:scribe", "label": "ElevenLabs Scribe ☁", "cloud": "scribe",
+     "note": "audio uploads to ElevenLabs · strict mode stays local"},
+    {"id": "cloud:openai", "label": "OpenAI Whisper API ☁", "cloud": "openai",
+     "note": "audio uploads to OpenAI · strict mode stays local"},
+    {"id": "cloud:voxtral", "label": "Mistral Voxtral ☁", "cloud": "voxtral",
+     "note": "audio uploads to Mistral · strict mode stays local"},
 ]
 MODEL_REPOS = {
     "Parakeet TDT 0.6B v2": "mlx-community/parakeet-tdt-0.6b-v2",
@@ -290,6 +300,7 @@ def gather_state():
             "enrolled": enrolled, "unknowns": unknown_list,
             "schedule": read_schedule(), "model": current_model(),
             "asr_choices": ASR_CHOICES, "battery": battery,
+            "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "rates": rates.summary(),
@@ -352,6 +363,15 @@ def set_folder(which: str, path: str):
 
 def _meeting_audio(base: str):
     return config.meeting_audio(base)
+
+
+def _cloud_key_status() -> dict:
+    """{provider: bool} — key presence only; actual keys never reach the page."""
+    try:
+        from stt import asr_cloud
+        return {prov: asr_cloud.available(prov) for prov in asr_cloud.PROVIDERS}
+    except Exception:
+        return {}
 
 
 def _snippet_for(meeting: str, speaker_key: str):
@@ -575,6 +595,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif u.path == "/api/model":
                 choice = b["model"]
+                if choice.startswith("cloud:"):
+                    from stt import asr_cloud
+                    prov = asr_cloud.provider_from_backend(choice)
+                    if not asr_cloud.available(prov):
+                        self._json({"ok": False, "error": "Add this provider's API key first (Cloud keys… in Settings)."})
+                        return
                 if choice.startswith("mlxwhisper"):
                     variant = choice.split(":", 1)[1] if ":" in choice else "large-v3"
                     _env_file_set({"STT_ASR_BACKEND": "mlxwhisper",
@@ -630,6 +656,19 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b["new"]))
+            elif u.path == "/api/cloud_keys":
+                from stt import asr_cloud
+                updates = {}
+                for prov, meta in asr_cloud.PROVIDERS.items():
+                    v = (b.get(prov) or "").strip()
+                    if v:
+                        updates[meta["key_env"]] = v
+                if updates:
+                    _env_file_set(updates)
+                    os.chmod(config.PROJECT_DIR / "stt.env", 0o600)
+                self._json({"ok": True,
+                            "set": {prov: asr_cloud.available(prov)
+                                    for prov in asr_cloud.PROVIDERS}})
             elif u.path == "/api/set_date":
                 if not self._require_base(b.get("base")):
                     return
@@ -897,6 +936,9 @@ mark{background:color-mix(in srgb,var(--warn) 30%,transparent);color:inherit;bor
   <div class="row"><div class="grow"><div class="name">Transcription model</div>
     <div class="sub" id="modelnote"></div></div>
     <select id="modelsel" onchange="setModel()"></select></div>
+  <div class="row"><div class="grow"><div class="name">Cloud transcription</div>
+    <div class="sub" id="cloudnote"></div></div>
+    <button onclick="openCloudKeys()">Cloud keys…</button></div>
   <div class="row"><div class="grow"><div class="name">Punctuation cleanup</div>
     <div class="sub">Restore punctuation &amp; casing (never changes words)</div></div>
     <button class="toggle" id="punctbtn" onclick="togglePunct()"></button></div>
@@ -1022,8 +1064,11 @@ function render(){
   const sc=s.schedule;
   $('#schedtext').textContent=sc.hour==null?'not set':new Date(2000,0,1,sc.hour,sc.minute).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+' · runs at next wake if the Mac is asleep';
   const sel=$('#modelsel');
-  sel.innerHTML=s.asr_choices.map(c=>`<option value="${c.id}" ${c.id===s.model?'selected':''}>${c.label}</option>`).join('');
+  const pickable=s.asr_choices.filter(c=>!c.cloud||(s.cloud_keys||{})[c.cloud]);
+  sel.innerHTML=pickable.map(c=>`<option value="${c.id}" ${c.id===s.model?'selected':''}>${c.label}</option>`).join('');
   $('#modelnote').textContent=(s.asr_choices.find(c=>c.id===s.model)||{}).note||'';
+  const nk=Object.values(s.cloud_keys||{}).filter(Boolean).length;
+  $('#cloudnote').textContent=nk?`${nk} provider key${nk>1?'s':''} set — cloud engines appear in the model picker`:'Optional: bring your own API key (ElevenLabs · OpenAI · Mistral)';
   $('#srcpath').textContent=s.paths.source.replace(/^\/Users\/[^/]+/,'~');
   $('#dstpath').textContent=s.paths.dest.replace(/^\/Users\/[^/]+/,'~');
   // meetings: filter by title/speaker, newest meeting-date first, grouped by month
@@ -1612,7 +1657,30 @@ async function checkUpdates(){
   $('#updnote').textContent=ups.length?('Updates available: '+ups.map(u=>u.label).join(', ')):'All models are current.';
   $('#updbtn').textContent='Check';
 }
-function setModel(){api('/api/model',{model:$('#modelsel').value}).then(refresh)}
+function openCloudKeys(){
+  const ck=S.cloud_keys||{};
+  const row=(prov,label,hint)=>`<div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+    <span style="width:150px" class="sub">${label}</span>
+    <input type="password" id="ck_${prov}" placeholder="${ck[prov]?'key saved — paste to replace':'paste API key'}" style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:6px 8px">
+    <span class="sub" style="width:52px">${ck[prov]?'✓ set':''}</span></div>
+    <div class="sub" style="margin-left:158px;opacity:.8">${hint}</div>`;
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
+  <p class="muted" style="margin-top:8px">Optional: transcribe with a cloud engine instead of the local models. Only the audio is uploaded — speaker identification and voiceprints stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine is selected. Keys are stored in stt.env on this machine and never shown again.</p>
+  ${row('scribe','ElevenLabs Scribe','elevenlabs.io → Profile → API keys')}
+  ${row('openai','OpenAI','platform.openai.com → API keys')}
+  ${row('voxtral','Mistral Voxtral','console.mistral.ai → API keys')}
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+    <button onclick="dlg.close()">Cancel</button>
+    <button class="primary" onclick="saveCloudKeys()">Save</button>
+  </div>`;
+  dlg.showModal();
+}
+async function saveCloudKeys(){
+  const r=await api('/api/cloud_keys',{scribe:$('#ck_scribe').value,openai:$('#ck_openai').value,voxtral:$('#ck_voxtral').value});
+  if(!r.ok){alert(r.error||'Could not save');return}
+  dlg.close();refresh();
+}
+function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh();setInterval(refresh,2000);
 </script></body></html>
