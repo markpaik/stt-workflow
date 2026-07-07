@@ -348,7 +348,6 @@ def main():
         return 0
 
     if args.job is not None:
-        from stt import jobs
         # claim only now, with every abort guard (lock, battery, folders, token)
         # passed — an aborted run leaves the job queued for the panel to re-kick
         jobs.remove(args.job)
@@ -484,7 +483,6 @@ def main():
     # chain into the next panel-queued job (a Redo clicked during this run).
     # Release our lock FIRST so the child can take it; if something else wins
     # the race instead, the job stays queued and the panel re-kicks it.
-    from stt import jobs
     nxt = jobs.items()
     if nxt:
         lock.close()
