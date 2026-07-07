@@ -116,7 +116,13 @@ def stop_run(timeout: float = 8.0) -> dict:
     Returns {"stopped": bool, "forced": bool, "survivors": [pid...],
     "cleared_jobs": n}."""
     from . import jobs
-    cleared = jobs.clear()
+    try:
+        cleared = jobs.clear()
+    except Exception:
+        # the kill switch must work even if the queue file is unwritable —
+        # losing the ability to clear queued jobs is far better than losing
+        # the ability to stop a runaway batch
+        cleared = 0
     groups = batch_groups()
     if not groups:
         return {"stopped": False, "forced": False, "survivors": [],

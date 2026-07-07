@@ -129,3 +129,49 @@ def test_remove_sample_states(sandbox):
     assert identify.remove_sample("Mark", 0)
     assert not identify.remove_sample("Mark", 0)      # last sample protected
     assert not identify.remove_sample("Nobody", 0)    # unknown person
+
+
+def test_enroll_sanitized_filename_collision_does_not_overwrite(sandbox):
+    """'A/B' and 'A_B' both sanitize to 'A_B.npy' — enrolling the second must
+    never silently overwrite the first person's voiceprint file."""
+    v1, v2 = _vec(1), _vec(2)
+    identify.enroll("A_B", v1)
+    identify.enroll("A/B", v2)
+
+    reg = identify.load_registry()
+    assert reg["A_B"]["file"] != reg["A/B"]["file"]
+
+    vps = identify.load_voiceprints()
+    assert np.allclose(vps["A_B"][0], v1 / np.linalg.norm(v1))
+    assert np.allclose(vps["A/B"][0], v2 / np.linalg.norm(v2))
+
+
+def test_reenroll_reuses_own_disambiguated_file(sandbox):
+    """Adding a second sample to an already-disambiguated person must reuse
+    THEIR file (from the registry), not recompute a fresh, colliding guess."""
+    identify.enroll("A_B", _vec(1))
+    identify.enroll("A/B", _vec(2))  # gets disambiguated to A_B_2.npy
+    disambiguated_file = identify.load_registry()["A/B"]["file"]
+
+    identify.enroll("A/B", _vec(3))  # a second sample for the SAME person
+
+    reg = identify.load_registry()
+    assert reg["A/B"]["file"] == disambiguated_file  # unchanged, not re-derived
+    assert reg["A/B"]["n_samples"] == 2
+    assert reg["A_B"]["n_samples"] == 1  # untouched
+
+
+def test_rename_into_colliding_name_does_not_overwrite(sandbox):
+    """Renaming into a name whose sanitized filename collides with an
+    unrelated existing person must not destroy that person's voiceprint."""
+    v_existing, v_renamed = _vec(1), _vec(2)
+    identify.enroll("A_B", v_existing)
+    identify.enroll("Someone Else", v_renamed)
+
+    assert identify.rename_person("Someone Else", "A/B") is True
+
+    reg = identify.load_registry()
+    assert reg["A_B"]["file"] != reg["A/B"]["file"]
+    vps = identify.load_voiceprints()
+    assert np.allclose(vps["A_B"][0], v_existing / np.linalg.norm(v_existing))
+    assert np.allclose(vps["A/B"][0], v_renamed / np.linalg.norm(v_renamed))

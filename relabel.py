@@ -36,61 +36,73 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         return False
     strict = config.STRICT if strict is None else strict
 
-    data = json.loads(jpath.read_text())
-    words = [{"start": w["start"], "end": w["end"], "word": w["word"]} for w in data["words"]]
-    # heal ASR hallucination loops in transcripts processed before the guard
-    from stt import sanitize
-    words, loop_spans = sanitize.collapse_repeats(words)
-
-    vps = identify.load_voiceprints()
-    if allowed_names is not None:
-        vps = {n: s for n, s in vps.items() if n in allowed_names}
-    raw_turns, turn_embeddings, cent_emb, overlaps = diarcache.load(dpath)
-    cluster_names = ({k: v["name"] for k, v in
-                      identify.name_speakers(cent_emb, allowed_names=allowed_names,
-                                             context=f"relabel:{base}").items()}
-                     if vps else {k: None for k in cent_emb})
-    cluster_names = refine.resolve_split_clusters(cluster_names, cent_emb, vps)
-    turns, names, stats = diarize.build_attribution(
-        raw_turns, turn_embeddings, cluster_names, vps if config.REFINE else {},
-        cluster_centroids=cent_emb, words=words, strict=strict)
-    uid_map = unknowns.assign(cent_emb, cluster_names, base)
-    for label, uid in uid_map.items():
-        if label in names and not names[label].get("name"):
-            names[label]["global_id"] = uid
-            names[label]["display"] = unknowns.display(uid)
-
-    labels = sorted(names.keys())
-    segments, labeled_words = merge.assign_and_group(words, turns, names,
-                                                     overlaps=overlaps,
-                                                     spans=stats.get("spans", []) + loop_spans)
-    if config.PUNCTUATE:
-        punctuate.restore_segments(segments)
-    # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)
-    from stt import verify
-    vc = verify.load_sidecar(base)
-    if vc:
-        verify.apply_flags(segments, vc.get("regions", []))
-    data["segments"], data["words"] = segments, labeled_words
-    # human review decisions outlive any relabel — reapply them onto the
-    # freshly-rebuilt segments (accepts, text edits, speaker reassignments,
-    # inserted/removed lines) and clear the flags they resolved
+    # held for the whole read -> recompute -> reapply -> write span, not just
+    # the write: a GUI edit landing after we read but before we write would
+    # otherwise be silently clobbered by our (by-then-stale) rewrite.
     from stt import review
-    review.reapply_decisions(base, data)
-    segments, labeled_words = data["segments"], data["words"]
-    data["speakers"] = output.build_speakers(labels, names)
-    data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
-    data["strict"] = strict
-    data["punctuated"] = bool(config.PUNCTUATE)
-    data["overlap_spans"] = [[s, e] for s, e in overlaps]
+    with review.lock_meeting(base):
+        data = json.loads(jpath.read_text())
+        words = [{"start": w["start"], "end": w["end"], "word": w["word"]} for w in data["words"]]
+        # heal ASR hallucination loops in transcripts processed before the guard
+        from stt import sanitize
+        words, loop_spans = sanitize.collapse_repeats(words)
 
-    header = output.txt_header(data.get("source_file", base),
-                               data.get("duration_sec", 0), data["speakers"], strict)
+        vps = identify.load_voiceprints()
+        if allowed_names is not None:
+            vps = {n: s for n, s in vps.items() if n in allowed_names}
+        raw_turns, turn_embeddings, cent_emb, overlaps = diarcache.load(dpath)
+        cluster_names = ({k: v["name"] for k, v in
+                          identify.name_speakers(cent_emb, allowed_names=allowed_names,
+                                                 context=f"relabel:{base}").items()}
+                         if vps else {k: None for k in cent_emb})
+        cluster_names = refine.resolve_split_clusters(cluster_names, cent_emb, vps)
+        turns, names, stats = diarize.build_attribution(
+            raw_turns, turn_embeddings, cluster_names, vps if config.REFINE else {},
+            cluster_centroids=cent_emb, words=words, strict=strict)
+        uid_map = unknowns.assign(cent_emb, cluster_names, base)
+        for label, uid in uid_map.items():
+            if label in names and not names[label].get("name"):
+                names[label]["global_id"] = uid
+                names[label]["display"] = unknowns.display(uid)
 
-    output.write_json(jpath, {k: v for k, v in data.items()
-                              if k not in ("speakers", "segments", "words")},
-                      data["speakers"], segments, labeled_words)
-    output.write_txt(tpath, segments, header=header)
+        labels = sorted(names.keys())
+        segments, labeled_words = merge.assign_and_group(words, turns, names,
+                                                         overlaps=overlaps,
+                                                         spans=stats.get("spans", []) + loop_spans)
+        if config.PUNCTUATE:
+            punctuate.restore_segments(segments)
+        # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)
+        from stt import verify
+        vc = verify.load_sidecar(base)
+        if vc:
+            verify.apply_flags(segments, vc.get("regions", []))
+        data["segments"], data["words"] = segments, labeled_words
+        # human review decisions outlive any relabel — reapply them onto the
+        # freshly-rebuilt segments (accepts, text edits, speaker reassignments,
+        # inserted/removed lines) and clear the flags they resolved
+        review.reapply_decisions(base, data)
+        segments, labeled_words = data["segments"], data["words"]
+        # reapply_decisions may have added/reused MANUAL_n entries (people the
+        # diarizer never heard, named by a human) on data["speakers"] — the roster
+        # rebuild below only knows about diarized clusters, so fold those back in
+        # or every manually-named speaker vanishes from the header/dropdown on
+        # every relabel, and a later relabel would mint a fresh MANUAL_1 for
+        # someone else since it no longer sees the one already in use.
+        manual_speakers = [s for s in data.get("speakers", [])
+                           if str(s.get("id", "")).startswith("MANUAL_")]
+        data["speakers"] = output.build_speakers(labels, names) + manual_speakers
+        data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
+        data["strict"] = strict
+        data["punctuated"] = bool(config.PUNCTUATE)
+        data["overlap_spans"] = [[s, e] for s, e in overlaps]
+
+        header = output.txt_header(data.get("source_file", base),
+                                   data.get("duration_sec", 0), data["speakers"], strict)
+
+        output.write_json(jpath, {k: v for k, v in data.items()
+                                  if k not in ("speakers", "segments", "words")},
+                          data["speakers"], segments, labeled_words)
+        output.write_txt(tpath, segments, header=header)
 
     print(f"  {base}: " + ", ".join(s["display"] for s in data["speakers"])
           + (f"  [{stats['flagged']} flagged]" if stats.get("flagged") else ""))

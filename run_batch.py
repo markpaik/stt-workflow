@@ -79,6 +79,19 @@ def clean_scratch():
         p.unlink(missing_ok=True)
 
 
+def job_spec_from_args(args, todo) -> dict:
+    """The queued-job dict equivalent to this invocation's CLI args. Used to
+    re-queue a --job run if it's interrupted before finishing (see
+    _terminate() in main()) — manifest idempotency makes replaying it, files
+    already done included, a safe no-op for anything that already succeeded."""
+    return {"files": args.files.split(",") if args.files else [],
+            "paths": args.paths.split(",") if args.paths else [],
+            "force": args.force, "strict": args.strict,
+            "verify": args.verify, "parallel": args.parallel,
+            "label": (", ".join(s.name for s in todo[:2])
+                     + (f" +{len(todo) - 2} more" if len(todo) > 2 else "")) or "resumed run"}
+
+
 def preflight_source(source: Path) -> bool:
     try:
         next(source.iterdir(), None)
@@ -196,12 +209,25 @@ def main():
               + (" The queued job stays queued." if args.job else ""))
         return 0
 
+    # A queued job (Redo, hand-picked files) is claimed — removed from the
+    # queue — once every abort guard below passes. If a SIGTERM (Stop
+    # processing) lands after that but before the run genuinely finishes, the
+    # job would otherwise vanish: neither queued nor done. _terminate()
+    # re-queues an equivalent job in that case; claimed_job is cleared once
+    # run_todo() actually completes so a stray late signal can't re-queue
+    # already-finished work.
+    claimed_job = None
+
     # graceful stop: abandon in-flight work safely and record a clean status.
     # CRITICAL: take the whole process group down with us — --parallel workers
     # are separate processes that would otherwise survive as multi-GB orphans.
     def _terminate(signum, frame):
         print("Stop requested — aborting current file(s); originals preserved.",
               flush=True)
+        if claimed_job is not None:
+            from stt import jobs
+            jobs.add(claimed_job)
+            print("  queued job re-added — it will run on the next kick.", flush=True)
         status.end_run()
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         try:
@@ -276,6 +302,8 @@ def main():
         # claim only now, with every abort guard (lock, battery, folders, token)
         # passed — an aborted run leaves the job queued for the panel to re-kick
         jobs.remove(args.job)
+        # kept only long enough to re-queue on a SIGTERM (see _terminate above)
+        claimed_job = job_spec_from_args(args, todo)
 
     status.start_run([s.name for s in todo])
     base_opts = {"do_diarize": not args.no_diarize,
@@ -336,6 +364,7 @@ def main():
         status.finish_file(name, False, str(e))
 
     run_todo(todo)
+    claimed_job = None  # the work is done — a stray late SIGTERM must not re-queue it
 
     # recordings that landed WHILE we processed: their WatchPaths trigger hit our
     # lock and exited, so sweep again until the folder is quiet (plain runs only)

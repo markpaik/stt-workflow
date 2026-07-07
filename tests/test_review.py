@@ -1,6 +1,8 @@
 """review: the accept/edit workflow against real files, plus voice-clip lookup
 including the named-mid-batch fallback (transcripts not yet relabeled)."""
 import json
+import threading
+import time
 
 import numpy as np
 
@@ -262,3 +264,85 @@ def test_insert_negative_time_clamped(sandbox):
     d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
     seg = d["segments"][r["index"]]
     assert seg["start"] == 0.0 and seg["end"] > seg["start"]
+
+
+def test_lock_meeting_serializes_same_meeting(sandbox):
+    """The P0-3 fix: a GUI edit and a relabel writing the SAME meeting must
+    never run their read-modify-write concurrently. Proven with real OS-level
+    flock contention (a blocking acquire on another thread), not a mock."""
+    events = []
+
+    def holder():
+        with review.lock_meeting("Mtg"):
+            events.append(("holder_in", time.monotonic()))
+            time.sleep(0.3)
+            events.append(("holder_out", time.monotonic()))
+
+    t = threading.Thread(target=holder)
+    t.start()
+    time.sleep(0.05)  # let the holder acquire first
+
+    with review.lock_meeting("Mtg"):
+        events.append(("waiter_in", time.monotonic()))
+    t.join()
+
+    order = [e[0] for e in events]
+    assert order == ["holder_in", "holder_out", "waiter_in"], order
+
+
+def test_lock_meeting_does_not_block_a_different_meeting(sandbox):
+    """Per-meeting, not global: editing 'Mtg' must never block 'Other'."""
+    holder_in = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with review.lock_meeting("Mtg"):
+            holder_in.set()
+            release.wait(timeout=2)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert holder_in.wait(timeout=2)
+
+    start = time.monotonic()
+    with review.lock_meeting("Other"):
+        elapsed = time.monotonic() - start
+    assert elapsed < 0.2  # did not wait for Mtg's lock at all
+
+    release.set()
+    t.join()
+
+
+def test_relabel_blocks_on_a_concurrent_gui_edit_of_the_same_meeting(sandbox):
+    """End-to-end: hold the SAME lock relabel_one() uses (simulating a GUI
+    request mid-write) and confirm relabel_one() genuinely waits for it
+    rather than racing it. relabel_one()'s own work has real (non-mocked)
+    compute in it — a plain "did relabel finish after the holder released"
+    ordering check can pass by coincidence if that compute alone takes longer
+    than the hold, so this asserts a hard minimum elapsed time instead: with
+    the lock actually enforced, relabel_one cannot return before HOLD_SEC has
+    passed, no matter how fast (or slow) its own work is."""
+    from test_relabel import _seed_meeting
+    import relabel
+
+    _seed_meeting("Mtg")
+    HOLD_SEC = 1.5  # comfortably longer than relabel_one's own ~0.8s baseline
+
+    def gui_holder(release):
+        with review.lock_meeting("Mtg"):
+            release.wait(HOLD_SEC)
+
+    release = threading.Event()
+    t = threading.Thread(target=gui_holder, args=(release,))
+    t.start()
+    time.sleep(0.05)  # let the holder acquire first
+
+    start = time.monotonic()
+    assert relabel.relabel_one("Mtg") is True
+    elapsed = time.monotonic() - start
+    release.set()
+    t.join()
+
+    assert elapsed >= HOLD_SEC - 0.1, (
+        f"relabel_one returned after {elapsed:.2f}s while the same meeting's "
+        f"lock was held for {HOLD_SEC}s — it did not wait for it")
