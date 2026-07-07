@@ -64,7 +64,9 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
     d = read()
     active = d.get("active", {})
     prev = active.get(name, {})
-    entry = {"stage": stage, "since": prev.get("since", _now())}
+    entry = {"stage": stage, "since": prev.get("since", _now()),
+             "stage_since": (prev.get("stage_since", _time.time())
+                             if prev.get("stage") == stage else _time.time())}
     if duration or prev.get("duration"):
         entry["duration"] = duration or prev.get("duration")
     if diarize is not None or "diarize" in prev:
@@ -135,7 +137,19 @@ def estimate_progress(entry: dict, n_active: int = 1):
     frac_in = entry.get("progress")
     if frac_in is None:
         frac_in = 0.5  # mid-stage assumption when the engine gives no callback
-    done += est.get(stage, 0.0) * min(1.0, max(0.0, frac_in))
+    # a stage's progress hook can race ahead of wall time (pyannote reports
+    # segmentation, ~87% "done" within minutes, then embeds and clusters
+    # silently for most of the stage) — reading that 87% at face value showed
+    # "4 min left" on an hour-long file for 15+ real minutes. Completion
+    # credit is therefore BOUNDED by elapsed wall time in the stage: a stage
+    # is never more done than the clock allows, so the ETA converges on
+    # reality instead of flattering the hook.
+    est_stage = est.get(stage, 0.0)
+    ss = entry.get("stage_since")
+    if ss and est_stage > 0:
+        wall_frac = min((_time.time() - ss) / est_stage, 0.98)
+        frac_in = min(frac_in, wall_frac)
+    done += est_stage * min(1.0, max(0.0, frac_in))
     overall = min(0.99, done / total)
     return overall, max(0.0, total - done)
 
