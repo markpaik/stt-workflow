@@ -204,6 +204,7 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "flagged_minor": sum(1 for s in d.get("segments", [])
                                      if s.get("flags") and review.is_minor(s)),
                 "summary": d.get("ai_summary", ""),
+                "next_steps": d.get("ai_next_steps", []),
                 "audio": str(audio_p) if audio_p else None}
     except Exception:
         meta = None
@@ -894,14 +895,12 @@ mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;bor
   background:var(--inset);padding:10px}
 .tseg:hover .segbtn,.tseg:focus-within .segbtn{opacity:1}
 .tseg.editing{cursor:default;background:var(--inset)}
-.hastip{position:relative}
-.hastip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 6px);
-  z-index:30;width:min(560px,80vw);background:var(--card);color:var(--ink);
-  border:1px solid var(--line);border-radius:10px;padding:12px 14px;
-  font-size:13px;line-height:1.55;font-style:normal;white-space:normal;
-  box-shadow:0 12px 40px rgba(0,0,0,.18);opacity:0;visibility:hidden;
-  transition:opacity .12s .25s;pointer-events:none}
-.hastip:hover::after{opacity:1;visibility:visible}
+#tipbox{position:fixed;z-index:60;width:min(560px,80vw);background:var(--card);
+  color:var(--ink);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px;font-size:13px;line-height:1.55;
+  box-shadow:0 12px 40px rgba(0,0,0,.22);pointer-events:none;display:none}
+#tipbox ul{margin:6px 0 0 18px;padding:0}
+#tipbox .tiphead{font-weight:600;margin-top:8px}
 .mtitle,.mdate{cursor:text;border-radius:4px}
 .mtitle:hover,.mdate:hover{background:var(--chip);
   box-shadow:0 0 0 4px var(--chip)}
@@ -998,6 +997,7 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 </div>
 
 <dialog id="dlg"></dialog>
+<div id="tipbox"></div>
 <script>
 const $=q=>document.querySelector(q);
 function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
@@ -1115,7 +1115,7 @@ function render(){
     const mon=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated';
     const hdr=mon!==lastMon?`<div class="mgroup">${mon}</div>`:'';lastMon=mon;
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
-    return hdr+`<div class="row"><div class="grow${m.summary?' hastip':''}"${m.summary?` data-tip="${esc(m.summary)}"`:''}>
+    return hdr+`<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
     <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}',event)" title="Click to rename">${esc(m.base)}</span></div>
     <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
@@ -1378,8 +1378,38 @@ function spkWireNew(sel){
     sel.insertBefore(o,sel.lastElementChild);sel.value='name:'+nm;
   });
 }
+let _tipTimer=null;
+function _tipHtml(m){
+  let h=esc(m.summary||'');
+  if((m.next_steps||[]).length){
+    h+='<div class="tiphead">Committed next steps</div><ul>'
+      +m.next_steps.slice(0,5).map(s=>`<li>${esc(s)}</li>`).join('')
+      +(m.next_steps.length>5?`<li>+${m.next_steps.length-5} more…</li>`:'')+'</ul>';
+  }
+  return h;
+}
+document.addEventListener('mouseover',e=>{
+  const row=e.target.closest&&e.target.closest('.hastip');
+  const tip=$('#tipbox');
+  if(!row||!row.dataset.base){clearTimeout(_tipTimer);tip.style.display='none';return}
+  if(tip.dataset.for===row.dataset.base&&tip.style.display==='block')return;
+  clearTimeout(_tipTimer);
+  _tipTimer=setTimeout(()=>{
+    const m=(S&&S.meetings||[]).find(x=>x.base===row.dataset.base);
+    if(!m||!m.summary)return;
+    tip.innerHTML=_tipHtml(m);tip.dataset.for=m.base;
+    tip.style.display='block';
+    const r=row.getBoundingClientRect(),tw=tip.offsetWidth,th=tip.offsetHeight;
+    let x=Math.min(r.left,window.innerWidth-tw-12);
+    let y=r.bottom+8;
+    if(y+th>window.innerHeight-8)y=Math.max(8,r.top-th-8);  // flip above
+    tip.style.left=Math.max(8,x)+'px';tip.style.top=y+'px';
+  },250);
+});
+document.addEventListener('scroll',()=>{$('#tipbox').style.display='none'},true);
 function inlineRename(base,ev){
   ev.stopPropagation();
+  $('#tipbox').style.display='none';
   const el=ev.currentTarget;
   el.outerHTML=`<input class="inline-edit" id="ire" value="${esc(base)}" size="${Math.min(60,base.length+4)}">`;
   const inp=$('#ire');inp.focus();inp.select();
@@ -1398,6 +1428,7 @@ function inlineRename(base,ev){
 }
 function inlineDate(base,iso,ev){
   ev.stopPropagation();
+  $('#tipbox').style.display='none';
   const el=ev.currentTarget;
   el.outerHTML=`<input type="date" class="inline-edit" id="ide" value="${esc(iso)}">`;
   const inp=$('#ide');inp.focus();
@@ -1696,8 +1727,9 @@ function openRename(base){
 }
 function openSummary(base){
   const m=S.meetings.find(x=>x.base===base)||{};
+  const steps=(m.next_steps||[]).length?`<div style="font-weight:600;margin-top:10px">Committed next steps</div><ul style="margin:6px 0 0 18px">${m.next_steps.map(s=>`<li class="muted">${esc(s)}</li>`).join('')}</ul>`:'';
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
-  <div id="sumbody" class="muted" style="margin-top:10px;max-height:300px;overflow:auto">${m.summary?esc(m.summary):'No summary yet — generate one below. Runs locally; nothing leaves this Mac.'}</div>
+  <div style="margin-top:10px;max-height:340px;overflow:auto"><div id="sumbody" class="muted">${m.summary?esc(m.summary):'No summary yet — generate one below. Runs locally; nothing leaves this Mac.'}</div>${steps}</div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="genSummary('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${m.summary?'Regenerate':'✨ Generate summary'}</button>
     <button onclick="dlg.close()">Close</button>
@@ -1708,7 +1740,8 @@ async function genSummary(base){
   $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… (~15–30s)';
   const r=await api('/api/suggest?base='+encodeURIComponent(base));
   $('#sumbody').textContent=r.summary||r.error||'No summary produced.';
-  refresh();
+  await refresh();
+  openSummary(base);  // re-render with next steps from fresh state
 }
 async function suggest(base){
   $('#sumnote').innerHTML='<span class="spin"></span> Reading the transcript…';

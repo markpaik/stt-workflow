@@ -83,34 +83,46 @@ def suggest_title(base: str) -> dict:
         "no punctuation except spaces, naming the meeting type and main topic (key "
         "participant names only if clearly central).\n"
         "2. A DETAILED summary of 4-7 sentences covering: the main topics discussed, "
-        "any decisions made or positions taken, disagreements or open questions, and "
-        "concrete action items / next steps with owners where stated. Write in plain "
-        "prose, no bullet points, specific rather than generic.\n"
+        "any decisions made or positions taken, disagreements or open questions. "
+        "Write in plain prose, no bullet points, specific rather than generic.\n"
+        "3. NEXT STEPS: every concrete commitment someone made, one per line, "
+        "formatted exactly as:  - [<speaker name as labeled in the transcript>] "
+        "will <specific action> by <stated deadline, or 'no date given'>\n"
+        "Only include commitments actually stated; if there are none, write "
+        "exactly:  - none\n"
         "Answer in exactly this format:\n"
-        "TITLE: <title>\nSUMMARY: <summary>\n\n"
+        "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
         f"TRANSCRIPT:\n{sample}"
     )
     out = _generate(prompt, max_tokens=3000)
-    title, summary = "", []
-    in_summary = False
+    title, summary, steps = "", [], []
+    mode = None
     for line in out.splitlines():
-        if line.upper().startswith("TITLE:"):
+        u = line.upper()
+        if u.startswith("TITLE:"):
             title = line.split(":", 1)[1].strip()
-            in_summary = False
-        elif line.upper().startswith("SUMMARY:"):
+            mode = None
+        elif u.startswith("SUMMARY:"):
             summary.append(line.split(":", 1)[1].strip())
-            in_summary = True
-        elif in_summary and line.strip():
+            mode = "summary"
+        elif u.startswith("NEXT STEPS"):
+            mode = "steps"
+        elif mode == "summary" and line.strip():
             summary.append(line.strip())
+        elif mode == "steps" and line.strip().startswith("-"):
+            item = line.strip().lstrip("-").strip()
+            if item and item.lower() not in ("none", "none stated", "none stated."):
+                steps.append(item)
     summary = " ".join(s for s in summary if s)
     title = re.sub(r'[<>:"/\\|?*]', "", title).strip() or "Untitled Meeting"
-    result = {"title": title, "summary": summary,
+    result = {"title": title, "summary": summary, "next_steps": steps,
               "suggested_name": f"{title} {_date_suffix(base)}"}
     # persist so the panel can show it without regenerating
     j = config.meeting_file(base, ".json")
     try:
         d = json.loads(j.read_text())
         d["ai_title"], d["ai_summary"] = title, summary
+        d["ai_next_steps"] = steps
         d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
         j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
     except Exception:
