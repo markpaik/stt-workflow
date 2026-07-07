@@ -7,6 +7,7 @@ transcription.
 """
 import json
 import os
+import time as _time
 from datetime import datetime
 
 from . import config
@@ -72,8 +73,15 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
         entry["verify"] = verify if verify is not None else prev.get("verify")
     if progress is not None:
         entry["progress"] = round(float(progress), 3)
+        # when the value last CHANGED — long hook-less stretches (pyannote's
+        # clustering tail) freeze the bar; the panel uses this to say "still
+        # working" instead of letting a stale ETA erode trust
+        moved = (prev.get("stage") != stage
+                 or entry["progress"] != prev.get("progress"))
+        entry["progress_at"] = _time.time() if moved else prev.get("progress_at", _time.time())
     elif prev.get("stage") == stage and "progress" in prev:
         entry["progress"] = prev["progress"]
+        entry["progress_at"] = prev.get("progress_at")
     active[name] = entry
     d["active"] = active
     d["pending"] = [p for p in d.get("pending", []) if p != name]

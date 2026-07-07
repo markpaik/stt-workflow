@@ -87,7 +87,17 @@ def load_registry() -> dict:
 
 def save_registry(reg: dict):
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(_registry_path(), json.dumps(reg, indent=2))
+    p = _registry_path()
+    # rolling backup: before overwriting a registry that HAS people, keep the
+    # previous version as .bak — one accidental wipe of this file is the
+    # difference between "restore in seconds" and rebuilding every voiceprint
+    # from meeting caches (biometric data with no other copy on this machine)
+    try:
+        if p.exists() and json.loads(p.read_text()):
+            os.replace(p, p.with_suffix(".json.bak"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    _atomic_write(p, json.dumps(reg, indent=2))
 
 
 def _unique_filename(stem: str, reg: dict) -> str:

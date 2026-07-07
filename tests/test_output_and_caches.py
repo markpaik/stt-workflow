@@ -156,3 +156,43 @@ def test_materialize_deadline_uses_monotonic_not_wallclock(sandbox, monkeypatch)
     monkeypatch.setattr(icloud.time, "time", _boom)
     f = sandbox / "never_appears.m4a"
     assert icloud.materialize(f, timeout=0.3, poll=0.1) is False
+
+
+def test_unknown_ghosts_pruned_when_their_only_meeting_gets_named(sandbox):
+    """A cluster registered as an unknown, later matched to an enrolled person
+    (so promote() never ran): re-assigning that meeting must retire the stale
+    unknown — otherwise 'Speaker N' ghosts pile up in the panel for meetings
+    where everyone is already named. Unknowns seen in OTHER meetings stay."""
+    from stt import config, unknowns
+    v1 = np.random.default_rng(1).normal(size=256)
+    v2 = np.random.default_rng(2).normal(size=256)
+
+    out = unknowns.assign({"SPEAKER_00": v1, "SPEAKER_01": v2},
+                          {"SPEAKER_00": None, "SPEAKER_01": None}, "MtgA")
+    assert set(out.values()) == {"U001", "U002"}
+    # U002's voice also appears in MtgB — multi-meeting evidence
+    unknowns.assign({"SPEAKER_00": v2}, {"SPEAKER_00": None}, "MtgB")
+
+    # relabel of MtgA after enrollment: both clusters now NAMED
+    out = unknowns.assign({"SPEAKER_00": v1, "SPEAKER_01": v2},
+                          {"SPEAKER_00": "Alice", "SPEAKER_01": "Bob"}, "MtgA")
+    assert out == {}
+    reg = unknowns.load()
+    assert "U001" not in reg["speakers"]  # only-MtgA ghost retired
+    assert not (config.VOICEPRINTS_DIR / "U001.npy").exists()
+    assert "U002" in reg["speakers"]  # still evidenced by MtgB
+
+
+def test_registry_backup_survives_a_wipe(sandbox):
+    """Every save that would overwrite a registry WITH people first rolls it
+    to registry.json.bak — one accidental wipe stays a seconds-long restore,
+    not a rebuild of biometric data."""
+    from stt import config, identify
+    identify.enroll("Alice", np.random.default_rng(3).normal(size=256), source="M")
+    identify.enroll("Bob", np.random.default_rng(4).normal(size=256), source="M")
+    identify.save_registry({})  # the wipe
+    assert identify.load_registry() == {}
+    bak = config.VOICEPRINTS_DIR / "registry.json.bak"
+    assert bak.exists()
+    saved = json.loads(bak.read_text())
+    assert set(saved) == {"Alice", "Bob"}  # full pre-wipe registry, restorable
