@@ -90,6 +90,72 @@ def test_stop_kills_even_when_job_queue_clear_fails(sandbox, monkeypatch):
             pass
 
 
+def test_stop_sweeps_the_job_a_dying_batch_requeues(sandbox):
+    """A panel-spawned --job batch re-queues its claimed job from its SIGTERM
+    handler (crash-safety). But stop_run() clears the queue BEFORE sending
+    SIGTERM — so that re-add used to land in the freshly-emptied queue and the
+    panel's idle self-heal restarted the very run the user just stopped.
+    stop_run must sweep again after the group is verified dead."""
+    from stt import jobs
+    jobs.add({"label": "genuinely queued", "files": ["a.m4a"]})
+
+    qfile = jobs.PATH
+    # a real process group whose SIGTERM handler re-queues a job, exactly
+    # like run_batch._terminate does (written directly: the subprocess can't
+    # see this test's monkeypatched sandbox paths)
+    code = (
+        "import json,os,signal,sys,time\n"
+        "def t(s,f):\n"
+        "    json.dump([{'label':'resurrected','files':['a.m4a'],'at':1.0}],"
+        "open(sys.argv[1],'w'))\n"
+        "    os._exit(130)\n"
+        "signal.signal(signal.SIGTERM,t)\n"
+        "time.sleep(60)\n")
+    p = subprocess.Popen([sys.executable, "-c", code, str(qfile),
+                          str(config.PROJECT_DIR)], start_new_session=True)
+    pgid = os.getpgid(p.pid)
+    time.sleep(0.8)
+    try:
+        d = status.read()
+        d.update(running=True, pgid=pgid)
+        status._write(d)
+        assert pgid in control.batch_groups()
+
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == []
+        assert res["cleared_jobs"] == 1  # the genuinely queued run
+        assert jobs.items() == []  # the handler's re-add was swept, not revived
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def test_stop_deadline_uses_monotonic_not_wallclock(sandbox, monkeypatch):
+    """The SIGKILL-escalation grace window must be immune to wall-clock jumps
+    (same class as icloud.materialize's fix). Proven by making time.time()
+    raise: if stop_run still depends on it for the deadline, this fails
+    loudly instead of silently passing."""
+    def _boom():
+        raise AssertionError("stop_run() must not call time.time() for its deadline")
+    monkeypatch.setattr(control.time, "time", _boom)
+
+    p = _spawn_fake_batch(sandbox)
+    pgid = os.getpgid(p.pid)
+    try:
+        d = status.read()
+        d.update(running=True, pgid=pgid)
+        status._write(d)
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == []
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def test_stale_pgid_of_foreign_group_ignored(sandbox):
     """A recycled pgid pointing at processes that are NOT ours must never be
     claimed (stop would kill innocent programs)."""

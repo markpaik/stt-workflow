@@ -1447,10 +1447,10 @@ function openName(uid,display,meeting){
   <input type="text" id="pname" list="knownnames" placeholder="Person’s name" style="width:100%;margin-top:12px">
   <datalist id="knownnames">${opts}</datalist>
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:16px">
-    <button class="danger" onclick="api('/api/forget',{uid:'${uid}'}).then(()=>{dlg.close();refresh()})">Not a real speaker</button>
+    <button class="danger" onclick="api('/api/forget',{uid:'${escJs(uid)}'}).then(()=>{dlg.close();refresh()})">Not a real speaker</button>
     <div style="display:flex;gap:8px">
       <button onclick="dlg.close()">Cancel</button>
-      <button class="primary" onclick="const n=$('#pname').value.trim();if(n)api('/api/name',{uid:'${uid}',name:n}).then(()=>{dlg.close();refresh()})">Save name</button>
+      <button class="primary" onclick="const n=$('#pname').value.trim();if(n)api('/api/name',{uid:'${escJs(uid)}',name:n}).then(()=>{dlg.close();refresh()})">Save name</button>
     </div>
   </div>`;
   dlg.showModal();
