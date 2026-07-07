@@ -106,6 +106,22 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
                                         "created": datetime.now().isoformat(timespec="seconds")}
             out[label] = uid
+        # prune ghosts: an unknown whose ONLY evidence is THIS meeting, whose
+        # own voice a NAMED cluster in this pass now matches — the person got
+        # named via a voiceprint match (promote() never ran), so nothing else
+        # retires the stale "Speaker N" entry. Requiring the voice match keeps
+        # this safe for partial-cluster calls; multi-meeting unknowns are
+        # never touched here.
+        named_vecs = [np.asarray(v, float) for label, v in cent_emb.items()
+                      if cluster_names.get(label)]
+        for uid in [u for u, m in reg["speakers"].items()
+                    if m.get("meetings") == [meeting] and u not in out.values()]:
+            s = _samples(reg, uid)
+            if s is None or not named_vecs:
+                continue
+            if max(score_against(v, s) for v in named_vecs) >= MATCH_MIN:
+                (config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]).unlink(missing_ok=True)
+                del reg["speakers"][uid]
         save(reg)
         return out
 

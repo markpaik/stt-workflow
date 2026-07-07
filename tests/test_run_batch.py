@@ -211,3 +211,26 @@ def test_main_has_no_shadowed_module_imports():
     shadowed = set(run_batch.main.__code__.co_varnames) & {
         "config", "control", "icloud", "jobs", "manifest", "rates", "status"}
     assert not shadowed, f"module names shadowed as locals in main(): {shadowed}"
+
+
+def test_warns_when_registry_empty_but_meetings_have_names(sandbox, monkeypatch):
+    import json
+
+    from conftest import mfile
+    from stt import config
+
+    calls = []
+    monkeypatch.setattr(run_batch.subprocess, "run",
+                        lambda *a, **k: calls.append(a) or types.SimpleNamespace(stdout=""))
+    mfile("Mtg", ".json").write_text(json.dumps(
+        {"speakers": [{"id": "Katie", "name": "Katie"}],
+         "segments": [], "words": []}))
+    assert run_batch.warn_if_registry_lost(config.MEETINGS_DIR) is True
+    assert calls  # user-facing notification attempted
+
+    # a healthy registry: no warning
+    import numpy as np
+
+    from stt import identify
+    identify.enroll("Katie", np.random.default_rng(5).normal(size=256), source="Mtg")
+    assert run_batch.warn_if_registry_lost(config.MEETINGS_DIR) is False

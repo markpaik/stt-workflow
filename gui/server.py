@@ -894,6 +894,21 @@ mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;bor
   background:var(--inset);padding:10px}
 .tseg:hover .segbtn,.tseg:focus-within .segbtn{opacity:1}
 .tseg.editing{cursor:default;background:var(--inset)}
+.hastip{position:relative}
+.hastip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 6px);
+  z-index:30;width:min(560px,80vw);background:var(--card);color:var(--ink);
+  border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  font-size:13px;line-height:1.55;font-style:normal;white-space:normal;
+  box-shadow:0 12px 40px rgba(0,0,0,.18);opacity:0;visibility:hidden;
+  transition:opacity .12s .25s;pointer-events:none}
+.hastip:hover::after{opacity:1;visibility:visible}
+.mtitle,.mdate{cursor:text;border-radius:4px}
+.mtitle:hover,.mdate:hover{background:var(--chip);
+  box-shadow:0 0 0 4px var(--chip)}
+.inline-edit{font:inherit;background:var(--card);color:var(--ink);
+  border:1px solid var(--accent);border-radius:6px;padding:1px 6px}
+.rvnav{width:30px;height:30px;padding:0;border-radius:8px;font-size:14px;
+  display:flex;align-items:center;justify-content:center}
 </style>
 <script>
 // theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint.
@@ -1022,7 +1037,7 @@ function render(){
     return `<div class="row"><div class="grow"><div class="name">${esc(n.replace(/\.[^.]+$/,''))}</div>
     <div class="stagechips">${STAGES.filter(st=>(st!=='verifying'||a.stage==='verifying')&&(st!=='summarizing'||a.stage==='summarizing')).map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
     ${pct!=null?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
-    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left</div>`:'<span class="spin"></span>'}</div></div>`;
+    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">${a.progress_at&&Date.now()/1000-a.progress_at>120?'still working — this stage reports progress coarsely':'≈ '+fmtEta(a.eta_sec)+' left'}</div>`:'<span class="spin"></span>'}</div></div>`;
   }).join(''):(orphaned?'':'<div class="sub">Starting…</div>'))
   +(s.overall_eta_sec?`<div class="sub" style="padding-top:10px">Everything queued: ≈ ${fmtEta(s.overall_eta_sec)} remaining</div>`:'');
   // queued panel runs (redos / hand-picked) — waiting for the current run to finish
@@ -1095,13 +1110,14 @@ function render(){
     ||m.speakers.join(' ').toLowerCase().includes(mq))
     .slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   let lastMon='';
+  if(document.querySelector('#meetings .inline-edit'))return;  // typing in place — don't wipe it
   $('#meetings').innerHTML=shown.map(m=>{
     const mon=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated';
     const hdr=mon!==lastMon?`<div class="mgroup">${mon}</div>`:'';lastMon=mon;
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
-    return hdr+`<div class="row"><div class="grow">
-    <div class="name">${esc(m.base)}</div>
-    <div class="sub">${day?day+' · ':''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
+    return hdr+`<div class="row"><div class="grow${m.summary?' hastip':''}"${m.summary?` data-tip="${esc(m.summary)}"`:''}>
+    <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}',event)" title="Click to rename">${esc(m.base)}</span></div>
+    <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
     <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
@@ -1222,7 +1238,12 @@ async function openReview(base){
   if(!d.items||!d.items.length){alert('Nothing left to review — all resolved.');refresh();return}
   RV={...d,i:0};
   $('#dlg').classList.add('wide');
-  dlg.onclose=()=>{const a=$('#rva');if(a)a.pause();dlg.onclose=null;$('#dlg').classList.remove('wide');refresh()};
+  dlg.onkeydown=e=>{ // ←/→ flip between flagged segments unless typing
+    if(['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))return;
+    if(e.key==='ArrowLeft'){e.preventDefault();rvGo(-1)}
+    if(e.key==='ArrowRight'){e.preventDefault();rvGo(1)}
+  };
+  dlg.onclose=()=>{const a=$('#rva');if(a)a.pause();dlg.onclose=null;dlg.onkeydown=null;$('#dlg').classList.remove('wide');refresh()};
   renderReview();
   dlg.showModal();
 }
@@ -1232,6 +1253,8 @@ function renderReview(){
   const alts=(it.alt||[]).map((a,k)=>`<div class="sub" style="margin-top:4px">Second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}” <button style="font-size:12px;padding:2px 8px" onclick="rvUseAlt(${k})" title="Swap the second engine’s version into the text below">Use it</button></div>`).join('');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Review — ${esc(RV.base)}</h1>
   <div class="sub" style="margin-top:4px;display:flex;gap:8px;align-items:center">
+    <button class="rvnav" onclick="rvGo(-1)" ${RV.i===0?'disabled':''} title="Previous flagged segment (nothing is changed when you flip)">‹</button>
+    <button class="rvnav" onclick="rvGo(1)" ${RV.i>=RV.items.length-1?'disabled':''} title="Next flagged segment (nothing is changed when you flip)">›</button>
     <span>${RV.i+1} of ${RV.items.length} · ${esc(it.flags.join(', '))}${it.minor?' · minor':''}</span>
     ${minorLeft?`<button style="font-size:12px;padding:3px 10px" onclick="rvAcceptMinor()" title="Sub-second crosstalk crumbs (“like”, “so”…) — accept them all in one click; substantial items stay">✓ Accept ${minorLeft} minor</button>`:''}</div>
   <audio id="rva" controls src="/api/audio?base=${encodeURIComponent(RV.base)}"></audio>
@@ -1252,6 +1275,11 @@ function renderReview(){
   </div>`;
   spkWireNew($('#rvspk'));
   rvPlay();
+}
+function rvGo(d){
+  const j=RV.i+d;
+  if(j<0||j>=RV.items.length)return;
+  RV.i=j;renderReview();
 }
 function rvUseAlt(k){
   const a=RV.items[RV.i].alt[k],ta=$('#rvtext');
@@ -1349,6 +1377,41 @@ function spkWireNew(sel){
     const o=document.createElement('option');o.value='name:'+nm;o.textContent=nm;
     sel.insertBefore(o,sel.lastElementChild);sel.value='name:'+nm;
   });
+}
+function inlineRename(base,ev){
+  ev.stopPropagation();
+  const el=ev.currentTarget;
+  el.outerHTML=`<input class="inline-edit" id="ire" value="${esc(base)}" size="${Math.min(60,base.length+4)}">`;
+  const inp=$('#ire');inp.focus();inp.select();
+  let done=false;
+  const finish=async save=>{
+    if(done)return;done=true;
+    const nm=inp.value.trim();
+    if(save&&nm&&nm!==base){
+      const r=await api('/api/rename',{base,new:nm});
+      if(!r.ok)alert(r.error||'Rename failed');
+    }
+    inp.remove();refresh();
+  };
+  inp.onkeydown=e=>{if(e.key==='Enter')finish(true);else if(e.key==='Escape')finish(false)};
+  inp.onblur=()=>finish(true);
+}
+function inlineDate(base,iso,ev){
+  ev.stopPropagation();
+  const el=ev.currentTarget;
+  el.outerHTML=`<input type="date" class="inline-edit" id="ide" value="${esc(iso)}">`;
+  const inp=$('#ide');inp.focus();
+  let done=false;
+  const finish=async save=>{
+    if(done)return;done=true;
+    if(save&&inp.value&&inp.value!==iso){
+      const r=await api('/api/set_date',{base,date:inp.value});
+      if(!r.ok)alert(r.error||'Date not saved');
+    }
+    inp.remove();refresh();
+  };
+  inp.onkeydown=e=>{if(e.key==='Enter')finish(true);else if(e.key==='Escape')finish(false)};
+  inp.onblur=()=>finish(true);
 }
 const HUES=['#0071e3','#34c759','#ff9f0a','#ff375f','#bf5af2','#64d2ff','#ffd60a','#ac8e68'];
 let tvTimer=null,TV=null;

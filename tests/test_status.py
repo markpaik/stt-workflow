@@ -119,3 +119,23 @@ def test_set_stage_remembers_diarize_and_verify_across_calls(sandbox):
     status.set_stage("f.m4a", "converting")  # no diarize/verify passed here
     entry = status.read()["active"]["f.m4a"]
     assert entry["diarize"] is False and entry["verify"] is True
+
+
+def test_progress_at_stamps_only_when_the_bar_moves(sandbox, monkeypatch):
+    """progress_at is the panel's "still working" signal: it updates when the
+    progress VALUE changes and holds still while the value repeats — a frozen
+    bar with an old stamp is how a hook-less stage tail gets labeled."""
+    from stt import status as st
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(st._time, "time", lambda: t["now"])
+    st.set_stage("A.m4a", "diarizing", progress=0.5, duration=100)
+    assert st.read()["active"]["A.m4a"]["progress_at"] == 1000.0
+
+    t["now"] = 1060.0
+    st.set_stage("A.m4a", "diarizing", progress=0.5)  # same value — stamp holds
+    assert st.read()["active"]["A.m4a"]["progress_at"] == 1000.0
+
+    t["now"] = 1120.0
+    st.set_stage("A.m4a", "diarizing", progress=0.87)  # moved — stamp updates
+    assert st.read()["active"]["A.m4a"]["progress_at"] == 1120.0

@@ -137,6 +137,40 @@ def auto_summarize(keys) -> int:
     return n
 
 
+def warn_if_registry_lost(dest: Path):
+    """An empty voiceprint registry alongside meetings that HAVE named
+    speakers means enrollments were lost (deleted file, moved folder) — every
+    new meeting would silently come out anonymous. Say so loudly; the fix is
+    one command."""
+    import json as _json
+
+    from stt import identify
+    if identify.load_registry():
+        return False
+    for base in config.meeting_bases(dest):
+        try:
+            d = _json.loads(config.meeting_file(base, ".json", dest).read_text())
+        except (OSError, ValueError):
+            continue
+        if any(s.get("name") for s in d.get("speakers", [])):
+            print("WARNING: the voiceprint registry is EMPTY but existing "
+                  "transcripts have named speakers — enrollments look lost. "
+                  "New meetings will come out anonymous until it is restored:\n"
+                  "  ./run.sh py tools/rebuild_voiceprints.py --apply\n"
+                  "rebuilds every voiceprint from the meeting caches.",
+                  file=sys.stderr, flush=True)
+            try:
+                subprocess.run(["/usr/bin/osascript", "-e",
+                                'display notification "Voiceprint registry is empty — '
+                                'speaker names will be missing. See logs." '
+                                'with title "STT workflow"'],
+                               capture_output=True, timeout=10)
+            except Exception:
+                pass
+            return True
+    return False
+
+
 def preflight_source(source: Path) -> bool:
     try:
         next(source.iterdir(), None)
@@ -301,6 +335,7 @@ def main():
         n = config.migrate_flat_meetings(dest)
         if n:
             print(f"migrated {n} file(s) into per-meeting folders")
+        warn_if_registry_lost(dest)
 
     if not args.dry_run and not args.no_diarize and not config.resolve_hf_token():
         print("Diarization needs a HuggingFace token (see README).", file=sys.stderr)

@@ -13,7 +13,8 @@ ICLOUD_DIR = Path(
 )
 MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR", HOME / "Projects/brain/meetings"))
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-VOICEPRINTS_DIR = PROJECT_DIR / "voiceprints"
+VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
+                                      PROJECT_DIR / "voiceprints"))
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"
 WORK_DIR = PROJECT_DIR / "work"  # scratch space for normalized wavs
 LOG_DIR = PROJECT_DIR / "logs"
