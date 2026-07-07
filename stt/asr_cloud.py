@@ -50,11 +50,13 @@ def available(provider: str) -> bool:
 
 def _compress_for_upload(wav) -> Path:
     """The 16 kHz PCM working WAV is ~115 MB/hour — recompress to 32 kbps
-    mono AAC (~14 MB/hour) so uploads are fast and fit provider size caps.
+    mono MP3 (~14 MB/hour) so uploads are fast and fit provider size caps.
+    MP3, not AAC: it is the one format all three providers document.
     Caller deletes the temp file."""
-    out = Path(tempfile.mkstemp(suffix=".m4a", prefix="sttup_")[1])
-    subprocess.run([FFMPEG, "-y", "-i", str(wav), "-ac", "1", "-c:a", "aac",
-                    "-b:a", "32k", str(out)], check=True, capture_output=True)
+    out = Path(tempfile.mkstemp(suffix=".mp3", prefix="sttup_")[1])
+    subprocess.run([FFMPEG, "-y", "-i", str(wav), "-ac", "1",
+                    "-c:a", "libmp3lame", "-b:a", "32k", str(out)],
+                   check=True, capture_output=True)
     return out
 
 
@@ -79,7 +81,7 @@ def _words_from_segments(segments):
 
 def _scribe(path, key):
     import requests
-    model = os.environ.get("STT_SCRIBE_MODEL", "scribe_v1")
+    model = os.environ.get("STT_SCRIBE_MODEL", "scribe_v2")
     with open(path, "rb") as fh:
         r = requests.post(
             "https://api.elevenlabs.io/v1/speech-to-text",
@@ -96,8 +98,16 @@ def _scribe(path, key):
     return {"engine": f"elevenlabs/{model}", "text": d.get("text", ""), "words": words}
 
 
+OPENAI_MAX_BYTES = 25 * 1024 * 1024  # documented API cap
+
+
 def _openai(path, key):
     import requests
+    size = Path(path).stat().st_size
+    if size > OPENAI_MAX_BYTES:
+        raise RuntimeError(
+            f"audio is {size / 1e6:.0f} MB compressed — over OpenAI's 25 MB "
+            "cap (~1h45m of audio); use Scribe or the local engine for this one")
     # whisper-1 is the documented word-timestamp path (verbose_json +
     # timestamp_granularities); override via env as newer models gain it
     model = os.environ.get("STT_OPENAI_STT_MODEL", "whisper-1")
@@ -125,7 +135,10 @@ def _voxtral(path, key):
         r = requests.post(
             "https://api.mistral.ai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
-            data={"model": model, "timestamp_granularities": "segment"},
+            # repeated form fields (requests encodes the list) — word for
+            # Transcribe V2, segment kept so older models still return timings
+            data={"model": model,
+                  "timestamp_granularities": ["word", "segment"]},
             files={"file": fh}, timeout=TIMEOUT)
     r.raise_for_status()
     d = r.json()
