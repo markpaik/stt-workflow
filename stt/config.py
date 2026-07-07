@@ -58,11 +58,11 @@ REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"
 # with evidence (unusable/contrary embedding) and never for bare yes/no answers.
 REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.3"))
 # Words that are never smoothed away into a neighbouring speaker: one-word answers
-# carry meaning ("yes" in a hearing), even when the voice evidence is thin.
+# carry meaning ("yes" in a confidential conversation), even when the voice evidence is thin.
 PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agreed",
                    "true", "false", "sure", "okay", "ok", "uh-huh", "mm-hmm"}
 
-# STRICT mode (sensitive recordings, e.g. hearings): no smoothing, no open-set
+# STRICT mode (confidential conversations): no smoothing, no open-set
 # reassignment — fragile attributions are flagged for human review instead of guessed.
 STRICT = os.environ.get("STT_STRICT", "0") == "1"
 

@@ -11,7 +11,7 @@ enrolled voiceprints we can do better, carefully:
   2. Evidence-gated smoothing — tiny sandwiched fragments are re-attributed to the
      surrounding speaker ONLY when the fragment's own embedding is unusable or
      actually favors the neighbour. Bare answers ("yes", "no", ...) are never
-     smoothed: a one-word reply in a hearing means something, and attributing it
+     smoothed: a one-word reply in a confidential conversation means something, and attributing it
      to the questioner is worse than leaving a fragment.
 
 STRICT mode (sensitive recordings): no smoothing, no open-set reassignment —

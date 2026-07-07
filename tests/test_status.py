@@ -174,3 +174,16 @@ def test_eta_trusts_wall_clock_when_the_hook_goes_silent(sandbox, monkeypatch):
     t["now"] = 2500.0
     pct, eta = st.estimate_progress(entry)
     assert 20 <= eta <= 160 and pct < 1.0
+
+
+def test_verify_timings_calibrate_the_secondary_engine(sandbox):
+    """A verify pass is a transcription by the secondary engine — its measured
+    seconds must feed that engine's learned rate, so verify-mode ETAs adapt
+    to the machine instead of staying on factory defaults forever."""
+    from stt import rates
+
+    # 600s of audio, primary parakeet: verify ran on whisper turbo for 60s
+    rates.record(600.0, {"transcribing": 10.0, "verifying": 60.0}, "parakeet")
+    L = rates.learned()
+    assert L["asr"]["parakeet@1"] == 60.0          # 600/10 primary
+    assert L["asr"]["mlxwhisper:turbo@1"] == 10.0  # 600/60 from the verify pass

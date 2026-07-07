@@ -52,7 +52,7 @@ selection, or files from anywhere on disk ("Other files…"), with four
 per-run options:
 
 - **two at a time**: parallel workers, ≈1.7× throughput for a backlog
-- **strict**, for hearings and HR conversations: never guess an uncertain
+- **strict**, for confidential conversations: never guess an uncertain
   speaker (flag it for review instead), and never send audio to any cloud
   engine whatever the global settings say
 - **verify**: a second, architecturally different engine transcribes too;

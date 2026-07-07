@@ -83,6 +83,14 @@ def learned() -> dict:
                 d / secs["transcribing"])
         if secs.get("diarizing"):
             buckets["diarize"].setdefault(n, []).append(d / secs["diarizing"])
+        if secs.get("verifying"):
+            # the verify pass IS a transcription by the secondary engine —
+            # its timing calibrates that engine's rate like any primary run
+            from . import verify as _verify
+            backend, variant = _verify.secondary_engine(r.get("asr", "parakeet"))
+            sec_key = f"{backend}:{variant}" if variant else backend
+            buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
+                d / secs["verifying"])
         if secs.get("writing"):
             buckets["writing"].append(secs["writing"])
 

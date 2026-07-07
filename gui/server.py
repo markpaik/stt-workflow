@@ -951,11 +951,11 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   </div>
   <div style="display:flex;gap:22px;margin-top:10px">
     <label class="sub" style="white-space:nowrap"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
-    <label class="sub" style="white-space:nowrap" title="For sensitive recordings (hearings): never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
+    <label class="sub" style="white-space:nowrap" title="For confidential conversations: never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
     <label class="sub" style="white-space:nowrap" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
     <label class="sub" style="white-space:nowrap" title="Focus groups, interviews with people you'll never need to identify: their voices are NOT added to the Speakers list (and no voice samples are kept for them). The transcript still labels them Speaker 1, 2… and you can still enroll someone from the meeting later."><input type="checkbox" id="onetime" class="checkbox" style="vertical-align:-3px"> one-time speakers</label>
   </div>
-  <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for hearings). “Verify” has a second engine listen too and flags the disagreements.</div>
+  <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for confidential conversations). “Verify” has a second engine listen too and flags the disagreements.</div>
   <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
     <span class="chip" title="A rolling history — each new result pushes the oldest out; the 8 latest show here">last 20 kept</span></h2><div id="recent"></div></div>
 </div>
@@ -1365,7 +1365,7 @@ async function openRedo(base,audio){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Reprocess “${esc(base)}”</h1>
   <p class="muted" style="margin-top:8px">Re-runs transcription + speaker detection from the stored audio with the current model and speaker library. The existing transcript is replaced.</p>
   ${ed.n?`<p class="muted" style="margin-top:8px;color:var(--warn,#c60)"><b>⚠ This meeting has ${ed.n} manual edit${ed.n>1?'s':''}</b> (corrections, added or removed lines). A redo rebuilds everything from the audio, so they will no longer apply — they’re archived to a “.reviews.superseded.json” file next to the transcript, not deleted.</p>`:''}
-  <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for hearings)</label>
+  <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for confidential conversations)</label>
   <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoverify" class="checkbox" style="vertical-align:-3px"> verify — a second engine listens too; disagreements get flagged with both versions</label>
   <label class="sub" style="display:block;margin-top:6px"><input type="checkbox" id="redoonetime" class="checkbox" style="vertical-align:-3px"> one-time speakers — don’t add this meeting’s unnamed voices to the Speakers list (focus groups)</label>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
@@ -1629,8 +1629,16 @@ async function tvRetrans(i,ev){
   ev.stopPropagation();
   const g=TV.segs[i];
   const eng=$('#tvengine').value;
-  $('#tvrx').innerHTML='<span class="spin"></span> listening again… ('+(eng==='parakeet'?'~15s':'~30–60s')+')';
+  // estimate from THIS machine's own past re-transcriptions (localStorage
+  // median per engine) — no hardcoded numbers that lie on faster/slower Macs
+  const hist=JSON.parse(localStorage.getItem('stt_retrans_secs')||'{}');
+  const past=(hist[eng]||[]).slice().sort((a,b)=>a-b);
+  const estTxt=past.length?` (~${Math.round(past[Math.floor(past.length/2)])}s on this Mac)`:'';
+  $('#tvrx').innerHTML='<span class="spin"></span> listening again…'+estTxt;
+  const t0=Date.now();
   const r=await api('/api/retranscribe',{base:TV.base,start:g.start,end:g.end,engine:eng});
+  hist[eng]=((hist[eng]||[]).concat((Date.now()-t0)/1000)).slice(-5);
+  localStorage.setItem('stt_retrans_secs',JSON.stringify(hist));
   if(r.error){$('#tvrx').textContent='failed: '+r.error;return}
   $('#tvta').value=r.text;
   $('#tvrx').textContent='proposed by '+(r.engine||'second engine')+' — edit if needed, then Save';
