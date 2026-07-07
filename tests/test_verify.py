@@ -1,0 +1,107 @@
+"""verify: cross-engine disagreement detection — alignment, filler tolerance,
+region merging, segment flagging, and the sidecar that survives relabels."""
+import json
+
+from stt import config, verify
+
+
+def _w(items):
+    """[(start, end, word)] -> word dicts."""
+    return [{"start": s, "end": e, "word": w} for s, e, w in items]
+
+
+PRIMARY = _w([(0.0, 0.4, "We"), (0.4, 0.8, "reviewed"), (0.8, 1.2, "the"),
+              (1.2, 1.8, "dashboard"), (5.0, 5.4, "numbers"), (5.4, 5.9, "today.")])
+
+
+def test_agreeing_streams_produce_no_regions():
+    assert verify.regions(PRIMARY, PRIMARY) == []
+
+
+def test_substitution_region_with_correct_span():
+    secondary = _w([(0.0, 0.4, "We"), (0.4, 0.8, "renewed"), (0.8, 1.2, "the"),
+                    (1.2, 1.8, "dashboard"), (5.0, 5.4, "numbers"), (5.4, 5.9, "today.")])
+    regs = verify.regions(PRIMARY, secondary)
+    assert len(regs) == 1
+    r = regs[0]
+    assert r["ours"] == "reviewed" and r["theirs"] == "renewed"
+    assert r["start"] == 0.4 and r["end"] == 0.8  # primary word timing
+
+
+def test_filler_only_difference_is_ignored():
+    secondary = _w([(0.0, 0.4, "We"), (0.35, 0.4, "um"), (0.4, 0.8, "reviewed"),
+                    (0.8, 1.2, "the"), (1.2, 1.8, "dashboard"),
+                    (5.0, 5.4, "numbers"), (5.4, 5.9, "today.")])
+    assert verify.regions(PRIMARY, secondary) == []
+
+
+def test_insertion_anchors_between_neighbors():
+    """Second engine heard an extra word the primary missed entirely."""
+    secondary = _w([(0.0, 0.4, "We"), (0.4, 0.8, "reviewed"), (0.8, 1.2, "the"),
+                    (1.2, 1.8, "dashboard"), (2.0, 2.4, "carefully"),
+                    (5.0, 5.4, "numbers"), (5.4, 5.9, "today.")])
+    regs = verify.regions(PRIMARY, secondary)
+    assert len(regs) == 1
+    r = regs[0]
+    assert r["theirs"] == "carefully" and r["ours"] == ""
+    assert 1.8 <= r["start"] <= r["end"] <= 5.0  # sits in the gap
+
+
+def test_adjacent_regions_merge():
+    secondary = _w([(0.0, 0.4, "He"), (0.4, 0.8, "renewed"), (0.8, 1.2, "the"),
+                    (1.2, 1.8, "dashboard"), (5.0, 5.4, "numbers"), (5.4, 5.9, "today.")])
+    regs = verify.regions(PRIMARY, secondary)
+    assert len(regs) == 1  # "he/we" + "renewed/reviewed" 0s apart -> one item
+    assert "we" in regs[0]["ours"] and "reviewed" in regs[0]["ours"]
+
+
+def test_apply_flags_attaches_alt_and_skips_reviewed():
+    segments = [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "We reviewed the dashboard", "flags": []},
+        {"start": 5.0, "end": 6.0, "speaker": "SPEAKER_01", "text": "numbers today.", "flags": [],
+         "reviewed": "accepted"},
+    ]
+    regs = [{"start": 0.4, "end": 0.8, "ours": "reviewed", "theirs": "renewed"},
+            {"start": 5.1, "end": 5.3, "ours": "numbers", "theirs": "number"}]
+    n = verify.apply_flags(segments, regs)
+    assert n == 1
+    assert verify.FLAG in segments[0]["flags"]
+    assert segments[0]["alt"][0]["theirs"] == "renewed"
+    assert "alt" not in segments[1] and segments[1]["flags"] == []  # reviewed: untouched
+
+
+def test_secondary_engine_is_architecturally_different():
+    assert verify.secondary_engine("mlx-community/parakeet-tdt-0.6b-v2") == ("mlxwhisper", "turbo")
+    assert verify.secondary_engine("mlx-whisper/large-v3") == ("parakeet", None)
+
+
+def test_sidecar_roundtrip(sandbox):
+    regs = [{"start": 1.0, "end": 2.0, "ours": "a", "theirs": "b"}]
+    verify.save_sidecar("Mtg", regs, "mlx-whisper/turbo")
+    got = verify.load_sidecar("Mtg")
+    assert got["engine"] == "mlx-whisper/turbo" and got["regions"] == regs
+    assert verify.load_sidecar("Nothing") is None
+    # a corrupt sidecar degrades to None, never a crash
+    verify.sidecar_path("Bad").write_text("{nope")
+    assert verify.load_sidecar("Bad") is None
+
+
+def test_verify_flag_is_reviewable(sandbox):
+    """The flag round-trips through the review workflow like any other."""
+    from stt import review
+    segments = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "name": "Mark",
+                 "display": "Mark", "text": "We reviewed the dashboard",
+                 "flags": [verify.FLAG], "overlap": False,
+                 "alt": [{"start": 0.4, "end": 0.8, "ours": "reviewed", "theirs": "renewed"}]}]
+    data = {"source_file": "Mtg.m4a", "duration_sec": 2.0, "strict": False,
+            "speakers": [{"id": "SPEAKER_00", "name": "Mark", "display": "Mark"}],
+            "segments": segments, "words": []}
+    (config.MEETINGS_DIR / "Mtg.json").write_text(json.dumps(data))
+    (config.MEETINGS_DIR / "Mtg.txt").write_text("stub")
+
+    out = review.list_flagged("Mtg")
+    assert out["items"][0]["alt"][0]["theirs"] == "renewed"
+    r = review.apply("Mtg", 0, "edit", start=0.0, text="We renewed the dashboard")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    assert d["segments"][0]["flags"] == [] and "alt" not in d["segments"][0]

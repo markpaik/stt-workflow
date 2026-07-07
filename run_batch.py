@@ -131,6 +131,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
 
     res = pipeline.process_file(
         src, dest_dir=dest, do_diarize=opts["do_diarize"], strict=opts["strict"],
+        do_verify=opts.get("verify", False),
         allowed_names=opts["allowed"], report=report)
     if cur["stage"]:  # close out the final stage (writing ends when we return)
         stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (_time.monotonic() - cur["t"])
@@ -172,6 +173,9 @@ def main():
                     help="process up to 2 files at once")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--verify", action="store_true",
+                    help="second-opinion pass: another engine transcribes too and "
+                         "engine disagreements are flagged for review")
     ap.add_argument("--speakers", help="comma-separated attendee names to allow")
     ap.add_argument("--ignore-battery", action="store_true")
     ap.add_argument("--ignore-pause", action="store_true",
@@ -265,6 +269,7 @@ def main():
     status.start_run([s.name for s in todo])
     base_opts = {"do_diarize": not args.no_diarize,
                  "strict": args.strict or config.STRICT,
+                 "verify": args.verify or config.VERIFY,
                  "allowed": [s.strip() for s in args.speakers.split(",")] if args.speakers else None,
                  "do_move": config.MOVE_AFTER_SUCCESS and not args.keep_original}
 

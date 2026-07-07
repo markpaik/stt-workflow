@@ -21,6 +21,11 @@ personnel conversations, anything sensitive.
 - **Hallucination-loop defense**: Whisper's classic "now now now…" repetition
   loops are prevented at the decoder, collapsed if they slip through, and
   flagged for human review — and existing transcripts self-heal on relabel
+- **Verify mode (second opinion)**: a second, architecturally different engine
+  transcribes the same audio and every disagreement is flagged for review with
+  both candidates shown against the audio. Where the engines agree (~95% of
+  words on our benchmark) no review is needed — agreed words matched an
+  independent commercial reference ~94% of the time
 - Word-preserving **punctuation/truecasing restoration** for Parakeet output
   (an ONNX post-processor that can never alter words)
 - Accepts anything ffmpeg reads — including **video containers** (the audio
@@ -54,8 +59,12 @@ personnel conversations, anything sensitive.
 - Edit **any** line in Read mode (not just flagged ones), with the option to
   **re-transcribe that span** using your choice of engine — a different model
   than the original gives an independent second opinion
+- Reassign a line to **anyone** — another speaker in the meeting, any enrolled
+  person, or a brand-new name the diarizer never detected (a voice buried in
+  crosstalk); **add a line** the pipeline missed entirely, or **remove** a
+  bogus one (echo, noise heard as speech)
 - Human decisions are stored separately and **survive every relabel** —
-  corrections are never silently lost
+  corrections, added and removed lines are never silently lost
 
 **Reading, search & organization**
 

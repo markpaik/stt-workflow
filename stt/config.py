@@ -65,6 +65,12 @@ PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agre
 # reassignment — fragile attributions are flagged for human review instead of guessed.
 STRICT = os.environ.get("STT_STRICT", "0") == "1"
 
+# VERIFY mode (second opinion): a second ASR engine transcribes too, and the
+# regions where the engines disagree are flagged for review with both candidates.
+# Measured 07/2026: where the engines agree (~95% of words) they match the
+# Scribe benchmark ~94% of the time, so only disagreements need human ears.
+VERIFY = os.environ.get("STT_VERIFY", "0") == "1"
+
 # --- Punctuation restoration (fixes Parakeet's lowercase run-ons; word-preserving) ---
 PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
 

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import audio, config, diarcache, diarize, merge, output, sanitize, punctuate, unknowns
+from . import (audio, config, diarcache, diarize, merge, output, sanitize,
+               punctuate, unknowns, verify)
 
 
 def _load_asr():
@@ -19,11 +20,12 @@ def _load_asr():
 
 
 def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
-                 strict=None, allowed_names=None, report=None,
+                 strict=None, allowed_names=None, report=None, do_verify=None,
                  num_speakers=None, min_speakers=None, max_speakers=None) -> dict:
     src = Path(src)
     report = report or (lambda *a, **k: None)
     strict = config.STRICT if strict is None else strict
+    do_verify = config.VERIFY if do_verify is None else do_verify
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
     base = src.stem
@@ -75,6 +77,13 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         if config.PUNCTUATE:
             punctuate.restore_segments(segments)
         speakers = output.build_speakers(labels, names)
+
+        verify_engine, verify_regions = None, None
+        if do_verify and words:
+            report("verifying", 0.0)
+            verify_regions, verify_engine = verify.run(
+                wav, words, asr_out["engine"], progress=lambda f: report("verifying", f))
+            verify.apply_flags(segments, verify_regions)
     finally:
         wav.unlink(missing_ok=True)
 
@@ -89,11 +98,15 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "n_speakers": len(labels),
         "strict": strict,
         "punctuated": bool(config.PUNCTUATE),
+        "verify_engine": verify_engine,
         "overlap_spans": [[s, e] for s, e in overlaps],
         "refine_stats": diar["refine_stats"] if diar else None,
     }
     output.write_txt(txt_path, segments, header=header)
     output.write_json(json_path, meta, speakers, segments, labeled_words)
+    if verify_regions is not None:
+        # sidecar: relabel rebuilds segments from the diar cache and re-flags from this
+        verify.save_sidecar(base, verify_regions, verify_engine, dest_dir=dest_dir)
 
     saved_emb = None
     if save_embeddings and diar and diar.get("embeddings"):

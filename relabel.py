@@ -66,9 +66,15 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                                                      spans=stats.get("spans", []) + loop_spans)
     if config.PUNCTUATE:
         punctuate.restore_segments(segments)
+    # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)
+    from stt import verify
+    vc = verify.load_sidecar(base)
+    if vc:
+        verify.apply_flags(segments, vc.get("regions", []))
     data["segments"], data["words"] = segments, labeled_words
     # human review decisions outlive any relabel — reapply them onto the
-    # freshly-rebuilt segments (accepts, text edits, speaker reassignments)
+    # freshly-rebuilt segments (accepts, text edits, speaker reassignments,
+    # inserted/removed lines) and clear the flags they resolved
     from stt import review
     review.reapply_decisions(base, data)
     segments, labeled_words = data["segments"], data["words"]

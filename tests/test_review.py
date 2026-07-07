@@ -138,6 +138,69 @@ def test_accept_decision_survives_relabel(sandbox):
     assert data["segments"][1]["flags"] == []
 
 
+def test_reassign_to_person_not_in_meeting(sandbox):
+    """Crosstalk misattribution: the real speaker was never diarized. 'name:'
+    creates a manual speaker entry, updates words, and shows in the .txt."""
+    _make_meeting(sandbox)
+    r = review.apply("Mtg", 1, "edit", start=5.0, speaker_id="name:Louise")
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    seg = d["segments"][1]
+    assert seg["speaker"] == "MANUAL_1" and seg["display"] == "Louise"
+    assert any(s["id"] == "MANUAL_1" and s["manual"] for s in d["speakers"])
+    w = [w for w in d["words"] if w["word"] == "uncertain"][0]
+    assert w["speaker"] == "MANUAL_1"
+    assert "Louise: Uncertain bit here." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    # same name again resolves to the SAME entry, not MANUAL_2
+    review.apply("Mtg", 0, "edit", start=0.0, speaker_id="name:Louise")
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    assert sum(1 for s in d["speakers"] if str(s["id"]).startswith("MANUAL_")) == 1
+
+
+def test_insert_and_delete_line(sandbox):
+    _make_meeting(sandbox)
+    r = review.insert_segment("Mtg", 5.0, 6.0, "name:Omar", "Quick interjection.")
+    assert r["ok"] and r["index"] == 2  # after the 5.0s segment (ties sort stable)
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    seg = d["segments"][r["index"]]
+    assert seg["inserted"] and seg["display"] == "Omar" and seg["attribution"] == "manual"
+    assert [s["start"] for s in d["segments"]] == sorted(s["start"] for s in d["segments"])
+    assert "Omar: Quick interjection." in (config.MEETINGS_DIR / "Mtg.txt").read_text()
+    # guards
+    assert not review.insert_segment("Mtg", 1.0, 2.0, "name:X", "  ")["ok"]
+    assert not review.insert_segment("Mtg", 1.0, 2.0, "SPEAKER_99", "hi")["ok"]
+
+    # delete the flagged line: words detach, decision recorded
+    r = review.delete_segment("Mtg", 1, start=5.0)
+    assert r["ok"]
+    d = json.loads((config.MEETINGS_DIR / "Mtg.json").read_text())
+    assert all(s["text"] != "Uncertain bit here." for s in d["segments"])
+    w = [w for w in d["words"] if w["word"] == "uncertain"][0]
+    assert w["speaker"] is None
+    assert not review.delete_segment("Mtg", 0, start=99.0)["ok"]  # stale guard
+
+
+def test_insert_delete_and_manual_speaker_survive_relabel(sandbox):
+    """All three new decision types re-apply onto rebuilt segments."""
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, speaker_id="name:Louise")
+    review.insert_segment("Mtg", 6.5, 7.5, "name:Omar", "Missed line.")
+    review.delete_segment("Mtg", 0, start=0.0)
+
+    data = _make_meeting(sandbox)  # simulate relabel rebuild
+    n = review.reapply_decisions("Mtg", data)
+    assert n == 3
+    texts = [s["text"] for s in data["segments"]]
+    assert "Clean opening turn." not in texts           # delete re-applied
+    assert "Missed line." in texts                       # insert re-applied
+    ins = next(s for s in data["segments"] if s.get("inserted"))
+    assert ins["display"] == "Omar"
+    seg = next(s for s in data["segments"] if s["text"] == "Uncertain bit here.")
+    assert seg["display"] == "Louise"                    # manual person recreated
+    assert any(str(s["id"]).startswith("MANUAL_") for s in data["speakers"])
+    assert [s["start"] for s in data["segments"]] == sorted(s["start"] for s in data["segments"])
+
+
 def test_retranscribe_engine_selection(sandbox):
     from stt import retranscribe
     import stt.asr_parakeet, stt.asr_mlxwhisper, os

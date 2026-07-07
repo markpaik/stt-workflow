@@ -43,6 +43,7 @@ def list_flagged(base: str) -> dict:
             "speaker": s.get("speaker"),
             "display": s.get("display") or output.speaker_display(s.get("speaker"), s.get("name")),
             "text": s.get("text", ""), "flags": s.get("flags", []),
+            "alt": s.get("alt"),  # second engine's candidate(s), verify mode
             "minor": is_minor(s),
             "prev": segs[i - 1]["text"][-90:] if i > 0 else "",
             "next": segs[i + 1]["text"][:90] if i + 1 < len(segs) else "",
@@ -51,7 +52,9 @@ def list_flagged(base: str) -> dict:
     return {"base": base, "items": items,
             "n_minor": sum(1 for x in items if x["minor"]),
             "speakers": [{"id": s["id"], "display": s["display"]}
-                         for s in data.get("speakers", [])]}
+                         for s in data.get("speakers", [])],
+            # enrolled people, for reassigning to someone the diarizer missed
+            "people": sorted(identify.load_registry().keys())}
 
 
 def accept_minor(base: str) -> dict:
@@ -66,6 +69,7 @@ def accept_minor(base: str) -> dict:
                                     "action": "accept", "text": None, "speaker_id": None})
             seg["flags"] = []
             seg["overlap"] = False
+            seg.pop("alt", None)
             n += 1
     if n:
         _rewrite(jpath, data)
@@ -84,6 +88,41 @@ def _rewrite(jpath, data):
                                data.get("duration_sec", 0), speakers,
                                data.get("strict", False))
     output.write_txt(jpath.with_suffix(".txt"), segments, header=header)
+
+
+def _resolve_speaker(data, spec):
+    """Resolve a speaker spec to this meeting's speaker entry, creating one when
+    the person isn't among the diarized speakers. spec is either an existing
+    speaker id ("SPEAKER_03") or "name:<who>" — an enrolled person or a brand-new
+    name typed by the human (a voice diarization missed entirely, e.g. crosstalk).
+    Manual entries get ids MANUAL_1, MANUAL_2… and their display is the name."""
+    speakers = data.setdefault("speakers", [])
+    by_id = {s["id"]: s for s in speakers}
+    if spec in by_id:
+        return by_id[spec]
+    if not (spec or "").startswith("name:"):
+        return None
+    nm = spec[5:].strip()
+    if not nm:
+        return None
+    for s in speakers:
+        if nm in (s.get("name"), s.get("display")):
+            return s
+    n = 1 + sum(1 for s in speakers if str(s["id"]).startswith("MANUAL_"))
+    entry = {"id": f"MANUAL_{n}", "name": nm, "global_id": None,
+             "display": nm, "match_score": None, "manual": True}
+    speakers.append(entry)
+    return entry
+
+
+def _set_segment_speaker(data, seg, sp):
+    seg["speaker"] = sp["id"]
+    seg["name"] = sp.get("name")
+    seg["display"] = sp["display"]
+    # keep word-level labels consistent with the human's call
+    for w in data.get("words", []):
+        if seg["start"] <= w["start"] < seg["end"]:
+            w["speaker"] = sp["id"]
 
 
 def apply(base: str, index: int, action: str, start: float = None,
@@ -106,29 +145,72 @@ def apply(base: str, index: int, action: str, start: float = None,
             seg["text"] = text.strip()
             seg["text_edited"] = True
         if speaker_id:
-            by_id = {s["id"]: s for s in data.get("speakers", [])}
-            sp = by_id.get(speaker_id)
+            sp = _resolve_speaker(data, speaker_id)
             if sp is None:
                 return {"ok": False, "error": f"unknown speaker {speaker_id}"}
-            seg["speaker"] = sp["id"]
-            seg["name"] = sp.get("name")
-            seg["display"] = sp["display"]
-            # keep word-level labels consistent with the human's call
-            for w in data.get("words", []):
-                if seg["start"] <= w["start"] < seg["end"]:
-                    w["speaker"] = sp["id"]
+            _set_segment_speaker(data, seg, sp)
         seg["reviewed"] = "edited"
     else:
         return {"ok": False, "error": f"unknown action {action}"}
 
     seg["flags"] = []
     seg["overlap"] = False
+    seg.pop("alt", None)
     _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
                             "text": text if action == "edit" else None,
                             "speaker_id": speaker_id if action == "edit" else None})
     _rewrite(jpath, data)
     remaining = sum(1 for s in segs if s.get("flags") and not s.get("reviewed"))
     return {"ok": True, "remaining": remaining}
+
+
+def insert_segment(base: str, start: float, end: float, speaker_id: str,
+                   text: str) -> dict:
+    """Add a line the pipeline missed entirely (a voice buried in crosstalk).
+    The segment is human-authored: no word-level timing entries, marked
+    inserted + text_edited, and it survives every relabel via the decisions
+    sidecar."""
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is required"}
+    jpath, data = _load(base)
+    sp = _resolve_speaker(data, speaker_id)
+    if sp is None:
+        return {"ok": False, "error": f"unknown speaker {speaker_id}"}
+    start, end = float(start), float(end)
+    if end <= start:
+        end = start + 1.0
+    seg = {"start": round(start, 3), "end": round(end, 3), "speaker": sp["id"],
+           "text": text.strip(), "attribution": "manual", "flags": [],
+           "overlap": False, "name": sp.get("name"), "display": sp["display"],
+           "text_edited": True, "inserted": True, "reviewed": "edited"}
+    segs = data.get("segments", [])
+    pos = next((i for i, s in enumerate(segs) if s["start"] > seg["start"]), len(segs))
+    segs.insert(pos, seg)
+    _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                            "action": "insert", "text": seg["text"],
+                            "speaker_id": speaker_id})
+    _rewrite(jpath, data)
+    return {"ok": True, "index": pos}
+
+
+def delete_segment(base: str, index: int, start: float = None) -> dict:
+    """Remove a line (echo, hallucination, misheard non-speech). Its words are
+    detached from any speaker rather than deleted — the ASR record stays honest."""
+    jpath, data = _load(base)
+    segs = data.get("segments", [])
+    if not (0 <= index < len(segs)):
+        return {"ok": False, "error": "segment index out of range"}
+    seg = segs[index]
+    if start is not None and abs(seg["start"] - float(start)) > 0.25:
+        return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
+    segs.pop(index)
+    for w in data.get("words", []):
+        if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
+            w["speaker"] = None
+    _record_decision(base, {"start": seg["start"], "end": seg["end"],
+                            "action": "delete", "text": None, "speaker_id": None})
+    _rewrite(jpath, data)
+    return {"ok": True}
 
 
 def _decisions_path(base: str):
@@ -155,7 +237,9 @@ def _record_decision(base: str, decision: dict):
 
 def reapply_decisions(base: str, data: dict) -> int:
     """Re-apply recorded review decisions onto freshly-rebuilt segments (called
-    by relabel after it regenerates a meeting). Returns how many were applied."""
+    by relabel after it regenerates a meeting). Handles accepts, edits and
+    speaker reassignments (including manual people the diarizer never saw),
+    plus human-inserted and human-deleted lines. Returns how many applied."""
     p = _decisions_path(base)
     if not p.exists():
         return 0
@@ -163,27 +247,46 @@ def reapply_decisions(base: str, data: dict) -> int:
         decisions = json.loads(p.read_text())
     except json.JSONDecodeError:
         return 0
-    by_id = {s["id"]: s for s in data.get("speakers", [])}
+    segs = data.get("segments", [])
     applied = 0
     for dec in decisions:
-        seg = next((s for s in data.get("segments", [])
-                    if abs(s["start"] - dec["start"]) <= 0.3), None)
+        if dec["action"] == "insert":
+            seg = {"start": dec["start"], "end": dec["end"], "speaker": None,
+                   "text": dec.get("text") or "", "attribution": "manual",
+                   "flags": [], "overlap": False, "text_edited": True,
+                   "inserted": True, "reviewed": "edited"}
+            sp = _resolve_speaker(data, dec.get("speaker_id") or "")
+            if sp:
+                seg["speaker"], seg["name"] = sp["id"], sp.get("name")
+                seg["display"] = sp["display"]
+            pos = next((i for i, s in enumerate(segs)
+                        if s["start"] > seg["start"]), len(segs))
+            segs.insert(pos, seg)
+            applied += 1
+            continue
+        seg = next((s for s in segs
+                    if abs(s["start"] - dec["start"]) <= 0.3
+                    and not s.get("inserted")), None)
         if seg is None:
+            continue
+        if dec["action"] == "delete":
+            segs.remove(seg)
+            for w in data.get("words", []):
+                if seg["start"] <= w["start"] < seg["end"] and w.get("speaker") == seg.get("speaker"):
+                    w["speaker"] = None
+            applied += 1
             continue
         if dec["action"] == "edit":
             if dec.get("text"):
                 seg["text"] = dec["text"]
                 seg["text_edited"] = True
-            sp = by_id.get(dec.get("speaker_id") or "")
+            sp = _resolve_speaker(data, dec.get("speaker_id") or "")
             if sp:
-                seg["speaker"], seg["name"] = sp["id"], sp.get("name")
-                seg["display"] = sp["display"]
-                for w in data.get("words", []):
-                    if seg["start"] <= w["start"] < seg["end"]:
-                        w["speaker"] = sp["id"]
+                _set_segment_speaker(data, seg, sp)
         seg["reviewed"] = "edited" if dec["action"] == "edit" else "accepted"
         seg["flags"] = []
         seg["overlap"] = False
+        seg.pop("alt", None)
         applied += 1
     return applied
 

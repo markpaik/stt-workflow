@@ -34,22 +34,38 @@ def _text_norm(s: str) -> str:
 
 # ---------- parsers ----------
 
+_EVENT = re.compile(r"^\[[^\]]*\]?$|^[^\[]*\]$")  # "[laughter]", "[microphone", "thudding]"
+
+
 def parse_scribe(path) -> dict:
-    """ElevenLabs Scribe JSON -> {words, turns, by_speaker}. Tolerant of field names."""
+    """ElevenLabs Scribe JSON -> {words, turns, by_speaker}.
+
+    Handles both export shapes: flat {words:[{text,speaker_id,start,end}]} and
+    {segments:[{speaker:{id}, words:[{text,start_time,end_time}]}]}. Spacing
+    tokens and bracketed audio events ("[laughter]") are dropped — our pipeline
+    doesn't emit them, so they'd count as spurious deletions.
+    """
     data = json.loads(open(path).read()) if isinstance(path, str) else path
     words = []
+    for seg in data.get("segments", []):
+        spk = str((seg.get("speaker") or {}).get("id", "spk0"))
+        for w in seg.get("words", []):
+            txt = (w.get("text") or "").strip()
+            if not txt or _EVENT.match(txt):
+                continue
+            words.append({"start": float(w["start_time"]), "end": float(w["end_time"]),
+                          "word": txt, "speaker": spk})
     for w in data.get("words", []):
-        typ = w.get("type", "word")
-        if typ != "word":
+        if w.get("type", "word") != "word":
             continue
         txt = (w.get("text") or w.get("word") or "").strip()
-        if not txt:
+        if not txt or _EVENT.match(txt):
             continue
         spk = str(w.get("speaker_id", w.get("speaker", "spk0")))
         words.append({"start": float(w.get("start", 0.0)),
                       "end": float(w.get("end", w.get("start", 0.0))),
                       "word": txt, "speaker": spk})
-    return _finalize(words, full_text=data.get("text"))
+    return _finalize(words, full_text=None)
 
 
 def parse_ours(path) -> dict:
