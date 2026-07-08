@@ -962,6 +962,12 @@ border:1px solid var(--hairline);color:var(--sub)}
 .stagechips .s.on{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+/* Speakers card: exactly as tall as the Settings card beside it, never taller.
+   The list scrolls inside an absolutely-positioned inner (absolute content
+   contributes nothing to grid row sizing, so Settings alone sets the height). */
+.spkcard{display:flex;flex-direction:column;min-height:0}
+.spkscroll{position:relative;flex:1;min-height:300px}
+.spkscroll-in{position:absolute;inset:0;overflow-y:auto;overscroll-behavior:contain}
 .checkbox{width:16px;height:16px;accent-color:var(--accent);flex:none}
 dialog{margin:auto;border:1px solid var(--line);border-radius:14px;padding:26px;
 background:var(--card);color:var(--ink);
@@ -1064,10 +1070,14 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 </div>
 
 <div class="grid2">
-<div class="card">
-  <h2>Speakers</h2>
-  <div id="enrolled"></div>
-  <div id="unknowns"></div>
+<div class="card spkcard">
+  <h2>Speakers <span class="grow"></span>
+    <label class="sub" style="font-weight:400;white-space:nowrap" title="Show only voices without a name yet"><input type="checkbox" id="spkunk" class="checkbox" style="vertical-align:-2px" onchange="render()"> unidentified only</label>
+    <input type="text" id="spkfilter" placeholder="Find a speaker…" oninput="render()" style="width:min(150px,28vw);font-size:13px"></h2>
+  <div class="spkscroll"><div class="spkscroll-in">
+    <div id="enrolled"></div>
+    <div id="unknowns"></div>
+  </div></div>
   <div id="relnote" class="muted" style="display:none;margin-top:8px"></div>
 </div>
 <div class="card">
@@ -1189,12 +1199,20 @@ function render(){
     ?`Measured from ${s.rates.runs} run${s.rates.runs>1?'s':''}: ${s.rates.text} realtime — estimates improve automatically`
     :'Estimates use factory measurements until a few runs complete';
   // speakers (▶ = one-tap voice playback, found automatically in recent meetings)
-  $('#enrolled').innerHTML=s.enrolled.map(e=>`<div class="row">
+  const sq=($('#spkfilter').value||'').trim().toLowerCase();
+  const unkOnly=$('#spkunk').checked;
+  const smatch=t=>!sq||(t||'').toLowerCase().includes(sq);
+  const enr=unkOnly?[]:s.enrolled.filter(e=>smatch(e.name));
+  $('#enrolled').innerHTML=enr.map(e=>`<div class="row">
     <button class="playbtn" data-key="${esc(e.name)}" onclick="playVoice(this)">▶</button>
     <div class="grow"><div class="name">${esc(e.name)}</div>
     <div class="sub" title="${esc((e.sources||[]).join(', '))}">${e.samples} voice sample${e.samples>1?'s':''}${e.sources&&e.sources.length?' · from '+esc(e.sources[e.sources.length-1])+(e.sources.length>1?' +'+(e.sources.length-1):''):''}</div></div>
-    <button onclick="openSpeakerActions('name:${escJs(e.name)}','${escJs(e.name)}','')">⋯</button></div>`).join('')||'<div class="sub">No one enrolled yet.</div>';
-  const vis=s.unknowns.filter(u=>!u.archived),hid=s.unknowns.filter(u=>u.archived);
+    <button onclick="openSpeakerActions('name:${escJs(e.name)}','${escJs(e.name)}','')">⋯</button></div>`).join('')
+    ||(unkOnly?'':`<div class="sub">${sq?'No enrolled speaker matches “'+esc(sq)+'”.':'No one enrolled yet.'}</div>`);
+  // the unknowns search also matches the meetings a voice was heard in, so
+  // "who was that in Tuesday's sync?" is findable by the meeting's name
+  const vis=s.unknowns.filter(u=>!u.archived&&(smatch(u.display)||u.meetings.some(smatch))),
+        hid=s.unknowns.filter(u=>u.archived&&(smatch(u.display)||u.meetings.some(smatch)));
   $('#unknowns').innerHTML=vis.map(u=>`<div class="row">
     <button class="playbtn" data-key="${u.uid}" data-meeting="${esc(u.meetings[0]||'')}" onclick="playVoice(this)">▶</button>
     <div class="grow"><div class="name">${esc(u.display)}</div>
@@ -1207,7 +1225,7 @@ function render(){
         <div class="grow"><div class="name">${esc(u.display)}</div>
         <div class="sub">hidden · heard in ${u.meetings.length} meeting${u.meetings.length>1?'s':''}</div></div>
         <button onclick="api('/api/hide_unknown',{uid:'${escJs(u.uid)}',hide:false}).then(refresh)">Restore</button></div>`).join(''):''):'')
-    ||'<div class="sub" style="padding-top:8px">No unidentified voices right now.</div>';
+    ||`<div class="sub" style="padding-top:8px">${sq?'No unidentified voice matches “'+esc(sq)+'”.':'No unidentified voices right now.'}</div>`;
   $('#relnote').style.display=s.relabel_pending?'block':'none';
   $('#relnote').textContent='Applying names to all transcripts… (moments)';
   // settings
