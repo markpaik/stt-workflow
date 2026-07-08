@@ -1159,6 +1159,10 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
+    <select id="msort" onchange="localStorage.setItem('stt_msort',this.value);render()" title="How the list is ordered and grouped" style="font-size:13px">
+      <option value="date">by month</option>
+      <option value="name">by name</option>
+    </select>
     <input type="text" id="mfilter" placeholder="Search words or titles…"
            oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
   <div id="searchhits"></div>
@@ -1306,13 +1310,18 @@ function render(){
   $('#dstpath').textContent=s.paths.dest.replace(/^\/Users\/[^/]+/,'~');
   // meetings: filter by title/speaker, newest meeting-date first, grouped by month
   const mq=($('#mfilter').value||'').toLowerCase();
+  const msort=($('#msort')&&$('#msort').value)||'date';
   const shown=s.meetings.filter(m=>!mq||m.base.toLowerCase().includes(mq)
     ||m.speakers.join(' ').toLowerCase().includes(mq))
-    .slice().sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+    .slice().sort(msort==='name'
+      ?(a,b)=>a.base.toLowerCase().localeCompare(b.base.toLowerCase())
+      :(a,b)=>(b.date||'').localeCompare(a.date||''));
   let lastMon='';
   if(document.querySelector('#meetings .inline-edit'))return;  // typing in place — don't wipe it
   $('#meetings').innerHTML=shown.map(m=>{
-    const mon=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated';
+    const mon=msort==='name'
+      ?(/^[a-z]/i.test(m.base)?m.base[0].toUpperCase():'#')
+      :(m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated');
     const hdr=mon!==lastMon?`<div class="mgroup">${mon}</div>`:'';lastMon=mon;
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
     return hdr+`<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
@@ -2251,6 +2260,7 @@ function cycleTheme(){
   applyTheme(order[(order.indexOf(themeNow())+1)%3]);
 }
 applyTheme(themeNow());
+{const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh().then(()=>{
