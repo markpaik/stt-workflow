@@ -654,14 +654,26 @@ def reapply_decisions(base: str, data: dict) -> int:
     return applied
 
 
-def find_voice_clip(key: str, meeting: str = None):
-    """Locate a playable stretch of `key`'s voice: (meeting_base, start, dur).
+def find_voice_clips(key: str, meeting: str = None, n: int = 3):
+    """The n longest playable stretches of `key`'s voice in ONE meeting:
+    [{"base","start","dur","index"}, ...] longest first, with each clip's TRUE
+    segment duration and its transcript index (so a UI can jump to the moment
+    in context). Searches `meeting` if given, else the newest meeting that has
+    this voice.
 
     key may be a speaker id (SPEAKER_xx), a global unknown id (U007), a display
     name, or an enrolled person's name. For enrolled people whose transcripts
     haven't been relabeled yet (e.g. named mid-batch), fall back to VOICEPRINT
     matching against each source meeting's cached centroids — the person's name
     doesn't need to appear in any transcript for playback to work."""
+    def _rows(d, ids, base):
+        rows = [(i, s) for i, s in enumerate(d.get("segments", []))
+                if s.get("speaker") in ids]
+        rows.sort(key=lambda t: t[1]["end"] - t[1]["start"], reverse=True)
+        return [{"base": base, "start": max(0.0, s["start"]),
+                 "dur": max(2.0, s["end"] - s["start"]), "index": i}
+                for i, s in rows[:n]]
+
     def _by_transcript(base):
         j = config.meeting_file(base, ".json")
         if not j.exists():
@@ -672,11 +684,7 @@ def find_voice_clip(key: str, meeting: str = None):
             return None
         ids = {s["id"] for s in d.get("speakers", [])
                if key in (s["id"], s.get("global_id"), s.get("display"), s.get("name"))}
-        segs = [s for s in d.get("segments", []) if s.get("speaker") in ids]
-        if not segs:
-            return None
-        seg = max(segs, key=lambda s: s["end"] - s["start"])
-        return base, max(0.0, seg["start"]), min(12.0, max(2.0, seg["end"] - seg["start"]))
+        return _rows(d, ids, base) or None
 
     all_bases = config.meeting_bases()
     candidates = ([meeting] if meeting else
@@ -725,8 +733,17 @@ def find_voice_clip(key: str, meeting: str = None):
             d = json.loads(jf.read_text())
         except json.JSONDecodeError:
             continue
-        segs = [s for s in d.get("segments", []) if s.get("speaker") == label]
-        if segs:
-            seg = max(segs, key=lambda s: s["end"] - s["start"])
-            return base, max(0.0, seg["start"]), min(12.0, max(2.0, seg["end"] - seg["start"]))
+        rows = _rows(d, {label}, base)
+        if rows:
+            return rows
     return None
+
+
+def find_voice_clip(key: str, meeting: str = None):
+    """Compatibility wrapper: the single best clip as (base, start, dur),
+    playback-capped at 12s like it always was."""
+    clips = find_voice_clips(key, meeting, n=1)
+    if not clips:
+        return None
+    c = clips[0]
+    return c["base"], c["start"], min(12.0, c["dur"])
