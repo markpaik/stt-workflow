@@ -3,6 +3,7 @@
 This never touches the iCloud original; the batch orchestrator owns the
 copy/move/delete lifecycle. Output writes are atomic (see output._atomic_write).
 """
+import datetime as _dt
 import os
 from pathlib import Path
 
@@ -154,7 +155,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         wav.unlink(missing_ok=True)
 
     named = [s["name"] for s in speakers if s["name"]]
-    header = output.txt_header(src.name, dur, speakers, strict)
+    # when transcription actually ran (initial OR redo). Distinct from
+    # generated_at, which write_json re-stamps on every save including a review
+    # edit — this one is set only here and preserved by relabel and by edits, so
+    # it answers "when was this last transcribed". Shared by the txt header.
+    processed_at = _dt.datetime.now().isoformat(timespec="seconds")
+    header = output.txt_header(src.name, dur, speakers, strict, processed_at)
 
     meta = {
         "source_file": src.name,
@@ -163,6 +169,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # often weeks after the meeting. Grouping and sorting read this
         # stored field; a human can correct it in the panel.
         "date": _meeting_date(src, json_path),
+        "processed_at": processed_at,
         "duration_sec": round(dur, 1),
         "asr_engine": asr_out["engine"],
         "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
