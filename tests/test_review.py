@@ -538,6 +538,93 @@ def test_insert_negative_time_clamped(sandbox):
     assert seg["start"] == 0.0 and seg["end"] > seg["start"]
 
 
+def test_nested_split_keeps_both_split_decisions(sandbox):
+    """#0 data-loss: split a segment, then re-split its FIRST half. Both splits
+    record the same start (the first half's start never moves), so deduping on
+    start alone dropped the first split and a relabel replay lost the tail
+    ('gamma delta'). Both decisions must persist and replay with no word lost."""
+    _make_split_meeting(sandbox)
+    # split 'alpha beta gamma delta' -> 'alpha beta' | 'gamma delta'
+    r = review.split_segment("Split", 0, start=0.0, text_a="alpha beta",
+                             text_b="gamma delta", speaker_b="SPEAKER_01")
+    assert r["ok"]
+    # re-split the first half 'alpha beta' -> 'alpha' | 'beta' (still start=0.0)
+    r = review.split_segment("Split", 0, start=0.0, text_a="alpha",
+                             text_b="beta", speaker_b="SPEAKER_00")
+    assert r["ok"]
+    decs = json.loads((mfile("Split", ".reviews.json")).read_text())
+    assert sum(1 for d in decs if d["action"] == "split") == 2, decs
+
+    # a relabel rebuild must replay BOTH splits with no words lost
+    data = _make_split_meeting(sandbox)
+    review.reapply_decisions("Split", data)
+    joined = " ".join(s["text"] for s in data["segments"])
+    assert joined == "alpha beta gamma delta next turn words", joined
+
+
+def test_two_adjacent_minor_crumbs_both_persist(sandbox):
+    """#13 data-loss: bulk-accepting two sub-second crumbs whose starts sit
+    within 0.25s recorded only ONE accept (start-proximity dedup), so the other
+    crumb silently reappeared as needing review after a relabel. Both accepts
+    must persist and replay."""
+    crumbs = ((9.0, 9.15, "so"), (9.15, 9.30, "um"))
+
+    def _append(d):
+        for st, en, wd in crumbs:
+            d["segments"].append({"start": st, "end": en, "speaker": "SPEAKER_01",
+                                  "name": None, "display": "Speaker 2", "text": wd,
+                                  "flags": ["id_mismatch"], "overlap": False})
+        return d
+
+    data = _append(_make_meeting(sandbox))
+    (mfile("Mtg", ".json")).write_text(json.dumps(data))
+
+    r = review.accept_minor("Mtg")
+    assert r["accepted"] == 2 and r["remaining"] == 1  # major flagged seg remains
+    decs = json.loads((mfile("Mtg", ".reviews.json")).read_text())
+    assert sum(1 for d in decs if d["action"] == "accept") == 2, decs
+
+    # relabel rebuild: both crumbs come back accepted, neither still flagged
+    rebuilt = _append(_make_meeting(sandbox))
+    review.reapply_decisions("Mtg", rebuilt)
+    back = [s for s in rebuilt["segments"] if s["text"] in ("so", "um")]
+    assert len(back) == 2
+    assert all(s.get("reviewed") == "accepted" and s["flags"] == [] for s in back)
+
+
+def test_reapply_matches_nearest_segment_not_first_in_list(sandbox):
+    """#10 correctness: reapply matched a decision to the FIRST segment within
+    0.3s, not the nearest. When a relabel leaves two segments inside the window
+    (start 9.0 and 9.28), an edit meant for the first and a delete meant for the
+    second landed on the wrong lines — the delete destroyed the wrong segment."""
+    _make_meeting(sandbox)  # gives the sidecar a home; data is built below
+    decs = [
+        {"start": 9.0, "end": 9.2, "action": "edit", "text": "edited first line",
+         "speaker_id": None, "at": "t"},
+        {"start": 9.28, "end": 9.5, "action": "delete", "text": None,
+         "speaker_id": None, "at": "t"},
+    ]
+    (mfile("Mtg", ".reviews.json")).write_text(json.dumps(decs))
+
+    data = {"speakers": [
+                {"id": "SPEAKER_00", "name": "Mark", "display": "Mark"},
+                {"id": "SPEAKER_01", "name": None, "display": "Speaker 2"}],
+            "words": [],
+            "segments": [
+                {"start": 9.0, "end": 9.2, "speaker": "SPEAKER_00", "name": "Mark",
+                 "display": "Mark", "text": "Mark real line", "flags": ["overlap"],
+                 "overlap": True},
+                {"start": 9.28, "end": 9.5, "speaker": "SPEAKER_01", "name": None,
+                 "display": "Speaker 2", "text": "echo", "flags": ["overlap"],
+                 "overlap": True}]}
+    review.reapply_decisions("Mtg", data)
+    segs = data["segments"]
+    # the edit landed on the nearer 9.0 segment; the delete removed 9.28
+    assert len(segs) == 1, segs
+    assert segs[0]["text"] == "edited first line"
+    assert segs[0]["speaker"] == "SPEAKER_00"
+
+
 def test_lock_meeting_serializes_same_meeting(sandbox):
     """The P0-3 fix: a GUI edit and a relabel writing the SAME meeting must
     never run their read-modify-write concurrently. Proven with real OS-level
