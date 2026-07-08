@@ -1044,6 +1044,8 @@ flex:none;width:46px}
 letter-spacing:.08em;padding:14px 0 3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
 mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;border-radius:3px}
 mark.cur{background:color-mix(in srgb,var(--accent) 30%,transparent);outline:1.5px solid var(--accent)}
+.pnitem{padding:7px 10px;border-radius:6px;cursor:pointer}
+.pnitem:hover,.pnitem.cur{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 .tseg .segbtn{opacity:0;flex:none;padding:1px 8px;font-size:12px;border-radius:6px}
 .tgap{height:8px;margin:0 8px;border-radius:6px;text-align:center;line-height:8px;
   font-size:11px;color:transparent;cursor:pointer;transition:all .12s}
@@ -1959,18 +1961,61 @@ function openSchedule(){
   dlg.showModal();
 }
 function mmss(t){const m=Math.floor(t/60),s=String(Math.floor(t%60)).padStart(2,'0');return m+':'+s}
+// ---- enrolled-name autocomplete for "Who is this?" (native datalist can't be
+// styled, scrolled, or ranked — with a long roster it overflowed the page) ----
+let PN={items:[],cur:-1};
+function pnameFilter(){
+  const q=($('#pname').value||'').trim().toLowerCase();
+  const names=S.enrolled.map(e=>e.name).sort((a,b)=>a.localeCompare(b));
+  let items=q?names.filter(n=>n.toLowerCase().includes(q)):names;
+  if(q){ // closest match first: whole-name prefix, then any word's prefix, then substring
+    const rank=n=>{const l=n.toLowerCase();
+      return l.startsWith(q)?0:(l.split(/\s+/).some(w=>w.startsWith(q))?1:2)};
+    items=items.slice().sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
+  }
+  PN={items,cur:items.length&&q?0:-1};
+  pnameRender();
+}
+function pnameRender(){
+  const dd=$('#pnamedd');if(!dd)return;
+  const q=($('#pname').value||'').trim();
+  const rx=q?new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i'):null;
+  dd.innerHTML=PN.items.map((n,i)=>
+    `<div class="pnitem${i===PN.cur?' cur':''}" onmousedown="event.preventDefault();pnamePick(${i})">${rx?esc(n).replace(rx,m=>'<mark>'+m+'</mark>'):esc(n)}</div>`).join('');
+  dd.style.display=PN.items.length?'block':'none';
+  const c=dd.querySelector('.pnitem.cur');if(c)c.scrollIntoView({block:'nearest'});
+}
+function pnamePick(i){const f=$('#pname');if(!f)return;f.value=PN.items[i];pnameClose();f.focus()}
+function pnameClose(){const dd=$('#pnamedd');if(dd)dd.style.display='none';PN.cur=-1}
+function pnameKey(e){
+  const dd=$('#pnamedd'),open=dd&&dd.style.display!=='none';
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault();
+    if(!open){pnameFilter();return}
+    if(!PN.items.length)return;
+    PN.cur=(PN.cur+(e.key==='ArrowDown'?1:-1)+PN.items.length)%PN.items.length;
+    pnameRender();
+  }else if(e.key==='Enter'){
+    e.preventDefault();
+    if(open&&PN.cur>=0)pnamePick(PN.cur);
+    else $('#pnamesave').click();
+  }else if(e.key==='Escape'&&open){
+    // close only the dropdown, not the whole dialog
+    e.preventDefault();e.stopPropagation();pnameClose();
+  }
+}
 async function openName(uid,display,meeting){
-  const opts=S.enrolled.map(e=>`<option value="${esc(e.name)}">`).join('');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Who is ${esc(display)}?</h1>
   <p class="muted" style="margin-top:8px">Listen to this voice — the clip is their longest turn in each meeting they were heard in, and “Read” opens the transcript at that exact moment for full context. Typing an <b>existing</b> name merges this voice into that person. Every past and future meeting relabels automatically.</p>
   <div id="nameclips"><span class="spin"></span></div>
-  <input type="text" id="pname" list="knownnames" placeholder="Person’s name" style="width:100%;margin-top:12px">
-  <datalist id="knownnames">${opts}</datalist>
+  <input type="text" id="pname" placeholder="Person’s name" autocomplete="off" spellcheck="false" style="width:100%;margin-top:12px"
+    oninput="pnameFilter()" onfocus="pnameFilter()" onblur="setTimeout(pnameClose,150)" onkeydown="pnameKey(event)">
+  <div id="pnamedd" class="inset" style="display:none;max-height:170px;overflow-y:auto;margin-top:6px;padding:4px"></div>
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:16px">
     <button class="danger" onclick="api('/api/forget',{uid:'${escJs(uid)}'}).then(()=>{dlg.close();refresh()})">Not a real speaker</button>
     <div style="display:flex;gap:8px">
       <button onclick="dlg.close()">Cancel</button>
-      <button class="primary" onclick="const n=$('#pname').value.trim();if(n)api('/api/name',{uid:'${escJs(uid)}',name:n}).then(()=>{dlg.close();refresh()})">Save name</button>
+      <button class="primary" id="pnamesave" onclick="const n=$('#pname').value.trim();if(n)api('/api/name',{uid:'${escJs(uid)}',name:n}).then(()=>{dlg.close();refresh()})">Save name</button>
     </div>
   </div>`;
   dlg.showModal();
