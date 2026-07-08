@@ -134,12 +134,36 @@ def test_verify_flag_is_reviewable(sandbox):
     assert d["segments"][0]["flags"] == [] and "alt" not in d["segments"][0]
 
 
-def test_failed_secondary_engine_flags_nothing():
+def test_failed_secondary_engine_flags_nothing(monkeypatch):
     """A second engine that returns almost nothing has failed — flagging the
-    whole transcript as 'disagreement' would be noise. (Guard in verify.run;
-    the region math it protects is exercised here.)"""
-    regs = verify.regions(PRIMARY, [])
-    # raw math yields one giant deletion region; run() suppresses it via the
-    # 30% floor — assert the floor logic directly:
-    assert len(regs) >= 1
-    assert 0 < 0.3 * len(PRIMARY)  # floor is active for any non-empty primary
+    whole transcript as 'disagreement' would be noise. Drive verify.run()
+    itself so the 30%-floor guard is exercised, not just the region math it
+    protects: a Parakeet primary routes the second opinion through mlxwhisper,
+    which we stub to return a single word (1 << 0.3*6)."""
+    from stt import asr_mlxwhisper
+    sec = [{"start": 0.0, "end": 0.4, "word": "ok"}]
+    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+                        lambda wav, progress=None: {"words": sec,
+                                                    "engine": "mlx-whisper/turbo"})
+    regs, engine = verify.run("dummy.wav", PRIMARY,
+                              "mlx-community/parakeet-tdt-0.6b-v2")
+    # below the floor: run() returns NO regions even though the raw math on the
+    # same inputs would emit a giant spurious deletion — that gap is the guard.
+    assert regs == [] and engine == "mlx-whisper/turbo"
+    assert verify.regions(PRIMARY, sec) != []
+
+
+def test_working_secondary_engine_flags_real_disagreement(monkeypatch):
+    """The other side of the floor: a second engine that returns ENOUGH words
+    (>= 30% of primary) which genuinely disagree must yield real regions — so a
+    removed or inverted floor comparison fails one of these two tests."""
+    from stt import asr_mlxwhisper
+    sec = _w([(0.0, 0.4, "We"), (0.4, 0.8, "renewed"), (0.8, 1.2, "the"),
+              (1.2, 1.8, "dashboard")])  # 4 words >= 0.3*6; "renewed" disagrees
+    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+                        lambda wav, progress=None: {"words": sec,
+                                                    "engine": "mlx-whisper/turbo"})
+    regs, engine = verify.run("dummy.wav", PRIMARY,
+                              "mlx-community/parakeet-tdt-0.6b-v2")
+    assert engine == "mlx-whisper/turbo"
+    assert any(r["theirs"] == "renewed" for r in regs)
