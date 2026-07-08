@@ -101,6 +101,15 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
         entry = {"stage": stage, "since": prev.get("since", _now()),
                  "stage_since": (prev.get("stage_since", _time.monotonic())
                                  if prev.get("stage") == stage else _time.monotonic())}
+        # actual wall seconds of each FINISHED stage, so the panel can show
+        # "Transcribing 3m ✓" instead of generalizing over the whole pipeline
+        done_secs = dict(prev.get("done_secs") or {})
+        if (prev.get("stage") and prev.get("stage") != stage
+                and prev.get("stage_since") is not None):
+            done_secs[prev["stage"]] = round(
+                _time.monotonic() - prev["stage_since"], 1)
+        if done_secs:
+            entry["done_secs"] = done_secs
         if duration or prev.get("duration"):
             entry["duration"] = duration or prev.get("duration")
         if diarize is not None or "diarize" in prev:
@@ -185,11 +194,54 @@ def estimate_progress(entry: dict, n_active: int = 1):
         # clock must not make the stage look "almost done" when little real work
         # happened. monotonic is system-wide per boot, so cross-process (worker
         # writes it, GUI reads it) comparison stays valid.
-        wall_frac = min((_time.monotonic() - ss) / est_stage, 0.98)
-        frac_in = min(frac_in, wall_frac)
+        wall_frac = min((_time.monotonic() - ss) / est_stage, 0.97)
+        pa = entry.get("progress_at")
+        if (pa is not None and _time.time() - pa > 20.0
+                and wall_frac > frac_in):
+            # the hook STOPPED (pyannote's clustering tail reports nothing for
+            # minutes) and the monotonic clock has genuinely passed its frozen
+            # value — min(hook, wall) froze the countdown there and then
+            # collapsed the ETA all at once when the stage flipped. Follow the
+            # elapsed clock so the ETA keeps counting down, but never claim
+            # the stage done: its actual end is the only honest 100%. Both
+            # conditions matter: staleness alone is wall-clock (progress_at)
+            # and an NTP jump can fake it, but wall_frac is monotonic, so a
+            # faked stall with little real elapsed keeps the brake on.
+            frac_in = min(wall_frac, 0.97)
+        else:
+            frac_in = min(frac_in, wall_frac)
     done += est_stage * min(1.0, max(0.0, frac_in))
     overall = min(0.99, done / total)
     return overall, max(0.0, total - done)
+
+
+def stage_breakdown(entry: dict, n_active: int = 1):
+    """Per-stage view for the panel, so the ETA stops generalizing over the
+    whole pipeline: actual seconds for finished stages, elapsed vs expected
+    for the current one, expected for the ones still ahead. None if the
+    file's duration (and so any estimate) is unknown."""
+    dur = entry.get("duration")
+    stage = entry.get("stage")
+    if not dur or stage not in STAGE_ORDER:
+        return None
+    est = stage_estimates(dur, n_active, verify=entry.get("verify", False),
+                          diarize=entry.get("diarize", True))
+    done_secs = entry.get("done_secs") or {}
+    idx = STAGE_ORDER.index(stage)
+    out = []
+    for i, s in enumerate(STAGE_ORDER):
+        if s == stage:
+            ss = entry.get("stage_since")
+            elapsed = max(0.0, _time.monotonic() - ss) if ss is not None else None
+            out.append({"stage": s, "state": "active",
+                        "secs": round(elapsed, 1) if elapsed is not None else None,
+                        "est": round(est.get(s, 0.0), 1)})
+        elif i < idx or s in done_secs:
+            if s in done_secs or s in est:
+                out.append({"stage": s, "state": "done", "secs": done_secs.get(s)})
+        elif s in est:
+            out.append({"stage": s, "state": "next", "est": round(est[s], 1)})
+    return out
 
 
 def clear_stage(name):

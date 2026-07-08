@@ -253,3 +253,66 @@ def test_estimate_progress_ignores_wall_clock_jump(sandbox):
         st._time.time = real_time
 
     assert abs(jumped_overall - base_overall) < 0.01
+
+
+def test_stalled_hook_keeps_the_countdown_moving(sandbox):
+    """The diarizer's hook races to ~87% then reports NOTHING through the
+    clustering tail. min(hook, wall) froze the ETA at the hook's value for
+    the whole silent stretch, then collapsed it all at once when the stage
+    flipped ('35m left' one poll, '4m' the next). Once the hook is stalled,
+    the wall clock must keep the countdown moving — without ever claiming
+    the stage finished."""
+    import time as _t
+
+    entry = {"stage": "diarizing", "duration": 4200.0, "progress": 0.87,
+             "progress_at": _t.time() - 300}       # hook silent for 5 minutes
+    est = status.stage_estimates(4200.0)["diarizing"]
+
+    entry["stage_since"] = _t.monotonic() - 0.90 * est   # wall past the hook
+    _, eta_early = status.estimate_progress(entry)
+    entry["stage_since"] = _t.monotonic() - 0.96 * est   # 6% more wall time
+    _, eta_later = status.estimate_progress(entry)
+
+    assert eta_later < eta_early, "ETA froze while the hook was stalled"
+    # ...but a LIVE hook that is genuinely behind still bounds the estimate
+    # (a fresh progress_at means the hook is trustworthy; wall may not race it)
+    live = {"stage": "diarizing", "duration": 4200.0, "progress": 0.30,
+            "progress_at": _t.time(), "stage_since": _t.monotonic() - 0.90 * est}
+    frac_live, _ = status.estimate_progress(live)
+    stalled_frac, _ = status.estimate_progress(entry)
+    assert frac_live < stalled_frac
+    # and the stage is never declared done from the clock alone
+    entry["stage_since"] = _t.monotonic() - 5.0 * est
+    frac_cap, eta_cap = status.estimate_progress(entry)
+    assert frac_cap < 1.0 and eta_cap > 0
+
+
+def test_finished_stage_actuals_accumulate(sandbox):
+    """Stage transitions record each finished stage's REAL wall seconds
+    (done_secs), which the panel shows instead of one pipeline-wide guess."""
+    import time as _t
+    status.start_run(["a"])
+    status.set_stage("a", "converting", duration=600)
+    _t.sleep(0.05)
+    status.set_stage("a", "transcribing")
+    _t.sleep(0.05)
+    status.set_stage("a", "diarizing")
+    e = status.read()["active"]["a"]
+    assert set(e["done_secs"]) == {"converting", "transcribing"}
+    assert all(v >= 0 for v in e["done_secs"].values())
+
+
+def test_stage_breakdown_states(sandbox):
+    """done/active/next per stage, with actuals for done and est for ahead."""
+    import time as _t
+    status.start_run(["a"])
+    status.set_stage("a", "converting", duration=600)
+    status.set_stage("a", "transcribing", progress=0.4)
+    bd = status.stage_breakdown(status.read()["active"]["a"])
+    by = {x["stage"]: x for x in bd}
+    assert by["converting"]["state"] == "done"
+    assert by["transcribing"]["state"] == "active"
+    assert by["transcribing"]["est"] > 0 and by["transcribing"]["secs"] is not None
+    assert by["diarizing"]["state"] == "next" and by["diarizing"]["est"] > 0
+    # unknown duration -> no breakdown at all
+    assert status.stage_breakdown({"stage": "transcribing"}) is None
