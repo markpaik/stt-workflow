@@ -17,7 +17,8 @@ from datetime import datetime
 import numpy as np
 
 from . import config
-from .identify import _atomic_write, _l2, cosine, lock_registry, score_against
+from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
+                       lock_registry, score_against)
 
 MATCH_MIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
 MATCH_MARGIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
@@ -93,6 +94,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
         reg = load()
         out = {}
         claimed = {}  # uid -> centroid of the first cluster that claimed it this pass
+        enrolled = load_voiceprints()  # gate below: enrolled voices never mint
         for label, vec in cent_emb.items():
             if cluster_names.get(label):
                 continue  # named person, not an unknown
@@ -133,6 +135,18 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                     # recognizing this voice)
                     continue
             else:
+                # never mint a NEW unknown for a voice that strongly matches an
+                # ENROLLED person. Naming an unknown moves its samples into the
+                # enrolled profile verbatim and deletes the unknown entry — but
+                # a meeting where the diarizer SPLIT that person into two
+                # clusters can name only one of them (open-set one-name-per-
+                # meeting rule), so the loser cluster matched nothing here and
+                # resurrected as a fresh "Speaker 1" seconds after the naming.
+                # A voice this close to an enrolled person is not a stranger
+                # worth tracking; it keeps its transcript-local label.
+                if any(score_against(v, s) >= MATCH_MIN
+                       for s in enrolled.values() if s is not None):
+                    continue
                 # lowest free number: after unknowns get named, new voices start
                 # back at Speaker 1 instead of counting up forever
                 taken = {int(u[1:]) for u in reg["speakers"] if u[1:].isdigit()}
