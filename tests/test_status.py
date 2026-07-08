@@ -149,7 +149,9 @@ def test_eta_trusts_wall_clock_when_the_hook_goes_silent(sandbox, monkeypatch):
     from stt import status as st
 
     t = {"now": 1000.0}
-    monkeypatch.setattr(st._time, "time", lambda: t["now"])
+    # stage_since (the wall-clock bound) is monotonic now, so a corrected/jumped
+    # wall clock can't inflate it; drive that clock to exercise the bound.
+    monkeypatch.setattr(st._time, "monotonic", lambda: t["now"])
     monkeypatch.setattr(st, "stage_estimates",
                         lambda dur, n_active=1, verify=False, diarize=True:
                         {"downloading": 0, "converting": 0, "transcribing": 0,
@@ -187,3 +189,67 @@ def test_verify_timings_calibrate_the_secondary_engine(sandbox):
     L = rates.learned()
     assert L["asr"]["parakeet@1"] == 60.0          # 600/10 primary
     assert L["asr"]["mlxwhisper:turbo@1"] == 10.0  # 600/60 from the verify pass
+
+
+def test_set_stage_concurrent_no_lost_update(sandbox):
+    """Two processes/threads mutating the SAME status.json must serialize their
+    read-modify-write. Without the flock, a writer built from a pre-read snapshot
+    silently clobbers another writer's just-published entry (lost update)."""
+    import threading
+    from stt import status as st
+
+    st.start_run([])  # active = {}
+    ev_a_paused = threading.Event()
+    ev_b_done = threading.Event()
+    state = {"paused_once": False}
+    real_write = st._write
+
+    def instrumented_write(d):
+        # Pause thread A AFTER it has read empty + built its {A} update, opening
+        # a window for B to run its whole RMW. With the lock, B blocks on the
+        # flock and this wait times out -> A commits, releases, then B commits;
+        # without the lock, B writes {B} and A's stale write drops it.
+        if not state["paused_once"] and "A.m4a" in d.get("active", {}):
+            state["paused_once"] = True
+            ev_a_paused.set()
+            ev_b_done.wait(1.5)
+        real_write(d)
+
+    st._write = instrumented_write
+    try:
+        ta = threading.Thread(target=lambda: st.set_stage(
+            "A.m4a", "transcribing", progress=0.5, duration=100.0))
+        tb = threading.Thread(target=lambda: st.set_stage(
+            "B.m4a", "transcribing", progress=0.5, duration=100.0))
+        ta.start()
+        assert ev_a_paused.wait(3)  # A has read + built {A}, now paused pre-write
+        tb.start()
+        tb.join(4)
+        ev_b_done.set()
+        ta.join(4)
+    finally:
+        st._write = real_write
+
+    active = st.read().get("active", {})
+    assert "A.m4a" in active and "B.m4a" in active  # neither write lost
+
+
+def test_estimate_progress_ignores_wall_clock_jump(sandbox):
+    """The stalled-hook wall bound is anchored on a monotonic clock, so an NTP
+    correction / resume that jumps the wall clock forward must NOT lift the brake
+    on an over-eager progress hook and report the stage as nearly done."""
+    from stt import status as st
+
+    st.start_run([])
+    st.set_stage("A.m4a", "transcribing", progress=0.95, duration=600.0)
+    entry = st.read()["active"]["A.m4a"]
+
+    base_overall, _ = st.estimate_progress(entry, n_active=1)
+    real_time = st._time.time
+    try:
+        st._time.time = lambda: real_time() + 100000.0  # huge forward wall jump
+        jumped_overall, _ = st.estimate_progress(entry, n_active=1)
+    finally:
+        st._time.time = real_time
+
+    assert abs(jumped_overall - base_overall) < 0.01
