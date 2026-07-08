@@ -114,9 +114,12 @@ stable numbers across meetings ("Speaker 2" is the same person everywhere),
 and matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
 honest. One-time voices you chose to hide restore with one click from the
-"n hidden" toggle:
+"n hidden" toggle. The card stays the height of the Settings card beside it
+and scrolls as the roster grows; a search box finds any speaker by name (or,
+for unknown voices, by the meeting they were heard in), and an "unidentified
+only" filter shows just the voices still waiting for a name:
 
-<img src="docs/img/speakers.png" width="367" alt="Speaker library with an unknown voice and a hidden one">
+<img src="docs/img/speakers.png" width="404" alt="Speaker library with search and the unidentified-only filter">
 
 The ⋯ menu on any speaker manages the profile. Play any voice sample (each
 traceable to its source meeting), and when one is wrong, either remove it (a
