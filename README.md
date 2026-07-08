@@ -127,11 +127,17 @@ matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
 honest.
 
-The ⋯ menu on any speaker manages the profile: play and prune individual
-voice samples (each traceable to its source meeting), rename everywhere,
-merge duplicates, un-enroll, or **hide** a one-time voice. Hidden entries
-keep their samples (so their number stays theirs) and restore with one
-click from the "n hidden" toggle:
+The ⋯ menu on any speaker manages the profile. Play any voice sample (each
+traceable to its source meeting), and when one is wrong, either remove it (a
+bad recording, where the person is still right) or **reassign** it to the
+correct person, which moves the voiceprint to them instead of discarding it.
+You can also rename everywhere, merge duplicates, un-enroll, or **hide** a
+one-time voice. Hidden entries keep their samples (so their number stays
+theirs) and restore with one click from the "n hidden" toggle. A profile
+keeps up to five samples; a varied set, from different meetings, rooms, and
+mics, identifies someone more reliably than several clips from one recording.
+Any sample edit re-runs identification across every meeting, so a correction
+propagates the same way naming does:
 
 ![Speaker profile actions](docs/img/speaker-actions.png)
 
@@ -264,6 +270,44 @@ watched folder (iCloud)                          transcripts folder
 ```
 
 Model attribution (CC-BY-4.0 weights): see [NOTICE.md](NOTICE.md).
+
+## Limitations
+
+The pipeline runs entirely on your Mac with open models, so it trades some
+accuracy for privacy and control. What that means in practice:
+
+- **Overlapping speech is the weak spot.** When two people talk at once, no
+  open diarizer attributes the overlapping words cleanly, so crosstalk is where
+  you will see the most speaker errors. The panel flags overlap regions for
+  review rather than hiding them.
+- **Audio quality drives everything else.** A phone on a conference table picks
+  up room echo, fan and HVAC hum, and volume falloff with distance; a far
+  speaker, a hard-surfaced room, or a noisy line each raise the word error rate
+  and blur speaker boundaries. A recording made close to each talker in a quiet
+  room is worth more than any model choice.
+- **More speakers, more mistakes.** Two or three people separate cleanly. A
+  large group, or a room where people trade off in quick bursts, gives the
+  diarizer more chances to split one voice into two or merge two into one.
+  Voiceprints name the regulars well; strangers in a crowd stay approximate.
+- **Names depend on enrollment.** Someone is labeled only once you have a
+  voiceprint for them, and a match can still miss across a very different room
+  or mic. A varied sample set (see speaker profiles above) is the fix.
+- **Accuracy trails the cloud services by a few points on clean audio, and by
+  more on hard audio.** For a confidential recording that cannot leave the
+  machine, that is the trade. For anything that can, the bring-your-own-key
+  cloud engines are there and still get local names.
+
+### Why the text reads rougher than a cloud service
+
+That roughness is a missing normalization step, not extra errors. The local
+engine writes words as spoken: lowercase, numbers spelled out, few capitals,
+light punctuation. Commercial services such as Scribe run a fast second model,
+inverse text normalization, that rewrites "twenty twenty six" as "2026",
+restores casing and punctuation, and fixes obvious misspellings. The words are
+the same; only the presentation differs. For now you can normalize a transcript
+yourself after export when it needs to be reader-ready, and we are looking at
+running that cleanup at export time, so the stored transcript stays a faithful
+record while an exported copy reads clean.
 
 ## If you record other people
 
