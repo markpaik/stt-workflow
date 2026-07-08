@@ -55,6 +55,26 @@ def _make_meeting(base):
     (mfile(base, ".txt")).write_text("stub")
 
 
+def test_remove_sample_re_identifies_all_meetings(running_server, monkeypatch):
+    """Removing a sample changes who a profile matches, so it must re-run
+    identification like every other registry edit — otherwise a misattributed
+    voice stays wrong in past transcripts until some unrelated relabel. A prior
+    version skipped the relabel spawn only for this one action."""
+    import numpy as np
+
+    from stt import identify
+    identify.enroll("Alex Rivera", np.ones(8), source="M1")
+    identify.enroll("Alex Rivera", np.arange(1, 9, dtype=float), source="M2")
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(list(map(str, cmd))))
+
+    status, body = _post(running_server, "/api/remove_sample",
+                         {"name": "Alex Rivera", "index": 0})
+    assert body["ok"]
+    assert any("relabel" in " ".join(c) for c in spawned), \
+        "removing a sample must spawn a relabel to re-identify meetings"
+
+
 # ---------- _known_base ----------
 
 def test_known_base_rejects_traversal_and_missing(sandbox):
