@@ -429,14 +429,18 @@ def _cloud_key_status() -> dict:
         return {}
 
 
-def _snippet_for(meeting: str, speaker_key: str):
-    """Extract a short audio snippet of `speaker_key` (display, id, name, or uid).
+def _snippet_for(meeting: str, speaker_key: str, secs: float = 12.0):
+    """Extract an audio snippet of `speaker_key` (display, id, name, or uid),
+    up to `secs` seconds of their longest turn — never past the turn's end, so
+    a longer request can't bleed into another person's voice mid-identification.
     Locating the right stretch — including the voiceprint fallback for people
     named before their transcripts were relabeled — lives in stt.review."""
-    hit = review.find_voice_clip(speaker_key, meeting or None)
-    if hit is None:
+    clips = review.find_voice_clips(speaker_key, meeting or None, n=1)
+    if not clips:
         return None
-    base, start, dur = hit
+    c = clips[0]
+    base, start = c["base"], c["start"]
+    dur = min(max(2.0, min(45.0, secs)), c["dur"])
     audio_f = _meeting_audio(base)
     if audio_f is None:
         return None
@@ -514,7 +518,11 @@ class Handler(BaseHTTPRequestHandler):
                     # client string is DISCARDED, never used as a path, and
                     # find_voice_clip searches the real library instead
                     meeting = ""
-                f = _snippet_for(meeting, q["speaker"])
+                try:
+                    secs = float(q.get("secs", 12.0))
+                except ValueError:
+                    secs = 12.0
+                f = _snippet_for(meeting, q["speaker"], secs=secs)
                 if f is None:
                     self._json({"error": "no snippet"}, 404)
                     return
@@ -528,6 +536,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+            elif u.path == "/api/voice_clips":
+                # for the "Who is this?" dialog: this unknown's longest turn in
+                # EACH meeting it was heard in — meeting names come from the
+                # SERVER's registry, never the client, so no base gate needed
+                uid = q.get("speaker", "")
+                meetings = (unknowns.load()["speakers"]
+                            .get(uid, {}).get("meetings", []))[:5]
+                clips = []
+                for m in meetings:
+                    if not _known_base(m):
+                        continue  # stale reference (renamed before tracking)
+                    cs = review.find_voice_clips(uid, m, n=1)
+                    if cs:
+                        c = cs[0]
+                        clips.append({"meeting": m, "start": c["start"],
+                                      "dur": round(c["dur"], 1),
+                                      "index": c["index"]})
+                self._json({"clips": clips})
             elif u.path == "/api/transcript":
                 base = q["base"]
                 if not self._require_base(base):
@@ -1932,11 +1958,12 @@ function openSchedule(){
   </div>`;
   dlg.showModal();
 }
-function openName(uid,display,meeting){
+function mmss(t){const m=Math.floor(t/60),s=String(Math.floor(t%60)).padStart(2,'0');return m+':'+s}
+async function openName(uid,display,meeting){
   const opts=S.enrolled.map(e=>`<option value="${esc(e.name)}">`).join('');
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Who is ${esc(display)}?</h1>
-  <p class="muted" style="margin-top:8px">Listen to a clip of this voice from “${esc(meeting)}”, then name them. Typing an <b>existing</b> name merges this voice into that person. Every past and future meeting relabels automatically.</p>
-  <audio controls src="/api/snippet?meeting=${encodeURIComponent(meeting)}&speaker=${encodeURIComponent(uid)}"></audio>
+  <p class="muted" style="margin-top:8px">Listen to this voice — the clip is their longest turn in each meeting they were heard in, and “Read” opens the transcript at that exact moment for full context. Typing an <b>existing</b> name merges this voice into that person. Every past and future meeting relabels automatically.</p>
+  <div id="nameclips"><span class="spin"></span></div>
   <input type="text" id="pname" list="knownnames" placeholder="Person’s name" style="width:100%;margin-top:12px">
   <datalist id="knownnames">${opts}</datalist>
   <div style="display:flex;gap:8px;justify-content:space-between;margin-top:16px">
@@ -1947,6 +1974,19 @@ function openName(uid,display,meeting){
     </div>
   </div>`;
   dlg.showModal();
+  $('#pname').focus();
+  const r=await api('/api/voice_clips?speaker='+encodeURIComponent(uid));
+  const box=$('#nameclips');
+  if(!box)return;  // dialog closed while loading
+  const clips=(r.clips||[]);
+  box.innerHTML=clips.map(c=>`<div class="row">
+    <div class="grow" style="min-width:0"><div class="name" title="${esc(c.meeting)}">${esc(c.meeting)}</div>
+    <div class="sub">their longest turn · at ${mmss(c.start)} · ${Math.round(c.dur)}s</div></div>
+    <audio controls preload="none" style="height:32px;width:min(230px,38vw)" onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
+      src="/api/snippet?meeting=${encodeURIComponent(c.meeting)}&speaker=${encodeURIComponent(uid)}&secs=45"></audio>
+    <button onclick="openTranscript('${escJs(c.meeting)}',${c.index})" title="Open the transcript at this moment — hear as much as you like, with the conversation around it">Read</button>
+  </div>`).join('')
+    ||`<audio controls src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`;
 }
 function reassignSample(name,index){
   // move a misattributed sample to the right person instead of discarding it

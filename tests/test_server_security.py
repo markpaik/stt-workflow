@@ -241,8 +241,9 @@ def test_pick_folder_does_not_interpolate_prompt_into_applescript(monkeypatch):
 def test_snippet_uses_a_unique_path_per_request(sandbox, monkeypatch):
     """Two concurrent snippet extractions must not share one fixed
     work/snippet.wav — that lets one request overwrite the other's audio."""
-    monkeypatch.setattr(srv.review, "find_voice_clip",
-                        lambda key, meeting: ("Mtg", 0.0, 2.0))
+    monkeypatch.setattr(srv.review, "find_voice_clips",
+                        lambda key, meeting=None, n=1: [
+                            {"base": "Mtg", "start": 0.0, "dur": 2.0, "index": 0}])
     monkeypatch.setattr(srv, "_meeting_audio", lambda base: sandbox / "a.m4a")
 
     def fake_run(cmd, *a, **k):
@@ -444,7 +445,7 @@ def test_snippet_with_stale_meeting_falls_back_to_search(running_server, monkeyp
     as a path) and the clip search runs across the whole library instead."""
     calls = []
 
-    def fake_snippet(meeting, speaker):
+    def fake_snippet(meeting, speaker, secs=12.0):
         calls.append((meeting, speaker))
         return None  # no clip found — the endpoint should 404, not 400
 
@@ -459,3 +460,67 @@ def test_snippet_with_stale_meeting_falls_back_to_search(running_server, monkeyp
     calls.clear()
     st, _ = _get(running_server, "/api/snippet?speaker=U001&meeting=Real%20Mtg")
     assert st == 404 and calls == [("Real Mtg", "U001")]
+
+
+# ---------- /api/voice_clips: per-meeting clips for the naming dialog ----------
+
+def test_voice_clips_lists_each_meeting_and_skips_stale_names(running_server):
+    """'Who is this?' shows this voice's longest turn per meeting it was heard
+    in — meeting names resolve from the SERVER's unknown registry, and a stale
+    (renamed-away) reference is skipped, never an error."""
+    from stt import unknowns
+
+    for base, uid_start in (("Mtg A", 3.0), ("Mtg B", 7.0)):
+        (mfile(base, ".json")).write_text(json.dumps({
+            "source_file": f"{base}.m4a", "duration_sec": 60.0, "strict": False,
+            "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Speaker 9",
+                          "global_id": "U009", "match_score": None}],
+            "segments": [
+                {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "name": None,
+                 "display": "Speaker 9", "text": "short", "flags": [], "overlap": False},
+                {"start": uid_start, "end": uid_start + 6.0, "speaker": "SPEAKER_00",
+                 "name": None, "display": "Speaker 9", "text": "their longest turn here",
+                 "flags": [], "overlap": False}],
+            "words": []}))
+        (mfile(base, ".txt")).write_text("stub")
+    unknowns.save({"speakers": {"U009": {
+        "file": "U009.npy", "meetings": ["Mtg A", "Mtg B", "Renamed Away Mtg"]}}})
+
+    st, body = _get(running_server, "/api/voice_clips?speaker=U009")
+    assert st == 200
+    assert [(c["meeting"], c["index"]) for c in body["clips"]] == \
+        [("Mtg A", 1), ("Mtg B", 1)]                 # longest turn's index, per meeting
+    assert body["clips"][0]["start"] == 3.0 and body["clips"][0]["dur"] == 6.0
+
+    st, body = _get(running_server, "/api/voice_clips?speaker=U404")
+    assert st == 200 and body["clips"] == []          # unknown uid: empty, not error
+
+
+def test_snippet_secs_is_clamped_and_never_past_the_turn(running_server, monkeypatch):
+    """A longer clip request plays more of the SAME turn — capped at 45s and at
+    the turn's real end, so it can't bleed into the next speaker's voice."""
+    import subprocess as sp
+
+    from stt import review
+    monkeypatch.setattr(review, "find_voice_clips",
+                        lambda key, mtg=None, n=1: [
+                            {"base": "X", "start": 10.0, "dur": 100.0, "index": 0}])
+    monkeypatch.setattr(srv, "_meeting_audio", lambda base: Path("/dev/null"))
+    cmds = []
+
+    def fake_run(cmd, **kw):
+        cmds.append([str(c) for c in cmd])
+        Path(str(cmd[-1])).write_bytes(b"RIFFxxxx")
+        return sp.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(srv.subprocess, "run", fake_run)
+    st, _ = srv._snippet_for("", "U009", secs=600.0), None   # absurd request
+    t = float(cmds[0][cmds[0].index("-t") + 1])
+    assert t == 45.0                                  # clamped
+    cmds.clear()
+    monkeypatch.setattr(review, "find_voice_clips",
+                        lambda key, mtg=None, n=1: [
+                            {"base": "X", "start": 10.0, "dur": 4.0, "index": 0}])
+    srv._snippet_for("", "U009", secs=45.0)
+    t = float(cmds[0][cmds[0].index("-t") + 1])
+    assert t == 4.0                                   # never past the turn's end

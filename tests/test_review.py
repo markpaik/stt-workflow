@@ -723,3 +723,19 @@ def test_relabel_blocks_on_a_concurrent_gui_edit_of_the_same_meeting(sandbox):
     assert elapsed >= HOLD_SEC - 0.1, (
         f"relabel_one returned after {elapsed:.2f}s while the same meeting's "
         f"lock was held for {HOLD_SEC}s — it did not wait for it")
+
+
+def test_find_voice_clips_longest_first_with_true_durations(sandbox):
+    """The multi-clip finder behind 'Who is this?': every stretch of one voice,
+    longest first, each with its TRUE duration (not the 12s playback cap) and
+    its transcript index so the dialog can jump to the moment in context."""
+    _make_meeting(sandbox)
+    clips = review.find_voice_clips("Mark", "Mtg")
+    assert [c["index"] for c in clips] == [0, 2]     # 5s turn, then the 3s one
+    assert clips[0]["dur"] == 5.0 and clips[1]["dur"] == 3.0
+    assert all(c["base"] == "Mtg" for c in clips)
+    # n caps the list
+    assert len(review.find_voice_clips("Mark", "Mtg", n=1)) == 1
+    # the single-clip wrapper still returns the capped tuple older callers expect
+    base, start, dur = review.find_voice_clip("Mark")
+    assert (base, start) == ("Mtg", 0.0) and dur <= 12.0
