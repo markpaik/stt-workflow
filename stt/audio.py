@@ -1,4 +1,5 @@
 """Audio normalization + probing via ffmpeg/ffprobe."""
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -51,9 +52,14 @@ def extract_audio(src: Path, dst: Path) -> Path:
     """Extract the audio track from a video into an .m4a (stream-copied when AAC,
     re-encoded otherwise) — the archival copy stored next to transcripts."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "copy", str(dst)],
+    # write to a sibling .part then os.replace: an interrupted ffmpeg (Stop
+    # button kills the process group mid-write) must never leave a truncated
+    # dst that run_batch's existence guard would treat as a finished extract.
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    r = subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "copy", str(tmp)],
                        capture_output=True)
     if r.returncode != 0:  # audio codec not m4a-compatible; re-encode
         subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "aac",
-                        "-b:a", "160k", str(dst)], check=True, capture_output=True)
+                        "-b:a", "160k", str(tmp)], check=True, capture_output=True)
+    os.replace(tmp, dst)
     return dst

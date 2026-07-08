@@ -186,7 +186,14 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
 
     audio = tmp_path / "Redo Me 07012026.m4a"
     audio.write_bytes(b"\x00" * 64)
+    proj = tmp_path / "proj"
+    proj.mkdir()
     env = {**__import__("os").environ,
+           # STT_PROJECT_DIR redirects the single-instance lock/manifest into
+           # tmp so the subprocess never touches the real repo's batch.lock —
+           # the "already running" branch can therefore never fire even if a
+           # real batch holds the repo lock, so this test can't flake into a skip.
+           "STT_PROJECT_DIR": str(proj),
            "STT_ICLOUD_DIR": str(tmp_path / "src"),
            "STT_MEETINGS_DIR": str(tmp_path / "dst"),
            "PYTHONPATH": str(_P(run_batch.__file__).parent)}
@@ -197,10 +204,12 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
         capture_output=True, text=True, timeout=60, env=env)
     assert "UnboundLocalError" not in r.stderr, r.stderr
     assert r.returncode == 0, r.stderr
-    if "already running" in r.stdout:
-        import pytest
-        pytest.skip("a real batch holds the single-instance lock right now")
+    assert "already running" not in r.stdout, r.stdout
     assert "Redo Me 07012026.m4a" in r.stdout  # the path actually parsed
+    # hermeticity: the lock lived in tmp (proof STT_PROJECT_DIR was honored),
+    # never in the real repo — before the fix the subprocess ignored the env
+    # var and this file would sit under the repo instead.
+    assert (proj / "batch.lock").exists()
 
 
 def test_main_has_no_shadowed_module_imports():
@@ -234,3 +243,143 @@ def test_warns_when_registry_empty_but_meetings_have_names(sandbox, monkeypatch)
     from stt import identify
     identify.enroll("Katie", np.random.default_rng(5).normal(size=256), source="Mtg")
     assert run_batch.warn_if_registry_lost(config.MEETINGS_DIR) is False
+
+
+def test_extract_audio_is_atomic_on_interrupt(tmp_path, monkeypatch):
+    """Finding #2: an interrupted extraction (Stop kills ffmpeg mid-write) must
+    not leave a truncated dest .m4a — run_batch's existence guard would treat it
+    as a finished extract and later delete the original against a corrupt
+    archive. ffmpeg writes to a .part sibling, os.replace()d in only on success."""
+    from pathlib import Path
+
+    import pytest
+
+    from stt import audio
+
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"\x00" * 64)
+    dst = tmp_path / "clip.m4a"
+
+    def killed_midwrite(cmd, **kw):
+        # ffmpeg opens its output (the last arg) and writes partial bytes, then
+        # the process group is torn down before it can finish.
+        Path(cmd[-1]).write_bytes(b"truncated")
+        raise KeyboardInterrupt("SIGTERM during extract")
+
+    monkeypatch.setattr(audio.subprocess, "run", killed_midwrite)
+    with pytest.raises(KeyboardInterrupt):
+        audio.extract_audio(src, dst)
+
+    # the final dest was never created — only a stale .part took the damage
+    assert not dst.exists()
+
+
+def test_rescan_never_loops_on_a_permanently_failing_file(sandbox, monkeypatch):
+    """Finding #5: a file that fails every attempt (corrupt audio) is tried at
+    most once per run. The end-of-run rescan excludes files that already failed,
+    so run_batch can't spin forever holding the single-instance lock."""
+    import signal
+    import sys
+
+    from stt import config, summarize
+
+    (config.ICLOUD_DIR / "corrupt.m4a").write_bytes(b"\x00" * 64)
+
+    calls = []
+
+    def always_fails(src_str, dest_str, opts):
+        calls.append(src_str)
+        if len(calls) > 3:  # a looping rescan would re-attempt this forever
+            raise SystemExit("rescan retried a permanently-failing file")
+        raise RuntimeError("corrupt audio")
+
+    monkeypatch.setattr(run_batch, "process_one", always_fails)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    assert len(calls) == 1  # attempted once, never retried by the rescan
+    assert rc == 1  # the failure is reported
+
+
+def test_rate_sample_tags_true_concurrency_not_stale_worker_count(sandbox, monkeypatch):
+    """Finding #20: rate calibration must tag each sample with the concurrency
+    it actually ran at. Under --parallel 2, a BrokenProcessPool solo-retry runs
+    single-worker and must record n_active=1, not the batch's initial count."""
+    import concurrent.futures as cf
+    import signal
+    import sys
+    from concurrent.futures.process import BrokenProcessPool
+    from pathlib import Path
+
+    from stt import config, rates, summarize
+
+    for name in ("A.m4a", "B.m4a"):
+        (config.ICLOUD_DIR / name).write_bytes(b"\x00" * 64)
+
+    # run the "parallel" branch in-process so the stubbed process_one is used
+    # (a real ProcessPoolExecutor would re-import run_batch in a subprocess).
+    class _Fut:
+        def __init__(self, fn, a):
+            self._fn, self._a = fn, a
+
+        def result(self):
+            return self._fn(*self._a)
+
+    class _Pool:
+        def __init__(self, max_workers=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *a):
+            return _Fut(fn, a)
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", _Pool)
+    monkeypatch.setattr(cf, "as_completed", lambda futs: list(futs))
+
+    calls = {}
+
+    def stub(src_str, dest_str, opts):
+        name = Path(src_str).name
+        calls[name] = calls.get(name, 0) + 1
+        if name == "A.m4a" and calls[name] == 1:
+            raise BrokenProcessPool("worker died")  # forces the single-worker retry
+        return {"ok": True, "key": name, "mtime": Path(src_str).stat().st_mtime,
+                "outputs": [], "summary": "s", "who": "",
+                "duration_sec": (100.0 if name == "A.m4a" else 200.0),
+                "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", stub)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+
+    recorded = []
+    monkeypatch.setattr(rates, "record",
+                        lambda dur, ss, key, n_active=1: recorded.append((dur, n_active)))
+
+    monkeypatch.setattr(sys, "argv",
+                        ["run_batch.py", "--no-diarize", "--parallel", "2",
+                         "--source", str(config.ICLOUD_DIR),
+                         "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    # B ran in the 2-worker pool; A's solo retry ran single-worker
+    assert (200.0, 2) in recorded
+    assert (100.0, 1) in recorded  # the fix: solo retry tagged n_active=1, not 2
