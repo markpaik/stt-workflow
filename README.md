@@ -114,12 +114,12 @@ stable numbers across meetings ("Speaker 2" is the same person everywhere),
 and matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
 honest. One-time voices you chose to hide restore with one click from the
-"n hidden" toggle. The card stays the height of the Settings card beside it
-and scrolls as the roster grows; a search box finds any speaker by name (or,
-for unknown voices, by the meeting they were heard in), and an "unidentified
-only" filter shows just the voices still waiting for a name:
+"n hidden" toggle. The list scrolls as the roster grows; a search box finds
+any speaker by name (or, for unknown voices, by the meeting they were heard
+in), and an "unidentified only" filter shows just the voices still waiting
+for a name:
 
-<img src="docs/img/speakers.png" width="404" alt="Speaker library with search and the unidentified-only filter">
+<img src="docs/img/speakers.png" width="826" alt="Speaker library with search and the unidentified-only filter">
 
 The ⋯ menu on any speaker manages the profile. Play any voice sample (each
 traceable to its source meeting), and when one is wrong, either remove it (a
@@ -200,7 +200,9 @@ everywhere; a reader can never see a half-written transcript.
 
 ### 7 · Configure
 
-Settings covers the two automatic triggers, each with its own switch: the
+Settings live in a slide-over panel behind the gear in the top bar, so
+they are reachable from any scroll position without crowding the page.
+They cover the two automatic triggers, each with its own switch: the
 folder watch (a new recording starts processing within moments of landing
 while the Mac is awake) and the nightly run (everything new at a set
 time). Turn both off for fully manual operation. It also covers the
@@ -209,7 +211,7 @@ the summaries-and-Ask assistant (local Qwen by default, Claude or OpenAI
 by key), punctuation cleanup, speed calibration, a model-update check, and
 the watched and transcripts folders:
 
-<img src="docs/img/settings.png" width="442" alt="Settings card">
+<img src="docs/img/settings.png" width="460" alt="Settings flyout">
 
 Cloud transcription is bring-your-own-key for ElevenLabs Scribe, OpenAI, and
 Mistral Voxtral: only the audio uploads (recompressed small), diarization
