@@ -62,10 +62,14 @@ per-run options:
 
 <img src="docs/img/queue.png" width="826" alt="Queue with per-run options">
 
-While a run is live you get per-stage progress with a time estimate
-calibrated to your machine's measured throughput (visible in the panel shot
-above), and a Stop button that kills the whole process group and verifies
-nothing is left. Runs are idempotent by manifest: the iCloud original is
+While a run is live the panel shows exactly where the file is and how long
+each step is taking: finished stages with their actual times, the current
+stage as elapsed against expected, and the stages still ahead with their own
+estimates, so transcription and speaker separation are never blended into
+one blurry number (visible in the panel shot above). Estimates count down in
+real time, calibrated from your machine's measured throughput on past runs,
+and a Stop button kills the whole process group and verifies nothing is
+left. Runs are idempotent by manifest: the iCloud original is
 deleted only after outputs are verified, and a run interrupted mid-file
 simply re-runs that file next time.
 
@@ -114,12 +118,23 @@ stable numbers across meetings ("Speaker 2" is the same person everywhere),
 and matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
 honest. One-time voices you chose to hide restore with one click from the
-"n hidden" toggle. The list scrolls as the roster grows; a search box finds
+"n hidden" toggle. The roster lists alphabetically by first name with
+unnamed voices at the bottom and scrolls as it grows; a search box finds
 any speaker by name (or, for unknown voices, by the meeting they were heard
 in), and an "unidentified only" filter shows just the voices still waiting
 for a name:
 
 <img src="docs/img/speakers.png" width="826" alt="Speaker library with search and the unidentified-only filter">
+
+"Who is this?" makes the identification itself easy: one clip from each
+meeting the voice was heard in, labeled with its source, playing up to 45
+seconds of that person's longest turn, and when a clip alone is not enough,
+Read opens the transcript at that exact moment so you can hear the
+conversation around it. The name box suggests the closest enrolled names as
+you type, because typing an existing name merges this voice into that
+person:
+
+<img src="docs/img/who-is-this.png" width="468" alt="Who is this? dialog with a voice clip per meeting and name suggestions">
 
 The ⋯ menu on any speaker manages the profile. Play any voice sample (each
 traceable to its source meeting), and when one is wrong, either remove it (a
@@ -140,10 +155,10 @@ registry write keeps a rolling backup.
 
 ### 4 · Summaries, next steps, and Ask
 
-At the end of every run, Qwen3-8B (4-bit, on-device) drafts each meeting's
-brief summary and extracts **Committed next steps**: every stated commitment
-as "[Speaker] will *action* by *date*". Both show in the Summary dialog and
-in the hover tooltip on any meeting row:
+The moment a recording finishes processing, Qwen3-8B (4-bit, on-device)
+drafts its brief summary and extracts **Committed next steps**: every stated
+commitment as "[Speaker] will *action* by *date*". Both show in the Summary
+dialog and in the hover tooltip on any meeting row:
 
 <img src="docs/img/summary.png" width="468" alt="Summary dialog with committed next steps">
 
@@ -166,9 +181,9 @@ uploads audio.
 
 ### 5 · The library: search and organize
 
-The library groups meetings by month with their date, length, attendees,
-review chips, and summary snippet inline; Read, Summary, and Ask are one
-click from any row:
+The library lists meetings by month or, with the sort toggle, alphabetically
+by title, showing each meeting's date, length, attendees, review chips, and
+summary snippet inline; Read, Summary, and Ask are one click from any row:
 
 <img src="docs/img/transcripts.png" width="826" alt="Meeting library">
 
@@ -221,7 +236,7 @@ never upload. Keys live in `stt.env` (git-ignored, `chmod 600`) and are
 never shown again; a saved key can be replaced by pasting a new one or
 removed with its Clear button:
 
-<img src="docs/img/cloud-keys.png" width="468" alt="Cloud transcription keys with a saved key and its Clear button">
+<img src="docs/img/cloud-keys.png" width="708" alt="Cloud transcription and assistant keys with a saved key and its Clear button">
 
 ## Light and dark
 
