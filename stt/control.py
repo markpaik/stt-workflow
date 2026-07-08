@@ -19,6 +19,8 @@ from datetime import datetime
 from . import config, status
 
 PAUSE_FLAG = config.PROJECT_DIR / "paused.flag"
+STOP_FLAG = config.PROJECT_DIR / "stopping.flag"
+STOP_WINDOW = 25.0  # seconds a "Stop" suppresses re-queue and self-heal kicks
 
 
 def is_paused() -> bool:
@@ -31,6 +33,29 @@ def pause():
 
 def resume():
     PAUSE_FLAG.unlink(missing_ok=True)
+
+
+def mark_stopping():
+    """Record that a Stop is intentional. A killed --job run re-queues itself
+    from its SIGTERM handler so a crash/sleep never loses work; on a user Stop
+    that same re-queue would make the panel's self-heal respawn the very run
+    just stopped. This flag lets both sides tell the two cases apart."""
+    try:
+        STOP_FLAG.write_text(datetime.now().isoformat(timespec="seconds"))
+    except OSError:
+        pass
+
+
+def clear_stopping():
+    STOP_FLAG.unlink(missing_ok=True)
+
+
+def stopping_recently(within: float = STOP_WINDOW) -> bool:
+    """True if a Stop was requested in the last `within` seconds."""
+    try:
+        return (time.time() - STOP_FLAG.stat().st_mtime) < within
+    except OSError:
+        return False
 
 
 def _pgrep(args):
@@ -48,15 +73,21 @@ def _parent_pids():
 
 def _group_is_ours(pgid) -> bool:
     """Guard against pgid reuse: only claim a recorded group if a member's
-    command line clearly belongs to this pipeline (run_batch parent, a
-    multiprocessing spawn worker, or our venv python)."""
+    command line clearly belongs to a BATCH RUN — the run_batch parent or a
+    multiprocessing spawn worker.
+
+    Deliberately NOT "our venv python / PROJECT_DIR appears in the command
+    line": that also matches the menu-bar app, the control panel, and any
+    helper launched from this repo's venv, whose paths all contain
+    PROJECT_DIR. When a finished run's pgid gets recycled onto one of those,
+    the loose check reported the batch as still running forever, pinning the
+    panel on "processing / Starting…" with nothing actually running."""
     try:
         out = subprocess.run(["ps", "-o", "command=", "-g", str(pgid)],
                              capture_output=True, text=True).stdout
     except Exception:
         return False
-    return ("run_batch.py" in out or "multiprocessing" in out
-            or str(config.PROJECT_DIR) in out)
+    return "run_batch.py" in out or "multiprocessing" in out
 
 
 def batch_groups():
@@ -116,6 +147,8 @@ def stop_run(timeout: float = 8.0) -> dict:
     Returns {"stopped": bool, "forced": bool, "survivors": [pid...],
     "cleared_jobs": n}."""
     from . import jobs
+    mark_stopping()  # before anything: a job's SIGTERM handler checks this to
+    # skip re-queuing, and the panel's self-heal checks it to skip re-kicking
     try:
         cleared = jobs.clear()
     except Exception:

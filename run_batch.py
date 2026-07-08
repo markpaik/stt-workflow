@@ -254,6 +254,18 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs}
 
 
+def _requeue_if_unintended(claimed_job) -> bool:
+    """Put a claimed job back on the queue when the run is interrupted, so a
+    crash or system sleep never loses it — UNLESS the interruption was an
+    intentional Stop (control.mark_stopping records that). Re-queuing a stopped
+    run would make the panel's idle self-heal respawn the very thing the user
+    just stopped, which reads as the run flickering back to 'Starting…'."""
+    if claimed_job is None or control.stopping_recently():
+        return False
+    jobs.add(claimed_job)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default=str(config.ICLOUD_DIR))
@@ -311,9 +323,7 @@ def main():
     def _terminate(signum, frame):
         print("Stop requested — aborting current file(s); originals preserved.",
               flush=True)
-        if claimed_job is not None:
-            from stt import jobs
-            jobs.add(claimed_job)
+        if _requeue_if_unintended(claimed_job):
             print("  queued job re-added — it will run on the next kick.", flush=True)
         status.end_run()
         signal.signal(signal.SIGTERM, signal.SIG_DFL)

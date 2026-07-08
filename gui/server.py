@@ -178,6 +178,11 @@ def _kick_jobs():
     nxt = jobs.items()
     if not nxt or control.snapshot()["pids"]:
         return
+    if control.stopping_recently():
+        # a Stop just happened — do NOT respawn a job a killed run may have
+        # re-queued from its SIGTERM handler; that was the "Starting… ↔
+        # Stopped" flicker. An explicit new run clears the flag (see /api/run).
+        return
     if _time.monotonic() - _jobs_kicked["at"] < 15:
         return
     _jobs_kicked["at"] = _time.monotonic()
@@ -616,6 +621,7 @@ class Handler(BaseHTTPRequestHandler):
                           "strict": bool(b.get("strict")), "verify": bool(b.get("verify")),
                           "onetime": bool(b.get("onetime")),
                           "parallel": int(b.get("parallel", 1)), "label": label})
+                control.clear_stopping()  # an explicit new run overrides a recent Stop
                 _jobs_kicked["at"] = 0.0  # a fresh click may bypass the cooldown
                 _kick_jobs()
                 self._json({"ok": True, "queued": busy})

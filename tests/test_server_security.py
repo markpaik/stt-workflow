@@ -55,6 +55,27 @@ def _make_meeting(base):
     (mfile(base, ".txt")).write_text("stub")
 
 
+def test_kick_jobs_suppressed_right_after_a_stop(sandbox, monkeypatch):
+    """The panel's idle self-heal must not respawn a job in the window right
+    after a Stop — a killed run may have re-queued it, and re-kicking it is the
+    "Starting… ↔ Stopped" flicker. An explicit new run clears the flag."""
+    from stt import control, jobs
+    jobs.add({"label": "redo", "files": ["a.m4a"], "at": 1.0})
+    monkeypatch.setattr(control, "snapshot", lambda *a, **k: {"pids": [], "mem_mb": 0})
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda a: spawned.append(a))
+
+    srv._jobs_kicked["at"] = 0.0  # bypass the cooldown so only the stop-flag matters
+    control.mark_stopping()
+    srv._kick_jobs()
+    assert spawned == [], "a job must not be respawned right after a Stop"
+
+    control.clear_stopping()
+    srv._jobs_kicked["at"] = 0.0
+    srv._kick_jobs()
+    assert len(spawned) == 1, "once the stop window clears, the queue drains normally"
+
+
 def test_remove_sample_re_identifies_all_meetings(running_server, monkeypatch):
     """Removing a sample changes who a profile matches, so it must re-run
     identification like every other registry edit — otherwise a misattributed

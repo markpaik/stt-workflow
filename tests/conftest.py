@@ -28,6 +28,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")
+    monkeypatch.setattr(control, "STOP_FLAG", d / "stopping.flag")
     monkeypatch.setattr(rates, "RATES_LOG", d / "rates.jsonl")
     monkeypatch.setattr(jobs, "PATH", d / "queued_jobs.json")
     monkeypatch.setattr(jobs, "_LOCK", d / "queued_jobs.lock")

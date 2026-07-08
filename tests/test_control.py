@@ -27,13 +27,14 @@ def test_stop_with_nothing_running(sandbox):
 
 
 def _spawn_fake_batch(sandbox):
-    """A process group like a real run: leader + a worker child whose command
-    line does NOT mention run_batch.py (the exact shape that used to leak).
-    PROJECT_DIR in argv satisfies the ownership guard."""
+    """A process group like a real run: a leader whose command line marks it as
+    run_batch (the ownership signal, exactly like the real parent) plus a worker
+    child whose OWN command line does not mention it (the orphanable shape). The
+    group is claimed via the leader, and stop takes the whole group down."""
     code = ("import subprocess,sys,time;"
             "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
             "time.sleep(60)")
-    p = subprocess.Popen([sys.executable, "-c", code, str(config.PROJECT_DIR)],
+    p = subprocess.Popen([sys.executable, "-c", code, "run_batch.py"],
                          start_new_session=True)
     time.sleep(1.0)
     return p
@@ -112,7 +113,7 @@ def test_stop_sweeps_the_job_a_dying_batch_requeues(sandbox):
         "signal.signal(signal.SIGTERM,t)\n"
         "time.sleep(60)\n")
     p = subprocess.Popen([sys.executable, "-c", code, str(qfile),
-                          str(config.PROJECT_DIR)], start_new_session=True)
+                          "run_batch.py"], start_new_session=True)
     pgid = os.getpgid(p.pid)
     time.sleep(0.8)
     try:
@@ -168,6 +169,41 @@ def test_stale_pgid_of_foreign_group_ignored(sandbox):
         assert pgid not in control.batch_groups()
     finally:
         p.kill()
+
+
+def test_group_with_only_project_dir_in_cmdline_is_not_ours(sandbox):
+    """The menu-bar app and control panel run from this repo's venv, so their
+    command lines contain PROJECT_DIR. A finished run's pgid recycled onto one
+    of them must NOT read as a live batch — otherwise the panel pins on
+    'processing / Starting…' with nothing actually running. Only run_batch and
+    multiprocessing-spawn members count as a batch."""
+    # a real process whose ONLY 'ours' signal is PROJECT_DIR in its argv,
+    # exactly like `python .../gui/menubar.py`
+    p = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)",
+                          str(config.PROJECT_DIR / "gui" / "menubar.py")],
+                         start_new_session=True)
+    pgid = os.getpgid(p.pid)
+    try:
+        assert control._group_is_ours(pgid) is False
+        d = status.read()
+        d.update(running=True, pgid=pgid)
+        status._write(d)
+        assert pgid not in control.batch_groups()  # not claimed as a run
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def test_stopping_flag_marks_intentional_stops(sandbox):
+    """mark/clear/stopping_recently is the signal that a Stop was deliberate."""
+    assert not control.stopping_recently()
+    control.mark_stopping()
+    assert control.stopping_recently()
+    assert not control.stopping_recently(within=-1)  # window is respected
+    control.clear_stopping()
+    assert not control.stopping_recently()
 
 
 def test_snapshot_caches(sandbox, monkeypatch):
