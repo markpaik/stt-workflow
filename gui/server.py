@@ -2136,12 +2136,14 @@ async function openName(uid,display,meeting){
   const box=$('#nameclips');
   if(!box)return;  // dialog closed while loading
   const clips=(r.clips||[]);
-  box.innerHTML=clips.map(c=>`<div class="row">
-    <div class="grow" style="min-width:0"><div class="name" title="${esc(c.meeting)}">${esc(c.meeting)}</div>
-    <div class="sub">their longest turn · at ${mmss(c.start)} · ${Math.round(c.dur)}s</div></div>
-    <audio controls preload="none" style="height:32px;width:min(230px,38vw)" onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
-      src="/api/snippet?meeting=${encodeURIComponent(c.meeting)}&speaker=${encodeURIComponent(uid)}&secs=45"></audio>
-    <button onclick="openTranscript('${escJs(c.meeting)}',${c.index})" title="Open the transcript at this moment — hear as much as you like, with the conversation around it">Read</button>
+  box.innerHTML=clips.map(c=>`<div class="row" style="display:block">
+    <div class="name" title="${esc(c.meeting)}">${esc(c.meeting)}</div>
+    <div class="sub">their longest turn · at ${mmss(c.start)} · ${Math.round(c.dur)}s</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <audio controls preload="none" style="height:32px;flex:1;min-width:0" onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
+        src="/api/snippet?meeting=${encodeURIComponent(c.meeting)}&speaker=${encodeURIComponent(uid)}&secs=45"></audio>
+      <button onclick="openTranscript('${escJs(c.meeting)}',${c.index})" title="Open the transcript at this moment — hear as much as you like, with the conversation around it">Read</button>
+    </div>
   </div>`).join('')
     ||`<audio controls src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`;
 }
