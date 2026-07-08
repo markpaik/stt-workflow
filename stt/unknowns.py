@@ -17,11 +17,16 @@ from datetime import datetime
 import numpy as np
 
 from . import config
-from .identify import _atomic_write, _l2, lock_registry, score_against
+from .identify import _atomic_write, _l2, cosine, lock_registry, score_against
 
 MATCH_MIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
 MATCH_MARGIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
 MAX_SAMPLES = 5
+# two clusters in one meeting may only share a global "Speaker N" when their own
+# centroids are this close — i.e. one person over-segmented into two clusters, not
+# two distinct strangers who merely resemble the same past unknown (mirrors
+# refine.resolve_split_clusters' inter-cluster gate)
+SPLIT_SIM = 0.75
 
 
 def _path():
@@ -39,7 +44,7 @@ def load() -> dict:
             print(f"WARNING: {p} is corrupt ({e}) — treating as empty. "
                   "Sample files on disk are untouched; fix or restore before "
                   "naming any unknown speaker.", file=sys.stderr)
-    return {"next": 1, "speakers": {}}
+    return {"speakers": {}}
 
 
 def save(reg: dict):
@@ -69,6 +74,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
     with lock_registry():
         reg = load()
         out = {}
+        claimed = {}  # uid -> centroid of the first cluster that claimed it this pass
         for label, vec in cent_emb.items():
             if cluster_names.get(label):
                 continue  # named person, not an unknown
@@ -83,7 +89,16 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
             scored.sort(reverse=True)
             best, uid = scored[0] if scored else (-1.0, None)
             second = scored[1][0] if len(scored) > 1 else -1.0
-            if uid is not None and best >= MATCH_MIN and (best - second) >= MATCH_MARGIN:
+            matched = uid is not None and best >= MATCH_MIN and (best - second) >= MATCH_MARGIN
+            if matched and uid in claimed and cosine(v, claimed[uid]) < SPLIT_SIM:
+                # a different cluster in THIS meeting already took this unknown, and
+                # the two centroids are not close — these are two distinct strangers,
+                # not one over-segmented voice. Don't collapse them into one Speaker N;
+                # register this one as a new unknown instead (mirrors the greedy
+                # each-id-used-once rule in identify.name_speakers).
+                matched = False
+            if matched:
+                claimed.setdefault(uid, v)
                 # returning unknown: add this meeting's sample ONCE (a relabel of the
                 # same meeting must not stack duplicate centroids)
                 mts = reg["speakers"][uid].setdefault("meetings", [])
@@ -100,7 +115,6 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                 while n in taken:
                     n += 1
                 uid = f"U{n:03d}"
-                reg["next"] = max(reg.get("next", 1), n + 1)
                 fname = f"{uid}.npy"
                 np.save(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
