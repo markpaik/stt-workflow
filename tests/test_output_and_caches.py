@@ -311,3 +311,33 @@ def test_archive_hides_but_keeps_matching(sandbox):
     assert unknowns.restore(uid)
     assert "archived" not in unknowns.load()["speakers"][uid]
     assert not unknowns.archive("U999")  # unknown uid: clean False
+
+
+def test_promoted_split_voice_does_not_resurrect_as_new_unknown(sandbox):
+    """The diarizer split one person into two clusters; both unknowns were
+    named to the same person (promote moves their samples into the enrolled
+    profile and deletes the unknown entries). The next relabel can give the
+    name to only ONE cluster (one-name-per-meeting), so the loser cluster
+    used to match nothing and resurrect as a fresh 'Speaker 1' seconds after
+    the naming. A voice that strongly matches an ENROLLED profile must never
+    mint a new unknown."""
+    from stt import identify
+
+    rng = np.random.default_rng(7)
+    va, vb = rng.normal(size=256), rng.normal(size=256)   # split: far apart
+    uids = unknowns.assign({"SA": va, "SB": vb}, {"SA": None, "SB": None}, "Mtg T")
+    assert unknowns.promote(uids["SA"], "Taylore James")
+    assert unknowns.promote(uids["SB"], "Taylore James")
+    assert unknowns.load()["speakers"] == {}
+    assert identify.load_registry()["Taylore James"]["n_samples"] == 2
+
+    # relabel pass: cluster A won the name, cluster B lost the race
+    out = unknowns.assign({"SA": va, "SB": vb},
+                          {"SA": "Taylore James", "SB": None}, "Mtg T")
+    assert "SB" not in out                       # suppressed, no global label
+    assert unknowns.load()["speakers"] == {}     # and nothing was minted
+
+    # a genuine stranger in the same pass still registers normally
+    w = rng.normal(size=256)
+    out = unknowns.assign({"SC": w}, {"SC": None}, "Mtg T")
+    assert out["SC"].startswith("U")
