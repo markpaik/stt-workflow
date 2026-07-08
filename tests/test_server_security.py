@@ -310,6 +310,67 @@ def test_env_file_set_concurrent_writes_keep_both_keys(sandbox, monkeypatch):
     assert env.get("STT_A") == "1" and env.get("STT_B") == "2", env
 
 
+# ---------- /api/cloud_keys: set, clear, never echo ----------
+
+def _clean_key_env(monkeypatch):
+    """Hermetic: a real provider key in the developer's environment must not
+    leak into availability checks (api_key falls back to os.environ)."""
+    from stt import asr_cloud
+    for meta in asr_cloud.PROVIDERS.values():
+        monkeypatch.delenv(meta["key_env"], raising=False)
+
+
+def test_cloud_keys_set_then_clear_removes_the_line(running_server, monkeypatch):
+    _clean_key_env(monkeypatch)
+    port = running_server
+    st, body = _post(port, "/api/cloud_keys", {"scribe": "sk-test-123"})
+    assert st == 200 and body["ok"] and body["set"]["scribe"] is True
+    assert config._env_file().get("STT_ELEVENLABS_KEY") == "sk-test-123"
+
+    st, body = _post(port, "/api/cloud_keys", {"clear": ["scribe"]})
+    assert st == 200 and body["ok"] and body["set"]["scribe"] is False
+    assert "STT_ELEVENLABS_KEY" not in config._env_file()
+
+
+def test_cloud_keys_clear_keeps_other_keys_and_comments(running_server, monkeypatch):
+    _clean_key_env(monkeypatch)
+    port = running_server
+    envp = config.PROJECT_DIR / "stt.env"
+    envp.write_text("# provider keys\nSTT_ELEVENLABS_KEY=aaa\nSTT_OPENAI_KEY=bbb\n")
+    st, body = _post(port, "/api/cloud_keys", {"clear": ["scribe"]})
+    assert st == 200
+    assert body["set"] == {"scribe": False, "openai": True, "voxtral": False}
+    text = envp.read_text()
+    assert "# provider keys" in text and "STT_OPENAI_KEY=bbb" in text
+    assert "STT_ELEVENLABS_KEY" not in text
+
+
+def test_cloud_keys_paste_wins_over_clear_and_empty_is_noop(running_server, monkeypatch):
+    _clean_key_env(monkeypatch)
+    port = running_server
+    _post(port, "/api/cloud_keys", {"scribe": "old"})
+    # the dialog posts all three fields — blank ones must not clear anything
+    st, body = _post(port, "/api/cloud_keys", {"scribe": "", "openai": "", "voxtral": ""})
+    assert st == 200 and body["set"]["scribe"] is True
+    # paste + clear for the same provider in one request: the paste wins
+    st, body = _post(port, "/api/cloud_keys", {"scribe": "new", "clear": ["scribe"]})
+    assert body["set"]["scribe"] is True
+    assert config._env_file()["STT_ELEVENLABS_KEY"] == "new"
+
+
+def test_cloud_keys_never_echoed_to_the_client(running_server, monkeypatch):
+    """Presence booleans only — the actual key value must never appear in any
+    payload the page can read (the POST response or the state snapshot)."""
+    _clean_key_env(monkeypatch)
+    port = running_server
+    secret = "sk-super-secret-value"
+    st, body = _post(port, "/api/cloud_keys", {"openai": secret})
+    assert st == 200 and secret not in json.dumps(body)
+    st, state = _get(port, "/api/state")
+    assert secret not in json.dumps(state)
+    assert state["cloud_keys"] == {"scribe": False, "openai": True, "voxtral": False}
+
+
 # ---------- /api/audio Range handling (finding #18) ----------
 
 def _raw_get(port, path, headers=None):
