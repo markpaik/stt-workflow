@@ -12,6 +12,23 @@ def _args(**over):
     return types.SimpleNamespace(**base)
 
 
+def test_intentional_stop_does_not_requeue_but_interrupt_does(sandbox):
+    """A killed --job run re-queues itself so a crash or sleep never loses the
+    work. But when the user hit Stop (control marks it), re-queuing would make
+    the panel's self-heal respawn the very run they stopped ("Starting… ↔
+    Stopped" flicker). The re-queue must honor that intent."""
+    from stt import control, jobs
+    job = {"label": "redo", "files": ["a.m4a"], "at": 1.0}
+
+    control.mark_stopping()
+    assert run_batch._requeue_if_unintended(job) is False
+    assert jobs.items() == []            # intentional Stop: stays gone
+
+    control.clear_stopping()
+    assert run_batch._requeue_if_unintended(job) is True
+    assert len(jobs.items()) == 1        # crash/sleep: preserved for the next kick
+
+
 def test_job_spec_from_args_files_and_paths():
     spec = run_batch.job_spec_from_args(_args(files="A.m4a,B.m4a"), [])
     assert spec["files"] == ["A.m4a", "B.m4a"]
