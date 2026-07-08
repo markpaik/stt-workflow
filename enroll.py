@@ -82,9 +82,12 @@ def main():
         embs = diar["embeddings"]
         if not embs:
             raise SystemExit("No speaker embedding was produced from that clip.")
+        # embs is keyed by raw diarization cluster label, so tally talk time by
+        # the same raw label (raw_turns), not turns' post-refine speaker name,
+        # which is the enrolled NAME once a cluster matches a voiceprint.
         talk = {}
-        for t in diar["turns"]:
-            talk[t["speaker"]] = talk.get(t["speaker"], 0.0) + (t["end"] - t["start"])
+        for t in diar["raw_turns"]:
+            talk[t["cluster"]] = talk.get(t["cluster"], 0.0) + (t["end"] - t["start"])
         vec = embs[max(embs, key=lambda l: talk.get(l, 0.0))]
     else:
         raise SystemExit("Provide --from-meeting (+--speaker) or --audio")

@@ -152,8 +152,11 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                     out[i]["attribution"] = "smoothed"
                     smoothed += 1
                 else:                                  # keep diarizer's call, note it
-                    out[i]["flags"].append("short_low_confidence")
-                    flagged += 1
+                    # the two-pass loop can revisit this turn unchanged; guard the
+                    # append (like protected_answer above) so it isn't doubled
+                    if "short_low_confidence" not in out[i]["flags"]:
+                        out[i]["flags"].append("short_low_confidence")
+                        flagged += 1
     # any short turn that was neither smoothed nor already marked stays visible but
     # flagged: its attribution rests on thin evidence regardless of neighbors
     for i, t in enumerate(turns):
