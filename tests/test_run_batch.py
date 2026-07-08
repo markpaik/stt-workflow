@@ -400,3 +400,80 @@ def test_rate_sample_tags_true_concurrency_not_stale_worker_count(sandbox, monke
     # B ran in the 2-worker pool; A's solo retry ran single-worker
     assert (200.0, 2) in recorded
     assert (100.0, 1) in recorded  # the fix: solo retry tagged n_active=1, not 2
+
+
+def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
+    """The per-file pass: drafts for a meeting without an ai_summary, no-ops
+    for one that already has it, and never leaves a stale 'summarizing' entry
+    in the active status display."""
+    import json
+
+    from conftest import mfile
+    from stt import status, summarize
+
+    mfile("Fresh Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Fresh Mtg.m4a", "segments": [], "speakers": [], "words": []}))
+    mfile("Done Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Done Mtg.m4a", "ai_summary": "have one",
+         "segments": [], "speakers": [], "words": []}))
+    calls = []
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
+
+    assert run_batch.summarize_one("Fresh Mtg.m4a") is True
+    assert run_batch.summarize_one("Done Mtg.m4a") is False
+    assert calls == ["Fresh Mtg"]
+    assert status.read().get("active", {}) == {}
+
+
+def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):
+    """Drive the REAL main() (pipeline stubbed): each meeting's description
+    must be drafted the moment that file finishes, between files — not in one
+    batch at end-of-run. With a long backlog the end is hours away, and a Stop
+    pressed before then used to silently lose every summary of the run."""
+    import json
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from conftest import mfile
+    from stt import config, summarize
+
+    src = sandbox / "source"
+    for b in ("A Mtg", "B Mtg"):
+        (src / f"{b}.m4a").write_bytes(b"\x00" * 64)
+
+    events = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        base = _P(src_str).stem
+        events.append(("process", base))
+        j = mfile(base, ".json")
+        j.write_text(json.dumps({"source_file": f"{base}.m4a",
+                                 "segments": [], "speakers": [], "words": []}))
+        mfile(base, ".txt").write_text("[00:00] A: hi")
+        return {"ok": True, "key": f"{base}.m4a",
+                "mtime": (src / f"{base}.m4a").stat().st_mtime,
+                "outputs": [str(j)], "summary": "1 speaker(s), 1.0 min",
+                "who": "", "duration_sec": 60.0, "stage_secs": {}}
+
+    def fake_suggest(base):
+        events.append(("summarize", base))
+        j = config.meeting_file(base, ".json")   # persist like the real one,
+        d = json.loads(j.read_text())            # so the end-of-run sweep skips
+        d["ai_summary"] = "drafted"
+        j.write_text(json.dumps(d))
+        return {}
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", fake_suggest)
+    monkeypatch.setattr(_sys, "argv",
+                        ["run_batch.py", "--files", "A Mtg.m4a,B Mtg.m4a",
+                         "--force", "--ignore-battery", "--ignore-pause"])
+    run_batch.main()
+
+    assert events == [("process", "A Mtg"), ("summarize", "A Mtg"),
+                      ("process", "B Mtg"), ("summarize", "B Mtg")], events
+    for b in ("A Mtg", "B Mtg"):
+        d = json.loads(config.meeting_file(b, ".json").read_text())
+        assert d["ai_summary"] == "drafted"
