@@ -117,27 +117,67 @@ def current_model():
 
 
 def read_schedule():
-    src = AGENT
+    """The agent's automation triggers, straight from the plist: `watch`
+    (event-triggered runs when a file lands) and `nightly` (the scheduled
+    run) are INDEPENDENT — either can be off while the other stays on."""
     try:
-        d = plistlib.loads(src.read_bytes())
-        sci = d.get("StartCalendarInterval", {})
+        d = plistlib.loads(AGENT.read_bytes())
+        sci = d.get("StartCalendarInterval") or {}
         return {"hour": sci.get("Hour"), "minute": sci.get("Minute", 0) or 0,
-                "installed": AGENT.exists()}
+                "nightly": bool(sci), "watch": bool(d.get("WatchPaths")),
+                "installed": True}
     except Exception:
-        return {"hour": None, "minute": 0, "installed": AGENT.exists()}
+        return {"hour": None, "minute": 0, "nightly": False, "watch": False,
+                "installed": AGENT.exists()}
+
+
+def _agent_reload():
+    """launchd caches plists — every edit must bootout+bootstrap to apply."""
+    import os
+    uid = os.getuid()
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT)], capture_output=True)
+
+
+def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
+    """Rewrite the agent's triggers; None leaves that trigger as it is.
+    Disabling nightly remembers its time (stt.env) so re-enabling restores
+    it; enabling watch stamps the CURRENT source folder, healing a stale
+    WatchPaths after a folder change. Login catch-up (RunAtLoad) stays on
+    only while some automatic trigger exists — 'manual' means manual."""
+    if not AGENT.exists():
+        return {"ok": False,
+                "error": "automation agent not installed — run ./setup.sh install-agent"}
+    d = plistlib.loads(AGENT.read_bytes())
+    if watch is not None:
+        if watch:
+            d["WatchPaths"] = [str(config.source_dir())]
+        else:
+            d.pop("WatchPaths", None)
+    if hour is not None:  # setting a time implies the nightly run is wanted
+        nightly = True
+    if nightly is not None:
+        if nightly:
+            if hour is None:
+                saved = _env_file_get()[0].get("STT_SCHEDULE_SAVED", "2:0")
+                try:
+                    hour, minute = (int(x) for x in saved.split(":"))
+                except ValueError:
+                    hour, minute = 2, 0
+            d["StartCalendarInterval"] = {"Hour": int(hour), "Minute": int(minute or 0)}
+        else:
+            sci = d.pop("StartCalendarInterval", None)
+            if sci:
+                _env_file_set({"STT_SCHEDULE_SAVED":
+                               f"{sci.get('Hour', 2)}:{sci.get('Minute', 0)}"})
+    d["RunAtLoad"] = bool(d.get("WatchPaths")) or "StartCalendarInterval" in d
+    AGENT.write_bytes(plistlib.dumps(d))
+    _agent_reload()
+    return {"ok": True, **read_schedule()}
 
 
 def write_schedule(hh, mm):
-    import os
-    for p in (AGENT,):
-        if p.exists():
-            d = plistlib.loads(p.read_bytes())
-            d["StartCalendarInterval"] = {"Hour": hh, "Minute": mm}
-            p.write_bytes(plistlib.dumps(d))
-    if AGENT.exists():
-        uid = os.getuid()
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
-        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT)], capture_output=True)
+    write_automation(hour=hh, minute=mm)
 
 
 _dur_cache = {}
@@ -833,6 +873,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 _env_file_set({"STT_LLM_BACKEND": backend})
                 self._json({"ok": True, "backend": backend})
+            elif u.path == "/api/automation":
+                self._json(write_automation(
+                    watch=(bool(b["watch"]) if "watch" in b else None),
+                    nightly=(bool(b["nightly"]) if "nightly" in b else None)))
             elif u.path == "/api/set_date":
                 if not self._require_base(b.get("base")):
                     return
@@ -1038,7 +1082,8 @@ border:1px solid var(--hairline);color:var(--sub)}
 .checkbox{width:16px;height:16px;accent-color:var(--accent);flex:none}
 dialog{margin:auto;border:1px solid var(--line);border-radius:14px;padding:26px;
 background:var(--card);color:var(--ink);
-box-shadow:0 20px 60px rgba(0,0,0,.2);max-width:440px;width:92%}
+box-shadow:0 20px 60px rgba(0,0,0,.2);max-width:440px;width:92%;
+max-height:88vh;overflow-y:auto;overscroll-behavior:contain}
 dialog::backdrop{background:rgba(0,0,0,.45)}
 dialog h1{font-size:17px}
 .timegrid{display:flex;gap:8px;align-items:center;margin:14px 0}
@@ -1151,11 +1196,13 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 </div>
 <div class="card">
   <h2>Settings</h2>
-  <div class="row"><div class="grow"><div class="name">Daily run</div>
-    <div class="sub" id="schedtext"></div></div>
-    <button onclick="openSchedule()">Change…</button></div>
   <div class="row"><div class="grow"><div class="name">Folder watch</div>
-    <div class="sub" id="watchnote"></div></div></div>
+    <div class="sub" id="watchnote"></div></div>
+    <button class="toggle" id="watchbtn" onclick="togWatch()" title="On: a new recording starts processing within moments of landing. Off: files wait for the nightly run or a manual click."></button></div>
+  <div class="row"><div class="grow"><div class="name">Nightly run</div>
+    <div class="sub" id="schedtext"></div></div>
+    <button class="toggle" id="nightbtn" onclick="togNightly()" title="On: everything new processes at the scheduled time. Independent of the folder watch."></button>
+    <button onclick="openSchedule()" id="schedchg">Change…</button></div>
   <div class="row"><div class="grow"><div class="name">Transcription model</div>
     <div class="sub" id="modelnote"></div></div>
     <select id="modelsel" onchange="setModel()"></select></div>
@@ -1322,9 +1369,23 @@ function render(){
     ||`<div class="sub" style="padding-top:8px">${sq?'No unidentified voice matches “'+esc(sq)+'”.':'No unidentified voices right now.'}</div>`;
   $('#relnote').style.display=s.relabel_pending?'block':'none';
   $('#relnote').textContent='Applying names to all transcripts… (moments)';
-  // settings
+  // settings — the two automatic triggers, independently switchable
   const sc=s.schedule;
-  $('#schedtext').textContent=sc.hour==null?'not set':new Date(2000,0,1,sc.hour,sc.minute).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+' · runs at next wake if the Mac is asleep';
+  $('#watchbtn').textContent=sc.watch?'On':'Off';
+  $('#watchbtn').style.color=sc.watch?'var(--ok)':'var(--sub)';
+  $('#watchbtn').disabled=!sc.installed;
+  $('#watchnote').textContent=!sc.installed
+    ?'Not installed — run ./setup.sh install-agent'
+    :(sc.watch?'New recordings process within moments of landing (while the Mac is awake)'
+              :'Off — new files wait for the nightly run or a manual click');
+  $('#nightbtn').textContent=sc.nightly?'On':'Off';
+  $('#nightbtn').style.color=sc.nightly?'var(--ok)':'var(--sub)';
+  $('#nightbtn').disabled=!sc.installed;
+  $('#schedchg').style.display=sc.nightly?'inline-block':'none';
+  $('#schedtext').textContent=!sc.installed?'Not installed'
+    :(sc.nightly
+      ?new Date(2000,0,1,sc.hour,sc.minute).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+' · runs at next wake if the Mac is asleep'
+      :'Off — turn on to process everything new at a set time');
   const sel=$('#modelsel');
   const pickable=s.asr_choices.filter(c=>!c.cloud||(s.cloud_keys||{})[c.cloud]);
   sel.innerHTML=pickable.map(c=>`<option value="${c.id}" ${c.id===s.model?'selected':''}>${c.label}</option>`).join('');
@@ -1339,10 +1400,6 @@ function render(){
   $('#llmnote').textContent=s.llm_backend==='local'
     ?(av.local?'Runs on this Mac — transcripts never leave it':'Local model not installed — pick a cloud assistant or install .venv-llm')
     :'Cloud assistant: transcript text uploads for summaries and Ask. Strict recordings always stay local.';
-  // folder watch (event-triggered runs) — installed with the automation agent
-  $('#watchnote').textContent=(s.schedule&&s.schedule.installed)
-    ?'Active — a new recording starts processing within moments of landing while the Mac is awake'
-    :'Not installed — run ./setup.sh install-agent for instant + nightly runs';
   $('#srcpath').textContent=s.paths.source.replace(/^\/Users\/[^/]+/,'~');
   $('#dstpath').textContent=s.paths.dest.replace(/^\/Users\/[^/]+/,'~');
   // meetings: filter by title/speaker, newest meeting-date first, grouped by month
@@ -1996,8 +2053,8 @@ async function pickFolder(which){
 
 function openSchedule(){
   const sc=S.schedule;const h=sc.hour??2,m=sc.minute??0;
-  $('#dlg').innerHTML=`<h1 style="font-size:18px">Daily run time</h1>
-  <p class="muted" style="margin-top:8px">The pipeline checks for new recordings every night. If the Mac is asleep at that moment, the run happens automatically at the next wake — and new files are also picked up within a minute whenever they land while the Mac is awake.</p>
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Nightly run time</h1>
+  <p class="muted" style="margin-top:8px">Everything new processes at this time each night. If the Mac is asleep at that moment, the run happens automatically at the next wake. (The folder watch is a separate switch — it picks files up the moment they land.)</p>
   <div class="timegrid">
     <select id="sh">${[...Array(24).keys()].map(i=>`<option value="${i}" ${i===h?'selected':''}>${(i%12)||12} ${i<12?'AM':'PM'}</option>`).join('')}</select>
     <b>:</b>
@@ -2254,12 +2311,19 @@ async function checkUpdates(){
 }
 function openCloudKeys(){
   const ck=S.cloud_keys||{};
-  const row=(prov,label,hint)=>`<div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-    <span style="width:150px" class="sub">${label}</span>
-    <input type="password" id="ck_${prov}" placeholder="${ck[prov]?'key saved — paste to replace':'paste API key'}" style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:6px 8px">
-    <span class="sub" style="width:52px;white-space:nowrap">${ck[prov]?'✓ set':''}</span>
-    ${ck[prov]?`<button onclick="clearCloudKey('${prov}','${label}')" title="Remove the saved ${label} key from this Mac">Clear</button>`:''}</div>
-    <div class="sub" style="margin-left:158px;opacity:.8">${hint}</div>`;
+  // fixed columns (label · input · status · clear) so every row lines up, with
+  // the status/clear slots RESERVED even when empty — mixed-width rows read
+  // as misalignment. Hints sit under their own input.
+  const row=(prov,label,hint)=>`<div style="display:flex;gap:10px;align-items:flex-start;margin-top:12px">
+    <span class="sub" style="width:118px;flex:none;padding-top:7px">${label}</span>
+    <div class="grow" style="min-width:0">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="password" id="ck_${prov}" placeholder="${ck[prov]?'saved — paste to replace':'paste API key'}" style="flex:1;min-width:0;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:6px 8px">
+        <span class="sub" style="width:16px;flex:none;text-align:center" title="${ck[prov]?'A key is saved':''}">${ck[prov]?'✓':''}</span>
+        <span style="width:54px;flex:none;text-align:right">${ck[prov]?`<button onclick="clearCloudKey('${prov}','${label}')" title="Remove the saved ${label} key from this Mac">Clear</button>`:''}</span>
+      </div>
+      <div class="sub" style="opacity:.75;margin-top:3px">${hint}</div>
+    </div></div>`;
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
   <p class="muted" style="margin-top:8px">Optional: transcribe with a cloud engine instead of the local models. Only the audio is uploaded — speaker identification and voiceprints stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine is selected. Keys are stored in stt.env on this machine and never shown again.</p>
   ${row('scribe','ElevenLabs Scribe','elevenlabs.io → Profile → API keys')}
@@ -2303,6 +2367,8 @@ applyTheme(themeNow());
 {const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 function setLlm(){api('/api/llm_backend',{backend:$('#llmsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch the assistant');refresh()})}
+function togWatch(){api('/api/automation',{watch:!S.schedule.watch}).then(r=>{if(!r.ok)alert(r.error||'Could not change the folder watch');refresh()})}
+function togNightly(){api('/api/automation',{nightly:!S.schedule.nightly}).then(r=>{if(!r.ok)alert(r.error||'Could not change the nightly run');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh().then(()=>{
   // deep link: /?open=<meeting> opens that transcript directly

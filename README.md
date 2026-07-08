@@ -200,9 +200,10 @@ everywhere; a reader can never see a half-written transcript.
 
 ### 7 · Configure
 
-Settings covers the daily run time, the folder-watch status (new
-recordings start processing within moments of landing while the Mac is
-awake; the nightly run and login catch-up cover the rest), the
+Settings covers the two automatic triggers, each with its own switch: the
+folder watch (a new recording starts processing within moments of landing
+while the Mac is awake) and the nightly run (everything new at a set
+time). Turn both off for fully manual operation. It also covers the
 transcription model (local engines, plus cloud ones once a key is added),
 the summaries-and-Ask assistant (local Qwen by default, Claude or OpenAI
 by key), punctuation cleanup, speed calibration, a model-update check, and
