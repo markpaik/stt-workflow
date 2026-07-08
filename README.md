@@ -147,13 +147,22 @@ in the hover tooltip on any meeting row:
 
 <img src="docs/img/summary.png" width="468" alt="Summary dialog with committed next steps">
 
-The same on-device model powers **Ask**: pick a meeting, ask questions about
+The same assistant powers **Ask**: pick a meeting, ask questions about
 it, and get answers drawn from that transcript only, citing timestamps.
-Follow-up questions understand the earlier ones. Each answer takes roughly
-20-60 seconds (the model loads fresh per question), the thread is never
-stored, and nothing leaves the machine:
+Follow-up questions understand the earlier ones, and the thread is never
+stored. On the local model each answer takes roughly 20-60 seconds (the
+model loads fresh per question) and nothing leaves the machine:
 
 <img src="docs/img/ask.png" width="468" alt="Ask dialog answering questions about one meeting">
+
+Summaries and Ask can also run on a **cloud assistant** instead of the
+local model: bring an Anthropic key (Claude Haiku) or reuse your OpenAI
+key, then pick the assistant in Settings. Cloud answers arrive in seconds
+and suit machines without the 4.5 GB local model, with the honest trade
+spelled out in the picker: transcript text is uploaded to that provider
+for these features, and strict-mode recordings always use the local model
+regardless of the setting, exactly like strict transcription never
+uploads audio.
 
 ### 5 · The library: search and organize
 
@@ -191,9 +200,13 @@ everywhere; a reader can never see a half-written transcript.
 
 ### 7 · Configure
 
-Settings covers the daily run time, the transcription model (local engines,
-plus cloud ones once a key is added), punctuation cleanup, speed
-calibration, a model-update check, and the watched and transcripts folders:
+Settings covers the daily run time, the folder-watch status (new
+recordings start processing within moments of landing while the Mac is
+awake; the nightly run and login catch-up cover the rest), the
+transcription model (local engines, plus cloud ones once a key is added),
+the summaries-and-Ask assistant (local Qwen by default, Claude or OpenAI
+by key), punctuation cleanup, speed calibration, a model-update check, and
+the watched and transcripts folders:
 
 <img src="docs/img/settings.png" width="442" alt="Settings card">
 
@@ -361,6 +374,9 @@ what people said. Treat both with care:
   fully-offline operation. The control panel binds to `127.0.0.1` only.
 - Cloud transcription is off unless you add a key, and strict-mode
   recordings never upload even then.
+- The summaries/Ask assistant is local by default; selecting a cloud
+  assistant uploads transcript text for those features, and strict-mode
+  recordings always stay on the local model regardless.
 
 ## License
 

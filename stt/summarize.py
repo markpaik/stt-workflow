@@ -1,10 +1,15 @@
-"""Local LLM features: title/summary suggestions and per-meeting Q&A.
+"""LLM features: title/summary suggestions and per-meeting Q&A.
 
-Runs Qwen3-8B (4-bit, MLX) fully on-device — transcripts never leave the machine,
-which matters because some recordings are sensitive. Used by the control panel's
-Rename flow (suggest a title from the transcript, the user edits/approves, then
-rename_meeting() renames every artifact consistently) and its Ask dialog
-(answer_question: grounded answers about one meeting's transcript).
+The DEFAULT backend is Qwen3-8B (4-bit, MLX) fully on-device — transcripts never
+leave the machine, which matters because some recordings are sensitive. A cloud
+assistant (Anthropic Claude or OpenAI) can be selected in Settings for machines
+that can't run the local model or want faster answers; transcript text is then
+uploaded to that provider for these features ONLY, and STRICT-mode recordings
+always use the local model whatever the setting says (mirroring transcription's
+strict rule). Used by the control panel's Rename flow (suggest a title from the
+transcript, the user edits/approves, then rename_meeting() renames every
+artifact consistently) and its Ask dialog (answer_question: grounded answers
+about one meeting's transcript).
 """
 import contextlib
 import fcntl
@@ -35,8 +40,59 @@ print(json.dumps({"text": out}))
 """
 
 
+# --- assistant backend selection ------------------------------------------
+LLM_BACKENDS = ("local", "anthropic", "openai")
+
+
+def _setting(name: str, default: str = None) -> str:
+    """stt.env wins over the process env (same precedence as asr_cloud keys),
+    read fresh each call so a panel change applies without restarts."""
+    return config._env_file().get(name) or os.environ.get(name) or default
+
+
+def llm_backend() -> str:
+    """Which assistant answers summaries/Ask: 'local' (default), 'anthropic',
+    or 'openai'. The panel's Settings picker writes STT_LLM_BACKEND."""
+    b = _setting("STT_LLM_BACKEND", "local")
+    return b if b in LLM_BACKENDS else "local"
+
+
+def backend_available(backend: str) -> bool:
+    if backend == "local":
+        return LLM_PY.exists()
+    if backend == "anthropic":
+        return bool(_setting("STT_ANTHROPIC_KEY"))
+    if backend == "openai":
+        return bool(_setting("STT_OPENAI_KEY"))
+    return False
+
+
 def available() -> bool:
-    return LLM_PY.exists()
+    return backend_available(llm_backend())
+
+
+def _strict_meeting(base: str) -> bool:
+    """Strict recordings must NEVER reach a cloud LLM. Unreadable metadata
+    fails PRIVATE: treat it as strict rather than risk an upload."""
+    try:
+        return bool(json.loads(
+            config.meeting_file(base, ".json").read_text()).get("strict"))
+    except Exception:
+        return True
+
+
+def _backend_for(base: str) -> str:
+    """The backend a given meeting may use: the selected one, except that a
+    strict meeting downgrades to local (or refuses if local isn't installed)."""
+    backend = llm_backend()
+    if backend != "local" and _strict_meeting(base):
+        if LLM_PY.exists():
+            return "local"
+        raise RuntimeError(
+            "this is a strict recording — its transcript never leaves this "
+            "Mac, and the local model isn't installed. Install .venv-llm or "
+            "switch the assistant back to the local model.")
+    return backend
 
 
 class LLMBusy(RuntimeError):
@@ -70,9 +126,18 @@ def _llm_lock(timeout: float | None = None):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = None) -> str:
+def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = None,
+              backend: str = None) -> str:
+    """One prompt in, one answer out, whichever assistant is selected. Cloud
+    backends need no llm.lock (nothing loads into RAM) and no busy path."""
+    backend = backend or llm_backend()
+    if backend == "anthropic":
+        return _generate_anthropic(prompt, max_tokens)
+    if backend == "openai":
+        return _generate_openai(prompt, max_tokens)
+
     import subprocess
-    if not available():
+    if not LLM_PY.exists():
         raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
@@ -86,6 +151,43 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
     # Qwen3 emits <think>...</think> before the answer; keep only the answer
     out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL)
     return out.strip()
+
+
+def _generate_anthropic(prompt: str, max_tokens: int) -> str:
+    import anthropic
+    key = _setting("STT_ANTHROPIC_KEY")
+    if not key:
+        raise RuntimeError("no Anthropic API key — add one under Cloud keys in Settings")
+    # Haiku: these are brief summaries and single-transcript Q&A. No sampling
+    # params and no thinking config — both portable across every current model
+    # if STT_ANTHROPIC_MODEL points somewhere else (Opus rejects temperature).
+    model = _setting("STT_ANTHROPIC_MODEL", "claude-haiku-4-5")
+    try:
+        r = anthropic.Anthropic(api_key=key).messages.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}])
+    except anthropic.APIError as e:
+        raise RuntimeError(f"Claude request failed: {e}") from e
+    if r.stop_reason == "refusal":
+        raise RuntimeError("the model declined this request")
+    return "".join(b.text for b in r.content if b.type == "text").strip()
+
+
+def _generate_openai(prompt: str, max_tokens: int) -> str:
+    import requests
+    key = _setting("STT_OPENAI_KEY")
+    if not key:
+        raise RuntimeError("no OpenAI API key — add one under Cloud keys in Settings")
+    model = _setting("STT_OPENAI_LLM_MODEL", "gpt-4o-mini")
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "max_completion_tokens": max_tokens,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"OpenAI request failed ({r.status_code}): {r.text[:200]}")
+    return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
 def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
@@ -117,6 +219,10 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
         return {"ok": False, "error": "empty question"}
     if not config.meeting_file(base, ".txt").exists():
         return {"ok": False, "error": f"no transcript for '{base}'"}
+    try:
+        backend = _backend_for(base)  # strict meetings never reach a cloud LLM
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
     sample, truncated = _transcript_sample(base, max_chars=QA_MAX_CHARS)
     hist = ""
     for h in (history or [])[-QA_MAX_HISTORY:]:
@@ -144,7 +250,7 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
         + f"QUESTION: {question}"
     )
     t0 = time.monotonic()
-    answer = _generate(prompt, max_tokens=2000, lock_timeout=15.0)
+    answer = _generate(prompt, max_tokens=2000, lock_timeout=15.0, backend=backend)
     if "<think>" in answer:
         # generation stopped mid-reasoning: the closing tag never arrived, so
         # _generate's strip didn't match and raw chain-of-thought would leak
@@ -172,6 +278,7 @@ def suggest_title(base: str) -> dict:
     """Suggest a filename + detailed summary for a processed meeting from its
     transcript. The result is persisted into the meeting's .json (ai_title /
     ai_summary) so it stays visible in the panel afterwards."""
+    backend = _backend_for(base)  # strict meetings never reach a cloud LLM
     sample, _ = _transcript_sample(base, max_chars=12000)
     prompt = (
         "Below is a (partial) meeting transcript. Produce:\n"
@@ -192,7 +299,7 @@ def suggest_title(base: str) -> dict:
         "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
         f"TRANSCRIPT:\n{sample}"
     )
-    out = _generate(prompt, max_tokens=3000)
+    out = _generate(prompt, max_tokens=3000, backend=backend)
     title, summary, steps = "", [], []
     mode = None
     for line in out.splitlines():

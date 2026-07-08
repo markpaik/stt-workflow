@@ -236,6 +236,7 @@ def _meeting_meta(j: Path, dst_dir: Path):
 
 
 def gather_state():
+    from stt import summarize
     st = status.read()
     m = manifest.load()
     src_dir, dst_dir = config.source_dir(), config.meetings_dir()
@@ -353,7 +354,10 @@ def gather_state():
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "rates": rates.summary(),
             "relabel_pending": (config.PROJECT_DIR / "relabel_pending.flag").exists(),
-            "llm_available": (config.PROJECT_DIR / ".venv-llm/bin/python").exists()}
+            "llm_available": summarize.available(),
+            "llm_backend": summarize.llm_backend(),
+            "llm_backends": {b: summarize.backend_available(b)
+                             for b in summarize.LLM_BACKENDS}}
 
 
 def _osascript(script: str, timeout=120, args=None):
@@ -425,10 +429,12 @@ def _meeting_audio(base: str):
 
 
 def _cloud_key_status() -> dict:
-    """{provider: bool} — key presence only; actual keys never reach the page."""
+    """{provider: bool} — key presence only; actual keys never reach the page.
+    'anthropic' is the assistant (summaries/Ask), not a transcription engine."""
     try:
-        from stt import asr_cloud
-        return {prov: asr_cloud.available(prov) for prov in asr_cloud.PROVIDERS}
+        from stt import asr_cloud, summarize
+        return {**{prov: asr_cloud.available(prov) for prov in asr_cloud.PROVIDERS},
+                "anthropic": summarize.backend_available("anthropic")}
     except Exception:
         return {}
 
@@ -799,20 +805,34 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok})
             elif u.path == "/api/cloud_keys":
                 from stt import asr_cloud
+                key_envs = {prov: meta["key_env"]
+                            for prov, meta in asr_cloud.PROVIDERS.items()}
+                key_envs["anthropic"] = "STT_ANTHROPIC_KEY"  # assistant, not ASR
                 updates, remove = {}, set()
                 cleared = {str(p) for p in (b.get("clear") or [])}
-                for prov, meta in asr_cloud.PROVIDERS.items():
+                for prov, key_env in key_envs.items():
                     v = (b.get(prov) or "").strip()
                     if v:  # a pasted key wins over a clear for the same provider
-                        updates[meta["key_env"]] = v
+                        updates[key_env] = v
                     elif prov in cleared:
-                        remove.add(meta["key_env"])
+                        remove.add(key_env)
                 if updates or remove:
                     _env_file_set(updates, remove=remove)
                     os.chmod(config.PROJECT_DIR / "stt.env", 0o600)
-                self._json({"ok": True,
-                            "set": {prov: asr_cloud.available(prov)
-                                    for prov in asr_cloud.PROVIDERS}})
+                self._json({"ok": True, "set": _cloud_key_status()})
+            elif u.path == "/api/llm_backend":
+                from stt import summarize
+                backend = str(b.get("backend") or "")
+                if backend not in summarize.LLM_BACKENDS:
+                    self._json({"error": "unknown assistant backend"}, 400)
+                    return
+                if not summarize.backend_available(backend):
+                    self._json({"error": "that assistant isn't set up yet — add "
+                                         "its API key (or install .venv-llm) "
+                                         "first"}, 400)
+                    return
+                _env_file_set({"STT_LLM_BACKEND": backend})
+                self._json({"ok": True, "backend": backend})
             elif u.path == "/api/set_date":
                 if not self._require_base(b.get("base")):
                     return
@@ -1134,9 +1154,14 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <div class="row"><div class="grow"><div class="name">Daily run</div>
     <div class="sub" id="schedtext"></div></div>
     <button onclick="openSchedule()">Change…</button></div>
+  <div class="row"><div class="grow"><div class="name">Folder watch</div>
+    <div class="sub" id="watchnote"></div></div></div>
   <div class="row"><div class="grow"><div class="name">Transcription model</div>
     <div class="sub" id="modelnote"></div></div>
     <select id="modelsel" onchange="setModel()"></select></div>
+  <div class="row"><div class="grow"><div class="name">Summaries &amp; Ask</div>
+    <div class="sub" id="llmnote"></div></div>
+    <select id="llmsel" onchange="setLlm()"></select></div>
   <div class="row"><div class="grow"><div class="name">Cloud transcription</div>
     <div class="sub" id="cloudnote"></div></div>
     <button onclick="openCloudKeys()">Cloud keys…</button></div>
@@ -1304,8 +1329,20 @@ function render(){
   const pickable=s.asr_choices.filter(c=>!c.cloud||(s.cloud_keys||{})[c.cloud]);
   sel.innerHTML=pickable.map(c=>`<option value="${c.id}" ${c.id===s.model?'selected':''}>${c.label}</option>`).join('');
   $('#modelnote').textContent=(s.asr_choices.find(c=>c.id===s.model)||{}).note||'';
-  const nk=Object.values(s.cloud_keys||{}).filter(Boolean).length;
+  const nk=['scribe','openai','voxtral'].filter(p=>(s.cloud_keys||{})[p]).length;
   $('#cloudnote').textContent=nk?`${nk} provider key${nk>1?'s':''} set — cloud engines appear in the model picker`:'Optional: bring your own API key (ElevenLabs · OpenAI · Mistral)';
+  // assistant backend picker (summaries & Ask)
+  const LB={local:'Local Qwen3-8B',anthropic:'Claude Haiku · cloud',openai:'OpenAI GPT · cloud'};
+  const av=s.llm_backends||{};
+  $('#llmsel').innerHTML=Object.keys(LB).map(b=>
+    `<option value="${b}" ${b===s.llm_backend?'selected':''} ${av[b]?'':'disabled'}>${LB[b]}${av[b]?'':' (no key)'}</option>`).join('');
+  $('#llmnote').textContent=s.llm_backend==='local'
+    ?(av.local?'Runs on this Mac — transcripts never leave it':'Local model not installed — pick a cloud assistant or install .venv-llm')
+    :'Cloud assistant: transcript text uploads for summaries and Ask. Strict recordings always stay local.';
+  // folder watch (event-triggered runs) — installed with the automation agent
+  $('#watchnote').textContent=(s.schedule&&s.schedule.installed)
+    ?'Active — a new recording starts processing within moments of landing while the Mac is awake'
+    :'Not installed — run ./setup.sh install-agent for instant + nightly runs';
   $('#srcpath').textContent=s.paths.source.replace(/^\/Users\/[^/]+/,'~');
   $('#dstpath').textContent=s.paths.dest.replace(/^\/Users\/[^/]+/,'~');
   // meetings: filter by title/speaker, newest meeting-date first, grouped by month
@@ -2127,7 +2164,7 @@ function openSummary(base){
   const m=S.meetings.find(x=>x.base===base)||{};
   const steps=(m.next_steps||[]).length?`<div style="font-weight:600;margin-top:10px">Committed next steps</div><ul style="margin:6px 0 0 18px">${m.next_steps.map(s=>`<li class="muted">${esc(s)}</li>`).join('')}</ul>`:'';
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
-  <div style="margin-top:10px;max-height:340px;overflow:auto"><div id="sumbody" class="muted">${m.summary?esc(m.summary):'No summary yet — generate one below. Runs locally; nothing leaves this Mac.'}</div>${steps}</div>
+  <div style="margin-top:10px;max-height:340px;overflow:auto"><div id="sumbody" class="muted">${m.summary?esc(m.summary):('No summary yet — generate one below. '+(S.llm_backend==='local'?'Runs locally; nothing leaves this Mac.':'Uses your cloud assistant.'))}</div>${steps}</div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="openAsk('${escJs(base)}')" ${S.llm_available?'':'disabled'}>Ask a question…</button>
     <button onclick="genSummary('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${m.summary?'Regenerate':'✨ Generate summary'}</button>
@@ -2140,7 +2177,7 @@ let ASK=null;  // {base, hist:[{q,a,err}], busy} — per-session only, never per
 function openAsk(base){
   ASK={base,hist:[],busy:false};
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Ask about ${esc(base)}</h1>
-  <p class="muted" style="margin-top:6px">Answers come from this transcript only and are generated on this Mac; nothing leaves the machine. Follow-up questions understand the earlier ones. Answers are not saved.</p>
+  <p class="muted" style="margin-top:6px">Answers come from this transcript only. ${S.llm_backend==='local'?'They are generated on this Mac; nothing leaves the machine.':'They are generated by your cloud assistant (the transcript text is sent to it for this).'} Follow-up questions understand the earlier ones. Answers are not saved.</p>
   <div id="askthread" style="margin-top:10px;max-height:320px;overflow:auto"></div>
   <div style="display:flex;gap:8px;margin-top:12px">
     <input type="text" id="askq" placeholder="e.g. What did we decide about the rollout?" autocomplete="off"
@@ -2158,7 +2195,7 @@ function askRender(){
   $('#askthread').innerHTML=ASK.hist.map(h=>`
     <div style="margin-top:10px"><b>Q:</b> ${esc(h.q)}</div>
     <div class="muted" style="margin-top:3px;white-space:pre-wrap"><b>A:</b> ${
-      h.a?esc(h.a):'<span class="spin"></span> Reading the transcript and thinking… usually 20-60s (the model loads fresh for each question)'}</div>`).join('');
+      h.a?esc(h.a):'<span class="spin"></span> Reading the transcript and thinking… '+(S.llm_backend==='local'?'usually 20-60s (the model loads fresh for each question)':'usually a few seconds')}</div>`).join('');
   $('#askthread').scrollTop=$('#askthread').scrollHeight;
 }
 async function askSend(){
@@ -2181,7 +2218,7 @@ async function askSend(){
   askRender();$('#askq').focus();
 }
 async function genSummary(base){
-  $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… (~15–30s)';
+  $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… '+(S.llm_backend==='local'?'(~15–30s)':'(a few seconds)');
   const r=await api('/api/suggest?base='+encodeURIComponent(base));
   $('#sumbody').textContent=r.summary||r.error||'No summary produced.';
   await refresh();
@@ -2226,8 +2263,11 @@ function openCloudKeys(){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
   <p class="muted" style="margin-top:8px">Optional: transcribe with a cloud engine instead of the local models. Only the audio is uploaded — speaker identification and voiceprints stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine is selected. Keys are stored in stt.env on this machine and never shown again.</p>
   ${row('scribe','ElevenLabs Scribe','elevenlabs.io → Profile → API keys')}
-  ${row('openai','OpenAI','platform.openai.com → API keys')}
+  ${row('openai','OpenAI','platform.openai.com → API keys (also unlocks the OpenAI assistant below)')}
   ${row('voxtral','Mistral Voxtral','console.mistral.ai → API keys')}
+  <h1 style="font-size:15px;margin-top:18px">Assistant (summaries &amp; Ask)</h1>
+  <p class="muted" style="margin-top:6px">The assistant drafts summaries and answers Ask questions. The local model needs no key. Choosing a cloud assistant in Settings sends transcript text to that provider for these features only; <b>strict-mode recordings always use the local model</b>.</p>
+  ${row('anthropic','Anthropic (Claude)','console.anthropic.com → API keys')}
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="dlg.close()">Cancel</button>
     <button class="primary" onclick="saveCloudKeys()">Save</button>
@@ -2235,7 +2275,7 @@ function openCloudKeys(){
   dlg.showModal();
 }
 async function saveCloudKeys(){
-  const r=await api('/api/cloud_keys',{scribe:$('#ck_scribe').value,openai:$('#ck_openai').value,voxtral:$('#ck_voxtral').value});
+  const r=await api('/api/cloud_keys',{scribe:$('#ck_scribe').value,openai:$('#ck_openai').value,voxtral:$('#ck_voxtral').value,anthropic:$('#ck_anthropic').value});
   if(!r.ok){alert(r.error||'Could not save');return}
   dlg.close();refresh();
 }
@@ -2262,6 +2302,7 @@ function cycleTheme(){
 applyTheme(themeNow());
 {const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
+function setLlm(){api('/api/llm_backend',{backend:$('#llmsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch the assistant');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh().then(()=>{
   // deep link: /?open=<meeting> opens that transcript directly
