@@ -971,6 +971,7 @@ flex:none;width:46px}
 .mgroup{font-size:11.5px;font-weight:600;color:var(--sub);text-transform:uppercase;
 letter-spacing:.08em;padding:14px 0 3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
 mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;border-radius:3px}
+mark.cur{background:color-mix(in srgb,var(--accent) 30%,transparent);outline:1.5px solid var(--accent)}
 .tseg .segbtn{opacity:0;flex:none;padding:1px 8px;font-size:12px;border-radius:6px}
 .tgap{height:8px;margin:0 8px;border-radius:6px;text-align:center;line-height:8px;
   font-size:11px;color:transparent;cursor:pointer;transition:all .12s}
@@ -1563,6 +1564,7 @@ async function openTranscript(base,target=null){
   // dialog opens, nulling TV and closing it (seen as a blank flash after
   // any merge/split/insert reload)
   if(tvTimer){clearInterval(tvTimer);tvTimer=null}
+  TVF=null;  // any re-render rebuilds the rows, so old find marks are gone
   dlg.onclose=null;
   const d=await api('/api/transcript?base='+encodeURIComponent(base));
   if(d.error){alert(d.error);return}
@@ -1578,10 +1580,19 @@ async function openTranscript(base,target=null){
     <audio id="tva" controls src="/api/audio?base=${encodeURIComponent(base)}" style="flex:1"></audio>
     <button onclick="tvAddAt()" title="Add a line the pipeline missed, at the audio’s current position — pause where you heard it, then click">＋ Line at playhead</button>
   </div>
+  <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+    <input id="tvfind" type="search" placeholder="Find in transcript… (⌘F)" autocomplete="off" spellcheck="false"
+      style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:6px 8px"
+      oninput="tvFindInput()" onkeydown="tvFindKey(event)">
+    <span id="tvfindn" class="sub" style="min-width:64px;text-align:right"></span>
+    <button onclick="tvFindNav(-1)" title="Previous match (Shift+Enter)">‹</button>
+    <button onclick="tvFindNav(1)" title="Next match (Enter)">›</button>
+  </div>
   <div id="tvlist" style="max-height:46vh;overflow:auto;margin-top:8px">${tvGap(-1)}${TV.segs.map((g,i)=>tvRow(g,i)+tvGap(i)).join('')}</div>
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="tvClose()">Close</button></div>`;
   if(!dlg.open)dlg.showModal();
   dlg.onclose=tvClose;
+  dlg.onkeydown=e=>{if((e.metaKey||e.ctrlKey)&&e.key==='f'){e.preventDefault();const f=$('#tvfind');if(f){f.focus();f.select()}}};
   if(target!=null){
     const i=TV.segs.findIndex(g=>g.index===target);
     if(i>=0)setTimeout(()=>{const el=$('#ts'+i);
@@ -1600,7 +1611,84 @@ async function openTranscript(base,target=null){
 function tvSeek(t){const a=$('#tva');if(!a)return;
   const go=()=>{a.currentTime=t;a.play()};
   a.readyState>=1?go():a.addEventListener('loadedmetadata',go,{once:true})}
-function tvClose(){if(tvTimer){clearInterval(tvTimer);tvTimer=null}TV=null;const a=$('#tva');if(a)a.pause();dlg.onclose=null;dlg.close();$('#dlg').classList.remove('wide');refresh()}
+function tvClose(){if(tvTimer){clearInterval(tvTimer);tvTimer=null}TV=null;TVF=null;const a=$('#tva');if(a)a.pause();dlg.onclose=null;dlg.onkeydown=null;dlg.close();$('#dlg').classList.remove('wide');refresh()}
+// ---- find within the open transcript (⌘F): occurrence count, next/prev, highlights ----
+let TVF=null,tvFindT=null;  // {q, rx, hits:[{i,k}], cur} — hits are occurrences, not rows
+function tvFindInput(){clearTimeout(tvFindT);tvFindT=setTimeout(()=>tvFindRun(true),200)}
+function tvFindKey(e){
+  if(e.key==='Enter'){
+    e.preventDefault();clearTimeout(tvFindT);
+    const q=$('#tvfind').value.trim();
+    if(!TVF||TVF.q!==q)tvFindRun(true);
+    else tvFindNav(e.shiftKey?-1:1);
+  }else if(e.key==='Escape'){
+    // clear the find, NOT the dialog — swallow it before the native <dialog>
+    // cancel behavior closes the whole viewer
+    e.preventDefault();e.stopPropagation();
+    tvFindClear();$('#tvfind').blur();
+  }
+}
+function tvFindRun(reset){
+  const f=$('#tvfind'),q=f?(f.value||'').trim():'';
+  const prev=TVF;
+  tvFindUnmark();TVF=null;
+  if(q.length<2){tvFindCount();return}
+  const rx=new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig');
+  const hits=[];
+  TV.segs.forEach((g,i)=>{const m=g.text.match(rx);if(m)for(let k=0;k<m.length;k++)hits.push({i,k})});
+  const cur=hits.length?(reset?0:Math.min(prev?Math.max(prev.cur,0):0,hits.length-1)):-1;
+  TVF={q,rx,hits,cur};
+  tvFindMark();tvFindCount();
+  if(reset&&cur>=0)tvFindShow();
+}
+function tvFindMark(){
+  if(!TVF||!TVF.hits.length)return;
+  const rows={};TVF.hits.forEach((h,n)=>{(rows[h.i]=rows[h.i]||[]).push(n)});
+  for(const i in rows){
+    const el=$('#ts'+i),g=TV.segs[i];
+    if(!el||el.classList.contains('editing'))continue;   // mid-edit: textarea owns the row
+    const x=el.querySelector('.x');if(!x)continue;
+    const t=g.text;let out='',last=0,k=0;
+    t.replace(TVF.rx,(m,off)=>{                          // escape AROUND matches, so a query
+      const n=rows[i][k++];                              // containing & < > still highlights
+      out+=esc(t.slice(last,off))+`<mark${n===TVF.cur?' class="cur"':''}>${esc(m)}</mark>`;
+      last=off+m.length;return m;
+    });
+    x.innerHTML=out+esc(t.slice(last));
+  }
+}
+function tvFindUnmark(){
+  if(!TVF)return;
+  new Set(TVF.hits.map(h=>h.i)).forEach(i=>{
+    const el=$('#ts'+i),g=TV.segs[i];
+    if(!el||!g||el.classList.contains('editing'))return;
+    const x=el.querySelector('.x');if(x)x.innerHTML=esc(g.text);
+  });
+}
+function tvFindNav(d){
+  if(!TVF||!TVF.hits.length)return;
+  TVF.cur=(TVF.cur+d+TVF.hits.length)%TVF.hits.length;
+  tvFindMark();tvFindCount();tvFindShow();
+}
+function tvFindShow(){
+  const h=TVF.hits[TVF.cur];if(!h)return;
+  const el=$('#ts'+h.i);if(!el)return;
+  (el.querySelector('mark.cur')||el).scrollIntoView({block:'center'});
+}
+function tvFindCount(){
+  const n=$('#tvfindn');if(!n)return;
+  n.textContent=TVF?(TVF.hits.length?`${TVF.cur+1} of ${TVF.hits.length}`:'0 of 0'):'';
+}
+function tvFindClear(){
+  clearTimeout(tvFindT);
+  tvFindUnmark();TVF=null;
+  const f=$('#tvfind');if(f)f.value='';
+  tvFindCount();
+}
+function tvFindRefresh(){  // an edited row was rebuilt bare — recompute and repaint
+  const f=$('#tvfind');
+  if(TVF&&f&&f.value.trim().length>=2)tvFindRun(false);
+}
 function tvEdit(i,ev){
   ev.stopPropagation();
   const g=TV.segs[i],el=$('#ts'+i);
@@ -1714,7 +1802,7 @@ function tvPlaySpan(i,ev){ev.stopPropagation();const g=TV.segs[i],a=$('#tva');
   if(!a)return;a.currentTime=Math.max(0,g.start-0.5);a.play();
   a.ontimeupdate=()=>{if(a.currentTime>=g.end+0.5){a.pause();a.ontimeupdate=null}}}
 function tvRestore(i,ev){if(ev)ev.stopPropagation();
-  const el=$('#ts'+i);el.outerHTML=tvRow(TV.segs[i],i)}
+  const el=$('#ts'+i);el.outerHTML=tvRow(TV.segs[i],i);tvFindRefresh()}
 async function tvRetrans(i,ev){
   ev.stopPropagation();
   const g=TV.segs[i];
