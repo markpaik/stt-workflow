@@ -319,6 +319,7 @@ def _clean_key_env(monkeypatch):
     from stt import asr_cloud
     for meta in asr_cloud.PROVIDERS.values():
         monkeypatch.delenv(meta["key_env"], raising=False)
+    monkeypatch.delenv("STT_ANTHROPIC_KEY", raising=False)  # assistant key
 
 
 def test_cloud_keys_set_then_clear_removes_the_line(running_server, monkeypatch):
@@ -340,7 +341,8 @@ def test_cloud_keys_clear_keeps_other_keys_and_comments(running_server, monkeypa
     envp.write_text("# provider keys\nSTT_ELEVENLABS_KEY=aaa\nSTT_OPENAI_KEY=bbb\n")
     st, body = _post(port, "/api/cloud_keys", {"clear": ["scribe"]})
     assert st == 200
-    assert body["set"] == {"scribe": False, "openai": True, "voxtral": False}
+    assert body["set"] == {"scribe": False, "openai": True, "voxtral": False,
+                           "anthropic": False}
     text = envp.read_text()
     assert "# provider keys" in text and "STT_OPENAI_KEY=bbb" in text
     assert "STT_ELEVENLABS_KEY" not in text
@@ -369,7 +371,8 @@ def test_cloud_keys_never_echoed_to_the_client(running_server, monkeypatch):
     assert st == 200 and secret not in json.dumps(body)
     st, state = _get(port, "/api/state")
     assert secret not in json.dumps(state)
-    assert state["cloud_keys"] == {"scribe": False, "openai": True, "voxtral": False}
+    assert state["cloud_keys"] == {"scribe": False, "openai": True,
+                                   "voxtral": False, "anthropic": False}
 
 
 # ---------- /api/audio Range handling (finding #18) ----------
@@ -538,3 +541,22 @@ def test_enrolled_speakers_listed_alphabetically(sandbox):
     st = srv.gather_state()
     assert [e["name"] for e in st["enrolled"]] == \
         ["alex rivera", "Jordan Lee", "Priya Shah"]   # case-insensitive
+
+
+def test_llm_backend_endpoint_switches_and_validates(running_server, monkeypatch):
+    """Settings picker: writes STT_LLM_BACKEND, refuses unknown backends and
+    ones whose key/venv is missing."""
+    from stt import summarize
+    st, body = _post(running_server, "/api/llm_backend", {"backend": "bogus"})
+    assert st == 400
+    st, body = _post(running_server, "/api/llm_backend", {"backend": "anthropic"})
+    assert st == 400 and "key" in body["error"]          # no key yet
+    _post(running_server, "/api/cloud_keys", {"anthropic": "sk-ant-test"})
+    st, body = _post(running_server, "/api/llm_backend", {"backend": "anthropic"})
+    assert st == 200 and body["ok"]
+    assert config._env_file()["STT_LLM_BACKEND"] == "anthropic"
+    assert summarize.llm_backend() == "anthropic"
+    st, state = _get(running_server, "/api/state")
+    assert state["llm_backend"] == "anthropic"
+    assert state["llm_backends"]["anthropic"] is True
+    assert state["llm_available"] is True

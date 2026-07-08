@@ -19,3 +19,6 @@ pytest>=9
 # Optional: accuracy evaluation against reference transcripts (tuning/)
 # jiwer>=4.0
 # meeteval>=0.4
+
+# Optional cloud assistant (summaries & Ask) — local Qwen remains the default
+anthropic>=0.116

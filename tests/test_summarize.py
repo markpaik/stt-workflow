@@ -349,3 +349,132 @@ def test_rename_meeting_updates_speaker_registry_references(sandbox):
     assert u["U002"]["meetings"] == ["Other Mtg"]           # untouched
     reg = identify.load_registry()
     assert reg["Alex Rivera"]["sources"] == ["New Name", "Other Mtg"]
+
+
+# ---------- assistant backend selection (local | anthropic | openai) ----------
+
+def _meeting_strict(base="Confidential"):
+    mfile(base, ".txt").write_text("[00:00] A: sensitive words.\n")
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": f"{base}.m4a", "strict": True,
+         "speakers": [], "segments": [], "words": []}))
+
+
+def test_backend_selection_reads_env_fresh(sandbox, monkeypatch):
+    monkeypatch.delenv("STT_LLM_BACKEND", raising=False)
+    monkeypatch.delenv("STT_ANTHROPIC_KEY", raising=False)
+    monkeypatch.delenv("STT_OPENAI_KEY", raising=False)
+    assert summarize.llm_backend() == "local"
+    (sandbox / "stt.env").write_text("STT_LLM_BACKEND=anthropic\n")
+    assert summarize.llm_backend() == "anthropic"
+    (sandbox / "stt.env").write_text("STT_LLM_BACKEND=bogus\n")
+    assert summarize.llm_backend() == "local"     # unknown value: safe default
+    assert summarize.backend_available("anthropic") is False   # no key yet
+    (sandbox / "stt.env").write_text("STT_ANTHROPIC_KEY=k\n")
+    assert summarize.backend_available("anthropic") is True
+
+
+def test_generate_routes_to_the_selected_backend(sandbox, monkeypatch):
+    calls = []
+    monkeypatch.setattr(summarize, "_generate_anthropic",
+                        lambda p, m: calls.append(("anthropic", m)) or "a")
+    monkeypatch.setattr(summarize, "_generate_openai",
+                        lambda p, m: calls.append(("openai", m)) or "o")
+    assert summarize._generate("hi", max_tokens=7, backend="anthropic") == "a"
+    assert summarize._generate("hi", max_tokens=9, backend="openai") == "o"
+    assert calls == [("anthropic", 7), ("openai", 9)]
+
+
+def test_anthropic_request_shape(sandbox, monkeypatch):
+    """Pin the Messages API call: user-message prompt, max_tokens, the default
+    Haiku model — and NO sampling params (they 400 on current Opus models if
+    the user points STT_ANTHROPIC_MODEL elsewhere)."""
+    import anthropic
+    from types import SimpleNamespace
+
+    (sandbox / "stt.env").write_text("STT_ANTHROPIC_KEY=sk-test\n")
+    seen = {}
+
+    class FakeMessages:
+        def create(self, **kw):
+            seen.update(kw)
+            return SimpleNamespace(stop_reason="end_turn", content=[
+                SimpleNamespace(type="text", text="hello "),
+                SimpleNamespace(type="text", text="world")])
+
+    monkeypatch.setattr(anthropic, "Anthropic",
+                        lambda api_key: SimpleNamespace(messages=FakeMessages(),
+                                                        _key=api_key))
+    out = summarize._generate_anthropic("the prompt", 123)
+    assert out == "hello world"
+    assert seen["model"] == "claude-haiku-4-5"
+    assert seen["max_tokens"] == 123
+    assert seen["messages"] == [{"role": "user", "content": "the prompt"}]
+    assert "temperature" not in seen and "top_p" not in seen and "thinking" not in seen
+
+
+def test_anthropic_refusal_is_a_clear_error(sandbox, monkeypatch):
+    import anthropic
+    from types import SimpleNamespace
+
+    (sandbox / "stt.env").write_text("STT_ANTHROPIC_KEY=sk-test\n")
+    monkeypatch.setattr(anthropic, "Anthropic", lambda api_key: SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kw: SimpleNamespace(
+            stop_reason="refusal", content=[]))))
+    with pytest.raises(RuntimeError, match="declined"):
+        summarize._generate_anthropic("p", 10)
+
+
+def test_openai_request_shape(sandbox, monkeypatch):
+    import requests
+    from types import SimpleNamespace
+
+    (sandbox / "stt.env").write_text("STT_OPENAI_KEY=sk-oai\n")
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.update(url=url, headers=headers, body=json)
+        return SimpleNamespace(status_code=200, json=lambda: {
+            "choices": [{"message": {"content": " the answer "}}]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert summarize._generate_openai("q", 55) == "the answer"
+    assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+    assert seen["headers"]["Authorization"] == "Bearer sk-oai"
+    assert seen["body"]["model"] == "gpt-4o-mini"
+    assert seen["body"]["max_completion_tokens"] == 55
+    assert seen["body"]["messages"] == [{"role": "user", "content": "q"}]
+
+
+def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
+    """The privacy rule that makes the cloud assistant safe to offer: a strict
+    recording downgrades to the local model, or refuses when it's missing —
+    its transcript text is NEVER sent to a cloud LLM."""
+    _meeting_strict()
+    (sandbox / "stt.env").write_text(
+        "STT_LLM_BACKEND=anthropic\nSTT_ANTHROPIC_KEY=k\n")
+
+    # no local model installed -> refuse rather than upload
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "nope" / "python")
+    r = summarize.answer_question("Confidential", "what was said?")
+    assert r["ok"] is False and "strict" in r["error"]
+    with pytest.raises(RuntimeError, match="strict"):
+        summarize.suggest_title("Confidential")
+
+    # local model installed -> quiet downgrade to local
+    fake_py = sandbox / ".venv-llm" / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    fake_py.write_text("")
+    monkeypatch.setattr(summarize, "LLM_PY", fake_py)
+    backends = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, max_tokens=0, lock_timeout=None, backend=None:
+                        backends.append(backend) or "TITLE: T\nSUMMARY: S\n")
+    summarize.suggest_title("Confidential")
+    r = summarize.answer_question("Confidential", "what was said?")
+    assert r["ok"] and backends == ["local", "local"]
+
+    # a NON-strict meeting with the same settings does use the cloud backend
+    _meeting("Open Mtg")
+    summarize.suggest_title("Open Mtg")
+    assert backends[-1] == "anthropic"
