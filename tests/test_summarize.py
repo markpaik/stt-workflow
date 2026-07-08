@@ -325,3 +325,27 @@ def test_interactive_generate_fails_fast_when_model_is_busy(sandbox, monkeypatch
     release.set()
     t.join(timeout=5)
     assert summarize._generate("x") == "ok"   # blocking default succeeds once free
+
+
+def test_rename_meeting_updates_speaker_registry_references(sandbox):
+    """The registries reference meetings BY NAME: an unknown's 'heard in' list
+    and an enrolled sample's source drive their ▶ voice playback. A rename
+    that skips them leaves dead play buttons (U001-U007 after the
+    '3011 W Grand Blvd' rename)."""
+    from stt import identify, unknowns
+
+    _meeting("Old Name")
+    unknowns.save({"speakers": {
+        "U001": {"file": "U001.npy", "meetings": ["Old Name", "Other Mtg"]},
+        "U002": {"file": "U002.npy", "meetings": ["Other Mtg"]}}})
+    identify.save_registry({
+        "Alex Rivera": {"n_samples": 2, "sources": ["Old Name", "Other Mtg"]}})
+
+    r = summarize.rename_meeting("Old Name", "New Name")
+    assert r["ok"], r
+
+    u = unknowns.load()["speakers"]
+    assert u["U001"]["meetings"] == ["New Name", "Other Mtg"]
+    assert u["U002"]["meetings"] == ["Other Mtg"]           # untouched
+    reg = identify.load_registry()
+    assert reg["Alex Rivera"]["sources"] == ["New Name", "Other Mtg"]

@@ -52,6 +52,24 @@ def save(reg: dict):
     _atomic_write(_path(), json.dumps(reg, indent=2))
 
 
+def rename_meeting_refs(old_base: str, new_base: str) -> int:
+    """A meeting rename must follow into this registry: each unknown's
+    `meetings` list drives its ▶ voice playback and 'heard in N meetings'
+    line, so a stale name means a dead play button. Returns how many
+    speakers were touched."""
+    n = 0
+    with lock_registry():
+        reg = load()
+        for meta in reg["speakers"].values():
+            mts = meta.get("meetings", [])
+            if old_base in mts:
+                meta["meetings"] = [new_base if m == old_base else m for m in mts]
+                n += 1
+        if n:
+            save(reg)
+    return n
+
+
 def _samples(reg, uid):
     f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
     if not f.exists():

@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -261,6 +262,16 @@ def rename_meeting(base: str, new_base: str) -> dict:
                 f.rename(dst)
                 renamed.append(dst.name)
         old_dir.rename(new_dir)
+        # the speaker registries reference meetings BY NAME: every unknown's
+        # "heard in" list and every enrolled sample's source drive their ▶
+        # voice playback, so a rename that skips them leaves dead play buttons
+        from . import identify, unknowns
+        try:
+            unknowns.rename_meeting_refs(base, new_base)
+            identify.rename_source_refs(base, new_base)
+        except Exception as e:
+            print(f"   rename: registry references not updated ({e})",
+                  file=sys.stderr)
         # keep the source_file field coherent for future relabels
         j = config.meeting_file(new_base, ".json")
         if j.exists():

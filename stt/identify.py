@@ -267,6 +267,23 @@ def _merge_budget(n_d, n_s, cap):
     return keep_d, keep_s
 
 
+def rename_source_refs(old_base: str, new_base: str) -> int:
+    """A meeting rename must follow into enrolled profiles too: each sample's
+    `sources` entry names the meeting it came from, and the speaker dialog's
+    per-sample ▶ plays from exactly that meeting. Returns people touched."""
+    n = 0
+    with lock_registry():
+        reg = load_registry()
+        for meta in reg.values():
+            srcs = meta.get("sources", [])
+            if old_base in srcs:
+                meta["sources"] = [new_base if s == old_base else s for s in srcs]
+                n += 1
+        if n:
+            save_registry(reg)
+    return n
+
+
 def merge_people(src: str, dst: str) -> bool:
     """Combine two enrolled entries that are really the same person: src's voice
     samples are folded into dst (keeping a spread of BOTH within MAX_SAMPLES),
