@@ -245,11 +245,21 @@ def gather_state():
             if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
                 done = manifest.is_processed(m, p.name, p.stat().st_mtime)
                 dur = None if done else _est_duration(p)
-                est_min = (round(sum(status.stage_estimates(dur).values()) / 60)
-                           if dur else None)
+                est_min, est_detail = None, None
+                if dur:
+                    ests = status.stage_estimates(dur)
+                    est_min = round(sum(ests.values()) / 60)
+                    # the split the total hides: transcription and speaker
+                    # separation dominate and scale differently per file
+                    est_detail = " · ".join(
+                        f"{label} ~{max(1, round(ests[k] / 60))}m"
+                        for k, label in (("transcribing", "transcribe"),
+                                         ("diarizing", "speakers"))
+                        if k in ests)
                 queue.append({"name": p.name, "size_mb": round(p.stat().st_size / 1e6, 1),
                               "video": p.suffix.lower() in config.VIDEO_EXTS,
-                              "processed": done, "est_min": est_min})
+                              "processed": done, "est_min": est_min,
+                              "est_detail": est_detail})
     except Exception:
         pass
     meetings = []
@@ -307,6 +317,9 @@ def gather_state():
             e["pct"] = round(pct * 100)
             e["eta_sec"] = round(eta)
             active_eta_sum += eta
+        bd = status.stage_breakdown(entry, n_active)
+        if bd:
+            e["stages"] = bd
         active_out[name] = e
     overall_eta = None
     if running:
@@ -1123,6 +1136,21 @@ const $=q=>document.querySelector(q);
 function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
   if(sec<3600)return Math.round(sec/60)+' min';
   return Math.floor(sec/3600)+'h '+String(Math.round(sec%3600/60)).padStart(2,'0')+'m'}
+function fmtM(sec){if(sec==null)return'?';if(sec<60)return Math.max(1,Math.round(sec))+'s';
+  return Math.round(sec/60)+'m'}
+function stageLine(st){ // done: actual · active: elapsed of expected · ahead: expected
+  if(!st)return'';
+  const parts=st.filter(x=>x.state==='active'||(x.secs||x.est||0)>=30).map(x=>{
+    const nice=STAGE_NICE[x.stage]||x.stage;
+    if(x.state==='done')return`${nice} ${fmtM(x.secs)} ✓`;
+    if(x.state==='active'){
+      const over=x.est&&x.secs>x.est;
+      return`<b>${nice} ${fmtM(x.secs)} of ~${fmtM(x.est)}</b>${over?' (running long — still working)':''}`;
+    }
+    return`then ${nice} ~${fmtM(x.est)}`;
+  });
+  return parts.length?`<div class="sub" style="margin-top:3px">${parts.join(' · ')}</div>`:'';
+}
 let S=null, selected=new Set(), showHidden=false;
 async function api(p,body){const r=await fetch(p,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -1157,7 +1185,8 @@ function render(){
     return `<div class="row"><div class="grow"><div class="name">${esc(n.replace(/\.[^.]+$/,''))}</div>
     <div class="stagechips">${STAGES.filter(st=>(st!=='verifying'||a.stage==='verifying')&&(st!=='summarizing'||a.stage==='summarizing')).map((st,i)=>`<span class="s ${i<=idx?'on':''}">${STAGE_NICE[st]}</span>`).join('')}</div>
     ${pct!=null?`<div class="bar"><i style="width:${pct}%"></i></div>`:''}
-    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left${a.progress_at&&Date.now()/1000-a.progress_at>120?'<br>still working — progress reports coarsely here':''}</div>`:'<span class="spin"></span>'}</div></div>`;
+    ${stageLine(a.stages)}
+    </div><div style="text-align:right;min-width:86px">${pct!=null?`<div class="name">${pct}%</div><div class="sub">≈ ${fmtEta(a.eta_sec)} left</div>`:'<span class="spin"></span>'}</div></div>`;
   }).join(''):(orphaned?'':'<div class="sub">Starting…</div>'))
   +(s.overall_eta_sec?`<div class="sub" style="padding-top:10px">Everything queued: ≈ ${fmtEta(s.overall_eta_sec)} remaining</div>`:'');
   // queued panel runs (redos / hand-picked) — waiting for the current run to finish
@@ -1171,7 +1200,7 @@ function render(){
     const pend=(s.pending||[]).includes(f.name);
     const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':(f.video?'<span class="chip">video</span>':'');
     const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${escJs(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
-    const est=(!f.processed&&f.est_min)?` · ~${f.est_min} min to process`:'';
+    const est=(!f.processed&&f.est_min)?` · <span ${f.est_detail?`title="${esc(f.est_detail)}"`:''}>~${f.est_min} min to process</span>`:'';
     return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}</div>`;
   }).join(''):(qjobs?'':'<div class="sub">Nothing in the iCloud folder.</div>'));
   $('#runsel').disabled=!selected.size||s.running;
