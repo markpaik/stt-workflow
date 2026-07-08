@@ -2071,7 +2071,7 @@ function openCloudKeys(){
   const row=(prov,label,hint)=>`<div style="display:flex;gap:8px;align-items:center;margin-top:10px">
     <span style="width:150px" class="sub">${label}</span>
     <input type="password" id="ck_${prov}" placeholder="${ck[prov]?'key saved — paste to replace':'paste API key'}" style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:6px 8px">
-    <span class="sub" style="width:52px">${ck[prov]?'✓ set':''}</span>
+    <span class="sub" style="width:52px;white-space:nowrap">${ck[prov]?'✓ set':''}</span>
     ${ck[prov]?`<button onclick="clearCloudKey('${prov}','${label}')" title="Remove the saved ${label} key from this Mac">Clear</button>`:''}</div>
     <div class="sub" style="margin-left:158px;opacity:.8">${hint}</div>`;
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
