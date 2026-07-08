@@ -245,6 +245,108 @@ def test_corrupt_registry_warns_instead_of_silently_resetting(sandbox, capsys):
     assert "corrupt" in capsys.readouterr().err.lower()
 
 
+def test_corrupt_registry_is_preserved_not_clobbered(sandbox):
+    """A corrupt registry.json must be routed to a timestamped .json.corrupt
+    sidecar before the next save overwrites it, and a previously-written GOOD
+    .json.bak must survive untouched (never clobbered by the corrupt content)."""
+    from stt import config
+    # a good .bak already exists from an earlier valid save
+    good_bak = config.VOICEPRINTS_DIR / "registry.json.bak"
+    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    good_bak.write_text('{"Priya": {"file": "Priya.npy", "n_samples": 1}}')
+    # the live registry is now corrupt on disk
+    (config.VOICEPRINTS_DIR / "registry.json").write_text("{not json")
+
+    identify.enroll("Mark", _vec(1))  # a normal save over the corrupt file
+
+    corrupt_sidecars = list(config.VOICEPRINTS_DIR.glob("registry.json.corrupt*"))
+    assert corrupt_sidecars, "corrupt registry bytes were destroyed with no sidecar"
+    assert corrupt_sidecars[0].read_text() == "{not json"
+    # the good .bak is intact, not overwritten by the corrupt content
+    assert '"Priya"' in good_bak.read_text()
+
+
+def test_save_registry_no_absence_window_for_unlocked_reader(sandbox, monkeypatch):
+    """save_registry must never remove registry.json from its path during the
+    backup step — an unlocked concurrent reader (diarize.py load_voiceprints in a
+    batch worker) must see the prior registry, never a transient empty one."""
+    import threading
+
+    identify.enroll("Existing", _vec(1))
+    prior = identify.load_registry()
+    assert prior  # non-empty baseline
+
+    started, release = threading.Event(), threading.Event()
+    real_atomic = identify._atomic_write
+
+    def blocking_atomic(path, text):
+        started.set()          # backup step is already done; window (if any) is open
+        release.wait(2.0)
+        real_atomic(path, text)
+
+    monkeypatch.setattr(identify, "_atomic_write", blocking_atomic)
+
+    def writer():
+        with identify.lock_registry():
+            identify.save_registry({**prior, "New": prior["Existing"]})
+
+    t = threading.Thread(target=writer)
+    t.start()
+    assert started.wait(2.0)
+    # reader does NOT take lock_registry (mirrors the real unlocked read sites)
+    seen = identify.load_registry()
+    release.set()
+    t.join()
+
+    assert seen, "unlocked reader saw an empty registry during the backup window"
+
+
+def test_merge_and_rename_with_orphaned_file_fail_cleanly(sandbox):
+    """A registry entry whose .npy is missing on disk must make merge/rename
+    return False (like remove_sample), not raise FileNotFoundError."""
+    from stt import config
+    identify.enroll("Real", _vec(1))
+    # forge an orphaned entry: registry references a file that isn't there
+    reg = identify.load_registry()
+    reg["Ghost"] = {"file": "Ghost.npy", "n_samples": 1, "sources": ["?"]}
+    identify.save_registry(reg)
+
+    assert identify.merge_people("Ghost", "Real") is False
+    assert identify.rename_person("Ghost", "NewGhost") is False
+    # registry left unchanged: Ghost still present, no NewGhost, Real intact
+    after = identify.load_registry()
+    assert set(after) == {"Real", "Ghost"}
+
+
+def test_rename_person_crash_after_copy_leaves_old_state_valid(sandbox, monkeypatch):
+    """A crash between moving the .npy and committing the registry must not
+    orphan the file. Copy-commit-delete keeps 'old' fully enrolled if save
+    fails, and a retry then succeeds."""
+    identify.enroll("Old", _vec(1))
+    identify.enroll("Old", _vec(2))  # two samples so we can assert they survive
+
+    real_save = identify.save_registry
+    boom = {"armed": True}
+
+    def crashing_save(reg):
+        if boom["armed"]:
+            raise RuntimeError("simulated crash before commit")
+        return real_save(reg)
+
+    monkeypatch.setattr(identify, "save_registry", crashing_save)
+    with pytest.raises(RuntimeError):
+        identify.rename_person("Old", "New")
+
+    # on-disk registry untouched: 'Old' still resolves to a loadable voiceprint
+    monkeypatch.setattr(identify, "save_registry", real_save)
+    vps = identify.load_voiceprints()
+    assert "Old" in vps and vps["Old"].shape[0] == 2
+    assert "New" not in identify.load_registry()
+    # retry self-heals
+    assert identify.rename_person("Old", "New") is True
+    assert identify.load_voiceprints()["New"].shape[0] == 2
+
+
 def test_cosine_dimension_mismatch_is_safe_not_a_crash():
     """A voiceprint saved under a different embedding size (e.g. after a
     model/backend change) must score as 'no match', not crash — and crucially
