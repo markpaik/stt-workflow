@@ -125,6 +125,13 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                     arr = np.vstack([s, _l2(v)])[-MAX_SAMPLES:]
                     np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"], arr)
                     mts.append(meeting)
+                if reg["speakers"][uid].get("dropped"):
+                    # the tombstone did its job: recognized, suppressed — the
+                    # cluster keeps its transcript-local label and never
+                    # resurfaces in the Speakers panel (the sample update above
+                    # still ran, so the tombstone keeps getting BETTER at
+                    # recognizing this voice)
+                    continue
             else:
                 # lowest free number: after unknowns get named, new voices start
                 # back at Speaker 1 instead of counting up forever
@@ -230,12 +237,16 @@ def restore(uid: str) -> bool:
 
 
 def drop(uid: str) -> bool:
-    """Forget an unknown (e.g. background voice you never want tracked)."""
+    """'Not a real speaker': suppress this voice for good. The entry and its
+    samples are KEPT as a tombstone — deleting them let the very next relabel
+    (and one runs after every naming) re-register the same voice from the
+    meeting caches under the next free number, seconds after the user removed
+    it. A dropped voice keeps matching its tombstone in assign() and is simply
+    never surfaced or given a global label again."""
     with lock_registry():
         reg = load()
-        if uid not in reg["speakers"]:
+        if uid not in reg["speakers"] or reg["speakers"][uid].get("dropped"):
             return False
-        (config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]).unlink(missing_ok=True)
-        del reg["speakers"][uid]
+        reg["speakers"][uid]["dropped"] = datetime.now().isoformat(timespec="seconds")
         save(reg)
         return True

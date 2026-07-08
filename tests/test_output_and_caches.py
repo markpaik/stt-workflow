@@ -132,9 +132,39 @@ def test_unknowns_lifecycle(sandbox):
     assert "Jane" in identify.load_registry()
     assert uid not in unknowns.load()["speakers"]
 
-    # drop the other one entirely
+    # drop the other one: a TOMBSTONE remains (see the resurrection test), it
+    # just never surfaces or matches into a global label again
     assert unknowns.drop(uid2)
-    assert unknowns.load()["speakers"] == {}
+    assert unknowns.load()["speakers"][uid2]["dropped"]
+    assert not unknowns.drop(uid2)  # double-drop is a no-op
+
+
+def test_dropped_unknown_never_resurrects_on_relabel(sandbox):
+    """'Not a real speaker' used to DELETE the entry — and the relabel that
+    runs after every naming re-registered the same voice from the meeting
+    caches under the next free number, seconds after the user removed it.
+    The tombstone must recognize the voice and suppress it instead."""
+    v = np.random.default_rng(3).normal(size=256)
+    uid = unknowns.assign({"S0": v}, {"S0": None}, "Mtg A")["S0"]
+    assert unknowns.drop(uid)
+
+    # the relabel pass sees the same cluster again: no label comes back, no
+    # new entry is minted, and the tombstone keeps its number reserved
+    out = unknowns.assign({"S0": v + 0.01}, {"S0": None}, "Mtg A")
+    assert "S0" not in out
+    assert set(unknowns.load()["speakers"]) == {uid}
+
+    # a genuinely NEW voice still registers, and does not reuse the
+    # tombstone's number
+    w = np.random.default_rng(4).normal(size=256)
+    uid2 = unknowns.assign({"S1": w}, {"S1": None}, "Mtg B")["S1"]
+    assert uid2 != uid
+
+    # and the panel list never shows the tombstone
+    from gui import server as srv
+    st = srv.gather_state()
+    assert uid not in {u["uid"] for u in st["unknowns"]}
+    assert uid2 in {u["uid"] for u in st["unknowns"]}
 
 
 def test_relabel_same_meeting_does_not_stack_duplicate_samples(sandbox):
