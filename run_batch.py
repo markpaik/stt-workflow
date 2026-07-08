@@ -109,34 +109,45 @@ def spawn_chained_job(job: dict):
     subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
-def auto_summarize(keys) -> int:
-    """Draft the AI title/summary for each newly-processed meeting at the end
-    of the run (local Qwen via .venv-llm), so the panel shows a description
-    without anyone clicking Summarize. Quietly skipped when the LLM venv
-    isn't installed; one meeting failing never breaks the others."""
+def summarize_one(key) -> bool:
+    """Draft the AI title/summary for ONE just-finished meeting (local Qwen
+    via .venv-llm). Runs right after the file completes, not at end-of-run:
+    with a long backlog the end is hours away, and a Stop before it would
+    lose the summaries for everything already finished. Quietly a no-op when
+    the LLM venv isn't installed or the meeting already has a summary; a
+    failure never breaks the run (the end-of-run sweep retries it)."""
     import json as _json
 
     from stt import status as st, summarize
+    if not summarize.available():
+        return False
+    base = Path(key).stem
+    try:
+        d = _json.loads(config.meeting_file(base, ".json").read_text())
+        if d.get("ai_summary"):
+            return False  # e.g. a re-queued file that was already summarized
+        st.set_stage(key, "summarizing")
+        summarize.suggest_title(base)
+        return True
+    except Exception as e:
+        print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
+        return False
+    finally:
+        st.clear_stage(key)
+
+
+def auto_summarize(keys) -> int:
+    """End-of-run sweep: summarize anything from this run still missing a
+    description. Normally each file was summarized the moment it finished
+    (see summarize_one in _record); this catches the ones whose inline pass
+    failed mid-run."""
+    from stt import summarize
     if not keys:
         return 0
     if not summarize.available():
         print("  (auto-summary skipped: local LLM not installed)")
         return 0
-    n = 0
-    for key in keys:
-        base = Path(key).stem
-        try:
-            d = _json.loads(config.meeting_file(base, ".json").read_text())
-            if d.get("ai_summary"):
-                continue  # e.g. a re-queued file that was already summarized
-            st.set_stage(key, "summarizing")
-            summarize.suggest_title(base)
-            n += 1
-        except Exception as e:
-            print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
-        finally:
-            st.clear_stage(key)
-    return n
+    return sum(1 for key in keys if summarize_one(key))
 
 
 def warn_if_registry_lost(dest: Path):
@@ -435,6 +446,10 @@ def main():
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             succeeded.append(res["key"])
             processed += 1
+            # the description lands NOW, while the next file transcribes —
+            # not hours later when the whole backlog ends (and never lost to
+            # a Stop pressed before then)
+            summarize_one(res["key"])
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
