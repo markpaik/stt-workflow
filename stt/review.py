@@ -540,8 +540,19 @@ def _record_decision(base: str, decision: dict):
     if mid:
         decisions = [d for d in decisions if d.get("manual_id") != mid] + [decision]
     else:
-        decisions = [d for d in decisions
-                     if abs(d["start"] - decision["start"]) > 0.25] + [decision]
+        # supersede only a PRIOR decision for the SAME segment, keyed on its
+        # (start, end) pair. Start alone conflated two genuinely different
+        # decisions whenever their starts landed close — a re-split of a first
+        # half (same start, much smaller end) or two adjacent sub-second crumbs
+        # bulk-accepted together (starts within 0.25s) — silently dropping one.
+        # Live edits never nudge a segment's bounds between decisions, so a
+        # same-segment re-edit keeps identical (start, end); a tight tolerance
+        # supersedes it while keeping distinct segments apart.
+        def _same_segment(d):
+            return (abs(d["start"] - decision["start"]) <= 0.05
+                    and abs(d.get("end", d["start"])
+                            - decision.get("end", decision["start"])) <= 0.05)
+        decisions = [d for d in decisions if not _same_segment(d)] + [decision]
     _write_decisions(p, decisions)
 
 
@@ -588,11 +599,21 @@ def reapply_decisions(base: str, data: dict) -> int:
             segs.insert(pos, seg)
             applied += 1
             continue
-        seg = next((s for s in segs
-                    if abs(s["start"] - dec["start"]) <= 0.3
-                    and not s.get("inserted")), None)
-        if seg is None:
+        # match the decision to the NEAREST non-inserted segment, not the first
+        # in list order: a relabel nudging boundaries can leave two rebuilt
+        # segments inside the window, and taking the first (earliest start)
+        # replayed a delete/edit onto the wrong line. A near dead-heat is
+        # genuinely ambiguous — skip rather than guess, mirroring
+        # _locate_segment; TIE is tighter here because adjacent rebuilt segments
+        # legitimately sit ~0.2-0.3s apart and must still replay.
+        WIDE, TIE = 0.3, 0.05
+        cands = sorted((abs(s["start"] - dec["start"]), i)
+                       for i, s in enumerate(segs) if not s.get("inserted"))
+        if not cands or cands[0][0] > WIDE:
             continue
+        if len(cands) > 1 and (cands[1][0] - cands[0][0]) < TIE:
+            continue
+        seg = segs[cands[0][1]]
         if dec["action"] == "delete":
             i = next(j for j, s in enumerate(segs) if s is seg)
             segs.remove(seg)
