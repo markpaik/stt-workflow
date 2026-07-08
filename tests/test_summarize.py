@@ -3,7 +3,10 @@ the LLM's structured reply (the LLM itself is faked — parsing is under test)."
 import json
 import os
 import threading
+import time
 from datetime import datetime as _real_datetime
+
+import pytest
 
 from stt import config, review, summarize
 from conftest import mfile
@@ -200,3 +203,125 @@ def test_rename_meeting_waits_for_concurrent_relabel_lock(sandbox):
     assert json.loads(newj.read_text()).get("relabel_marker") == MARK
     # no stale pre-rename json left orphaned inside the new folder
     assert not (config.meeting_dir("MtgNew") / "Mtg.json").exists()
+
+
+# ---------- answer_question: grounded per-meeting Q&A ----------
+
+def test_answer_question_prompt_grounding_and_history(sandbox, monkeypatch):
+    _meeting()
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "It shipped [00:00].")
+    r = summarize.answer_question("Mtg", "Did we ship?",
+                                  history=[{"q": "Who spoke?", "a": "Alex."}])
+    assert r["ok"] and r["answer"] == "It shipped [00:00]."
+    assert r["truncated"] is False
+    (p,) = prompts
+    assert "[00:00] Alex: We will ship it." in p           # transcript present
+    assert "QUESTION: Did we ship?" in p
+    assert "Q: Who spoke?" in p and "A: Alex." in p        # history rides along
+    assert "ONLY from the transcript" in p                 # grounding rules
+    assert "cite its timestamp" in p
+    assert "omitted" not in p                # no truncation note when it fits whole
+
+
+def test_answer_question_flags_a_sampled_long_transcript(sandbox, monkeypatch):
+    mfile("Big", ".txt").write_text(
+        "HEADMARK " + "x" * (summarize.QA_MAX_CHARS + 30_000) + " TAILMARK")
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "ok")
+    r = summarize.answer_question("Big", "anything?")
+    assert r["ok"] and r["truncated"] is True
+    (p,) = prompts
+    assert "HEADMARK" in p and "TAILMARK" in p and "[...]" in p
+    assert "omitted" in p                                  # the model is told
+
+
+def test_answer_question_rejects_empty_and_missing(sandbox, monkeypatch):
+    _meeting()
+    called = []
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: called.append(1) or "x")
+    assert summarize.answer_question("Mtg", "   ")["ok"] is False
+    r = summarize.answer_question("Nope", "hi?")
+    assert r["ok"] is False and "Nope" in r["error"]
+    assert not called
+
+
+def test_answer_question_never_leaks_unterminated_think(sandbox, monkeypatch):
+    """If generation dies inside a <think> block the closing tag never arrives,
+    _generate's strip can't match, and raw chain-of-thought would become the
+    'answer' — the guard must eat it."""
+    _meeting()
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda *a, **k: "<think>half-finished secret reasoning")
+    r = summarize.answer_question("Mtg", "hi?")
+    assert r["ok"] is False and "secret" not in json.dumps(r)
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda *a, **k: "<think>hmm</think>The answer.")
+    assert summarize.answer_question("Mtg", "hi?")["answer"] == "The answer."
+
+
+# ---------- _llm_lock: one resident model at a time ----------
+
+def _stub_llm_subprocess(monkeypatch, delay=0.0, tracker=None):
+    """Fake the .venv-llm subprocess under the REAL _generate/_llm_lock path."""
+    import subprocess as sp
+
+    guard = threading.Lock()
+
+    def fake_run(*a, **k):
+        if tracker is not None:
+            with guard:
+                tracker["inside"] += 1
+                tracker["peak"] = max(tracker["peak"], tracker["inside"])
+        if delay:
+            time.sleep(delay)
+        if tracker is not None:
+            with guard:
+                tracker["inside"] -= 1
+        return sp.CompletedProcess(a, 0, stdout=json.dumps({"text": "ok"}), stderr="")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    monkeypatch.setattr(summarize, "available", lambda: True)
+
+
+def test_generate_never_runs_two_models_at_once(sandbox, monkeypatch):
+    tracker = {"inside": 0, "peak": 0}
+    _stub_llm_subprocess(monkeypatch, delay=0.2, tracker=tracker)
+    outs, errs = [], []
+
+    def w():
+        try:
+            outs.append(summarize._generate("x"))
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    ts = [threading.Thread(target=w) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(timeout=10)
+    assert not errs, errs
+    assert outs == ["ok", "ok"]
+    assert tracker["peak"] == 1, "two LLM subprocesses overlapped"
+
+
+def test_interactive_generate_fails_fast_when_model_is_busy(sandbox, monkeypatch):
+    _stub_llm_subprocess(monkeypatch)
+    release = threading.Event()
+    held = threading.Event()
+
+    def holder():
+        with summarize._llm_lock():
+            held.set()
+            release.wait(timeout=10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(timeout=5)
+    with pytest.raises(summarize.LLMBusy):
+        summarize._generate("x", lock_timeout=0.1)
+    release.set()
+    t.join(timeout=5)
+    assert summarize._generate("x") == "ok"   # blocking default succeeds once free
