@@ -508,8 +508,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(gather_state())
             elif u.path == "/api/snippet":
                 meeting = q.get("meeting", "")
-                if meeting and not self._require_base(meeting):
-                    return
+                if meeting and not _known_base(meeting):
+                    # a stale reference (a meeting renamed/deleted before the
+                    # registries tracked renames) must not kill playback — the
+                    # client string is DISCARDED, never used as a path, and
+                    # find_voice_clip searches the real library instead
+                    meeting = ""
                 f = _snippet_for(meeting, q["speaker"])
                 if f is None:
                     self._json({"error": "no snippet"}, 404)

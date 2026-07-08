@@ -434,3 +434,28 @@ def test_spkwirenew_restores_prior_selection_on_cancel():
     assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in html
     # the old unconditional reset must be gone
     assert "if(!nm){sel.selectedIndex=0;return}" not in html
+
+
+# ---------- /api/snippet: stale meeting reference falls back, never 400s ----------
+
+def test_snippet_with_stale_meeting_falls_back_to_search(running_server, monkeypatch):
+    """A registry that references a renamed/deleted meeting must not kill voice
+    playback: the unknown-but-harmless meeting string is DISCARDED (never used
+    as a path) and the clip search runs across the whole library instead."""
+    calls = []
+
+    def fake_snippet(meeting, speaker):
+        calls.append((meeting, speaker))
+        return None  # no clip found — the endpoint should 404, not 400
+
+    monkeypatch.setattr(srv, "_snippet_for", fake_snippet)
+    st, body = _get(running_server,
+                    "/api/snippet?speaker=U001&meeting=Renamed%20Away%20Mtg")
+    assert st == 404 and body["error"] == "no snippet"
+    assert calls == [("", "U001")]   # stale name dropped, library-wide search
+
+    # a REAL meeting still passes through untouched
+    _make_meeting("Real Mtg")
+    calls.clear()
+    st, _ = _get(running_server, "/api/snippet?speaker=U001&meeting=Real%20Mtg")
+    assert st == 404 and calls == [("Real Mtg", "U001")]
