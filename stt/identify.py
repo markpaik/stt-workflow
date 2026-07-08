@@ -375,11 +375,29 @@ def remove_person(name: str) -> bool:
         return True
 
 
+def _cap_keeping_newest_and_diverse(arr, sources, cap):
+    """Enforce the per-person sample cap by dropping the MOST REDUNDANT older
+    sample (the one whose cosine to any other retained sample is highest), never
+    the freshest one (arr[-1]). A profile then keeps a spread across rooms, mics,
+    and days instead of narrowing to whichever samples arrived most recently:
+    matching scores by max cosine, so five near-duplicates from one recording
+    help far less than five samples that each cover a different condition."""
+    while arr.shape[0] > cap:
+        n = arr.shape[0]
+        drop = max(range(n - 1),  # older samples only — keep the newest
+                   key=lambda i: max(cosine(arr[i], arr[j])
+                                     for j in range(n) if j != i))
+        keep = [k for k in range(n) if k != drop]
+        arr, sources = arr[keep], [sources[k] for k in keep]
+    return arr, sources
+
+
 def enroll(name: str, vector, replace: bool = False, source: str = None):
-    """Add a voiceprint sample. Keeps up to MAX_SAMPLES most-recent L2-normalized
-    samples per person (scored by max cosine at match time). `source` records
-    which recording the sample came from — kept as a rolling list aligned with
-    the samples, so the GUI can show provenance and locate playable audio."""
+    """Add a voiceprint sample. Keeps up to MAX_SAMPLES L2-normalized samples per
+    person, evicting the most redundant one so the set stays diverse (scored by
+    max cosine at match time). `source` records which recording the sample came
+    from — kept as a rolling list aligned with the samples, so the GUI can show
+    provenance and locate playable audio."""
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     with lock_registry():
         reg = load_registry()
@@ -401,8 +419,8 @@ def enroll(name: str, vector, replace: bool = False, source: str = None):
                 return fpath  # same sample again (e.g. re-promote after a relabel) — skip
             prev_sources = reg[name].get("sources", ["?"] * arr.shape[0])
             arr = np.vstack([arr, vector])
-            sources = (prev_sources + [source or "?"])[-MAX_SAMPLES:]
-            arr = arr[-MAX_SAMPLES:]
+            sources = prev_sources + [source or "?"]
+            arr, sources = _cap_keeping_newest_and_diverse(arr, sources, MAX_SAMPLES)
         else:
             arr = vector.reshape(1, -1)
             sources = [source or "?"]
