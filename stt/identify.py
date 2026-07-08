@@ -252,9 +252,25 @@ def rename_person(old: str, new: str) -> bool:
         return True
 
 
+def _merge_budget(n_d, n_s, cap):
+    """How many samples to keep from dst and src when merging two people, so the
+    combined profile carries BOTH voices. Splits the cap between them (src takes
+    the floor half, dst the rest) and lets a side with fewer samples yield its
+    slack to the other. A plain tail of [dst, src] dropped ALL of dst whenever
+    dst already held cap samples — the merged profile then represented only the
+    person merged in last, exactly the voice the user was NOT looking at."""
+    if n_d + n_s <= cap:
+        return n_d, n_s
+    keep_s = min(n_s, cap // 2)
+    keep_d = min(n_d, cap - keep_s)
+    keep_s = min(n_s, cap - keep_d)  # reclaim slack dst couldn't use
+    return keep_d, keep_s
+
+
 def merge_people(src: str, dst: str) -> bool:
     """Combine two enrolled entries that are really the same person: src's voice
-    samples are folded into dst (rolling window), src is removed."""
+    samples are folded into dst (keeping a spread of BOTH within MAX_SAMPLES),
+    src is removed."""
     with lock_registry():
         reg = load_registry()
         if src not in reg or dst not in reg or src == dst:
@@ -269,8 +285,12 @@ def merge_people(src: str, dst: str) -> bool:
         d = d.reshape(1, -1) if d.ndim == 1 else d
         src_sources = reg[src].get("sources", ["?"] * s.shape[0])
         dst_sources = reg[dst].get("sources", ["?"] * d.shape[0])
-        arr = np.vstack([d, s])[-MAX_SAMPLES:]
-        sources = (dst_sources + src_sources)[-MAX_SAMPLES:]
+        keep_d, keep_s = _merge_budget(d.shape[0], s.shape[0], MAX_SAMPLES)
+        # most-recent within each side; explicit positive indices so a 0 keep
+        # slices to empty, never to the whole list the way [-0:] would
+        arr = np.vstack([d[d.shape[0] - keep_d:], s[s.shape[0] - keep_s:]])
+        sources = (dst_sources[len(dst_sources) - keep_d:]
+                   + src_sources[len(src_sources) - keep_s:])
         np.save(df, arr)
         sf.unlink(missing_ok=True)
         del reg[src]
@@ -301,6 +321,46 @@ def remove_sample(name: str, index: int) -> bool:
         reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
         save_registry(reg)
         return True
+
+
+def reassign_sample(name: str, index: int, to_name: str) -> dict:
+    """Move one voice sample from `name`'s profile to `to_name` (an existing
+    person, or a brand-new one). The honest fix when a sample was enrolled under
+    the WRONG identity: the embedding is carried across, not thrown away, and its
+    source meeting travels with it. Unlike remove_sample this may empty and drop
+    the source profile — reassigning its last sample means the whole thing was
+    the wrong person all along."""
+    to_name = (to_name or "").strip()
+    if not to_name:
+        return {"ok": False, "error": "a destination name is required"}
+    with lock_registry():
+        reg = load_registry()
+        if name not in reg:
+            return {"ok": False, "error": f"no profile for {name}"}
+        if to_name == name:
+            return {"ok": False, "error": "already this person"}
+        f = config.VOICEPRINTS_DIR / reg[name]["file"]
+        if not f.exists():
+            return {"ok": False, "error": "voiceprint file missing"}
+        arr = np.load(f)
+        arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
+        if not (0 <= index < arr.shape[0]):
+            return {"ok": False, "error": "no such sample"}
+        vec = arr[index]
+        sources = reg[name].get("sources", ["?"] * arr.shape[0])
+        src = sources[index] if index < len(sources) else None
+        keep = [i for i in range(arr.shape[0]) if i != index]
+        if keep:
+            np.save(f, arr[keep])
+            reg[name]["n_samples"] = len(keep)
+            reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
+        else:  # that was the source's only sample — the profile was wrong wholesale
+            f.unlink(missing_ok=True)
+            del reg[name]
+        save_registry(reg)  # commit the removal BEFORE enroll re-reads the registry
+        # enroll re-locks (reentrant) and re-normalizes; vec is already unit-norm
+        enroll(to_name, vec, source=src)
+        return {"ok": True, "to": to_name, "source_emptied": name not in reg}
 
 
 def remove_person(name: str) -> bool:

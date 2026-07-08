@@ -315,6 +315,7 @@ def gather_state():
             "paused": control.is_paused(),
             "queue": queue, "meetings": meetings,
             "enrolled": enrolled, "unknowns": unknown_list,
+            "max_samples": identify.MAX_SAMPLES,
             "schedule": read_schedule(), "model": current_model(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
@@ -782,9 +783,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": (r.stderr or "re-transcription failed")[-300:]}, 500)
             elif u.path == "/api/remove_sample":
                 ok = identify.remove_sample(b["name"], int(b["index"]))
-                self._json({"ok": ok} if ok else
+                if ok:
+                    # a removed sample changes who this profile matches — re-run
+                    # identification like every other registry edit, so a
+                    # misattributed voice drops out of past transcripts (and
+                    # resurfaces as an unknown to name) instead of the correction
+                    # only taking effect on the next unrelated relabel
+                    _spawn([str(RUN_SH), "relabel", "--all"])
+                self._json({"ok": ok, "note": "re-identifying all meetings in background"} if ok else
                            {"ok": False,
                             "error": "Can't remove the only sample — remove the person instead."})
+            elif u.path == "/api/reassign_sample":
+                r = identify.reassign_sample(b["name"], int(b["index"]), b.get("to", ""))
+                if r.get("ok"):
+                    _spawn([str(RUN_SH), "relabel", "--all"])  # moved voice, re-identify
+                self._json(r)
             elif u.path == "/api/punctuate":
                 _env_file_set({"STT_PUNCTUATE": "1" if b.get("on") else "0"})
                 self._json({"ok": True})
@@ -1747,6 +1760,25 @@ function openName(uid,display,meeting){
   </div>`;
   dlg.showModal();
 }
+function reassignSample(name,index){
+  // move a misattributed sample to the right person instead of discarding it
+  const others=S.enrolled.map(e=>e.name).filter(x=>x!==name);
+  const hint=others.length?`\nExisting people: ${others.slice(0,6).join(', ')}`:'';
+  const to=(prompt(`This voice sample is really whose? Type an existing name to add it there, or a new name to start a profile.${hint}`)||'').trim();
+  if(!to||to===name)return;
+  api('/api/reassign_sample',{name,index,to}).then(r=>{
+    if(!r.ok){alert(r.error||'failed');return;}
+    dlg.close();refresh();
+  });
+}
+function renameSpeaker(oldName){
+  const n=$('#rname').value.trim();
+  if(!n||n===oldName)return;
+  // renaming onto an existing person silently merges their voiceprints — say so
+  const clash=S.enrolled.find(e=>e.name.toLowerCase()===n.toLowerCase()&&e.name!==oldName);
+  if(clash&&!confirm(`${n} is already a saved person. Renaming “${oldName}” to “${n}” MERGES their voice samples into one profile. Continue?`))return;
+  api('/api/rename_speaker',{name:oldName,new:n}).then(()=>{dlg.close();refresh()});
+}
 function openSpeakerActions(key,display,meeting){
   const isName=key.startsWith('name:');
   const others=[...S.enrolled.map(e=>({k:'name:'+e.name,d:e.name})),
@@ -1755,14 +1787,16 @@ function openSpeakerActions(key,display,meeting){
   const enr=isName?S.enrolled.find(x=>x.name===key.slice(5)):null;
   let samplerows='';
   if(enr){
-    const n=enr.samples,srcs=enr.sources||[];
-    samplerows='<div class="sub" style="margin-top:8px;font-weight:600">Voice samples</div>'+
+    const n=enr.samples,srcs=enr.sources||[],cap=S.max_samples||5;
+    samplerows=`<div class="sub" style="margin-top:8px;font-weight:600">Voice samples (${n} of ${cap})</div>
+      <div class="sub" style="margin:2px 0 6px;color:var(--muted,#8a8f98)">A profile keeps up to ${cap} samples. A varied set, from different meetings, rooms, and mics, identifies this person more reliably than several clips from one recording.</div>`+
       Array.from({length:n},(_,i)=>{
         const src=srcs.length===n?srcs[i]:(srcs[srcs.length-n+i]||null);
         return `<div class="row">
           ${src?`<button class="playbtn" data-key="${esc(enr.name)}" data-meeting="${esc(src)}" onclick="playVoice(this)">▶</button>`:'<span style="width:30px" title="Source unknown (enrolled before tracking)"></span>'}
           <div class="grow"><div class="sub">Sample ${i+1} — ${src?esc(src):'source unknown'}</div></div>
-          ${n>1?`<button title="Remove this sample (e.g. it came from a bad recording)" onclick="api('/api/remove_sample',{name:'${escJs(enr.name)}',index:${i}}).then(r=>{if(!r.ok)alert(r.error||'failed');dlg.close();refresh()})">✕</button>`:''}
+          <button title="Reassign — this sample is really someone else's voice; move it to the right person instead of deleting it" onclick="reassignSample('${escJs(enr.name)}',${i})">→</button>
+          ${n>1?`<button title="Remove this sample (e.g. a bad recording); the person keeps their other samples" onclick="api('/api/remove_sample',{name:'${escJs(enr.name)}',index:${i}}).then(r=>{if(!r.ok)alert(r.error||'failed');dlg.close();refresh()})">✕</button>`:''}
         </div>`}).join('');
   }
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(display)}</h1>
@@ -1771,7 +1805,7 @@ function openSpeakerActions(key,display,meeting){
   ${isName?`
   <div class="row"><div class="grow"><div class="name">Rename</div><div class="sub">Fix the name everywhere</div></div>
     <input type="text" id="rname" value="${esc(display)}" style="width:150px">
-    <button onclick="const n=$('#rname').value.trim();if(n&&n!=='${escJs(display)}')api('/api/rename_speaker',{name:'${escJs(display)}',new:n}).then(()=>{dlg.close();refresh()})">Apply</button></div>`:''}
+    <button onclick="renameSpeaker('${escJs(display)}')">Apply</button></div>`:''}
   <div class="row"><div class="grow"><div class="name">Merge into…</div>
     <div class="sub">This voice is really the same person as</div></div>
     <select id="mtarget">${others.map(o=>`<option value="${esc(o.k)}">${esc(o.d)}</option>`).join('')}</select>

@@ -10,6 +10,15 @@ def _vec(seed, dim=256):
     return np.random.default_rng(seed).normal(size=dim)
 
 
+def _near(axis, i, dim=256):
+    """A vector clearly dominated by `axis` (so np.argmax(|v|) == axis) but
+    distinct enough from its siblings that enroll's 0.999 dedup keeps them all."""
+    v = np.zeros(dim)
+    v[axis] = 1.0
+    v[10 + i] = 0.2
+    return v
+
+
 def test_empty_library_names_nobody(sandbox):
     res = identify.name_speakers({"SPEAKER_00": _vec(1)})
     assert res["SPEAKER_00"]["name"] is None
@@ -115,6 +124,57 @@ def test_merge_combines_sources(sandbox):
     identify.enroll("B", _vec(2), source="M2")
     identify.merge_people("A", "B")
     assert identify.load_registry()["B"]["sources"] == ["M2", "M1"]
+
+
+def test_merge_keeps_a_spread_of_both_voices(sandbox):
+    """Merging two FULL profiles must carry both people's voice into the result.
+    A plain tail of [dst, src] dropped every one of dst's samples once dst held
+    MAX_SAMPLES, so the merged profile represented only the voice merged in last
+    — the one the user was NOT looking at."""
+    for i in range(identify.MAX_SAMPLES):
+        identify.enroll("Katie", _near(0, i), source=f"k{i}")
+    for i in range(identify.MAX_SAMPLES):
+        identify.enroll("Bob", _near(1, i), source=f"b{i}")
+    assert identify.merge_people("Bob", "Katie")  # Bob folded into Katie
+    merged = identify.load_voiceprints()["Katie"]
+    assert merged.shape[0] == identify.MAX_SAMPLES
+    axes = {int(np.argmax(np.abs(row))) for row in merged}
+    assert axes == {0, 1}, f"a voice was dropped in the merge: axes={axes}"
+    # sources stay aligned with whichever samples survived
+    assert len(identify.load_registry()["Katie"]["sources"]) == identify.MAX_SAMPLES
+
+
+def test_reassign_sample_moves_the_embedding_with_its_source(sandbox):
+    """A misattributed sample MOVES to the right person — embedding and source
+    provenance preserved — rather than being discarded (which loses the voice)
+    or left in the wrong profile."""
+    identify.enroll("Katie", _near(0, 0), source="M1")
+    identify.enroll("Katie", _near(1, 0), source="M2")  # actually Bob's voice
+    r = identify.reassign_sample("Katie", 1, "Bob")
+    assert r["ok"] and r["to"] == "Bob" and r["source_emptied"] is False
+    reg = identify.load_registry()
+    assert reg["Katie"]["n_samples"] == 1 and reg["Katie"]["sources"] == ["M1"]
+    assert reg["Bob"]["n_samples"] == 1 and reg["Bob"]["sources"] == ["M2"]
+    # the axis-1 voice really landed on Bob (not a copy of Katie's)
+    assert int(np.argmax(np.abs(identify.load_voiceprints()["Bob"][0]))) == 1
+
+
+def test_reassign_last_sample_drops_the_wrong_profile(sandbox):
+    """Reassigning a profile's ONLY sample means the whole profile was the wrong
+    person: the source is removed, the destination gains the voice."""
+    identify.enroll("Ghost", _near(0, 0), source="M1")
+    r = identify.reassign_sample("Ghost", 0, "Real Person")
+    assert r["ok"] and r["source_emptied"] is True
+    reg = identify.load_registry()
+    assert "Ghost" not in reg and reg["Real Person"]["n_samples"] == 1
+
+
+def test_reassign_sample_validates(sandbox):
+    identify.enroll("Katie", _near(0, 0), source="M1")
+    assert not identify.reassign_sample("Katie", 0, "")["ok"]        # no destination
+    assert not identify.reassign_sample("Katie", 0, "Katie")["ok"]   # same person
+    assert not identify.reassign_sample("Nobody", 0, "Bob")["ok"]    # unknown source
+    assert not identify.reassign_sample("Katie", 9, "Bob")["ok"]     # no such sample
 
 
 def test_remove_sample_states(sandbox):
