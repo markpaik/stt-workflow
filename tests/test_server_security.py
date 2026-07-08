@@ -560,3 +560,78 @@ def test_llm_backend_endpoint_switches_and_validates(running_server, monkeypatch
     assert state["llm_backend"] == "anthropic"
     assert state["llm_backends"]["anthropic"] is True
     assert state["llm_available"] is True
+
+
+# ---------- independent automation triggers (folder watch vs nightly) ----------
+
+@pytest.fixture
+def fake_agent(sandbox, monkeypatch):
+    """A sandboxed launchd plist with both triggers on, reloads recorded."""
+    import plistlib
+    p = sandbox / "com.stt-workflow.batch.plist"
+    p.write_bytes(plistlib.dumps({
+        "Label": "com.stt-workflow.batch",
+        "ProgramArguments": ["/x/python", "/x/run_batch.py"],
+        "StartCalendarInterval": {"Hour": 2, "Minute": 15},
+        "WatchPaths": ["/old/watched/folder"],
+        "RunAtLoad": True}))
+    monkeypatch.setattr(srv, "AGENT", p)
+    reloads = []
+    monkeypatch.setattr(srv, "_agent_reload", lambda: reloads.append(1))
+    return p, reloads
+
+
+def test_watch_and_nightly_toggle_independently(fake_agent):
+    """The user's model: manual vs always-watching is one switch, the
+    scheduled run is its own — either can be off while the other stays on."""
+    import plistlib
+    p, reloads = fake_agent
+
+    r = srv.write_automation(watch=False)
+    assert r["ok"] and r["watch"] is False and r["nightly"] is True
+    d = plistlib.loads(p.read_bytes())
+    assert "WatchPaths" not in d and d["StartCalendarInterval"]["Hour"] == 2
+    assert d["RunAtLoad"] is True          # nightly still needs login catch-up
+
+    r = srv.write_automation(nightly=False)
+    assert r["nightly"] is False
+    d = plistlib.loads(p.read_bytes())
+    assert "StartCalendarInterval" not in d
+    assert d["RunAtLoad"] is False         # fully manual: nothing runs itself
+    assert config._env_file()["STT_SCHEDULE_SAVED"] == "2:15"
+
+    # re-enable nightly: the remembered time comes back
+    r = srv.write_automation(nightly=True)
+    d = plistlib.loads(p.read_bytes())
+    assert d["StartCalendarInterval"] == {"Hour": 2, "Minute": 15}
+    assert d["RunAtLoad"] is True
+
+    # re-enable watch: stamps the CURRENT source folder, healing stale paths
+    r = srv.write_automation(watch=True)
+    d = plistlib.loads(p.read_bytes())
+    assert d["WatchPaths"] == [str(config.source_dir())]
+    assert len(reloads) == 4               # every change reloaded the agent
+
+
+def test_setting_a_time_implies_nightly_on(fake_agent):
+    import plistlib
+    p, _ = fake_agent
+    srv.write_automation(nightly=False)
+    srv.write_schedule(23, 30)             # the Change… dialog path
+    d = plistlib.loads(p.read_bytes())
+    assert d["StartCalendarInterval"] == {"Hour": 23, "Minute": 30}
+    assert srv.read_schedule()["nightly"] is True
+
+
+def test_automation_endpoint_round_trip(running_server, fake_agent):
+    st, body = _post(running_server, "/api/automation", {"watch": False})
+    assert st == 200 and body["ok"] and body["watch"] is False
+    st, state = _get(running_server, "/api/state")
+    assert state["schedule"]["watch"] is False
+    assert state["schedule"]["nightly"] is True
+
+
+def test_automation_requires_the_agent(sandbox, monkeypatch):
+    monkeypatch.setattr(srv, "AGENT", sandbox / "missing.plist")
+    r = srv.write_automation(watch=False)
+    assert r["ok"] is False and "install-agent" in r["error"]
