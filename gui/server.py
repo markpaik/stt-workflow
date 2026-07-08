@@ -85,7 +85,7 @@ def _env_file_get():
 _env_lock = threading.Lock()
 
 
-def _env_file_set(updates: dict):
+def _env_file_set(updates: dict, remove=()):
     # serialize the read-modify-write: settings POSTs each land on their own
     # ThreadingHTTPServer thread, so two concurrent saves would otherwise read
     # the same snapshot and the later write would silently drop the earlier key
@@ -98,6 +98,8 @@ def _env_file_set(updates: dict):
             s = ln.strip()
             if s and not s.startswith("#") and "=" in s:
                 k = s.split("=", 1)[0].strip()
+                if k in remove:  # drop the line entirely (clear a saved key)
+                    continue
                 if k in updates:
                     out.append(f"{k}={updates[k]}")
                     seen.add(k)
@@ -727,13 +729,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok})
             elif u.path == "/api/cloud_keys":
                 from stt import asr_cloud
-                updates = {}
+                updates, remove = {}, set()
+                cleared = {str(p) for p in (b.get("clear") or [])}
                 for prov, meta in asr_cloud.PROVIDERS.items():
                     v = (b.get(prov) or "").strip()
-                    if v:
+                    if v:  # a pasted key wins over a clear for the same provider
                         updates[meta["key_env"]] = v
-                if updates:
-                    _env_file_set(updates)
+                    elif prov in cleared:
+                        remove.add(meta["key_env"])
+                if updates or remove:
+                    _env_file_set(updates, remove=remove)
                     os.chmod(config.PROJECT_DIR / "stt.env", 0o600)
                 self._json({"ok": True,
                             "set": {prov: asr_cloud.available(prov)
@@ -1908,7 +1913,8 @@ function openCloudKeys(){
   const row=(prov,label,hint)=>`<div style="display:flex;gap:8px;align-items:center;margin-top:10px">
     <span style="width:150px" class="sub">${label}</span>
     <input type="password" id="ck_${prov}" placeholder="${ck[prov]?'key saved — paste to replace':'paste API key'}" style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:6px 8px">
-    <span class="sub" style="width:52px">${ck[prov]?'✓ set':''}</span></div>
+    <span class="sub" style="width:52px">${ck[prov]?'✓ set':''}</span>
+    ${ck[prov]?`<button onclick="clearCloudKey('${prov}','${label}')" title="Remove the saved ${label} key from this Mac">Clear</button>`:''}</div>
     <div class="sub" style="margin-left:158px;opacity:.8">${hint}</div>`;
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
   <p class="muted" style="margin-top:8px">Optional: transcribe with a cloud engine instead of the local models. Only the audio is uploaded — speaker identification and voiceprints stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine is selected. Keys are stored in stt.env on this machine and never shown again.</p>
@@ -1925,6 +1931,13 @@ async function saveCloudKeys(){
   const r=await api('/api/cloud_keys',{scribe:$('#ck_scribe').value,openai:$('#ck_openai').value,voxtral:$('#ck_voxtral').value});
   if(!r.ok){alert(r.error||'Could not save');return}
   dlg.close();refresh();
+}
+async function clearCloudKey(prov,label){
+  if(!confirm(`Remove the saved ${label} key? Cloud transcription with this provider stops working until a new key is pasted.`))return;
+  const r=await api('/api/cloud_keys',{clear:[prov]});
+  if(!r.ok){alert(r.error||'Could not clear the key');return}
+  S.cloud_keys=r.set;   // re-render the dialog from fresh state, keep it open
+  openCloudKeys();
 }
 const THEME_META={auto:["◐","Theme: matching macOS — click for light"],
 light:["☀","Theme: light — click for dark"],dark:["☾","Theme: dark — click to match macOS"]};
