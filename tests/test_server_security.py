@@ -524,3 +524,17 @@ def test_snippet_secs_is_clamped_and_never_past_the_turn(running_server, monkeyp
     srv._snippet_for("", "U009", secs=45.0)
     t = float(cmds[0][cmds[0].index("-t") + 1])
     assert t == 4.0                                   # never past the turn's end
+
+
+def test_enrolled_speakers_listed_alphabetically(sandbox):
+    """The Speakers card lists people by first name (registry order was
+    enrollment order); unknowns render in their own section below."""
+    import numpy as np
+
+    from stt import identify
+    rng = np.random.default_rng(5)
+    for name in ("Priya Shah", "alex rivera", "Jordan Lee"):
+        identify.enroll(name, rng.normal(size=16), source="M1")
+    st = srv.gather_state()
+    assert [e["name"] for e in st["enrolled"]] == \
+        ["alex rivera", "Jordan Lee", "Priya Shah"]   # case-insensitive
