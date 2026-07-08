@@ -36,6 +36,22 @@ def test_parses_title_summary_and_next_steps(sandbox, monkeypatch):
     assert d["ai_summary"] == r["summary"]
 
 
+def test_summary_prompt_asks_for_brief_varied_prose(sandbox, monkeypatch):
+    """Guards the restyle: summaries must be asked for as 2-3 sentences that
+    do not all open with 'The meeting ...' — a prompt revert would quietly
+    bring the samey, long summaries back."""
+    _meeting()
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "TITLE: T\nSUMMARY: S\n")
+    summarize.suggest_title("Mtg")
+    (p,) = prompts
+    assert "2-3 sentences" in p
+    assert "Never begin with 'The meeting'" in p
+    # the output contract the parser and panel depend on is unchanged
+    assert "TITLE: <title>" in p and "NEXT STEPS" in p
+
+
 def test_no_commitments_yields_empty_list(sandbox, monkeypatch):
     _meeting()
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
