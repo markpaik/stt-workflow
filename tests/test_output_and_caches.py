@@ -3,6 +3,7 @@ icloud materialization states; unknowns registry lifecycle."""
 import json
 
 import numpy as np
+import pytest
 
 from stt import diarcache, icloud, output, unknowns
 
@@ -62,6 +63,32 @@ def test_diarcache_roundtrip_with_missing_embeddings(sandbox):
     assert t2 == turns
     assert np.allclose(e2[0], np.ones(256)) and e2[1] is None
     assert np.allclose(c2["SPEAKER_00"], 0.5)
+
+
+def test_diarcache_save_is_atomic(sandbox, monkeypatch):
+    """A crash mid-save must not corrupt a previously-good cache: the damage
+    lands on the .tmp sibling and os.replace never fires."""
+    p = sandbox / "m.diar.npz"
+    turns = [{"start": 0.0, "end": 2.0, "cluster": "SPEAKER_00"}]
+    tembs = [np.ones(256)]
+    cents = {"SPEAKER_00": np.ones(256) * 0.5}
+    diarcache.save(p, turns, tembs, cents)  # good cache on disk
+
+    def boom(target, **kw):
+        # write garbage wherever np.savez is pointed, then die mid-write
+        if hasattr(target, "write"):
+            target.write(b"garbage")
+        else:
+            open(str(target) + (".npz" if not str(target).endswith(".npz") else ""),
+                 "wb").write(b"garbage")
+        raise RuntimeError("crash mid-write")
+
+    monkeypatch.setattr(diarcache.np, "savez", boom)
+    with pytest.raises(RuntimeError):
+        diarcache.save(p, turns, tembs, cents)
+    # the pre-existing good cache is untouched and still loads
+    t2 = diarcache.load(p)[0]
+    assert t2 == turns
 
 
 # ---------- icloud ----------
@@ -135,6 +162,46 @@ def test_unknown_numbers_restart_after_naming(sandbox):
     u3 = unknowns.assign({"S2": v3}, {"S2": None}, "M2")["S2"]
     assert u3 == "U001"                          # the freed number is reused
     assert unknowns.display(u3) == "Speaker 1"
+    # numbering is driven by the free-slot scan; the old dead 'next' key is gone
+    assert "next" not in unknowns.load()
+
+
+def _orthonormal(v, rng):
+    """A unit vector orthogonal to v (for building a cluster that scores low
+    against v yet is a legitimate embedding)."""
+    r = rng.normal(size=v.shape)
+    r = r - (r @ v) / (v @ v) * v
+    return r / np.linalg.norm(r)
+
+
+def test_two_distinct_clusters_never_collapse_to_one_speaker(sandbox):
+    """Two genuinely different strangers in one meeting who both resemble the same
+    past unknown must NOT both be labeled the same global Speaker N."""
+    rng = np.random.default_rng(7)
+    v = rng.normal(size=256)
+    u1 = unknowns.assign({"S0": v}, {"S0": None}, "M1")["S0"]
+    assert u1 == "U001"
+
+    vhat = v / np.linalg.norm(v)
+    c1 = v + rng.normal(size=256) * 1e-4               # ~identical to v
+    orth = _orthonormal(v, rng)
+    c2 = 0.7 * vhat + np.sqrt(1 - 0.49) * orth          # cos(c2, v) == 0.7
+    # both clusters match U001 (>= MATCH_MIN) but are distinct from each other
+    out = unknowns.assign({"S0": c1, "S1": c2}, {"S0": None, "S1": None}, "M2")
+    assert len(set(out.values())) == 2                  # not conflated
+    assert "U001" in out.values()                       # the real returning voice keeps its id
+
+
+def test_over_segmented_voice_still_shares_one_speaker(sandbox):
+    """Guard the split-cluster case: one person diarized into two near-identical
+    clusters keeps a SINGLE global Speaker N (the fix must not over-restrict)."""
+    rng = np.random.default_rng(11)
+    v = rng.normal(size=256)
+    u1 = unknowns.assign({"S0": v}, {"S0": None}, "M1")["S0"]
+    c1 = v + rng.normal(size=256) * 1e-4
+    c2 = v + rng.normal(size=256) * 1e-4
+    out = unknowns.assign({"S0": c1, "S1": c2}, {"S0": None, "S1": None}, "M2")
+    assert set(out.values()) == {u1}                    # both map to the same id
 
 
 def test_enroll_skips_near_duplicate_sample(sandbox):

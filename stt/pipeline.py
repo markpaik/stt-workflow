@@ -3,6 +3,7 @@
 This never touches the iCloud original; the batch orchestrator owns the
 copy/move/delete lifecycle. Output writes are atomic (see output._atomic_write).
 """
+import os
 from pathlib import Path
 
 import numpy as np
@@ -188,7 +189,14 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
 
     saved_emb = None
     if save_embeddings and diar and diar.get("embeddings"):
-        np.savez(emb_path, **{k: v for k, v in diar["embeddings"].items()})
+        # atomic: write to a temp sibling then os.replace, so a crash mid-write
+        # can't leave a truncated cache next to a complete transcript. Pass a
+        # file handle (not the path) so np.savez does not append its own .npz to
+        # the .tmp name and leave os.replace chasing a file that isn't there.
+        emb_tmp = emb_path.with_suffix(emb_path.suffix + ".tmp")
+        with open(emb_tmp, "wb") as fh:
+            np.savez(fh, **{k: v for k, v in diar["embeddings"].items()})
+        os.replace(emb_tmp, emb_path)
         saved_emb = emb_path
         # cache raw turns + per-turn embeddings + overlaps so relabel can
         # re-attribute later without re-diarizing
