@@ -75,7 +75,8 @@ def clean_scratch():
     if config.WORK_DIR.exists():
         for p in config.WORK_DIR.glob("*.wav"):
             p.unlink(missing_ok=True)
-    for p in list(config.MEETINGS_DIR.glob("*.tmp")) + list(config.MEETINGS_DIR.glob("*/*.tmp")):
+    for p in (list(config.MEETINGS_DIR.glob("*.tmp")) + list(config.MEETINGS_DIR.glob("*/*.tmp"))
+              + list(config.MEETINGS_DIR.glob("*.part")) + list(config.MEETINGS_DIR.glob("*/*.part"))):
         p.unlink(missing_ok=True)
 
 
@@ -411,15 +412,15 @@ def main():
 
     processed = failed = 0
     succeeded = []  # keys of files that fully processed (for auto-summary)
-    n_workers = 2 if (args.parallel > 1 and len(todo) > 1) else 1
+    failed_names = set()  # files that failed THIS run — never retried in rescan
 
-    def _record(res):
+    def _record(res, n_active):
         nonlocal processed, failed
         if res["ok"]:
             manifest.mark(m, res["key"], res["mtime"], res["outputs"])
             manifest.save(m)
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
-                         rates.current_asr_key(), n_active=n_workers)
+                         rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             succeeded.append(res["key"])
@@ -427,9 +428,14 @@ def main():
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
+            failed_names.add(res["key"])
             failed += 1
 
     def run_todo(batch):
+        # the concurrency actually used for THIS batch — a solo/short batch runs
+        # single-worker even under --parallel 2, so rate samples must be tagged
+        # with the real n_active, not the outer run's initial worker count.
+        n_used = args.parallel if (args.parallel > 1 and len(batch) > 1) else 1
         if args.parallel > 1 and len(batch) > 1:
             from concurrent.futures import ProcessPoolExecutor, as_completed
             from concurrent.futures.process import BrokenProcessPool
@@ -440,7 +446,7 @@ def main():
                     src = futs[fut]
                     print(f"[processing] {src.name}", flush=True)
                     try:
-                        _record(fut.result())
+                        _record(fut.result(), n_used)
                     except BrokenProcessPool:
                         # a DIFFERENT file's worker crashed (segfault/OOM-kill)
                         # and took the shared pool down with it — this file was
@@ -465,7 +471,7 @@ def main():
                     try:
                         with ProcessPoolExecutor(max_workers=1) as rex:
                             _record(rex.submit(process_one, str(src), str(dest),
-                                               opts_for(src)).result())
+                                               opts_for(src)).result(), 1)
                     except BrokenProcessPool:
                         nonlocal_fail(src.name, RuntimeError(
                             "crashed its worker process twice — file skipped"))
@@ -476,7 +482,7 @@ def main():
             for src in batch:
                 print(f"[processing] {src.name}", flush=True)
                 try:
-                    _record(process_one(str(src), str(dest), opts_for(src)))
+                    _record(process_one(str(src), str(dest), opts_for(src)), n_used)
                 except Exception as e:
                     traceback.print_exc()
                     nonlocal_fail(src.name, e)
@@ -484,6 +490,7 @@ def main():
     def nonlocal_fail(name, e):
         nonlocal failed
         failed += 1
+        failed_names.add(name)
         print(f"   FAILED: {name}: {e}  (original preserved)", file=sys.stderr, flush=True)
         status.finish_file(name, False, str(e))
 
@@ -494,8 +501,12 @@ def main():
     # lock and exited, so sweep again until the folder is quiet (plain runs only)
     if not (args.paths or args.files or args.only or args.force):
         while True:
+            # exclude files that already failed this run: nothing marks them
+            # processed, so without this a permanently-failing file (corrupt
+            # audio, stuck iCloud placeholder) would loop the rescan forever.
             more = [src for src in iter_audio(source)
-                    if not manifest.is_processed(m, src.name, src.stat().st_mtime)]
+                    if src.name not in failed_names
+                    and not manifest.is_processed(m, src.name, src.stat().st_mtime)]
             if not more:
                 break
             print(f"[rescan] {len(more)} new recording(s) arrived during the run", flush=True)
