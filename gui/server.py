@@ -280,6 +280,8 @@ def gather_state():
     reg = unknowns.load()
     unknown_list = []
     for uid, meta in sorted(reg["speakers"].items()):
+        if meta.get("dropped"):
+            continue  # tombstoned "not a real speaker" — never surfaces again
         unknown_list.append({"uid": uid, "display": unknowns.display(uid),
                              "archived": bool(meta.get("archived")),
                              "meetings": meta.get("meetings", [])})
