@@ -82,25 +82,32 @@ def _env_file_get():
     return config._env_file(), lines
 
 
+_env_lock = threading.Lock()
+
+
 def _env_file_set(updates: dict):
-    envp = config.PROJECT_DIR / "stt.env"
-    kv, lines = _env_file_get()
-    out = []
-    seen = set()
-    for ln in lines:
-        s = ln.strip()
-        if s and not s.startswith("#") and "=" in s:
-            k = s.split("=", 1)[0].strip()
-            if k in updates:
-                out.append(f"{k}={updates[k]}")
-                seen.add(k)
-                continue
-        out.append(ln)
-    for k, v in updates.items():
-        if k not in seen:
-            out.append(f"{k}={v}")
-    envp.write_text("\n".join(out) + "\n")
-    envp.chmod(0o600)
+    # serialize the read-modify-write: settings POSTs each land on their own
+    # ThreadingHTTPServer thread, so two concurrent saves would otherwise read
+    # the same snapshot and the later write would silently drop the earlier key
+    with _env_lock:
+        envp = config.PROJECT_DIR / "stt.env"
+        kv, lines = _env_file_get()
+        out = []
+        seen = set()
+        for ln in lines:
+            s = ln.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k = s.split("=", 1)[0].strip()
+                if k in updates:
+                    out.append(f"{k}={updates[k]}")
+                    seen.add(k)
+                    continue
+            out.append(ln)
+        for k, v in updates.items():
+            if k not in seen:
+                out.append(f"{k}={v}")
+        envp.write_text("\n".join(out) + "\n")
+        envp.chmod(0o600)
 
 
 def current_model():
@@ -233,9 +240,17 @@ def gather_state():
     except Exception:
         pass
     meetings = []
-    for j in sorted((config.meeting_file(b, ".json", dst_dir)
-                     for b in config.meeting_bases(dst_dir)),
-                    key=lambda p: p.stat().st_mtime, reverse=True):
+    # capture each mtime under try/except: a meeting folder can vanish
+    # mid-request (a concurrent /api/rename), and a bare stat() in the sort key
+    # would 500 the whole poll instead of just dropping that one item
+    dated = []
+    for b in config.meeting_bases(dst_dir):
+        j = config.meeting_file(b, ".json", dst_dir)
+        try:
+            dated.append((j.stat().st_mtime, j))
+        except OSError:
+            continue
+    for _, j in sorted(dated, key=lambda t: t[0], reverse=True):
         meta = _meeting_meta(j, dst_dir)
         if meta:
             meetings.append(meta)
@@ -310,15 +325,26 @@ def gather_state():
             "llm_available": (config.PROJECT_DIR / ".venv-llm/bin/python").exists()}
 
 
-def _osascript(script: str, timeout=120):
-    r = subprocess.run(["/usr/bin/osascript", "-e", script],
-                       capture_output=True, text=True, timeout=timeout)
+def _osascript(script: str, timeout=120, args=None):
+    # `args` are handed to osascript as `on run argv` items (after `--`), never
+    # spliced into the source string, so client-supplied text can't be parsed
+    # as AppleScript/shell code.
+    cmd = ["/usr/bin/osascript", "-e", script]
+    if args:
+        cmd += ["--", *args]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout.strip()
 
 
 def pick_folder(prompt: str):
+    # prompt is client-supplied and MUST NOT be interpolated into the script —
+    # a `"` would close the string literal and let the rest run as code (e.g.
+    # `do shell script "rm -rf …"`). Pass it as an inert argv item instead.
     code, out = _osascript(
-        f'POSIX path of (choose folder with prompt "{prompt}")')
+        'on run argv\n'
+        'POSIX path of (choose folder with prompt (item 1 of argv))\n'
+        'end run',
+        args=[prompt])
     return None if code != 0 else out.rstrip("/")
 
 
@@ -387,8 +413,14 @@ def _snippet_for(meeting: str, speaker_key: str):
     audio_f = _meeting_audio(base)
     if audio_f is None:
         return None
-    out = config.PROJECT_DIR / "work" / "snippet.wav"
-    out.parent.mkdir(exist_ok=True)
+    # a UNIQUE path per request: a single fixed snippet.wav lets two concurrent
+    # /api/snippet extractions overwrite each other and return the wrong voice.
+    import tempfile
+    work = config.PROJECT_DIR / "work"
+    work.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="snippet_", suffix=".wav", dir=str(work))
+    os.close(fd)
+    out = Path(tmp)
     from stt.audio import FFMPEG
     subprocess.run([FFMPEG, "-y", "-ss", str(start), "-t", str(max(2.0, dur)),
                     "-i", str(audio_f), "-ar", "22050", "-ac", "1", str(out)],
@@ -456,6 +488,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "no snippet"}, 404)
                     return
                 data = f.read_bytes()
+                try:  # per-request temp file; drop it once read
+                    f.unlink()
+                except OSError:
+                    pass
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/wav")
                 self.send_header("Content-Length", str(len(data)))
@@ -499,12 +535,25 @@ class Handler(BaseHTTPRequestHandler):
                 rng = self.headers.get("Range")
                 mo = re.match(r"bytes=(\d*)-(\d*)$", rng or "")
                 if mo and (mo.group(1) or mo.group(2)):
-                    a = int(mo.group(1) or 0)
-                    z = int(mo.group(2)) if mo.group(2) else len(data) - 1
-                    z = min(z, len(data) - 1)
+                    total = len(data)
+                    if not mo.group(1):
+                        # suffix form: bytes=-N means the LAST N bytes, not 0..N
+                        n = int(mo.group(2))
+                        a, z = max(0, total - n), total - 1
+                    else:
+                        a = int(mo.group(1))
+                        z = int(mo.group(2)) if mo.group(2) else total - 1
+                        z = min(z, total - 1)
+                    if a > z or a >= total:  # unsatisfiable range
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{total}")
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
                     chunk = data[a:z + 1]
                     self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {a}-{z}/{len(data)}")
+                    self.send_header("Content-Range", f"bytes {a}-{z}/{total}")
                 else:
                     chunk = data
                     self.send_response(200)
@@ -1385,10 +1434,13 @@ function spkOptions(speakers,people,sel){
   return h+`<option value="__new__">＋ New person…</option>`;
 }
 function spkWireNew(sel){
+  // remember the last real selection so cancelling the New-person prompt
+  // restores the segment's actual speaker instead of jumping to option 0
+  sel.addEventListener('focus',()=>{if(sel.value!=='__new__')sel._prev=sel.value});
   sel.addEventListener('change',()=>{
-    if(sel.value!=='__new__')return;
+    if(sel.value!=='__new__'){sel._prev=sel.value;return}
     const nm=(prompt('Who said this? (name as it should appear in the transcript)')||'').trim();
-    if(!nm){sel.selectedIndex=0;return}
+    if(!nm){if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0;return}
     const o=document.createElement('option');o.value='name:'+nm;o.textContent=nm;
     sel.insertBefore(o,sel.lastElementChild);sel.value='name:'+nm;
   });
@@ -1463,7 +1515,7 @@ const HUES=['#0071e3','#34c759','#ff9f0a','#ff375f','#bf5af2','#64d2ff','#ffd60a
 let tvTimer=null,TV=null;
 function tvRow(g,i){
   const mm=Math.floor(g.start/60),ss=String(Math.floor(g.start%60)).padStart(2,'0');
-  return `<div class="tseg${g.flags.length?' flagged':''}" id="ts${i}" onclick="tvSeek(${g.start})" title="${g.flags.length?'Uncertain: '+g.flags.join(', ')+' — tap to listen':'Tap to listen from here'}">
+  return `<div class="tseg${g.flags.length?' flagged':''}" id="ts${i}" onclick="tvSeek(${g.start})" title="${g.flags.length?'Uncertain: '+esc(g.flags.join(', '))+' — tap to listen':'Tap to listen from here'}">
   <span class="t">${mm}:${ss}</span>
   <span class="w" title="${esc(g.who)}" style="color:color-mix(in srgb, ${TV.color[g.who]||'currentColor'} 65%, var(--ink))">${esc(g.who)}${g.flags.length?' *':''}${g.edited?' ✎':''}</span>
   <span class="x">${esc(g.text)}</span>

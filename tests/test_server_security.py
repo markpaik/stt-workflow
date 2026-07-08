@@ -9,6 +9,7 @@
 import http.client
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -162,3 +163,172 @@ def test_check_updates_passes_a_timeout_to_hf_api(monkeypatch):
     assert result["models"]  # at least one configured model repo
     assert calls, "model_info was never called"
     assert all(t is not None and t > 0 for t in calls)
+
+
+# ---------- pick_folder AppleScript injection (finding #1) ----------
+
+def test_pick_folder_does_not_interpolate_prompt_into_applescript(monkeypatch):
+    """The client-supplied prompt must never reach the AppleScript SOURCE — a
+    `"` there closes the string literal and the rest runs as code. It has to be
+    passed as an inert `on run argv` item instead."""
+    captured = {}
+
+    class R:
+        returncode = 0
+        stdout = "/some/folder\n"
+
+    def fake_run(cmd, *a, **k):
+        captured["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(srv.subprocess, "run", fake_run)
+    payload = 'x" & (do shell script "touch /tmp/pwned") & "'
+    srv.pick_folder(payload)
+
+    cmd = captured["cmd"]
+    # every -e script argument is the AppleScript SOURCE; the injection must
+    # not appear in any of them (pre-fix it was spliced straight in)
+    scripts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-e"]
+    assert all("do shell script" not in s for s in scripts), scripts
+    # the payload survives only as a standalone argv item (after `--`)
+    assert payload in cmd
+    assert "--" in cmd and cmd.index(payload) > cmd.index("--")
+
+
+# ---------- snippet path race (finding #11) ----------
+
+def test_snippet_uses_a_unique_path_per_request(sandbox, monkeypatch):
+    """Two concurrent snippet extractions must not share one fixed
+    work/snippet.wav — that lets one request overwrite the other's audio."""
+    monkeypatch.setattr(srv.review, "find_voice_clip",
+                        lambda key, meeting: ("Mtg", 0.0, 2.0))
+    monkeypatch.setattr(srv, "_meeting_audio", lambda base: sandbox / "a.m4a")
+
+    def fake_run(cmd, *a, **k):
+        out = cmd[-1]  # ffmpeg output path (last arg) — write recognizable bytes
+        Path(out).write_bytes(b"clip-for-" + Path(out).name.encode())
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(srv.subprocess, "run", fake_run)
+
+    p1 = srv._snippet_for("Mtg", "Alice")
+    b1 = p1.read_bytes()
+    p2 = srv._snippet_for("Mtg", "Bob")
+    # distinct output paths, and p1's bytes are untouched by the p2 extraction
+    assert p1 != p2
+    assert p1.read_bytes() == b1
+    p1.unlink(missing_ok=True)
+    p2.unlink(missing_ok=True)
+
+
+# ---------- gather_state resilience to a vanished meeting (finding #16) ----------
+
+def test_gather_state_skips_meeting_that_vanished_mid_request(sandbox, monkeypatch):
+    """A meeting folder can disappear between meeting_bases() and the sort key
+    (a concurrent /api/rename); that must drop the item, not 500 the poll."""
+    _make_meeting("Real Meeting")
+    real = list(config.meeting_bases())
+    monkeypatch.setattr(config, "meeting_bases",
+                        lambda dest_dir=None: real + ["Ghost Meeting"])
+    st = srv.gather_state()  # pre-fix: FileNotFoundError from stat() in sort key
+    assert isinstance(st, dict)
+    assert {m["base"] for m in st["meetings"]} == {"Real Meeting"}
+
+
+# ---------- _env_file_set concurrent writes (finding #17) ----------
+
+def test_env_file_set_concurrent_writes_keep_both_keys(sandbox, monkeypatch):
+    """Two settings POSTs on separate server threads must both persist — an
+    unlocked read-modify-write drops one when their windows overlap."""
+    import time
+
+    real_get = srv._env_file_get
+
+    def slow_get():
+        res = real_get()
+        time.sleep(0.15)  # widen the read->write window deterministically
+        return res
+
+    monkeypatch.setattr(srv, "_env_file_get", slow_get)
+
+    errs = []
+
+    def w(k, v):
+        try:
+            srv._env_file_set({k: v})
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    t1 = threading.Thread(target=w, args=("STT_A", "1"))
+    t2 = threading.Thread(target=w, args=("STT_B", "2"))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    assert not errs, errs
+    env = config._env_file()
+    assert env.get("STT_A") == "1" and env.get("STT_B") == "2", env
+
+
+# ---------- /api/audio Range handling (finding #18) ----------
+
+def _raw_get(port, path, headers=None):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path, headers=headers or {})
+    r = conn.getresponse()
+    body = r.read()
+    hdrs = {k: v for k, v in r.getheaders()}
+    status = r.status
+    conn.close()
+    return status, hdrs, body
+
+
+def _make_meeting_with_audio(base, payload: bytes):
+    _make_meeting(base)
+    (mfile(base, ".m4a")).write_bytes(payload)
+
+
+def test_audio_range_suffix_and_unsatisfiable(running_server):
+    payload = bytes(range(10))  # 10 known bytes: 00 01 .. 09
+    _make_meeting_with_audio("Ranged", payload)
+    q = "/api/audio?base=Ranged"
+
+    # (a) suffix range: bytes=-4 must return the LAST 4 bytes
+    status, hdrs, body = _raw_get(running_server, q, {"Range": "bytes=-4"})
+    assert status == 206
+    assert body == payload[-4:]
+    assert hdrs.get("Content-Range") == "bytes 6-9/10"
+
+    # (b) start past the end: unsatisfiable -> 416, empty body
+    status, hdrs, body = _raw_get(running_server, q, {"Range": "bytes=100-"})
+    assert status == 416
+    assert hdrs.get("Content-Range") == "bytes */10"
+    assert body == b""
+
+    # (c) regression: a normal explicit range still works
+    status, hdrs, body = _raw_get(running_server, q, {"Range": "bytes=2-5"})
+    assert status == 206
+    assert body == payload[2:6]
+    assert hdrs.get("Content-Range") == "bytes 2-5/10"
+
+
+# ---------- HTML/JS defects (findings #19, #12) ----------
+
+def test_tvrow_escapes_flags_in_title_attribute():
+    """tvRow's title interpolates flag text into an HTML attribute; a flag
+    containing a quote (a speaker name flows into `possible:<name>`) would
+    break out of the attribute without esc()."""
+    html = srv.HTML
+    assert "'Uncertain: '+esc(g.flags.join(', '))+' — tap to listen'" in html
+    # the raw, un-escaped form must be gone
+    assert "'Uncertain: '+g.flags.join(', ')+' — tap to listen'" not in html
+
+
+def test_spkwirenew_restores_prior_selection_on_cancel():
+    """Cancelling the New-person prompt must restore the segment's prior
+    speaker, not silently jump to option 0 (misattributing the line)."""
+    html = srv.HTML
+    # remembers the prior real selection and restores it on cancel
+    assert "sel._prev" in html
+    assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in html
+    # the old unconditional reset must be gone
+    assert "if(!nm){sel.selectedIndex=0;return}" not in html
