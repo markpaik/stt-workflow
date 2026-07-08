@@ -477,3 +477,64 @@ def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):
     for b in ("A Mtg", "B Mtg"):
         d = json.loads(config.meeting_file(b, ".json").read_text())
         assert d["ai_summary"] == "drafted"
+
+
+def _probe_streams(path):
+    import subprocess
+
+    from stt.audio import FFPROBE
+    out = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+         "-of", "csv=p=0", str(path)], check=True, capture_output=True, text=True)
+    return [tuple(ln.split(",")[:2]) for ln in out.stdout.strip().splitlines()]
+
+
+def test_extract_audio_really_extracts_from_an_mp4(tmp_path):
+    """REAL ffmpeg, no stubs: the atomicity fix wrote to a '.part' name, which
+    ffmpeg cannot infer a container from — extraction failed on every actual
+    video while the stubbed atomicity test stayed green. The m4a muxer must be
+    named explicitly (-f ipod) for the .part path to work at all."""
+    import subprocess
+
+    from stt import audio
+    from stt.audio import FFMPEG
+
+    src = tmp_path / "clip.mp4"   # a genuine video: color frames + AAC audio
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=black:s=64x64:r=5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+                    "-t", "1", "-c:v", "libx264", "-c:a", "aac", "-shortest",
+                    str(src)], check=True, capture_output=True)
+    dst = tmp_path / "clip.m4a"
+
+    audio.extract_audio(src, dst)
+
+    assert dst.exists() and dst.stat().st_size > 500
+    assert not dst.with_suffix(dst.suffix + ".part").exists()
+    streams = _probe_streams(dst)
+    assert ("audio", "aac") in [(t, c) for c, t in streams] or \
+           ("aac", "audio") in streams          # stream-copied AAC, video dropped
+    assert all(t != "video" for c, t in streams)
+
+
+def test_extract_audio_reencodes_non_aac_tracks(tmp_path):
+    """The fallback branch, also against real ffmpeg: PCM audio can't be
+    stream-copied into an .m4a, so the re-encode path must produce AAC."""
+    import subprocess
+
+    from stt import audio
+    from stt.audio import FFMPEG
+
+    src = tmp_path / "clip.mov"   # PCM-in-mov: valid video, m4a-incompatible audio
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=black:s=64x64:r=5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+                    "-t", "1", "-c:v", "libx264", "-c:a", "pcm_s16le", "-shortest",
+                    str(src)], check=True, capture_output=True)
+    dst = tmp_path / "clip.m4a"
+
+    audio.extract_audio(src, dst)
+
+    streams = _probe_streams(dst)
+    assert ("aac", "audio") in streams
+    assert all(t != "video" for c, t in streams)

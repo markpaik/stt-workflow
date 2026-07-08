@@ -56,10 +56,15 @@ def extract_audio(src: Path, dst: Path) -> Path:
     # button kills the process group mid-write) must never leave a truncated
     # dst that run_batch's existence guard would treat as a finished extract.
     tmp = dst.with_suffix(dst.suffix + ".part")
-    r = subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "copy", str(tmp)],
-                       capture_output=True)
+    # -f ipod (the m4a muxer) is REQUIRED with the .part name: ffmpeg infers
+    # the container from the output extension, and ".part" isn't one — without
+    # it both commands fail ("unable to find a suitable output format") and
+    # every video import dies after transcription.
+    r = subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "copy",
+                        "-f", "ipod", str(tmp)], capture_output=True)
     if r.returncode != 0:  # audio codec not m4a-compatible; re-encode
         subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "aac",
-                        "-b:a", "160k", str(tmp)], check=True, capture_output=True)
+                        "-b:a", "160k", "-f", "ipod", str(tmp)],
+                       check=True, capture_output=True)
     os.replace(tmp, dst)
     return dst
