@@ -119,6 +119,22 @@ def test_enroll_records_source_provenance(sandbox):
     assert reg["Mark"]["sources"][-1] == f"M{identify.MAX_SAMPLES - 1}"
 
 
+def test_enroll_keeps_a_diverse_sample_over_recent_duplicates(sandbox):
+    """The 5-sample cap keeps a spread across recording conditions, not just the
+    most-recent samples. A distinctive early sample must survive a later run of
+    near-duplicates from one room — which most-recent eviction would drop, since
+    matching by max cosine gains little from five clips of the same recording."""
+    identify.enroll("Mark", _near(1, 0), source="room-B")   # distinctive, first
+    for i in range(5):  # five near-duplicates from one room, arriving later
+        identify.enroll("Mark", _near(0, i), source=f"room-A-{i}")
+    reg = identify.load_registry()
+    assert reg["Mark"]["n_samples"] == identify.MAX_SAMPLES
+    # the distinctive room-B sample survived (most-recent eviction drops it)
+    assert "room-B" in reg["Mark"]["sources"]
+    axes = {int(np.argmax(np.abs(row))) for row in identify.load_voiceprints()["Mark"]}
+    assert axes == {0, 1}, f"a recording condition was lost at the cap: {axes}"
+
+
 def test_merge_combines_sources(sandbox):
     identify.enroll("A", _vec(1), source="M1")
     identify.enroll("B", _vec(2), source="M2")
