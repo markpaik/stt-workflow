@@ -5,6 +5,8 @@ polls it. Supports multiple files in flight (parallel workers). Writes are atomi
 and every function swallows its own errors — status reporting must never break
 transcription.
 """
+import contextlib
+import fcntl
 import json
 import os
 import time as _time
@@ -40,6 +42,32 @@ def _write(d):
         pass
 
 
+@contextlib.contextmanager
+def _lock():
+    """Serialize a read-modify-write across processes. The main run_batch process
+    and every --parallel worker mutate the SAME status.json, so an unlocked RMW
+    lost updates (a worker's write built from a pre-read snapshot clobbered
+    another worker's just-published stage). Mirrors identify.lock_registry /
+    jobs._mutate. A lock-acquire failure degrades to an unlocked write rather
+    than raising — status reporting must never break the pipeline."""
+    lk = None
+    try:
+        lk = open(STATUS_PATH.with_suffix(".lock"), "w")
+        fcntl.flock(lk, fcntl.LOCK_EX)
+    except OSError:
+        if lk is not None:
+            lk.close()
+        lk = None
+    try:
+        yield
+    finally:
+        if lk is not None:
+            try:
+                fcntl.flock(lk, fcntl.LOCK_UN)
+            finally:
+                lk.close()
+
+
 def start_run(pending):
     # pgid lets the stop path find and kill the WHOLE process group — including
     # parallel workers whose command lines don't mention run_batch.py — even
@@ -48,9 +76,10 @@ def start_run(pending):
         pgid = os.getpgid(0)
     except OSError:
         pgid = None
-    _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
-            "active": {}, "pending": list(pending),
-            "recent": read().get("recent", [])})
+    with _lock():
+        _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
+                "active": {}, "pending": list(pending),
+                "recent": read().get("recent", [])})
 
 
 def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None):
@@ -61,33 +90,38 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
     inferring it from whatever the CURRENT stage happens to be, which made the
     ETA jump the instant a --no-diarize or verify-mode file reached a stage
     the guess didn't anticipate."""
-    d = read()
-    active = d.get("active", {})
-    prev = active.get(name, {})
-    entry = {"stage": stage, "since": prev.get("since", _now()),
-             "stage_since": (prev.get("stage_since", _time.time())
-                             if prev.get("stage") == stage else _time.time())}
-    if duration or prev.get("duration"):
-        entry["duration"] = duration or prev.get("duration")
-    if diarize is not None or "diarize" in prev:
-        entry["diarize"] = diarize if diarize is not None else prev.get("diarize")
-    if verify is not None or "verify" in prev:
-        entry["verify"] = verify if verify is not None else prev.get("verify")
-    if progress is not None:
-        entry["progress"] = round(float(progress), 3)
-        # when the value last CHANGED — long hook-less stretches (pyannote's
-        # clustering tail) freeze the bar; the panel uses this to say "still
-        # working" instead of letting a stale ETA erode trust
-        moved = (prev.get("stage") != stage
-                 or entry["progress"] != prev.get("progress"))
-        entry["progress_at"] = _time.time() if moved else prev.get("progress_at", _time.time())
-    elif prev.get("stage") == stage and "progress" in prev:
-        entry["progress"] = prev["progress"]
-        entry["progress_at"] = prev.get("progress_at")
-    active[name] = entry
-    d["active"] = active
-    d["pending"] = [p for p in d.get("pending", []) if p != name]
-    _write(d)
+    with _lock():
+        d = read()
+        active = d.get("active", {})
+        prev = active.get(name, {})
+        # stage_since is monotonic (compared only against _time.monotonic() in
+        # estimate_progress) so an NTP jump / sleep can't inflate the wall-clock
+        # bound; matches run_batch.stage_secs and control.stop_run. progress_at
+        # below stays wall-clock because the panel compares it to Date.now().
+        entry = {"stage": stage, "since": prev.get("since", _now()),
+                 "stage_since": (prev.get("stage_since", _time.monotonic())
+                                 if prev.get("stage") == stage else _time.monotonic())}
+        if duration or prev.get("duration"):
+            entry["duration"] = duration or prev.get("duration")
+        if diarize is not None or "diarize" in prev:
+            entry["diarize"] = diarize if diarize is not None else prev.get("diarize")
+        if verify is not None or "verify" in prev:
+            entry["verify"] = verify if verify is not None else prev.get("verify")
+        if progress is not None:
+            entry["progress"] = round(float(progress), 3)
+            # when the value last CHANGED — long hook-less stretches (pyannote's
+            # clustering tail) freeze the bar; the panel uses this to say "still
+            # working" instead of letting a stale ETA erode trust
+            moved = (prev.get("stage") != stage
+                     or entry["progress"] != prev.get("progress"))
+            entry["progress_at"] = _time.time() if moved else prev.get("progress_at", _time.time())
+        elif prev.get("stage") == stage and "progress" in prev:
+            entry["progress"] = prev["progress"]
+            entry["progress_at"] = prev.get("progress_at")
+        active[name] = entry
+        d["active"] = active
+        d["pending"] = [p for p in d.get("pending", []) if p != name]
+        _write(d)
 
 
 def stage_estimates(duration: float, n_active: int = 1, verify: bool = False,
@@ -147,7 +181,11 @@ def estimate_progress(entry: dict, n_active: int = 1):
     est_stage = est.get(stage, 0.0)
     ss = entry.get("stage_since")
     if ss and est_stage > 0:
-        wall_frac = min((_time.time() - ss) / est_stage, 0.98)
+        # stage_since is monotonic (set in set_stage) — a corrected/jumped wall
+        # clock must not make the stage look "almost done" when little real work
+        # happened. monotonic is system-wide per boot, so cross-process (worker
+        # writes it, GUI reads it) comparison stays valid.
+        wall_frac = min((_time.monotonic() - ss) / est_stage, 0.98)
         frac_in = min(frac_in, wall_frac)
     done += est_stage * min(1.0, max(0.0, frac_in))
     overall = min(0.99, done / total)
@@ -158,26 +196,29 @@ def clear_stage(name):
     """Drop a file from the active display WITHOUT logging a 'recent' entry —
     for post-processing stages (auto-summary) on files whose completion was
     already recorded by finish_file."""
-    d = read()
-    if d.get("active", {}).pop(name, None) is not None:
-        _write(d)
+    with _lock():
+        d = read()
+        if d.get("active", {}).pop(name, None) is not None:
+            _write(d)
 
 
 def finish_file(name, ok, summary=""):
-    d = read()
-    recent = d.get("recent", [])
-    recent.insert(0, {"name": name, "ok": bool(ok), "summary": summary, "at": _now()})
-    d["recent"] = recent[:20]
-    d.get("active", {}).pop(name, None)
-    _write(d)
+    with _lock():
+        d = read()
+        recent = d.get("recent", [])
+        recent.insert(0, {"name": name, "ok": bool(ok), "summary": summary, "at": _now()})
+        d["recent"] = recent[:20]
+        d.get("active", {}).pop(name, None)
+        _write(d)
 
 
 def end_run():
-    d = read()
-    d["running"] = False
-    d["active"] = {}
-    d["pid"] = None
-    d["pgid"] = None  # never leave a stale group id a future pgid could recycle
-    d["pending"] = []
-    d["ended_at"] = _now()
-    _write(d)
+    with _lock():
+        d = read()
+        d["running"] = False
+        d["active"] = {}
+        d["pid"] = None
+        d["pgid"] = None  # never leave a stale group id a future pgid could recycle
+        d["pending"] = []
+        d["ended_at"] = _now()
+        _write(d)
