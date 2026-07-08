@@ -287,7 +287,9 @@ def gather_state():
                              "meetings": meta.get("meetings", [])})
     enrolled = [{"name": n, "samples": meta.get("n_samples", 1),
                  "sources": [s for s in meta.get("sources", []) if s and s != "?"]}
-                for n, meta in identify.load_registry().items()]
+                for n, meta in sorted(identify.load_registry().items(),
+                                      key=lambda t: t[0].lower())]  # by first name;
+    # unknowns render in their own section below, so they stay at the bottom
     battery = ""
     try:
         out = subprocess.run(["/usr/bin/pmset", "-g", "batt"], capture_output=True,
