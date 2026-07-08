@@ -76,7 +76,10 @@ time. Reprocessing an existing meeting (Redo) offers the same options:
 ![Transcript viewer](docs/img/viewer.png)
 
 The viewer color-codes speakers, plays audio from any line, and follows
-playback with a live highlight. Every line is editable: fix text, reassign
+playback with a live highlight. A find bar (or ⌘F) searches within the open
+transcript: it counts every occurrence ("3 of 8"), Enter and the ‹ ›
+buttons jump between highlighted matches, and Escape clears the search
+without closing the viewer. Every line is editable: fix text, reassign
 the speaker (to anyone, including a person the diarizer never detected),
 add a line the pipeline missed, remove a bogus one, or **split** a line
 where two people got glued together. A reassigned line auto-merges with its
@@ -96,11 +99,17 @@ them:
 ![Review dialog](docs/img/review.png)
 
 At the end of every run, Qwen3-8B (4-bit, on-device) drafts each meeting's
-summary and extracts **Committed next steps**: every stated commitment as
-"[Speaker] will *action* by *date*". Both show in the Summary dialog and in
-the hover tooltip on any meeting row:
+brief summary and extracts **Committed next steps**: every stated
+commitment as "[Speaker] will *action* by *date*". Both show in the Summary
+dialog and in the hover tooltip on any meeting row:
 
 ![Summary tooltip with committed next steps](docs/img/tooltip.png)
+
+The same on-device model powers **Ask**: pick a meeting, ask questions
+about it, and get answers drawn from that transcript only, citing
+timestamps. Follow-up questions understand the earlier ones. Each answer
+takes roughly 20-60 seconds (the model loads fresh per question), the
+thread is never stored, and nothing leaves the machine.
 
 Full-text search jumps straight to the moment anything was said, audio
 cued; the same box filters the library by title or attendee:
@@ -155,7 +164,9 @@ bring-your-own-key for ElevenLabs Scribe, OpenAI, and Mistral Voxtral: only
 the audio uploads (recompressed small), diarization and voiceprints stay
 on-device so cloud words still get local names, a cloud failure falls back
 to the local engine mid-run, and strict-mode recordings never upload. Keys
-live in `stt.env` (git-ignored, `chmod 600`) and are never shown again:
+live in `stt.env` (git-ignored, `chmod 600`) and are never shown again; a
+saved key can be replaced by pasting a new one or removed with its Clear
+button:
 
 ![Cloud transcription keys](docs/img/cloud-keys.png)
 
