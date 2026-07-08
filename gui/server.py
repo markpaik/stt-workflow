@@ -723,6 +723,29 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b["new"]))
+            elif u.path == "/api/ask":
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                if not summarize.available():
+                    self._json({"error": "local LLM not installed"}, 503)
+                    return
+                q_ = (b.get("question") or "").strip()
+                if not q_:
+                    self._json({"error": "empty question"}, 400)
+                    return
+                if len(q_) > 2000:
+                    self._json({"error": "question too long (2000 chars max)"}, 400)
+                    return
+                hist = b.get("history")
+                try:
+                    r = summarize.answer_question(
+                        b["base"], q_, history=hist if isinstance(hist, list) else None)
+                    self._json(r, 200 if r.get("ok") else 400)
+                except summarize.LLMBusy:
+                    self._json({"error": "The local model is busy with another "
+                                         "summary or question. Try again in a "
+                                         "minute."}, 503)
             elif u.path == "/api/hide_unknown":
                 ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
                       else unknowns.restore(b["uid"]))
@@ -1216,6 +1239,7 @@ function render(){
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
     <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
     <button onclick="openSummary('${escJs(m.base)}')">Summary</button>
+    <button onclick="openAsk('${escJs(m.base)}')" ${S.llm_available?'':'disabled'} title="${S.llm_available?'Ask questions about this meeting, answered on this Mac':'Needs the local model (.venv-llm) installed'}">Ask</button>
     <button onclick="openMeetingMenu('${escJs(m.base)}')" title="Export, rename, reprocess…">⋯</button>
   </div>`}).join('')||`<div class="sub">${mq?'No transcript titles match “'+esc(mq)+'”.':'No transcripts yet — process something above.'}</div>`;
   _syncVoiceBtns();  // re-render rebuilt the ▶ buttons; restore ◼ on the playing one
@@ -1956,10 +1980,56 @@ function openSummary(base){
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
   <div style="margin-top:10px;max-height:340px;overflow:auto"><div id="sumbody" class="muted">${m.summary?esc(m.summary):'No summary yet — generate one below. Runs locally; nothing leaves this Mac.'}</div>${steps}</div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+    <button onclick="openAsk('${escJs(base)}')" ${S.llm_available?'':'disabled'}>Ask a question…</button>
     <button onclick="genSummary('${escJs(base)}')" ${S.llm_available?'':'disabled'}>${m.summary?'Regenerate':'✨ Generate summary'}</button>
     <button onclick="dlg.close()">Close</button>
   </div>`;
   dlg.showModal();
+}
+// ---- Ask: questions about one meeting, answered locally from its transcript ----
+let ASK=null;  // {base, hist:[{q,a,err}], busy} — per-session only, never persisted
+function openAsk(base){
+  ASK={base,hist:[],busy:false};
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Ask about ${esc(base)}</h1>
+  <p class="muted" style="margin-top:6px">Answers come from this transcript only and are generated on this Mac; nothing leaves the machine. Follow-up questions understand the earlier ones. Answers are not saved.</p>
+  <div id="askthread" style="margin-top:10px;max-height:320px;overflow:auto"></div>
+  <div style="display:flex;gap:8px;margin-top:12px">
+    <input type="text" id="askq" placeholder="e.g. What did we decide about the rollout?" autocomplete="off"
+      style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:6px 8px"
+      onkeydown="if(event.key==='Enter')askSend()">
+    <button class="primary" id="askbtn" onclick="askSend()">Ask</button>
+  </div>
+  <div id="asknote" class="sub" style="margin-top:8px"></div>
+  <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="dlg.close()">Close</button></div>`;
+  dlg.onclose=()=>{ASK=null;dlg.onclose=null};
+  if(!dlg.open)dlg.showModal();
+  $('#askq').focus();
+}
+function askRender(){
+  $('#askthread').innerHTML=ASK.hist.map(h=>`
+    <div style="margin-top:10px"><b>Q:</b> ${esc(h.q)}</div>
+    <div class="muted" style="margin-top:3px;white-space:pre-wrap"><b>A:</b> ${
+      h.a?esc(h.a):'<span class="spin"></span> Reading the transcript and thinking… usually 20-60s (the model loads fresh for each question)'}</div>`).join('');
+  $('#askthread').scrollTop=$('#askthread').scrollHeight;
+}
+async function askSend(){
+  if(!ASK||ASK.busy)return;
+  const q=$('#askq').value.trim();
+  if(!q)return;
+  // last few successful exchanges ride along so follow-ups make sense
+  const hist=ASK.hist.filter(h=>h.a&&!h.err).slice(-3).map(h=>({q:h.q,a:h.a}));
+  ASK.hist.push({q,a:''});ASK.busy=true;
+  $('#askq').value='';$('#askq').disabled=true;$('#askbtn').disabled=true;
+  askRender();
+  const r=await api('/api/ask',{base:ASK.base,question:q,history:hist});
+  if(!ASK)return;  // dialog was closed while the model was working
+  const cur=ASK.hist[ASK.hist.length-1];
+  if(r.answer){cur.a=r.answer}
+  else{cur.a='⚠ '+(r.error||'No answer produced.');cur.err=true}
+  $('#asknote').textContent=r.truncated
+    ?'Long meeting: middle portions were sampled, so details from the middle may be missing.':'';
+  ASK.busy=false;$('#askq').disabled=false;$('#askbtn').disabled=false;
+  askRender();$('#askq').focus();
 }
 async function genSummary(base){
   $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… (~15–30s)';

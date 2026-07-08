@@ -1,13 +1,17 @@
-"""Local LLM title/summary suggestions for renaming poorly-named recordings.
+"""Local LLM features: title/summary suggestions and per-meeting Q&A.
 
 Runs Qwen3-8B (4-bit, MLX) fully on-device — transcripts never leave the machine,
 which matters because some recordings are sensitive. Used by the control panel's
-Rename flow: suggest a title from the transcript, the user edits/approves, then
-rename_meeting() renames every artifact consistently.
+Rename flow (suggest a title from the transcript, the user edits/approves, then
+rename_meeting() renames every artifact consistently) and its Ask dialog
+(answer_question: grounded answers about one meeting's transcript).
 """
+import contextlib
+import fcntl
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -34,15 +38,47 @@ def available() -> bool:
     return LLM_PY.exists()
 
 
-def _generate(prompt: str, max_tokens: int = 2000) -> str:
+class LLMBusy(RuntimeError):
+    """The local LLM is already loaded by another request or process."""
+
+
+@contextlib.contextmanager
+def _llm_lock(timeout: float | None = None):
+    """One 8B model in RAM at a time, across processes — the panel's threads
+    AND run_batch's auto_summarize (separate process, hence flock rather than
+    a threading.Lock). timeout=None blocks until free (batch and /api/suggest
+    keep their wait-your-turn semantics); timeout=N tries for N seconds and
+    then raises LLMBusy, so an interactive question fails fast with a clear
+    message instead of hanging a dialog behind a minutes-long batch pass."""
+    with open(config.PROJECT_DIR / "llm.lock", "w") as fh:
+        if timeout is None:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise LLMBusy("the local model is busy with another request")
+                    time.sleep(0.5)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = None) -> str:
     import subprocess
     if not available():
         raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
-    r = subprocess.run([str(LLM_PY), "-c", _RUNNER],
-                       input=json.dumps({"model": MODEL, "prompt": prompt,
-                                         "max_tokens": max_tokens}),
-                       capture_output=True, text=True, timeout=600)
+    with _llm_lock(lock_timeout):
+        r = subprocess.run([str(LLM_PY), "-c", _RUNNER],
+                           input=json.dumps({"model": MODEL, "prompt": prompt,
+                                             "max_tokens": max_tokens}),
+                           capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"LLM runner failed: {r.stderr[-400:]}")
     out = json.loads(r.stdout.strip().splitlines()[-1])["text"]
@@ -51,13 +87,72 @@ def _generate(prompt: str, max_tokens: int = 2000) -> str:
     return out.strip()
 
 
-def _transcript_sample(base: str, max_chars: int = 9000) -> str:
+def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
+    """(text, truncated). Long meetings keep their head, middle, and tail with
+    [...] where spans were dropped — the flag lets callers say so honestly."""
     txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
     if len(txt) <= max_chars:
-        return txt
+        return txt, False
     third = max_chars // 3
     return (txt[:third] + "\n[...]\n" + txt[len(txt)//2 - third//2: len(txt)//2 + third//2]
-            + "\n[...]\n" + txt[-third:])
+            + "\n[...]\n" + txt[-third:]), True
+
+
+QA_MAX_CHARS = 80_000   # ~20k tokens: every meeting on disk so far fits whole,
+                        # and Qwen3's 32k context still has room for history +
+                        # a 2000-token answer
+QA_MAX_HISTORY = 3      # last N exchanges sent back so follow-ups make sense
+
+
+def answer_question(base: str, question: str, history: list | None = None) -> dict:
+    """Answer one question about one meeting, from its transcript only.
+    Ephemeral by design: this READS the .txt and writes nothing, so no
+    lock_meeting is needed and nothing is stored. `history` is the last few
+    {"q","a"} exchanges from the panel's Ask dialog (clipped here regardless
+    of what the client sends); pass None for an independent question.
+    Fully local, like everything else in this module."""
+    question = (question or "").strip()[:2000]
+    if not question:
+        return {"ok": False, "error": "empty question"}
+    if not config.meeting_file(base, ".txt").exists():
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    sample, truncated = _transcript_sample(base, max_chars=QA_MAX_CHARS)
+    hist = ""
+    for h in (history or [])[-QA_MAX_HISTORY:]:
+        q = str(h.get("q", ""))[:2000].strip()
+        a = str(h.get("a", ""))[:4000].strip()
+        if q and a:
+            hist += f"Q: {q}\nA: {a}\n\n"
+    prompt = (
+        "You are answering questions about ONE meeting, using only its "
+        "transcript below.\n"
+        "Rules:\n"
+        "- Answer ONLY from the transcript. If it does not contain the answer, "
+        "say so plainly (e.g. \"The transcript doesn't cover that.\"). Never "
+        "guess or use outside knowledge.\n"
+        "- When you reference a specific moment, cite its timestamp in square "
+        "brackets exactly as written in the transcript, e.g. [12:34].\n"
+        "- Attribute statements to speakers by the names used in the transcript.\n"
+        + ("- Parts of this long transcript were omitted where marked [...]. "
+           "If the answer likely falls in an omitted part, say the excerpt "
+           "may not cover it.\n" if truncated else "")
+        + "- Be concise: a few sentences, or a short list if the question asks "
+        "for several things.\n\n"
+        f"TRANSCRIPT:\n{sample}\n\n"
+        + (f"EARLIER QUESTIONS THIS SESSION (context only):\n{hist}" if hist else "")
+        + f"QUESTION: {question}"
+    )
+    t0 = time.monotonic()
+    answer = _generate(prompt, max_tokens=2000, lock_timeout=15.0)
+    if "<think>" in answer:
+        # generation stopped mid-reasoning: the closing tag never arrived, so
+        # _generate's strip didn't match and raw chain-of-thought would leak
+        answer = answer.split("</think>")[-1].strip()
+        if not answer or "<think>" in answer:
+            return {"ok": False, "error": "the model ran out of room reasoning "
+                                          "about this one; try a more specific question"}
+    return {"ok": True, "answer": answer, "truncated": truncated,
+            "elapsed_sec": round(time.monotonic() - t0, 1)}
 
 
 def _date_suffix(base: str) -> str:
@@ -76,7 +171,7 @@ def suggest_title(base: str) -> dict:
     """Suggest a filename + detailed summary for a processed meeting from its
     transcript. The result is persisted into the meeting's .json (ai_title /
     ai_summary) so it stays visible in the panel afterwards."""
-    sample = _transcript_sample(base, max_chars=12000)
+    sample, _ = _transcript_sample(base, max_chars=12000)
     prompt = (
         "Below is a (partial) meeting transcript. Produce:\n"
         "1. A SHORT descriptive title for the recording file: 3-6 words, Title Case, "

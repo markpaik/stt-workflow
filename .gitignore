@@ -35,6 +35,7 @@ queued_jobs.lock
 batch.lock
 relabel.lock
 status.lock
+llm.lock
 paused.flag
 stopping.flag
 relabel_pending.flag
