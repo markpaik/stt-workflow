@@ -1071,14 +1071,17 @@ border-bottom:1px solid var(--hairline)}
 .stagechips .s{font-size:11px;font-weight:500;padding:2px 10px;border-radius:99px;
 border:1px solid var(--hairline);color:var(--sub)}
 .stagechips .s.on{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-@media(max-width:700px){.grid2{grid-template-columns:1fr}}
-/* Speakers card: exactly as tall as the Settings card beside it, never taller.
-   The list scrolls inside an absolutely-positioned inner (absolute content
-   contributes nothing to grid row sizing, so Settings alone sets the height). */
-.spkcard{display:flex;flex-direction:column;min-height:0}
-.spkscroll{position:relative;flex:1;min-height:300px}
-.spkscroll-in{position:absolute;inset:0;overflow-y:auto;overscroll-behavior:contain}
+/* Settings live in a slide-over flyout (the ⚙ in the sticky top bar), so the
+   page itself stays one clean column. Fixed-position: openable at any scroll. */
+#setfly{position:fixed;top:0;right:0;height:100vh;width:min(460px,94vw);
+background:var(--card);border-left:1px solid var(--line);
+box-shadow:-24px 0 60px rgba(0,0,0,.25);padding:20px 24px 32px;
+overflow-y:auto;overscroll-behavior:contain;z-index:40;
+transform:translateX(105%);transition:transform .22s ease;visibility:hidden}
+#setfly.open{transform:none;visibility:visible}
+#setfly select{max-width:200px}
+#flyveil{position:fixed;inset:0;background:rgba(0,0,0,.28);display:none;z-index:39}
+#flyveil.open{display:block}
 .checkbox{width:16px;height:16px;accent-color:var(--accent);flex:none}
 dialog{margin:auto;border:1px solid var(--line);border-radius:14px;padding:26px;
 background:var(--card);color:var(--ink);
@@ -1148,6 +1151,7 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <h1>STT Workflow</h1>
   <span id="statusdot" class="dot"></span><span id="statustext" class="sub"></span>
   <span class="grow"></span>
+  <button class="themebtn" id="setbtn" onclick="toggleSettings()" title="Settings">⚙</button>
   <button class="themebtn" id="themebtn" onclick="cycleTheme()" title=""></button>
   <span id="mem" class="chip" style="display:none" title="Memory held by transcription processes right now"></span>
   <span id="battery" class="chip"></span>
@@ -1183,19 +1187,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <span class="chip" title="A rolling history — each new result pushes the oldest out; the 8 latest show here">last 20 kept</span></h2><div id="recent"></div></div>
 </div>
 
-<div class="grid2">
-<div class="card spkcard">
-  <h2>Speakers <span class="grow"></span>
-    <label class="sub" style="font-weight:400;white-space:nowrap" title="Show only voices without a name yet"><input type="checkbox" id="spkunk" class="checkbox" style="vertical-align:-2px" onchange="render()"> unidentified only</label>
-    <input type="text" id="spkfilter" placeholder="Find a speaker…" oninput="render()" style="width:min(150px,28vw);font-size:13px"></h2>
-  <div class="spkscroll"><div class="spkscroll-in">
-    <div id="enrolled"></div>
-    <div id="unknowns"></div>
-  </div></div>
-  <div id="relnote" class="muted" style="display:none;margin-top:8px"></div>
-</div>
-<div class="card">
-  <h2>Settings</h2>
+<aside id="setfly">
+  <h2 style="margin-bottom:4px">Settings <span class="grow"></span>
+    <button class="themebtn" onclick="toggleSettings(false)" title="Close settings">✕</button></h2>
   <div class="row"><div class="grow"><div class="name">Folder watch</div>
     <div class="sub" id="watchnote"></div></div>
     <button class="toggle" id="watchbtn" onclick="togWatch()" title="On: a new recording starts processing within moments of landing. Off: files wait for the nightly run or a manual click."></button></div>
@@ -1226,8 +1220,8 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <div class="row"><div class="grow"><div class="name">Transcripts folder</div>
     <div class="sub" id="dstpath" style="word-break:break-all"></div></div>
     <button onclick="pickFolder('dest')">Change…</button></div>
-</div>
-</div>
+</aside>
+<div id="flyveil" onclick="toggleSettings(false)"></div>
 
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
@@ -1239,6 +1233,17 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
            oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
   <div id="searchhits"></div>
   <div id="meetings" class="inset"></div>
+</div>
+
+<div class="card">
+  <h2>Speakers <span class="grow"></span>
+    <label class="sub" style="font-weight:400;white-space:nowrap" title="Show only voices without a name yet"><input type="checkbox" id="spkunk" class="checkbox" style="vertical-align:-2px" onchange="render()"> unidentified only</label>
+    <input type="text" id="spkfilter" placeholder="Find a speaker…" oninput="render()" style="width:min(220px,34vw);font-size:13px"></h2>
+  <div class="inset">
+    <div id="enrolled"></div>
+    <div id="unknowns"></div>
+  </div>
+  <div id="relnote" class="muted" style="display:none;margin-top:8px"></div>
 </div>
 
 <dialog id="dlg"></dialog>
@@ -2373,6 +2378,18 @@ applyTheme(themeNow());
 {const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 function setLlm(){api('/api/llm_backend',{backend:$('#llmsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch the assistant');refresh()})}
+function toggleSettings(open){
+  const want=open===undefined?!$('#setfly').classList.contains('open'):open;
+  $('#setfly').classList.toggle('open',want);
+  $('#flyveil').classList.toggle('open',want);
+}
+document.addEventListener('keydown',e=>{
+  // Escape closes the settings flyout — but never while a dialog is up
+  // (the dialog's own Escape handling owns that case)
+  if(e.key==='Escape'&&!dlg.open&&$('#setfly').classList.contains('open')){
+    e.preventDefault();toggleSettings(false);
+  }
+});
 function togWatch(){api('/api/automation',{watch:!S.schedule.watch}).then(r=>{if(!r.ok)alert(r.error||'Could not change the folder watch');refresh()})}
 function togNightly(){api('/api/automation',{nightly:!S.schedule.nightly}).then(r=>{if(!r.ok)alert(r.error||'Could not change the nightly run');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
