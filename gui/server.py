@@ -2324,18 +2324,24 @@ function openCloudKeys(){
       </div>
       <div class="sub" style="opacity:.75;margin-top:3px">${hint}</div>
     </div></div>`;
+  $('#dlg').classList.add('wide');  // room for full placeholders and hints
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Cloud transcription keys</h1>
   <p class="muted" style="margin-top:8px">Optional: transcribe with a cloud engine instead of the local models. Only the audio is uploaded — speaker identification and voiceprints stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine is selected. Keys are stored in stt.env on this machine and never shown again.</p>
   ${row('scribe','ElevenLabs Scribe','elevenlabs.io → Profile → API keys')}
-  ${row('openai','OpenAI','platform.openai.com → API keys (also unlocks the OpenAI assistant below)')}
+  ${row('openai','OpenAI','platform.openai.com → API keys · also used by the OpenAI assistant below')}
   ${row('voxtral','Mistral Voxtral','console.mistral.ai → API keys')}
-  <h1 style="font-size:15px;margin-top:18px">Assistant (summaries &amp; Ask)</h1>
+  <h1 style="font-size:15px;margin-top:20px">Assistant (summaries &amp; Ask)</h1>
   <p class="muted" style="margin-top:6px">The assistant drafts summaries and answers Ask questions. The local model needs no key. Choosing a cloud assistant in Settings sends transcript text to that provider for these features only; <b>strict-mode recordings always use the local model</b>.</p>
   ${row('anthropic','Anthropic (Claude)','console.anthropic.com → API keys')}
+  <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+    <span class="sub" style="width:118px;flex:none">OpenAI (GPT)</span>
+    <div class="grow sub">uses the OpenAI key from the transcription section above · ${ck.openai?'✓ key saved':'no key yet'}</div>
+  </div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="dlg.close()">Cancel</button>
     <button class="primary" onclick="saveCloudKeys()">Save</button>
   </div>`;
+  dlg.onclose=()=>{dlg.onclose=null;$('#dlg').classList.remove('wide')};
   dlg.showModal();
 }
 async function saveCloudKeys(){
