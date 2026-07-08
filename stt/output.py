@@ -34,7 +34,8 @@ def speaker_display(label, name=None) -> str:
         return str(label)
 
 
-def txt_header(source_file, duration_sec, speakers, strict=False) -> str:
+def txt_header(source_file, duration_sec, speakers, strict=False,
+               processed_at=None) -> str:
     """The one canonical .txt header line (pipeline, relabel, and review all
     regenerate the .txt and must agree)."""
     named = [s["name"] for s in speakers if s.get("name")]
@@ -44,6 +45,8 @@ def txt_header(source_file, duration_sec, speakers, strict=False) -> str:
         h += "  |  identified: " + ", ".join(named)
     if strict:
         h += "  |  STRICT mode (no smoothing/open-set reassignment)"
+    if processed_at:  # when transcription last ran, as YYYY-MM-DD HH:MM
+        h += "  |  processed " + str(processed_at).replace("T", " ")[:16]
     return h
 
 

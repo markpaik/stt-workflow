@@ -98,7 +98,8 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         data["overlap_spans"] = [[s, e] for s, e in overlaps]
 
         header = output.txt_header(data.get("source_file", base),
-                                   data.get("duration_sec", 0), data["speakers"], strict)
+                                   data.get("duration_sec", 0), data["speakers"],
+                                   strict, data.get("processed_at"))
 
         output.write_json(jpath, {k: v for k, v in data.items()
                                   if k not in ("speakers", "segments", "words")},

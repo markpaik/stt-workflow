@@ -202,6 +202,7 @@ def _meeting_meta(j: Path, dst_dir: Path):
         d = json.loads(j.read_text())
         audio_p = config.meeting_audio(j.stem, dst_dir)
         from datetime import date as _date
+        from datetime import datetime as _dt
         audio_mtime = (audio_p or j).stat().st_mtime
         meta = {"base": j.stem,
                 # stored date wins (stamped at process time, human-editable);
@@ -217,6 +218,11 @@ def _meeting_meta(j: Path, dst_dir: Path):
                                      if s.get("flags") and review.is_minor(s)),
                 "summary": d.get("ai_summary", ""),
                 "next_steps": d.get("ai_next_steps", []),
+                # when transcription last ran (new or redo). Older transcripts
+                # predate this field — fall back to generated_at, then mtime.
+                "processed_at": (d.get("processed_at") or d.get("generated_at")
+                                 or _dt.fromtimestamp(
+                                     j.stat().st_mtime).isoformat(timespec="seconds")),
                 "audio": str(audio_p) if audio_p else None}
     except Exception:
         meta = None
@@ -1465,6 +1471,11 @@ function spkWireNew(sel){
   });
 }
 let _tipTimer=null;
+function fmtWhen(iso){
+  if(!iso)return '';
+  try{return new Date(iso).toLocaleString([],{month:'short',day:'numeric',
+    year:'numeric',hour:'numeric',minute:'2-digit'});}catch(e){return iso;}
+}
 function _tipHtml(m){
   let h=esc(m.summary||'');
   if((m.next_steps||[]).length){
@@ -1472,6 +1483,7 @@ function _tipHtml(m){
       +m.next_steps.slice(0,5).map(s=>`<li>${esc(s)}</li>`).join('')
       +(m.next_steps.length>5?`<li>+${m.next_steps.length-5} more…</li>`:'')+'</ul>';
   }
+  if(m.processed_at)h+=`<div class="tiphead">Processed</div>${esc(fmtWhen(m.processed_at))}`;
   return h;
 }
 document.addEventListener('mouseover',e=>{
@@ -1553,8 +1565,10 @@ async function openTranscript(base,target=null){
   TV={base,segs:d.segments,speakers:d.speaker_options,people:d.people||[],color};
   const legend=d.speakers.map(w=>`<span class="chip"><span class="sdot" style="background:${color[w]}"></span>${esc(w)}</span>`).join(' ');
   $('#dlg').classList.add('wide');
+  const proc=(S.meetings.find(x=>x.base===base)||{}).processed_at;
   $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
   <div class="sub" style="margin:6px 0 2px">${legend}${d.strict?' <span class="chip warn">strict</span>':''}</div>
+  ${proc?`<div class="sub" style="color:var(--muted,#8a8f98);margin-bottom:4px">Processed ${esc(fmtWhen(proc))}</div>`:''}
   <div style="display:flex;gap:8px;align-items:center">
     <audio id="tva" controls src="/api/audio?base=${encodeURIComponent(base)}" style="flex:1"></audio>
     <button onclick="tvAddAt()" title="Add a line the pipeline missed, at the audio’s current position — pause where you heard it, then click">＋ Line at playhead</button>

@@ -101,6 +101,35 @@ def _fake_asr():
                   {"start": 1.5, "end": 1.9, "word": "pipeline"}]})
 
 
+def test_processed_at_stamped_by_a_run_and_preserved_across_edits(sandbox, monkeypatch, tmp_path):
+    """processed_at records when transcription last ran (new or redo). A review
+    save re-writes the json but must NOT touch it — it answers 'when was this
+    last transcribed', separate from generated_at which changes on every save."""
+    import subprocess
+
+    from stt import pipeline, review
+    from stt.audio import FFMPEG
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    src = tmp_path / "Sync 05012026.m4a"
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=3", "-ac", "1",
+                    "-c:a", "aac", str(src)], check=True, capture_output=True)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    d0 = json.loads(res["json"].read_text())
+    assert d0.get("processed_at")  # stamped by the transcription run
+    proc = d0["processed_at"]
+
+    # a review save (any edit) must preserve processed_at while re-stamping generated_at
+    _, data = review._load("Sync 05012026")
+    review._rewrite(res["json"], data)
+    d1 = json.loads(res["json"].read_text())
+    assert d1["processed_at"] == proc                 # transcription time preserved
+    assert "generated_at" in d1                        # (the save clock, re-stamped)
+
+
 def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     """The user's flow: process a meeting, rename it AND correct its date in
     the panel, then Redo. The reprocess must land everything in the RENAMED
