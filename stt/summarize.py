@@ -117,14 +117,21 @@ def suggest_title(base: str) -> dict:
     title = re.sub(r'[<>:"/\\|?*]', "", title).strip() or "Untitled Meeting"
     result = {"title": title, "summary": summary, "next_steps": steps,
               "suggested_name": f"{title} {_date_suffix(base)}"}
-    # persist so the panel can show it without regenerating
+    # persist so the panel can show it without regenerating. Take the per-meeting
+    # lock and re-read INSIDE it (the LLM call above can run for minutes, so a
+    # read taken earlier would be stale) and write atomically, so this can't
+    # clobber a concurrent human review edit of the same json.
+    from . import review
     j = config.meeting_file(base, ".json")
     try:
-        d = json.loads(j.read_text())
-        d["ai_title"], d["ai_summary"] = title, summary
-        d["ai_next_steps"] = steps
-        d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
-        j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+        with review.lock_meeting(base):
+            d = json.loads(j.read_text())
+            d["ai_title"], d["ai_summary"] = title, summary
+            d["ai_next_steps"] = steps
+            d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
+            tmp = j.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+            os.replace(tmp, j)
     except Exception:
         pass
     return result
@@ -144,26 +151,31 @@ def rename_meeting(base: str, new_base: str) -> dict:
         return {"ok": False, "error": f"no meeting folder for '{base}'"}
     if new_dir.exists():
         return {"ok": False, "error": f"'{new_base}' already exists"}
+    # Serialize against a concurrent relabel_one(base), which holds the same
+    # per-base lock for its whole read->rewrite span; the lock file lives in
+    # meetings_dir/.locks (a sibling of the folder), so it survives the rename.
+    from . import review
     renamed = []
     prefix = base + "."
-    for f in sorted(old_dir.iterdir()):
-        if f.is_file() and f.name.startswith(prefix):
-            dst = old_dir / (new_base + f.name[len(base):])
-            f.rename(dst)
-            renamed.append(dst.name)
-    old_dir.rename(new_dir)
-    # keep the source_file field coherent for future relabels
-    j = config.meeting_file(new_base, ".json")
-    if j.exists():
-        try:
-            d = json.loads(j.read_text())
-            old_sf = d.get("source_file", "")
-            suf = Path(old_sf).suffix or ".m4a"
-            d["source_file"] = new_base + suf
-            d["renamed_from"] = base
-            j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        except Exception:
-            pass
+    with review.lock_meeting(base):
+        for f in sorted(old_dir.iterdir()):
+            if f.is_file() and f.name.startswith(prefix):
+                dst = old_dir / (new_base + f.name[len(base):])
+                f.rename(dst)
+                renamed.append(dst.name)
+        old_dir.rename(new_dir)
+        # keep the source_file field coherent for future relabels
+        j = config.meeting_file(new_base, ".json")
+        if j.exists():
+            try:
+                d = json.loads(j.read_text())
+                old_sf = d.get("source_file", "")
+                suf = Path(old_sf).suffix or ".m4a"
+                d["source_file"] = new_base + suf
+                d["renamed_from"] = base
+                j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+            except Exception:
+                pass
     return {"ok": bool(renamed), "renamed": renamed}
 
 
