@@ -14,8 +14,10 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import sys
 import threading
+import time
 from datetime import datetime
 
 import numpy as np
@@ -92,11 +94,21 @@ def save_registry(reg: dict):
     # previous version as .bak — one accidental wipe of this file is the
     # difference between "restore in seconds" and rebuilding every voiceprint
     # from meeting caches (biometric data with no other copy on this machine)
-    try:
-        if p.exists() and json.loads(p.read_text()):
-            os.replace(p, p.with_suffix(".json.bak"))
-    except (OSError, json.JSONDecodeError):
-        pass
+    if p.exists():
+        try:
+            has_people = bool(json.loads(p.read_text()))
+        except (OSError, json.JSONDecodeError):
+            has_people = None  # unparseable => precious; never clobber a good .bak
+        if has_people is None:
+            # corrupt content is precious too: route it to a DISTINCT timestamped
+            # sidecar so a previously-written GOOD .bak stays restorable
+            with contextlib.suppress(OSError):
+                shutil.copy2(p, p.with_suffix(f".json.corrupt-{int(time.time())}"))
+        elif has_people:
+            # copy (not rename) so registry.json is never absent from its path —
+            # an unlocked concurrent reader must never see 'nobody enrolled'
+            with contextlib.suppress(OSError):
+                shutil.copy2(p, p.with_suffix(".json.bak"))
     _atomic_write(p, json.dumps(reg, indent=2))
 
 
@@ -224,11 +236,19 @@ def rename_person(old: str, new: str) -> bool:
         if new in reg:
             return merge_people(old, new)
         meta = reg.pop(old)
+        oldf = config.VOICEPRINTS_DIR / meta["file"]
+        if not oldf.exists():
+            return False  # orphaned entry: file gone out-of-band, nothing to rename
         newf = _unique_filename(new.replace("/", "_"), reg)
-        (config.VOICEPRINTS_DIR / meta["file"]).rename(config.VOICEPRINTS_DIR / newf)
+        # copy -> commit registry -> delete original, so a crash always leaves
+        # either the old or the new mapping fully valid. A rename-before-save
+        # could orphan the moved file with the registry still pointing at the
+        # vanished original (person un-enrolled, samples unreferenced on disk).
+        shutil.copy2(oldf, config.VOICEPRINTS_DIR / newf)
         meta["file"] = newf
         reg[new] = meta
         save_registry(reg)
+        oldf.unlink(missing_ok=True)
         return True
 
 
@@ -239,16 +259,20 @@ def merge_people(src: str, dst: str) -> bool:
         reg = load_registry()
         if src not in reg or dst not in reg or src == dst:
             return False
-        s = np.load(config.VOICEPRINTS_DIR / reg[src]["file"])
-        d = np.load(config.VOICEPRINTS_DIR / reg[dst]["file"])
+        sf = config.VOICEPRINTS_DIR / reg[src]["file"]
+        df = config.VOICEPRINTS_DIR / reg[dst]["file"]
+        if not (sf.exists() and df.exists()):
+            return False  # orphaned entry: fail cleanly like remove_sample, not a crash
+        s = np.load(sf)
+        d = np.load(df)
         s = s.reshape(1, -1) if s.ndim == 1 else s
         d = d.reshape(1, -1) if d.ndim == 1 else d
         src_sources = reg[src].get("sources", ["?"] * s.shape[0])
         dst_sources = reg[dst].get("sources", ["?"] * d.shape[0])
         arr = np.vstack([d, s])[-MAX_SAMPLES:]
         sources = (dst_sources + src_sources)[-MAX_SAMPLES:]
-        np.save(config.VOICEPRINTS_DIR / reg[dst]["file"], arr)
-        (config.VOICEPRINTS_DIR / reg[src]["file"]).unlink(missing_ok=True)
+        np.save(df, arr)
+        sf.unlink(missing_ok=True)
         del reg[src]
         reg[dst]["n_samples"] = int(arr.shape[0])
         reg[dst]["sources"] = sources
