@@ -11,7 +11,7 @@ model download.
 Built for meetings you can't send to a cloud service: 1-on-1s, interviews,
 personnel conversations, anything sensitive.
 
-![Control panel](docs/img/panel.png)
+<img src="docs/img/panel.png" width="826" alt="Control panel with a live run and the queue">
 
 ## Getting started
 
@@ -41,9 +41,7 @@ Whisper large-v3/turbo for punctuation and noise robustness), pyannote
 diarization, and your own voiceprint library attaching real names. Anything
 ffmpeg reads is accepted, video included.
 
-### 1 · Managing the queue
-
-![Queue and run options](docs/img/queue.png)
+### 1 · Capture and process
 
 Recordings land in the watched folder (iCloud Drive by default) and process
 nightly, within a minute of arriving while the Mac is awake, and at login
@@ -62,33 +60,42 @@ per-run options:
 - **one-time speakers**, for focus groups: unnamed voices are never added to
   the speaker library and no voice samples are kept for them
 
+<img src="docs/img/queue.png" width="826" alt="Queue with per-run options">
+
 While a run is live you get per-stage progress with a time estimate
-calibrated to your machine's measured throughput, and a Stop button that
-kills the whole process group and verifies nothing is left. Runs are
-idempotent by manifest: the iCloud original is deleted only after outputs
-are verified, and a run interrupted mid-file simply re-runs that file next
-time. Reprocessing an existing meeting (Redo) offers the same options:
+calibrated to your machine's measured throughput (visible in the panel shot
+above), and a Stop button that kills the whole process group and verifies
+nothing is left. Runs are idempotent by manifest: the iCloud original is
+deleted only after outputs are verified, and a run interrupted mid-file
+simply re-runs that file next time.
 
-![Reprocess dialog](docs/img/redo.png)
+Reprocessing an existing meeting (Redo) offers the same options:
 
-### 2 · Reading, editing, and reviewing transcripts
+<img src="docs/img/redo.png" width="468" alt="Reprocess dialog">
 
-![Transcript viewer](docs/img/viewer.png)
+### 2 · Read and fix
 
-The viewer color-codes speakers, plays audio from any line, and follows
-playback with a live highlight. A find bar (or ⌘F) searches within the open
-transcript: it counts every occurrence ("3 of 8"), Enter and the ‹ ›
-buttons jump between highlighted matches, and Escape clears the search
-without closing the viewer. Every line is editable: fix text, reassign
-the speaker (to anyone, including a person the diarizer never detected),
-add a line the pipeline missed, remove a bogus one, or **split** a line
-where two people got glued together. A reassigned line auto-merges with its
-now-matching neighbors, so one edit heals the whole turn, and a
-"re-transcribe this span" button gets a second opinion from a different
-engine on any single line. Human edits live in a sidecar file and survive
-every reprocessing of speaker labels.
+The viewer color-codes speakers, plays audio from any line, follows playback
+with a live highlight, and shows when the transcript was last processed:
 
-![Splitting a line between two speakers](docs/img/split.png)
+<img src="docs/img/viewer.png" width="708" alt="Transcript viewer">
+
+A find bar (or ⌘F) searches within the open transcript: it counts every
+occurrence, Enter and the ‹ › buttons jump between highlighted matches with
+the current one accented, and Escape clears the search without closing the
+viewer:
+
+<img src="docs/img/find.png" width="708" alt="Find within the transcript, match 2 of 5 highlighted">
+
+Every line is editable: fix text, reassign the speaker (to anyone, including
+a person the diarizer never detected), add a line the pipeline missed,
+remove a bogus one, or **split** a line where two people got glued together.
+A reassigned line auto-merges with its now-matching neighbors, so one edit
+heals the whole turn, and a "re-transcribe this span" button gets a second
+opinion from a different engine on any single line. Human edits live in a
+sidecar file and survive every reprocessing of speaker labels:
+
+<img src="docs/img/split.png" width="708" alt="Splitting a line between two speakers">
 
 Uncertain segments are flagged and triaged: substantial items first,
 sub-second crosstalk crumbs bulk-acceptable in one click. Each review item
@@ -96,96 +103,113 @@ cues its exact audio span, shows the second engine's candidate when verify
 mode ran, and the ‹ › arrows (or ←/→) flip through items without acting on
 them:
 
-![Review dialog](docs/img/review.png)
+<img src="docs/img/review.png" width="708" alt="Review dialog with a second-engine candidate">
 
-At the end of every run, Qwen3-8B (4-bit, on-device) drafts each meeting's
-brief summary and extracts **Committed next steps**: every stated
-commitment as "[Speaker] will *action* by *date*". Both show in the Summary
-dialog and in the hover tooltip on any meeting row:
-
-![Summary tooltip with committed next steps](docs/img/tooltip.png)
-
-The same on-device model powers **Ask**: pick a meeting, ask questions
-about it, and get answers drawn from that transcript only, citing
-timestamps. Follow-up questions understand the earlier ones. Each answer
-takes roughly 20-60 seconds (the model loads fresh per question), the
-thread is never stored, and nothing leaves the machine.
-
-Full-text search jumps straight to the moment anything was said, audio
-cued; the same box filters the library by title or attendee:
-
-![Search across everything ever said](docs/img/search.png)
-
-Meeting titles and dates are editable in place (click either in the list)
-or via the Rename dialog, which also offers an LLM-suggested title from the
-transcript's content. Dates are stamped at processing time from the
-filename convention and survive reprocessing; file timestamps are never
-trusted, because they reflect when Voice Memos exported the file:
-
-![Rename dialog with the meeting-date correction](docs/img/rename.png)
-
-### 3 · Managing speaker profiles
-
-![Speaker library with a hidden one-time voice](docs/img/speakers.png)
+### 3 · Name the speakers
 
 Name a speaker once ("Who is this?" plays their voice first) and every past
 and future transcript updates in seconds, because per-turn voice embeddings
-are cached, so re-labeling never reprocesses audio. Unknown voices keep stable
-numbers across meetings ("Speaker 2" is the same person everywhere), and
-matching is open-set with a score-plus-margin gate: a stranger near an
+are cached, so re-labeling never reprocesses audio. Unknown voices keep
+stable numbers across meetings ("Speaker 2" is the same person everywhere),
+and matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
-honest.
+honest. One-time voices you chose to hide restore with one click from the
+"n hidden" toggle:
+
+<img src="docs/img/speakers.png" width="367" alt="Speaker library with an unknown voice and a hidden one">
 
 The ⋯ menu on any speaker manages the profile. Play any voice sample (each
 traceable to its source meeting), and when one is wrong, either remove it (a
-bad recording, where the person is still right) or **reassign** it to the
-correct person, which moves the voiceprint to them instead of discarding it.
-You can also rename everywhere, merge duplicates, un-enroll, or **hide** a
-one-time voice. Hidden entries keep their samples (so their number stays
-theirs) and restore with one click from the "n hidden" toggle. A profile
-keeps up to five samples; a varied set, from different meetings, rooms, and
-mics, identifies someone more reliably than several clips from one recording.
-Any sample edit re-runs identification across every meeting, so a correction
-propagates the same way naming does:
+bad recording, where the person is still right) or **reassign** it (→) to
+the correct person, which moves the voiceprint to them instead of discarding
+it. You can also rename everywhere, merge duplicates, or un-enroll. A
+profile keeps up to five samples; a varied set, from different meetings,
+rooms, and mics, identifies someone more reliably than several clips from
+one recording. Any sample edit re-runs identification across every meeting,
+so a correction propagates the same way naming does:
 
-![Speaker profile actions](docs/img/speaker-actions.png)
+<img src="docs/img/speaker-actions.png" width="468" alt="Speaker profile: samples with play, reassign, and remove">
 
 If the registry is ever lost, `tools/rebuild_voiceprints.py` reconstructs
 every voiceprint from the meeting caches; the batch also warns loudly if it
 starts with an empty registry while named transcripts exist, and every
 registry write keeps a rolling backup.
 
-### 4 · Managing configuration
+### 4 · Summaries, next steps, and Ask
 
-Settings covers the transcription model (local engines, plus cloud ones
-once a key is added), the daily run time, watched and transcripts folders,
-punctuation cleanup, and a model-update check. Cloud transcription is
-bring-your-own-key for ElevenLabs Scribe, OpenAI, and Mistral Voxtral: only
-the audio uploads (recompressed small), diarization and voiceprints stay
-on-device so cloud words still get local names, a cloud failure falls back
-to the local engine mid-run, and strict-mode recordings never upload. Keys
-live in `stt.env` (git-ignored, `chmod 600`) and are never shown again; a
-saved key can be replaced by pasting a new one or removed with its Clear
-button:
+At the end of every run, Qwen3-8B (4-bit, on-device) drafts each meeting's
+brief summary and extracts **Committed next steps**: every stated commitment
+as "[Speaker] will *action* by *date*". Both show in the Summary dialog and
+in the hover tooltip on any meeting row:
 
-![Cloud transcription keys](docs/img/cloud-keys.png)
+<img src="docs/img/summary.png" width="468" alt="Summary dialog with committed next steps">
+
+The same on-device model powers **Ask**: pick a meeting, ask questions about
+it, and get answers drawn from that transcript only, citing timestamps.
+Follow-up questions understand the earlier ones. Each answer takes roughly
+20-60 seconds (the model loads fresh per question), the thread is never
+stored, and nothing leaves the machine:
+
+<img src="docs/img/ask.png" width="468" alt="Ask dialog answering questions about one meeting">
+
+### 5 · The library: search and organize
+
+The library groups meetings by month with their date, length, attendees,
+review chips, and summary snippet inline; Read, Summary, and Ask are one
+click from any row:
+
+<img src="docs/img/transcripts.png" width="826" alt="Meeting library">
+
+Full-text search jumps straight to the moment anything was said, audio cued;
+the same box filters the library by title or attendee:
+
+<img src="docs/img/search.png" width="826" alt="Search across everything ever said">
+
+Meeting titles and dates are editable in place (click either in the list) or
+via the Rename dialog, which also offers an LLM-suggested title from the
+transcript's content. Dates are stamped at processing time from the filename
+convention and survive reprocessing; file timestamps are never trusted,
+because they reflect when Voice Memos exported the file:
+
+<img src="docs/img/rename.png" width="468" alt="Rename dialog with the meeting-date correction">
+
+### 6 · Export
+
+Each meeting exports to Word (.docx) or print-ready PDF, copies to the
+clipboard as plain text, or reveals in Finder:
+
+<img src="docs/img/meeting-menu.png" width="468" alt="Export and file actions">
+
+On disk, every meeting is a self-contained folder (audio, readable `.txt`,
+structured `.json` with segment- and word-level timestamps, speakers, flags,
+and real confidence scores, caches, and edit history together), and renaming
+in the panel renames the folder and every file in it. Writes are atomic
+everywhere; a reader can never see a half-written transcript.
+
+### 7 · Configure
+
+Settings covers the daily run time, the transcription model (local engines,
+plus cloud ones once a key is added), punctuation cleanup, speed
+calibration, a model-update check, and the watched and transcripts folders:
+
+<img src="docs/img/settings.png" width="442" alt="Settings card">
+
+Cloud transcription is bring-your-own-key for ElevenLabs Scribe, OpenAI, and
+Mistral Voxtral: only the audio uploads (recompressed small), diarization
+and voiceprints stay on-device so cloud words still get local names, a cloud
+failure falls back to the local engine mid-run, and strict-mode recordings
+never upload. Keys live in `stt.env` (git-ignored, `chmod 600`) and are
+never shown again; a saved key can be replaced by pasting a new one or
+removed with its Clear button:
+
+<img src="docs/img/cloud-keys.png" width="468" alt="Cloud transcription keys with a saved key and its Clear button">
+
+## Light and dark
 
 The panel follows macOS light/dark by default; the toggle in the top bar
 pins either, and the choice persists:
 
-![Dark mode](docs/img/panel-dark.png)
-
-### 5 · Exporting
-
-![Export and file actions](docs/img/meeting-menu.png)
-
-Each meeting exports to Word (.docx) or print-ready PDF, copies to the
-clipboard as plain text, or reveals in Finder. On disk, every meeting is a
-self-contained folder (audio, readable `.txt`, structured `.json` with
-segment- and word-level timestamps, speakers, flags, and real confidence
-scores, caches, and edit history together), and renaming in the panel
-renames the folder and every file in it. Writes are atomic everywhere; a
-reader can never see a half-written transcript.
+<img src="docs/img/themes.png" width="833" alt="The same panel in light and dark themes">
 
 ## Requirements
 
@@ -218,7 +242,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 3. Put `HF_TOKEN=hf_…` in `stt.env`; the file is git-ignored and never
    leaves your machine.
 
-**Optional local LLM** for summaries and smart renames (Qwen3-8B-4bit,
+**Optional local LLM** for summaries, Ask, and smart renames (Qwen3-8B-4bit,
 ~4.5 GB; its own environment because its `transformers` pin conflicts with
 the audio stack):
 
@@ -227,8 +251,8 @@ uv venv --python 3.12 .venv-llm
 uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'
 ```
 
-Summaries and "Suggest from content" light up automatically once `.venv-llm`
-exists; everything else works without it.
+Summaries, Ask, and "Suggest from content" light up automatically once
+`.venv-llm` exists; everything else works without it.
 
 **Folders.** The watched folder defaults to iCloud Drive's `Voice Recordings`;
 transcripts land where you point them (one folder per meeting, holding the
@@ -253,7 +277,8 @@ true night wake: `sudo pmset repeat wakeorpoweron MTWRFSU 01:57:00`.
 
 Everything routes through the control panel: process recordings, watch live
 progress, name speakers (▶ plays a voice sample, "Who is this?" names it),
-review flagged segments against audio, read/search/edit transcripts, export.
+review flagged segments against audio, read/search/edit transcripts, ask
+questions, export.
 
 CLI equivalents:
 
@@ -262,7 +287,7 @@ CLI equivalents:
 ./run.sh batch --strict --files "Interview.m4a"   # strict: flag, never guess
 ./run.sh relabel --all                            # re-apply names everywhere
 ./run.sh enroll --from-meeting "Team Sync 05212026"
-./run.sh test                                     # 200+ tests
+./run.sh test                                     # 280+ tests
 ```
 
 ## How it works
@@ -277,7 +302,7 @@ watched folder (iCloud)                          transcripts folder
                                                │
               .txt + .json + cached embeddings (instant re-labeling)
                                                │
-        review/edit decisions (sidecar, survive relabels) ─► search / export / summaries
+        review/edit decisions (sidecar, survive relabels) ─► search / export / summaries / Ask
 ```
 
 Model attribution (CC-BY-4.0 weights): see [NOTICE.md](NOTICE.md).
