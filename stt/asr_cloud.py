@@ -53,7 +53,9 @@ def _compress_for_upload(wav) -> Path:
     mono MP3 (~14 MB/hour) so uploads are fast and fit provider size caps.
     MP3, not AAC: it is the one format all three providers document.
     Caller deletes the temp file."""
-    out = Path(tempfile.mkstemp(suffix=".mp3", prefix="sttup_")[1])
+    fd, path = tempfile.mkstemp(suffix=".mp3", prefix="sttup_")
+    os.close(fd)  # keep the reserved path; ffmpeg -y overwrites it
+    out = Path(path)
     subprocess.run([FFMPEG, "-y", "-i", str(wav), "-ac", "1",
                     "-c:a", "libmp3lame", "-b:a", "32k", str(out)],
                    check=True, capture_output=True)

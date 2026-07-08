@@ -52,6 +52,17 @@ def test_search_across_meetings(sandbox):
     assert "panorama" in hit["snippet"].lower()
 
 
+def test_search_survives_meeting_vanishing_mid_request(sandbox, monkeypatch):
+    """A meeting renamed/deleted between listing and the mtime sort must be
+    skipped, not turn the whole search into a 500."""
+    _mk("Mtg A", ["panorama survey today."], sandbox)
+    monkeypatch.setattr(config, "meeting_bases",
+                        lambda *a, **k: ["Mtg A", "Ghost Mtg"])  # ghost has no .json
+    r = search.query("panorama")
+    assert r["total"] == 1
+    assert {h["base"] for h in r["hits"]} == {"Mtg A"}
+
+
 def test_search_short_query_ignored(sandbox):
     _mk("Mtg A", ["hello there"], sandbox)
     assert search.query("he") == {"query": "he", "hits": [], "total": 0}

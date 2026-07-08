@@ -173,6 +173,28 @@ def test_openai_size_cap_is_a_clear_error(sandbox, monkeypatch, tmp_path):
         asr_cloud.transcribe(sandbox / "x.wav")
 
 
+def test_compress_for_upload_does_not_leak_fds(sandbox, tmp_path, monkeypatch):
+    """mkstemp's fd must be closed: repeated cloud transcriptions in one worker
+    process must not accumulate open descriptors (256-fd limit on macOS)."""
+    import os
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0))
+
+    def fd_count():
+        return len(os.listdir("/dev/fd"))
+
+    wav = tmp_path / "t.wav"
+    wav.write_bytes(b"pcm")
+    baseline = fd_count()
+    for _ in range(20):
+        out = asr_cloud._compress_for_upload(wav)
+        out.unlink(missing_ok=True)
+    # the reserved temp path is fine to leak; an open fd per call is the bug
+    assert fd_count() - baseline <= 2
+
+
 def test_compress_for_upload_produces_small_mp3(sandbox, tmp_path):
     """Real ffmpeg round-trip: the upload artifact is an MP3 (the one format
     all three providers document) far smaller than the source WAV."""

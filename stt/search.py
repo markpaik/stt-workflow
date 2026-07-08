@@ -12,6 +12,15 @@ from . import config
 _cache = {}  # path -> (mtime, [(seg_index, start, who, text_lower, text)])
 
 
+def _mtime(p):
+    """Sort key that tolerates a meeting vanishing mid-request (concurrent
+    rename/delete), mirroring _segments()'s own FileNotFoundError guard."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _segments(jpath):
     try:
         mtime = jpath.stat().st_mtime
@@ -43,7 +52,7 @@ def query(q: str, limit: int = 40) -> dict:
         return {"query": q, "hits": [], "total": 0}
     hits, total = [], 0
     files = sorted((config.meeting_file(b, ".json") for b in config.meeting_bases()),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
+                   key=_mtime, reverse=True)
     for jpath in files:
         base = jpath.stem
         for idx, start, who, low, text in _segments(jpath):
