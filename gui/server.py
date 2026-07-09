@@ -586,6 +586,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+            elif u.path == "/api/history":
+                # the complete processing history (results.jsonl merged with
+                # the status ring); filtering happens client-side
+                self._json({"results": status.history()})
             elif u.path == "/api/voice_clips":
                 # for the "Who is this?" dialog: this unknown's longest turn in
                 # EACH meeting it was heard in — meeting names come from the
@@ -1071,15 +1075,16 @@ border-bottom:1px solid var(--hairline)}
 .stagechips .s{font-size:11px;font-weight:500;padding:2px 10px;border-radius:99px;
 border:1px solid var(--hairline);color:var(--sub)}
 .stagechips .s.on{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
-/* Settings live in a slide-over flyout (the ⚙ in the sticky top bar), so the
-   page itself stays one clean column. Fixed-position: openable at any scroll. */
-#setfly{position:fixed;top:0;right:0;height:100vh;width:min(460px,94vw);
+/* Slide-over flyouts (Settings, History, Ask): fixed-position panels openable
+   at any scroll, so the page itself stays clean. */
+.fly{position:fixed;top:0;right:0;height:100vh;width:min(460px,94vw);
 background:var(--card);border-left:1px solid var(--line);
 box-shadow:-24px 0 60px rgba(0,0,0,.25);padding:20px 24px 32px;
 overflow-y:auto;overscroll-behavior:contain;z-index:40;
 transform:translateX(105%);transition:transform .22s ease;visibility:hidden}
-#setfly.open{transform:none;visibility:visible}
+.fly.open{transform:none;visibility:visible}
 #setfly select{max-width:200px}
+#histfly{width:min(560px,94vw)}
 #flyveil{position:fixed;inset:0;background:rgba(0,0,0,.28);display:none;z-index:39}
 #flyveil.open{display:block}
 .checkbox{width:16px;height:16px;accent-color:var(--accent);flex:none}
@@ -1184,10 +1189,28 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   </div>
   <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for confidential conversations). “Verify” has a second engine listen too and flags the disagreements.</div>
   <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
-    <span class="chip" title="A rolling history — each new result pushes the oldest out; the 8 latest show here">last 20 kept</span></h2><div id="recent"></div></div>
+    <span class="chip" title="The 5 latest results — the full permanent list is one click away">5 latest</span>
+    <span class="grow"></span>
+    <button onclick="openHistory()" title="Every file this pipeline ever processed, searchable and filterable">History…</button></h2><div id="recent"></div></div>
 </div>
 
-<aside id="setfly">
+<aside id="histfly" class="fly">
+  <h2 style="margin-bottom:4px">Processing history <span class="grow"></span>
+    <button class="themebtn" onclick="flyToggle('#histfly',false)" title="Close history">✕</button></h2>
+  <p class="muted" style="margin-top:6px">Every file this pipeline has processed, newest first. Failures keep their full error text.</p>
+  <div style="display:flex;gap:8px;margin:12px 0 4px">
+    <input type="text" id="histq" placeholder="Filter by name…" autocomplete="off" spellcheck="false"
+      style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:6px 8px"
+      oninput="histRender()">
+    <select id="histok" onchange="histRender()" title="Show everything, or only one outcome" style="font-size:13px">
+      <option value="">all</option><option value="ok">processed</option><option value="fail">failed</option>
+    </select>
+  </div>
+  <div class="sub" id="histcount"></div>
+  <div id="histlist"></div>
+</aside>
+
+<aside id="setfly" class="fly">
   <h2 style="margin-bottom:4px">Settings <span class="grow"></span>
     <button class="themebtn" onclick="toggleSettings(false)" title="Close settings">✕</button></h2>
   <div class="row"><div class="grow"><div class="name">Folder watch</div>
@@ -1221,7 +1244,7 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <div class="sub" id="dstpath" style="word-break:break-all"></div></div>
     <button onclick="pickFolder('dest')">Change…</button></div>
 </aside>
-<div id="flyveil" onclick="toggleSettings(false)"></div>
+<div id="flyveil" onclick="flyCloseAll()"></div>
 
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
@@ -1332,7 +1355,7 @@ function render(){
   // recent results (successes and failures)
   const rec=s.recent||[];
   $('#recentwrap').style.display=rec.length?'block':'none';
-  $('#recent').innerHTML=rec.slice(0,8).map(r=>`<div class="row">
+  $('#recent').innerHTML=rec.slice(0,5).map(r=>`<div class="row">
     <span class="chip ${r.ok?'done':'warn'}">${r.ok?'✓':'failed'}</span>
     <div class="grow"><div class="name">${esc(r.name.replace(/\.[^.]+$/,''))}</div>
     <div class="sub">${esc(r.summary||'')}${r.ok?'':' · original kept in iCloud — will retry next run'}</div></div>
@@ -2380,18 +2403,54 @@ applyTheme(themeNow());
 {const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 function setLlm(){api('/api/llm_backend',{backend:$('#llmsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch the assistant');refresh()})}
-function toggleSettings(open){
-  const want=open===undefined?!$('#setfly').classList.contains('open'):open;
-  $('#setfly').classList.toggle('open',want);
-  $('#flyveil').classList.toggle('open',want);
+function flyToggle(id,open){
+  const el=$(id);
+  const want=open===undefined?!el.classList.contains('open'):open;
+  if(want)document.querySelectorAll('.fly.open').forEach(f=>{if(f!==el)f.classList.remove('open')});
+  el.classList.toggle('open',want);
+  $('#flyveil').classList.toggle('open',!!document.querySelector('.fly.open'));
 }
+function flyCloseAll(){
+  document.querySelectorAll('.fly.open').forEach(f=>f.classList.remove('open'));
+  $('#flyveil').classList.remove('open');
+}
+function toggleSettings(open){flyToggle('#setfly',open)}
 document.addEventListener('keydown',e=>{
-  // Escape closes the settings flyout — but never while a dialog is up
+  // Escape closes whichever flyout is up — but never while a dialog is open
   // (the dialog's own Escape handling owns that case)
-  if(e.key==='Escape'&&!dlg.open&&$('#setfly').classList.contains('open')){
-    e.preventDefault();toggleSettings(false);
+  if(e.key==='Escape'&&!dlg.open&&document.querySelector('.fly.open')){
+    e.preventDefault();flyCloseAll();
   }
 });
+// ---- processing history flyout: the complete, permanent results list ----
+let HIST=null;
+async function openHistory(){
+  flyToggle('#histfly',true);
+  $('#histlist').innerHTML='<div style="padding:12px 0"><span class="spin"></span></div>';
+  $('#histcount').textContent='';
+  const r=await api('/api/history');
+  HIST=r.results||[];
+  histRender();
+}
+function histRender(){
+  if(HIST===null)return;
+  const q=($('#histq').value||'').trim().toLowerCase();
+  const f=$('#histok').value;
+  const rows=HIST.filter(r=>(!q||(r.name||'').toLowerCase().includes(q))&&(!f||(f==='ok')===!!r.ok));
+  const CAP=400, nOk=rows.filter(r=>r.ok).length;
+  $('#histcount').textContent=rows.length?`${rows.length} result${rows.length===1?'':'s'} · ${nOk} processed · ${rows.length-nOk} failed`:'';
+  let day='';
+  $('#histlist').innerHTML=rows.slice(0,CAP).map(r=>{
+    const d=(r.at||'').slice(0,10);
+    const hdr=d!==day?`<div class="mgroup">${d?new Date(d+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'long',day:'numeric',year:'numeric'}):'Undated'}</div>`:'';
+    day=d;
+    return hdr+`<div class="row"><span class="chip ${r.ok?'done':'warn'}">${r.ok?'✓':'failed'}</span>
+      <div class="grow" style="min-width:0"><div class="name">${esc((r.name||'').replace(/\.[^.]+$/,''))}</div>
+      ${r.summary?`<div class="sub" style="word-break:break-word">${esc(r.summary)}</div>`:''}</div>
+      <span class="sub" style="flex:none">${(r.at||'').slice(11,16)}</span></div>`;
+  }).join('')+(rows.length>CAP?`<div class="sub" style="padding:10px 0">Showing the first ${CAP} — narrow the filter to see older results.</div>`:'')
+  ||'<div class="sub" style="padding:10px 0">No matching results.</div>';
+}
 function togWatch(){api('/api/automation',{watch:!S.schedule.watch}).then(r=>{if(!r.ok)alert(r.error||'Could not change the folder watch');refresh()})}
 function togNightly(){api('/api/automation',{nightly:!S.schedule.nightly}).then(r=>{if(!r.ok)alert(r.error||'Could not change the nightly run');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}

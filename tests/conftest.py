@@ -27,6 +27,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEETINGS_DIR", d / "meetings")
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
+    monkeypatch.setattr(status, "HISTORY_LOG", d / "results.jsonl")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")
     monkeypatch.setattr(control, "STOP_FLAG", d / "stopping.flag")
     monkeypatch.setattr(rates, "RATES_LOG", d / "rates.jsonl")
