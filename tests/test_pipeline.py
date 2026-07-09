@@ -209,3 +209,19 @@ def test_no_sidecar_is_pure_mono(sandbox, monkeypatch):
                                 do_verify=False, track_unknowns=False)
     data = json.loads(res["json"].read_text())
     assert "channel_mode" not in data and "channel_layout" not in data
+
+
+def test_meeting_date_rejects_a_future_filename_date(sandbox, monkeypatch):
+    """A filename like '...10242026' parses to Oct 24 2026 (future). A recording
+    can't be from the future, so the stamped date must fall back to the file's
+    mtime instead of sorting above today's real meetings."""
+    from datetime import date
+    src = config.PROJECT_DIR / "Thrive ICD Omar 10242026.m4a"
+    src.write_bytes(b"x")
+    d = pipeline._meeting_date(src)
+    assert d <= date.today().isoformat()
+    assert d != "2026-10-24"
+    # a PAST filename date is still trusted
+    past = config.PROJECT_DIR / "LT Meeting 05212026.m4a"
+    past.write_bytes(b"x")
+    assert pipeline._meeting_date(past) == "2026-05-21"

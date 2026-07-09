@@ -66,7 +66,13 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
         fallback = date.fromtimestamp(src.stat().st_mtime).isoformat()
     except OSError:
         fallback = date.today().isoformat()
-    return dates.meeting_date(src.stem) or fallback
+    # a recording can't be from the future: a filename like "...10242026"
+    # parses to Oct 24 2026, which would sort above today's real meetings.
+    # Reject a future parse and fall back to the processing/mtime date.
+    parsed = dates.meeting_date(src.stem)
+    if parsed and parsed <= date.today().isoformat():
+        return parsed
+    return fallback
 
 
 def _resolve_channel(src: Path, existing_json: Path, input_opts):
