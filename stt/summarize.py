@@ -34,7 +34,8 @@ from mlx_lm import load, generate
 req = json.load(sys.stdin)
 model, tokenizer = load(req["model"])
 msgs = [{"role": "user", "content": req["prompt"]}]
-text = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+text = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False,
+                                     enable_thinking=req.get("think", True))
 out = generate(model, tokenizer, prompt=text, max_tokens=req["max_tokens"], verbose=False)
 print(json.dumps({"text": out}))
 """
@@ -127,9 +128,13 @@ def _llm_lock(timeout: float | None = None):
 
 
 def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = None,
-              backend: str = None) -> str:
+              backend: str = None, think: bool = True) -> str:
     """One prompt in, one answer out, whichever assistant is selected. Cloud
-    backends need no llm.lock (nothing loads into RAM) and no busy path."""
+    backends need no llm.lock (nothing loads into RAM) and no busy path.
+    think=False skips Qwen3's reasoning pass (measured ~4x faster). Use it for
+    extraction-shaped work (summaries), where grounding held on real meetings;
+    keep it on for Ask, where the no-think model gave up on a question the
+    thinking model answered well. Cloud backends ignore the flag."""
     backend = backend or llm_backend()
     if backend == "anthropic":
         return _generate_anthropic(prompt, max_tokens)
@@ -143,7 +148,7 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
     with _llm_lock(lock_timeout):
         r = subprocess.run([str(LLM_PY), "-c", _RUNNER],
                            input=json.dumps({"model": MODEL, "prompt": prompt,
-                                             "max_tokens": max_tokens}),
+                                             "max_tokens": max_tokens, "think": think}),
                            capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         raise RuntimeError(f"LLM runner failed: {r.stderr[-400:]}")
@@ -299,7 +304,7 @@ def suggest_title(base: str) -> dict:
         "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
         f"TRANSCRIPT:\n{sample}"
     )
-    out = _generate(prompt, max_tokens=3000, backend=backend)
+    out = _generate(prompt, max_tokens=3000, backend=backend, think=False)
     title, summary, steps = "", [], []
     mode = None
     for line in out.splitlines():

@@ -468,7 +468,7 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "LLM_PY", fake_py)
     backends = []
     monkeypatch.setattr(summarize, "_generate",
-                        lambda p, max_tokens=0, lock_timeout=None, backend=None:
+                        lambda p, max_tokens=0, lock_timeout=None, backend=None, think=True:
                         backends.append(backend) or "TITLE: T\nSUMMARY: S\n")
     summarize.suggest_title("Confidential")
     r = summarize.answer_question("Confidential", "what was said?")
@@ -478,3 +478,20 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
     _meeting("Open Mtg")
     summarize.suggest_title("Open Mtg")
     assert backends[-1] == "anthropic"
+
+
+def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
+    """suggest_title runs the local model with think=False (measured ~4x faster,
+    grounding held on real meetings); answer_question keeps the reasoning pass
+    (the no-think model gave up on a question the thinking model answered)."""
+    _meeting_with_segment("M")
+    calls = []
+
+    def fake_gen(prompt, max_tokens=2000, lock_timeout=None, backend=None, think=True):
+        calls.append(think)
+        return "TITLE: T\nSUMMARY: S\nNEXT STEPS:\n- none"
+
+    monkeypatch.setattr(summarize, "_generate", fake_gen)
+    summarize.suggest_title("M")
+    summarize.answer_question("M", "What was decided?")
+    assert calls == [False, True]
