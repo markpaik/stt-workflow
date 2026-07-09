@@ -26,6 +26,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORK_DIR", d / "work")
     monkeypatch.setattr(config, "MEETINGS_DIR", d / "meetings")
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
+    monkeypatch.setattr(config, "RECORDINGS_DIR", d / "recordings")
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
     monkeypatch.setattr(status, "HISTORY_LOG", d / "results.jsonl")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")

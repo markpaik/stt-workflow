@@ -12,7 +12,7 @@ from pathlib import Path
 
 import rumps
 
-from stt import config, control, status
+from stt import config, control, recorder, status
 from gui import server as panel
 
 ICON = str(config.PROJECT_DIR / "gui" / "waveform.png")
@@ -93,11 +93,26 @@ def gather():
         done_count = len(config.meeting_bases())
     except Exception:
         done_count = 0
+    rec = st.get("recording")
+    if rec and not _pid_alive(rec.get("pid")):
+        rec = None  # a dead recorder is handled by recover_orphans, not shown live
     return {"running": running, "active": active, "queued": queued,
             "queued_jobs": queued_jobs,
-            "paused": control.is_paused(),
+            "paused": control.is_paused(), "recording": rec,
             "recent": st.get("recent", [])[:6], "done_count": done_count,
             "schedule": read_schedule()}
+
+
+def _fmt_elapsed(started_at):
+    """mm:ss (or h:mm:ss) since an ISO timestamp, for the recording readout."""
+    from datetime import datetime
+    try:
+        secs = max(0, int((datetime.now() - datetime.fromisoformat(started_at)).total_seconds()))
+    except (ValueError, TypeError):
+        return ""
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 class STTMenuBar(rumps.App):
@@ -106,13 +121,20 @@ class STTMenuBar(rumps.App):
         self._frame = 0
         self._last_sig = None
         panel.start_server()  # local control panel at http://127.0.0.1:8737
+        try:  # a recording orphaned by a crash/forced quit: salvage its audio
+            saved = recorder.recover_orphans()
+            if saved:
+                rumps.notification("STT workflow", "Recovered a recording",
+                                   f"“{saved[0]}” was saved after an interrupted session.")
+        except Exception:
+            pass
         self.timer = rumps.Timer(self.refresh, 2.0)
         self.timer.start()
         self.refresh(None)
 
     @staticmethod
     def _signature(s):
-        return (s["running"], s["paused"],
+        return (s["running"], s["paused"], bool(s.get("recording")),
                 tuple(sorted((n, a["stage"]) for n, a in s["active"].items())),
                 tuple(s["queued"]), tuple(j.get("at") for j in s.get("queued_jobs", [])),
                 tuple((r["name"], r.get("ok")) for r in s["recent"]),
@@ -123,7 +145,13 @@ class STTMenuBar(rumps.App):
             s = gather()
             self._frame = (self._frame + 1) % len(SPINNER)
             # title (badge/spinner) updates every tick; it doesn't disturb an open menu
-            if s["running"]:
+            rec = s.get("recording")
+            if rec:
+                # a live recording owns the title (its clock ticks every 2s);
+                # a background batch still shows its spinner alongside
+                busy = SPINNER[self._frame] if s["running"] else ""
+                self.title = f" 🔴 {_fmt_elapsed(rec.get('started_at'))} {busy}".rstrip()
+            elif s["running"]:
                 n_act = max(1, len(s["active"]))
                 etas = [status.estimate_progress(a, n_act)[1] for a in s["active"].values()]
                 etas = [e for e in etas if e is not None]
@@ -193,6 +221,18 @@ class STTMenuBar(rumps.App):
                 mi._stt_name = r["name"]
                 items.append(mi)
 
+        # --- recorder ---
+        rec = s.get("recording")
+        items.append(rumps.separator)
+        if rec:
+            items.append(rumps.MenuItem(
+                f"■  Stop recording  ({_fmt_elapsed(rec.get('started_at'))})",
+                callback=self.stop_recording))
+        elif recorder.available():
+            items.append(rumps.MenuItem("●  Start recording", callback=self.start_recording))
+        else:
+            items.append(_disabled("●  Recording unavailable — build it (see Open logs)"))
+
         # --- controls ---
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open Control Panel…", callback=self.open_panel))
@@ -240,6 +280,41 @@ class STTMenuBar(rumps.App):
             rumps.notification("STT workflow", "Paused",
                                "Nightly/automatic runs will skip until resumed. "
                                "Manual runs still work.")
+
+    # ---- recorder ----
+    def start_recording(self, _):
+        r = recorder.start()
+        if not r.get("ok"):
+            rumps.notification("STT workflow", "Could not start recording",
+                               r.get("error", "unknown error"))
+            return
+        self.refresh(None)  # flip the menu/title immediately
+        rumps.notification("STT workflow", "Recording",
+                           "Capturing this meeting. Grant Microphone and "
+                           "'System Audio Recording Only' if macOS asks.")
+
+    def stop_recording(self, _):
+        caf = recorder.halt()  # end capture first, so we don't record the naming pause
+        if caf is None:
+            self.refresh(None)
+            return
+        try:
+            resp = rumps.Window(
+                title="Name this recording",
+                message="It will process and appear in your transcripts.",
+                default_text="", ok="Save", cancel="Skip",
+                dimensions=(320, 24)).run()
+            name = resp.text.strip() if resp.clicked else None
+        except Exception:
+            name = None
+        r = recorder.finalize(caf, name)
+        self.refresh(None)
+        if r.get("ok"):
+            rumps.notification("STT workflow", "Recording saved",
+                               f"“{r['name']}” — processing now.")
+        else:
+            rumps.notification("STT workflow", "Recording problem",
+                               r.get("error", "could not save the recording"))
 
     # ---- actions ----
     def run_now(self, _):

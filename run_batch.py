@@ -201,9 +201,28 @@ def preflight_source(source: Path) -> bool:
 
 
 def iter_audio(folder: Path):
+    if not Path(folder).is_dir():
+        return
     for p in sorted(Path(folder).iterdir()):
         if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
             yield p
+
+
+def iter_sources(source: Path):
+    """Sweep the primary source folder AND the local recordings staging folder
+    (the meeting recorder's output). Dot-prefixed in-progress captures are
+    already skipped by iter_audio; distinct filenames keep the manifest dedupe
+    unambiguous across folders."""
+    seen = set()
+    folders = [Path(source)]
+    rec = config.recordings_dir()
+    if rec not in folders:
+        folders.append(rec)
+    for folder in folders:
+        for p in iter_audio(folder):
+            if p.name not in seen:  # a file present in both folders processes once
+                seen.add(p.name)
+                yield p
 
 
 def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
@@ -388,7 +407,7 @@ def main():
                     skipped += 1
             else:
                 print(f"   skip (not a file): {p}", file=sys.stderr)
-    for src in iter_audio(source):
+    for src in iter_sources(source):
         if args.paths and wanted is None:
             break  # explicit-paths run: don't also sweep the source folder
         if wanted is not None and src.name not in wanted:
@@ -529,7 +548,7 @@ def main():
             # exclude files that already failed this run: nothing marks them
             # processed, so without this a permanently-failing file (corrupt
             # audio, stuck iCloud placeholder) would loop the rescan forever.
-            more = [src for src in iter_audio(source)
+            more = [src for src in iter_sources(source)
                     if src.name not in failed_names
                     and not manifest.is_processed(m, src.name, src.stat().st_mtime)]
             if not more:

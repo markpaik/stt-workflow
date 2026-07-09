@@ -139,6 +139,14 @@ def _agent_reload():
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT)], capture_output=True)
 
 
+def _watch_paths():
+    """Both folders the batch agent watches: the primary source AND the local
+    recordings staging folder (the meeting recorder's output). Every place that
+    rewrites WatchPaths uses this, so changing the source folder or toggling the
+    watch never silently drops the recorder's trigger."""
+    return [str(config.source_dir()), str(config.recordings_dir())]
+
+
 def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
     """Rewrite the agent's triggers; None leaves that trigger as it is.
     Disabling nightly remembers its time (stt.env) so re-enabling restores
@@ -151,7 +159,7 @@ def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
     d = plistlib.loads(AGENT.read_bytes())
     if watch is not None:
         if watch:
-            d["WatchPaths"] = [str(config.source_dir())]
+            d["WatchPaths"] = _watch_paths()
         else:
             d.pop("WatchPaths", None)
     if hour is not None:  # setting a time implies the nightly run is wanted
@@ -384,6 +392,7 @@ def gather_state():
                             for j in jobs.items()],
             "recent": st.get("recent", [])[:8],
             "paused": control.is_paused(),
+            "recording": st.get("recording"),
             "queue": queue, "meetings": meetings,
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
@@ -448,7 +457,7 @@ def set_folder(which: str, path: str):
         for pl in (AGENT,):
             if pl.exists():
                 d = plistlib.loads(pl.read_bytes())
-                d["WatchPaths"] = [str(p)]
+                d["WatchPaths"] = _watch_paths()
                 pl.write_bytes(plistlib.dumps(d))
         if AGENT.exists():
             uid = os.getuid()
@@ -1081,6 +1090,8 @@ border-bottom:1px solid var(--hairline)}
 .dot.run{background:var(--accent);animation:pulse 1.2s infinite}
 .dot.paused{background:var(--warn)}
 @keyframes pulse{50%{opacity:.3}}
+.recdot{width:11px;height:11px;border-radius:50%;background:var(--bad);flex:none;
+margin-right:10px;animation:pulse 1.2s infinite}
 .bar{height:4px;border-radius:99px;background:var(--chip);overflow:hidden;margin-top:6px}
 .bar>i{display:block;height:100%;border-radius:99px;background:var(--accent);transition:width .6s}
 .stagechips{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap}
@@ -1197,6 +1208,15 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <div id="cols">
 <div id="colmain">
+
+<div class="card" id="recbanner" style="display:none;border-color:color-mix(in srgb,var(--bad) 45%,var(--line))">
+  <div class="row" style="border:0;padding:0;align-items:center">
+    <span class="recdot"></span>
+    <div class="grow"><div class="name">Recording a meeting</div>
+    <div class="sub" id="rectime"></div></div>
+  </div>
+  <div class="sub" style="margin-top:8px">Started from the menu bar. Stop it there to name it and process it. This audio stays on your Mac.</div>
+</div>
 
 <div class="card" id="activecard" style="display:none">
   <h2>Processing now</h2><div id="active"></div>
@@ -1333,6 +1353,14 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 <div id="tipbox"></div>
 <script>
 const $=q=>document.querySelector(q);
+function recElapsed(startedAt){
+  const t=Date.parse((startedAt||'').replace(' ','T'));
+  if(isNaN(t))return'';
+  let s=Math.max(0,Math.floor((Date.now()-t)/1000));
+  const h=Math.floor(s/3600);s-=h*3600;const m=Math.floor(s/60);s-=m*60;
+  const mm=String(m).padStart(2,'0'),ss=String(s).padStart(2,'0');
+  return h?`${h}:${mm}:${ss}`:`${mm}:${ss}`;
+}
 function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
   if(sec<3600)return Math.round(sec/60)+' min';
   return Math.floor(sec/3600)+'h '+String(Math.round(sec%3600/60)).padStart(2,'0')+'m'}
@@ -1390,6 +1418,11 @@ function render(){
   // active
   const act=Object.entries(s.active||{});
   const orphaned=s.running&&!act.length&&s.mem_mb>500;
+  // recording banner (independent of processing — a call can record while a
+  // batch runs, or with nothing else happening)
+  const recg=s.recording;
+  $('#recbanner').style.display=recg?'block':'none';
+  if(recg)$('#rectime').textContent='Elapsed '+recElapsed(recg.started_at);
   $('#activecard').style.display=s.running?'block':'none';
   $('#active').innerHTML=(orphaned?`<div class="row"><span class="chip warn">recovering</span>
     <div class="grow"><div class="name">Background workers are still running</div>

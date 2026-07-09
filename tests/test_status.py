@@ -352,3 +352,18 @@ def test_history_survives_a_corrupt_log_line(sandbox):
     status.start_run(["b.m4a"])
     status.finish_file("b.m4a", True, "ok")
     assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
+
+
+def test_recording_key_roundtrips_and_survives_a_run(sandbox):
+    status.set_recording({"pid": 4242, "caf": "/x/.rec-a.caf", "started_at": "2026-07-09T10:00:00"})
+    assert status.recording()["pid"] == 4242
+    # a batch starting mid-recording must NOT wipe the banner state
+    status.start_run(["a.m4a"])
+    assert status.recording()["pid"] == 4242
+    status.set_stage("a.m4a", "transcribing", duration=600)
+    assert status.recording()["pid"] == 4242
+    status.finish_file("a.m4a", True, "ok")
+    status.end_run()
+    assert status.recording()["pid"] == 4242  # outlives the whole run
+    status.clear_recording()
+    assert status.recording() is None

@@ -12,6 +12,11 @@ ICLOUD_DIR = Path(
     )
 )
 MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR", HOME / "Projects/brain/meetings"))
+# where the on-device meeting recorder drops finished captures — a LOCAL folder
+# (not iCloud): these calls are sensitive and the files are large, so they never
+# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
+RECORDINGS_DIR = Path(os.environ.get(
+    "STT_RECORDINGS_DIR", HOME / "Library/Application Support/com.stt-workflow/recordings"))
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   Path(__file__).resolve().parent.parent))
 VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
@@ -117,6 +122,10 @@ def source_dir() -> Path:
 
 def meetings_dir() -> Path:
     return Path(_env_file().get("STT_MEETINGS_DIR") or MEETINGS_DIR)
+
+
+def recordings_dir() -> Path:
+    return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
 
 
 # --- Per-meeting folder layout ---

@@ -538,3 +538,23 @@ def test_extract_audio_reencodes_non_aac_tracks(tmp_path):
     streams = _probe_streams(dst)
     assert ("aac", "audio") in streams
     assert all(t != "video" for c, t in streams)
+
+
+def test_iter_sources_sweeps_recordings_folder(sandbox):
+    """The batch must ingest the recorder's staging folder as a second source,
+    skip in-progress dot-prefixed captures, and process a name present in both
+    folders only once."""
+    from stt import config
+    src = config.source_dir()
+    rec = config.recordings_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
+    (src / "From iCloud 05212026.m4a").write_bytes(b"a")
+    (rec / "Team Call 07092026.m4a").write_bytes(b"b")
+    (rec / ".rec-inprogress.caf").write_bytes(b"c")   # live capture, must be skipped
+    (rec / ".Team Call 07092026.m4a.part").write_bytes(b"d")  # finalize temp, skipped
+    names = [p.name for p in run_batch.iter_sources(src)]
+    assert "From iCloud 05212026.m4a" in names
+    assert "Team Call 07092026.m4a" in names
+    assert not any(n.startswith(".") for n in names)
+    assert len(names) == len(set(names))  # no dupes across folders
