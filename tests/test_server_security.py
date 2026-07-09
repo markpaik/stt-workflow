@@ -635,3 +635,15 @@ def test_automation_requires_the_agent(sandbox, monkeypatch):
     monkeypatch.setattr(srv, "AGENT", sandbox / "missing.plist")
     r = srv.write_automation(watch=False)
     assert r["ok"] is False and "install-agent" in r["error"]
+
+
+def test_history_endpoint_returns_full_merged_history(running_server):
+    from stt import status
+    status.start_run(["a.m4a", "b.m4a"])
+    status.finish_file("a.m4a", True, "2 speaker(s)")
+    status.finish_file("b.m4a", False, "boom")
+    st, body = _get(running_server, "/api/history")
+    assert st == 200
+    names = [r["name"] for r in body["results"]]
+    assert names == ["b.m4a", "a.m4a"]
+    assert body["results"][0]["ok"] is False

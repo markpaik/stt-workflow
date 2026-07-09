@@ -316,3 +316,39 @@ def test_stage_breakdown_states(sandbox):
     assert by["diarizing"]["state"] == "next" and by["diarizing"]["est"] > 0
     # unknown duration -> no breakdown at all
     assert status.stage_breakdown({"stage": "transcribing"}) is None
+
+
+def test_finish_file_appends_to_permanent_history(sandbox):
+    status.start_run(["a.m4a", "b.m4a"])
+    status.finish_file("a.m4a", True, "2 speaker(s)")
+    status.finish_file("b.m4a", False, "ffmpeg exploded")
+    lines = status.HISTORY_LOG.read_text().splitlines()
+    assert len(lines) == 2  # one line per result, oldest first on disk
+    h = status.history()
+    assert [r["name"] for r in h] == ["b.m4a", "a.m4a"]  # newest first
+    assert h[0]["ok"] is False and "ffmpeg" in h[0]["summary"]
+
+
+def test_history_includes_pre_log_ring_entries_once(sandbox):
+    # results recorded before results.jsonl existed live only in the status
+    # ring — history() must surface them, and must not double-count entries
+    # present in both places
+    import json
+    status.start_run(["new.m4a"])
+    status.finish_file("new.m4a", True, "ok")
+    d = status.read()
+    d["recent"].append({"name": "old.m4a", "ok": True,
+                        "summary": "from before the log", "at": "2026-01-01T09:00:00"})
+    status.STATUS_PATH.write_text(json.dumps(d))
+    h = status.history()
+    assert [r["name"] for r in h] == ["new.m4a", "old.m4a"]
+
+
+def test_history_survives_a_corrupt_log_line(sandbox):
+    status.start_run(["a.m4a"])
+    status.finish_file("a.m4a", True, "ok")
+    with open(status.HISTORY_LOG, "a") as f:
+        f.write("{not json\n")
+    status.start_run(["b.m4a"])
+    status.finish_file("b.m4a", True, "ok")
+    assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]

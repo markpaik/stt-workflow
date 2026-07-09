@@ -15,6 +15,7 @@ from datetime import datetime
 from . import config
 
 STATUS_PATH = config.PROJECT_DIR / "status.json"
+HISTORY_LOG = config.PROJECT_DIR / "results.jsonl"  # permanent, one line per result
 
 # ordered pipeline stages (for progress estimation / display)
 STAGES = ["queued", "downloading", "converting", "transcribing", "diarizing",
@@ -257,11 +258,38 @@ def clear_stage(name):
 def finish_file(name, ok, summary=""):
     with _lock():
         d = read()
+        entry = {"name": name, "ok": bool(ok), "summary": summary, "at": _now()}
         recent = d.get("recent", [])
-        recent.insert(0, {"name": name, "ok": bool(ok), "summary": summary, "at": _now()})
+        recent.insert(0, entry)
         d["recent"] = recent[:20]
         d.get("active", {}).pop(name, None)
         _write(d)
+        try:  # the permanent history — appending must never break the pipeline
+            with open(HISTORY_LOG, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass
+
+
+def history():
+    """Every result ever recorded, newest first: the permanent results.jsonl
+    merged with the status ring (which covers results from before the log
+    existed), deduplicated by (name, at)."""
+    rows = []
+    try:
+        if HISTORY_LOG.exists():
+            for ln in HISTORY_LOG.read_text().splitlines():
+                with contextlib.suppress(json.JSONDecodeError):
+                    rows.append(json.loads(ln))
+    except OSError:
+        pass
+    rows.reverse()  # newest-last on disk; the sort below is stable, so ties
+    # (results finishing within the same second) must already be newest-first
+    seen = {(r.get("name"), r.get("at")) for r in rows}
+    rows.extend(r for r in read().get("recent", [])
+                if (r.get("name"), r.get("at")) not in seen)
+    rows.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return rows
 
 
 def end_run():
