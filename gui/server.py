@@ -1119,6 +1119,16 @@ flex:none;width:46px}
 .toggle{min-width:52px}
 .mgroup{font-size:11.5px;font-weight:600;color:var(--sub);text-transform:uppercase;
 letter-spacing:.08em;padding:14px 0 3px;font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.mghdr{cursor:pointer;user-select:none}
+.mghdr:hover{color:var(--ink)}
+#meetings{position:relative;max-height:62vh}
+#mrail{display:none;flex:none;flex-direction:column;gap:1px;padding:10px 0 0;
+max-height:62vh;overflow-y:auto;overscroll-behavior:contain;
+font-family:ui-monospace,"SF Mono",Menlo,monospace}
+#mrail .yr{font-size:10.5px;font-weight:700;color:var(--sub);letter-spacing:.08em;padding:8px 8px 2px}
+#mrail button{border:0;background:none;color:var(--sub);text-align:left;padding:2.5px 8px;
+border-radius:6px;cursor:pointer;font-size:11.5px;font-family:inherit;letter-spacing:.04em;text-transform:uppercase}
+#mrail button:hover{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--ink)}
 mark{background:color-mix(in srgb,var(--warn) 26%,transparent);color:inherit;border-radius:3px}
 mark.cur{background:color-mix(in srgb,var(--accent) 30%,transparent);outline:1.5px solid var(--accent)}
 .pnitem{padding:7px 10px;border-radius:6px;cursor:pointer}
@@ -1255,7 +1265,10 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <input type="text" id="mfilter" placeholder="Search words or titles…"
            oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
   <div id="searchhits"></div>
-  <div id="meetings" class="inset"></div>
+  <div style="display:flex;gap:10px;align-items:stretch">
+    <div id="mrail"></div>
+    <div id="meetings" class="inset" style="flex:1;min-width:0"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -1292,6 +1305,21 @@ function stageLine(st){ // done: actual · active: elapsed of expected · ahead:
   return parts.length?`<div class="sub" style="margin-top:3px">${parts.join(' · ')}</div>`:'';
 }
 let S=null, selected=new Set(), showHidden=false;
+// collapsible transcript groups: overrides persist per sort mode; the newest
+// month (or first letter) is open unless the user collapsed it
+const MG={ov:JSON.parse(localStorage.getItem('stt_mgroups')||'{}'),keys:[],sort:'date'};
+function mgToggle(key,open){
+  MG.ov[MG.sort+':'+key]=open?1:0;
+  localStorage.setItem('stt_mgroups',JSON.stringify(MG.ov));
+  render();
+}
+function mgJump(i){
+  const key=MG.keys[i];
+  if(key===undefined)return;
+  if(MG.ov[MG.sort+':'+key]!==1){mgToggle(key,1)}
+  const el=document.getElementById('mg-'+i),c=$('#meetings');
+  if(el&&c)c.scrollTop=el.offsetTop-6;
+}
 async function api(p,body){const r=await fetch(p,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
 function esc(s){return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 // For values embedded as a JS string literal INSIDE an onclick="..." attribute (e.g. onclick="f('${escJs(x)}')").
@@ -1430,7 +1458,8 @@ function render(){
     :'Cloud assistant: transcript text uploads for summaries and Ask. Strict recordings always stay local.';
   $('#srcpath').textContent=s.paths.source.replace(/^\/Users\/[^/]+/,'~');
   $('#dstpath').textContent=s.paths.dest.replace(/^\/Users\/[^/]+/,'~');
-  // meetings: filter by title/speaker, newest meeting-date first, grouped by month
+  // meetings: filter by title/speaker, newest meeting-date first, in
+  // collapsible groups (month, or first letter when sorted by name)
   const mq=($('#mfilter').value||'').toLowerCase();
   const msort=($('#msort')&&$('#msort').value)||'date';
   const shown=s.meetings.filter(m=>!mq||m.base.toLowerCase().includes(mq)
@@ -1438,15 +1467,24 @@ function render(){
     .slice().sort(msort==='name'
       ?(a,b)=>a.base.toLowerCase().localeCompare(b.base.toLowerCase())
       :(a,b)=>(b.date||'').localeCompare(a.date||''));
-  let lastMon='';
   if(document.querySelector('#meetings .inline-edit'))return;  // typing in place — don't wipe it
-  $('#meetings').innerHTML=shown.map(m=>{
-    const mon=msort==='name'
+  const groups=[];
+  for(const m of shown){
+    const key=msort==='name'
       ?(/^[a-z]/i.test(m.base)?m.base[0].toUpperCase():'#')
       :(m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated');
-    const hdr=mon!==lastMon?`<div class="mgroup">${mon}</div>`:'';lastMon=mon;
+    if(!groups.length||groups[groups.length-1].key!==key)groups.push({key,rows:[]});
+    groups[groups.length-1].rows.push(m);
+  }
+  MG.keys=groups.map(g=>g.key);MG.sort=msort;
+  const mgOpen=(k,i)=>{
+    if(mq)return true;  // searching: every group with matches shows its rows
+    const ov=MG.ov[msort+':'+k];
+    return ov!==undefined?!!ov:i===0;  // newest month / first letter open by default
+  };
+  const mrow=m=>{
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
-    return hdr+`<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
+    return `<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
     <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}',event)" title="Click to rename">${esc(m.base)}</span></div>
     <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
@@ -1455,7 +1493,27 @@ function render(){
     <button onclick="openSummary('${escJs(m.base)}')">Summary</button>
     <button onclick="openAsk('${escJs(m.base)}')" ${S.llm_available?'':'disabled'} title="${S.llm_available?'Ask questions about this meeting, answered on this Mac':'Needs the local model (.venv-llm) installed'}">Ask</button>
     <button onclick="openMeetingMenu('${escJs(m.base)}')" title="Export, rename, reprocess…">⋯</button>
-  </div>`}).join('')||`<div class="sub">${mq?'No transcript titles match “'+esc(mq)+'”.':'No transcripts yet — process something above.'}</div>`;
+  </div>`};
+  $('#meetings').innerHTML=groups.map((g,i)=>{
+    const openG=mgOpen(g.key,i);
+    return `<div class="mgroup mghdr" id="mg-${i}" onclick="mgToggle('${escJs(g.key)}',${openG?0:1})" title="${openG?'Collapse':'Expand'} ${esc(g.key)}"><span style="display:inline-block;width:15px">${openG?'▾':'▸'}</span>${esc(g.key)} · ${g.rows.length}</div>`
+      +(openG?g.rows.map(mrow).join(''):'');
+  }).join('')||`<div class="sub">${mq?'No transcript titles match “'+esc(mq)+'”.':'No transcripts yet — process something above.'}</div>`;
+  // jump rail: one entry per group, year markers between months
+  const rail=$('#mrail');
+  if(groups.length>=3&&!mq){
+    let lastYr='';
+    rail.innerHTML=groups.map((g,i)=>{
+      let h='';
+      if(msort==='date'){
+        const yr=(g.key.match(/\d{4}/)||[''])[0];
+        if(yr&&yr!==lastYr){h=`<div class="yr">${yr}</div>`;lastYr=yr;}
+        return h+`<button onclick="mgJump(${i})" title="Jump to ${esc(g.key)} (${g.rows.length})">${g.key==='Undated'?'—':esc(g.key.slice(0,3))}</button>`;
+      }
+      return `<button onclick="mgJump(${i})" title="Jump to ${esc(g.key)} (${g.rows.length})">${esc(g.key)}</button>`;
+    }).join('');
+    rail.style.display='flex';
+  }else rail.style.display='none';
   _syncVoiceBtns();  // re-render rebuilt the ▶ buttons; restore ◼ on the playing one
 }
 // Voice-sample playback is tracked by speaker KEY (not DOM node), because the
