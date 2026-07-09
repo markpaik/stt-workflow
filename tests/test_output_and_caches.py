@@ -341,3 +341,20 @@ def test_promoted_split_voice_does_not_resurrect_as_new_unknown(sandbox):
     w = rng.normal(size=256)
     out = unknowns.assign({"SC": w}, {"SC": None}, "Mtg T")
     assert out["SC"].startswith("U")
+
+
+def test_diarcache_channel_extras_roundtrip_and_backcompat(sandbox):
+    p = sandbox / "m.diar.npz"
+    turns = [{"start": 0.0, "end": 2.0, "cluster": "SPEAKER_00"}]
+    diarcache.save(p, turns, [np.ones(8)], {"SPEAKER_00": np.ones(8)},
+                   mark_spans=[(3.0, 5.0)], mark_embs=[np.ones(8) * 0.7],
+                   channel_mode="stereo_channel_aware", mic_speaker="Mark Paik")
+    ch = diarcache.load_channel(p)
+    assert ch["mode"] == "stereo_channel_aware" and ch["mic_speaker"] == "Mark Paik"
+    assert ch["spans"] == [(3.0, 5.0)]
+    assert np.allclose(ch["embs"][0], np.ones(8) * 0.7)
+    # a plain (mono) cache reports no channel data -> relabel treats it as mono
+    q = sandbox / "mono.diar.npz"
+    diarcache.save(q, turns, [np.ones(8)], {"SPEAKER_00": np.ones(8)})
+    mono = diarcache.load_channel(q)
+    assert mono["mode"] is None and mono["spans"] == []

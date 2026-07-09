@@ -9,8 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-from . import (audio, config, diarcache, diarize, merge, output, sanitize,
-               punctuate, unknowns, verify)
+from . import (audio, channels, config, diarcache, diarize, identify, merge,
+               output, sanitize, punctuate, unknowns, verify)
 
 
 def _load_asr(strict=False):
@@ -69,10 +69,77 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     return dates.meeting_date(src.stem) or fallback
 
 
+def _resolve_channel(src: Path, existing_json: Path, input_opts):
+    """(channel_layout, mic_speaker) for a stereo me/them recording, or
+    (None, None). Precedence mirrors _meeting_date: explicit input_opts, then
+    the stored meeting json (so a Redo keeps the mode after the source sidecar
+    is gone), then a <base>.opts.json sidecar next to a fresh source file."""
+    import json as _json
+
+    def _pick(d):
+        return (d or {}).get("channel_layout"), (d or {}).get("mic_speaker")
+
+    cl, ms = _pick(input_opts)
+    if cl:
+        return cl, ms
+    for path in (existing_json, src.with_suffix(".opts.json")):
+        if path and path.exists():
+            try:
+                cl, ms = _pick(_json.loads(path.read_text()))
+                if cl:
+                    return cl, ms
+            except (OSError, ValueError):
+                pass
+    return None, None
+
+
+def _plan_channels(base, src, mic_speaker):
+    """Decide whether to run the channel-aware path and prepare its inputs.
+    Returns (mode, wav_mic, wav_sys, plan, stats) where plan is
+    {"spans","embs","score"} when mode == 'stereo_channel_aware' else None.
+    The two split WAVs are always returned (for cleanup) when created."""
+    wav_mic = config.WORK_DIR / f"{base}.mic.16k.wav"
+    wav_sys = config.WORK_DIR / f"{base}.sys.16k.wav"
+    audio.to_wav16k_channel(src, wav_mic, 0)
+    audio.to_wav16k_channel(src, wav_sys, 1)
+    stats = channels.sanity(wav_mic, wav_sys)
+    if stats["dual_mono"]:
+        return "mono_fallback_dual_mono", wav_mic, wav_sys, None, stats
+    if stats["sys_dead"]:
+        return "mono_fallback_sys_dead", wav_mic, wav_sys, None, stats
+    mark_vp = identify.load_voiceprints().get(mic_speaker)
+    if mark_vp is None:
+        return "mono_fallback_no_enroll", wav_mic, wav_sys, None, stats
+    spans = channels.mic_spans(wav_mic, wav_sys)
+    embs = diarize.embed_spans(wav_mic, spans)
+    kept, kept_embs, scores = [], [], []
+    for sp, em in zip(spans, embs):
+        if em is None:
+            continue
+        sc = identify.score_against(em, mark_vp)
+        if sc >= config.CHANNEL_FORCE_MIN:
+            kept.append(sp)
+            kept_embs.append(em)
+            scores.append(sc)
+    frac = (len(kept) / len(spans)) if spans else 0.0
+    stats.update({"n_mic_spans": len(spans), "n_kept": len(kept),
+                  "pass_fraction": round(frac, 3)})
+    if not spans:
+        # nobody dominated the mic at all (an all-listening meeting, or the mic
+        # speaker never spoke) -> nothing to overlay; process as mono
+        return "mono_fallback_no_me", wav_mic, wav_sys, None, stats
+    if frac < config.CHANNEL_PASS_FRACTION:
+        # candidates existed but too few match the enrolled voice -> heavy bleed
+        # or a wrong mapping; the split can't be trusted, use the mono mix
+        return "mono_fallback_bleed", wav_mic, wav_sys, None, stats
+    plan = {"spans": kept, "embs": kept_embs, "score": float(sum(scores) / len(scores))}
+    return "stereo_channel_aware", wav_mic, wav_sys, plan, stats
+
+
 def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                  strict=None, allowed_names=None, report=None, do_verify=None,
                  num_speakers=None, min_speakers=None, max_speakers=None,
-                 track_unknowns=True) -> dict:
+                 track_unknowns=True, input_opts=None) -> dict:
     src = Path(src)
     report = report or (lambda *a, **k: None)
     strict = config.STRICT if strict is None else strict
@@ -87,6 +154,13 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
 
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
     wav = config.WORK_DIR / f"{base}.16k.wav"
+    # channel-aware mode is opt-in per recording (the meeting recorder's stereo
+    # me/them layout + an enrolled mic speaker); everything else is byte-for-byte
+    # today's mono path.
+    channel_layout, mic_speaker = _resolve_channel(src, json_path, input_opts)
+    channel_mode, channel_stats = "mono", None
+    wav_mic = wav_sys = None
+    mic_plan = None
     try:
         dur = audio.duration_sec(src)  # probe the source so ETA is known up front
     except Exception:
@@ -97,10 +171,15 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # source, killed mid-write) must still hit the finally below and
         # clean up the scratch WAV, not leak it until the next batch's
         # clean_scratch() — worse, it would leak on every bad file in a run.
-        audio.to_wav16k(src, wav)
+        audio.to_wav16k(src, wav)  # the mono MIX — ASR input, and diar input in mono mode
         if dur is None:
             dur = audio.duration_sec(wav)
             report("converting", 1.0, dur)
+
+        if (channel_layout == "mic_left_system_right" and mic_speaker and do_diarize
+                and audio.probe_channels(src) >= 2):
+            channel_mode, wav_mic, wav_sys, mic_plan, channel_stats = _plan_channels(
+                base, src, mic_speaker)
 
         report("transcribing", 0.0)
         asr = _load_asr(strict)
@@ -112,13 +191,25 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         turns, labels, names, overlaps, diar = [], [], {}, [], None
         if do_diarize:
             report("diarizing", 0.0)
-            diar = diarize.diarize(wav, strict=strict, words=words,
+            # channel-aware: diarize the SYSTEM channel only (the remote
+            # participants), so the mic owner's speech never joins their
+            # clusters and me-vs-them overlap disappears.
+            diar_wav = wav_sys if channel_mode == "stereo_channel_aware" else wav
+            diar = diarize.diarize(diar_wav, strict=strict, words=words,
                                    allowed_names=allowed_names, context=base,
                                    num_speakers=num_speakers,
                                    min_speakers=min_speakers, max_speakers=max_speakers,
                                    progress=lambda f: report("diarizing", f))
             turns, labels, names = diar["turns"], diar["labels"], diar["names"]
             overlaps = diar["overlaps"]
+            if channel_mode == "stereo_channel_aware":
+                # overlay the mic owner's turns onto the system diarization
+                turns, names, extra_ov = channels.combine_turns(
+                    turns, names, mic_plan["spans"], mic_speaker, mic_plan["score"])
+                overlaps = overlaps + extra_ov
+                labels = labels + [channels.MIC_ID]  # so build_speakers emits the mic speaker
+                channel_stats["n_mic_turns"] = sum(
+                    1 for t in turns if t["speaker"] == channels.MIC_ID)
             if track_unknowns:
                 # stable global numbering for unknown voices across meetings
                 uid_map = unknowns.assign(diar["embeddings"], diar["cluster_names"], base)
@@ -153,6 +244,10 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                 verify_regions, verify_engine = None, None
     finally:
         wav.unlink(missing_ok=True)
+        if wav_mic:
+            wav_mic.unlink(missing_ok=True)
+        if wav_sys:
+            wav_sys.unlink(missing_ok=True)
 
     named = [s["name"] for s in speakers if s["name"]]
     # when transcription actually ran (initial OR redo). Distinct from
@@ -181,6 +276,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "overlap_spans": [[s, e] for s, e in overlaps],
         "refine_stats": diar["refine_stats"] if diar else None,
     }
+    if channel_layout:  # a recording that declared a me/them layout
+        meta["channel_layout"] = channel_layout
+        meta["mic_speaker"] = mic_speaker
+        meta["channel_mode"] = channel_mode  # stereo_channel_aware or a mono_fallback_*
+        if channel_stats:
+            meta["channel_stats"] = channel_stats
     # a redo invalidates old review decisions (new cluster ids) and any stale
     # verify regions (new word timings) — archive/remove them, never half-apply
     from . import review
@@ -206,9 +307,16 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         os.replace(emb_tmp, emb_path)
         saved_emb = emb_path
         # cache raw turns + per-turn embeddings + overlaps so relabel can
-        # re-attribute later without re-diarizing
+        # re-attribute later without re-diarizing. Persist the SYSTEM-channel
+        # overlaps only (not the mic/system double-talk added by combine) plus
+        # the mic spans + their embeddings, so relabel reconstructs the exact
+        # same overlay by re-gating against the CURRENT voiceprint.
+        mark = mic_plan or {}
         diarcache.save(diar_path, diar["raw_turns"], diar["turn_embeddings"],
-                       diar["embeddings"], overlaps=overlaps)
+                       diar["embeddings"], overlaps=diar["overlaps"],
+                       mark_spans=mark.get("spans"), mark_embs=mark.get("embs"),
+                       channel_mode=channel_mode if channel_layout else None,
+                       mic_speaker=mic_speaker)
 
     return {
         "base": base, "txt": txt_path, "json": json_path, "emb": saved_emb,

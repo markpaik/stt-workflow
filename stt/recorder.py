@@ -139,6 +139,15 @@ def finalize(caf: Path, name=None) -> dict:
         part.unlink(missing_ok=True)
         return {"ok": False, "error": "could not transcode the recording",
                 "detail": r.stderr[-400:].decode(errors="replace")}
+    # declare the me/them channel layout for channel-aware diarization BEFORE
+    # the audio becomes visible, so the batch always sees the sidecar with it.
+    # Only when the mic speaker is configured (and expected to be enrolled);
+    # otherwise the recording just processes as mono.
+    mic = config.mic_speaker()
+    if mic:
+        import json
+        (staging / f"{final}.opts.json").write_text(json.dumps(
+            {"channel_layout": "mic_left_system_right", "mic_speaker": mic}))
     os.replace(part, dst)
     caf.unlink(missing_ok=True)
     status.clear_recording()

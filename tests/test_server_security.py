@@ -648,3 +648,16 @@ def test_history_endpoint_returns_full_merged_history(running_server):
     names = [r["name"] for r in body["results"]]
     assert names == ["b.m4a", "a.m4a"]
     assert body["results"][0]["ok"] is False
+
+
+def test_mic_speaker_endpoint_persists_and_clears(running_server):
+    from stt import config
+    st, body = _post(running_server, "/api/mic_speaker", {"name": "Mark Paik"})
+    assert st == 200 and body["mic_speaker"] == "Mark Paik"
+    assert config.mic_speaker() == "Mark Paik"
+    st, body = _post(running_server, "/api/mic_speaker", {"name": ""})
+    assert body["mic_speaker"] is None
+    assert config.mic_speaker() is None
+    # never echoed as an env dump; state carries only the name
+    _, state = _get(running_server, "/api/state")
+    assert "mic_speaker" in state

@@ -13,8 +13,8 @@ import json
 import sys
 from pathlib import Path
 
-from stt import (config, diarcache, diarize, identify, merge, output, punctuate,
-                 refine, unknowns)
+from stt import (channels, config, diarcache, diarize, identify, merge, output,
+                 punctuate, refine, unknowns)
 
 
 def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
@@ -65,6 +65,26 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                 if label in names and not names[label].get("name"):
                     names[label]["global_id"] = uid
                     names[label]["display"] = unknowns.display(uid)
+
+        # channel-aware recordings: re-overlay the mic owner's turns from the
+        # cache, RE-GATED against the CURRENT voiceprint — so un-enrolling the
+        # mic speaker (or improving their prints) updates past meetings too.
+        ch = diarcache.load_channel(dpath)
+        if ch["mode"] == "stereo_channel_aware" and ch["mic_speaker"]:
+            mark_vp = identify.load_voiceprints().get(ch["mic_speaker"])
+            kept, scores = [], []
+            if mark_vp is not None:
+                for sp, em in zip(ch["spans"], ch["embs"]):
+                    if em is None:
+                        continue
+                    sc = identify.score_against(em, mark_vp)
+                    if sc >= config.CHANNEL_FORCE_MIN:
+                        kept.append(sp)
+                        scores.append(sc)
+            if kept:
+                turns, names, extra_ov = channels.combine_turns(
+                    turns, names, kept, ch["mic_speaker"], sum(scores) / len(scores))
+                overlaps = overlaps + extra_ov
 
         labels = sorted(names.keys())
         segments, labeled_words = merge.assign_and_group(words, turns, names,

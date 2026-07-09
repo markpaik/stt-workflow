@@ -48,6 +48,33 @@ def to_wav16k(src: Path, dst: Path) -> Path:
     return dst
 
 
+def probe_channels(src: Path) -> int:
+    """Channel count of the first audio stream, or 0 if unknown. Cheap guard
+    before channel-aware processing (a mono file has nothing to split)."""
+    try:
+        out = subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=channels", "-of", "default=nk=1:nw=1", str(src)],
+            capture_output=True, text=True)
+        return int(out.stdout.strip())
+    except (ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def to_wav16k_channel(src: Path, dst: Path, channel: int) -> Path:
+    """Decode ONE channel (0 = left, 1 = right) of a stereo source to 16 kHz
+    mono PCM — the per-channel inputs for channel-aware diarization. The `pan`
+    filter picks a single channel without averaging, so no cross-channel bleed
+    is introduced by the extraction itself."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [FFMPEG, "-y", "-i", str(src), "-vn",
+         "-af", f"pan=mono|c0=c{int(channel)}",
+         "-ar", str(config.SAMPLE_RATE), "-c:a", "pcm_s16le", str(dst)],
+        check=True, capture_output=True)
+    return dst
+
+
 def extract_audio(src: Path, dst: Path) -> Path:
     """Extract the audio track from a video into an .m4a (stream-copied when AAC,
     re-encoded otherwise) — the archival copy stored next to transcripts."""
