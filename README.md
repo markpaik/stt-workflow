@@ -11,7 +11,7 @@ model download.
 Built for meetings you can't send to a cloud service: 1-on-1s, interviews,
 personnel conversations, anything sensitive.
 
-<img src="docs/img/panel.png" width="826" alt="Control panel with a live run and the queue">
+<img src="docs/img/panel.png" width="1226" alt="Control panel: live run, queue, and results in the work column, speaker roster in the side column">
 
 ## Getting started
 
@@ -34,7 +34,14 @@ below.
 ## The workflow
 
 Everything below happens in the control panel (`http://127.0.0.1:8737`,
-local-only) or its menu-bar companion. The engine room: two GPU-accelerated
+local-only) or its menu-bar companion. On a wide window the panel works in
+two columns: the work itself (processing, queue, transcripts) on the left,
+and the speaker roster in a side column that stays put while you scroll; on
+smaller windows everything stacks into one column. Settings, the processing
+history, and the Ask chat each slide over the page from the right, reachable
+at any scroll position.
+
+The engine room: two GPU-accelerated
 transcription engines on Apple's MLX framework (NVIDIA Parakeet TDT 0.6B v2,
 ~30× realtime and the English word-error-rate leader among local models, and
 Whisper large-v3/turbo for punctuation and noise robustness), pyannote
@@ -72,6 +79,14 @@ and a Stop button kills the whole process group and verifies nothing is
 left. Runs are idempotent by manifest: the iCloud original is
 deleted only after outputs are verified, and a run interrupted mid-file
 simply re-runs that file next time.
+
+Every finished file lands under Recent results with its speaker count and
+attendees; failures show their full error and retry on the next run. The
+History button opens the complete, permanent record of everything the
+pipeline has ever processed, grouped by day, searchable by name, and
+filterable to just failures:
+
+<img src="docs/img/history.png" width="560" alt="Processing history flyout with day groups, search, and outcome filter">
 
 Reprocessing an existing meeting (Redo) offers the same options:
 
@@ -118,13 +133,14 @@ stable numbers across meetings ("Speaker 2" is the same person everywhere),
 and matching is open-set with a score-plus-margin gate: a stranger near an
 enrolled voice never inherits that person's name, and interviews stay
 honest. One-time voices you chose to hide restore with one click from the
-"n hidden" toggle. The roster lists alphabetically by first name with
-unnamed voices at the bottom and scrolls as it grows; a search box finds
-any speaker by name (or, for unknown voices, by the meeting they were heard
-in), and an "unidentified only" filter shows just the voices still waiting
-for a name:
+"n hidden" toggle. On a wide window the roster keeps its own side column,
+in view while you work through the library. It lists alphabetically by
+first name with unnamed voices at the bottom and scrolls as it grows; a
+search box finds any speaker by name (or, for unknown voices, by the
+meeting they were heard in), and an "unidentified only" filter shows just
+the voices still waiting for a name:
 
-<img src="docs/img/speakers.png" width="826" alt="Speaker library with search and the unidentified-only filter">
+<img src="docs/img/speakers.png" width="380" alt="Speaker roster in its side column with search and the unidentified-only filter">
 
 "Who is this?" makes the identification itself easy: one clip from each
 meeting the voice was heard in, labeled with its source, playing up to 45
@@ -162,13 +178,15 @@ dialog and in the hover tooltip on any meeting row:
 
 <img src="docs/img/summary.png" width="468" alt="Summary dialog with committed next steps">
 
-The same assistant powers **Ask**: pick a meeting, ask questions about
-it, and get answers drawn from that transcript only, citing timestamps.
-Follow-up questions understand the earlier ones, and the thread is never
-stored. On the local model each answer takes roughly 20-60 seconds (the
-model loads fresh per question) and nothing leaves the machine:
+The same assistant powers **Ask**, a chat that slides over the panel: pick
+a meeting, ask, and answers come from that transcript only, citing
+timestamps. Questions and answers read as conversation bubbles, follow-ups
+understand the earlier thread, and nothing is ever stored; the thread lives
+until you close the page or ask about a different meeting. On the local
+model each answer takes roughly 20-60 seconds (the model loads fresh per
+question) and nothing leaves the machine:
 
-<img src="docs/img/ask.png" width="468" alt="Ask dialog answering questions about one meeting">
+<img src="docs/img/ask.png" width="560" alt="Ask chat with question and answer bubbles and the input pinned at the bottom">
 
 Summaries and Ask can also run on a **cloud assistant** instead of the
 local model: bring an Anthropic key (Claude Haiku) or reuse your OpenAI
@@ -183,7 +201,11 @@ uploads audio.
 
 The library lists meetings by month or, with the sort toggle, alphabetically
 by title, showing each meeting's date, length, attendees, review chips, and
-summary snippet inline; Read, Summary, and Ask are one click from any row:
+summary snippet inline; Read, Summary, and Ask are one click from any row.
+Built for growth: months collapse to headers with counts (the newest stays
+open, and your choices stick), and the rail on the left jumps straight to
+any month or year, so a hundred meetings stay one glance deep. Search spans
+every meeting and shows whichever groups match, expanded:
 
 <img src="docs/img/transcripts.png" width="826" alt="Meeting library">
 
