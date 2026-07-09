@@ -51,3 +51,4 @@ __pycache__/
 
 # macOS noise
 .DS_Store
+native/stt-recorder

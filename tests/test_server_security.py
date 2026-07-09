@@ -606,10 +606,11 @@ def test_watch_and_nightly_toggle_independently(fake_agent):
     assert d["StartCalendarInterval"] == {"Hour": 2, "Minute": 15}
     assert d["RunAtLoad"] is True
 
-    # re-enable watch: stamps the CURRENT source folder, healing stale paths
+    # re-enable watch: stamps the CURRENT source folder AND the recordings
+    # staging folder (the meeting recorder's output), healing stale paths
     r = srv.write_automation(watch=True)
     d = plistlib.loads(p.read_bytes())
-    assert d["WatchPaths"] == [str(config.source_dir())]
+    assert d["WatchPaths"] == [str(config.source_dir()), str(config.recordings_dir())]
     assert len(reloads) == 4               # every change reloaded the agent
 
 

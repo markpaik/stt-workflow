@@ -78,9 +78,36 @@ def start_run(pending):
     except OSError:
         pgid = None
     with _lock():
+        prev = read()
+        # start_run rebuilds status.json from scratch — carry forward the keys
+        # that outlive a single batch: `recent` (result history) and
+        # `recording` (a capture in progress in the menu bar, whose banner must
+        # survive a batch kicking off mid-recording).
         _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
                 "active": {}, "pending": list(pending),
-                "recent": read().get("recent", [])})
+                "recent": prev.get("recent", []),
+                "recording": prev.get("recording")})
+
+
+def set_recording(info):
+    """Record that the menu-bar recorder is capturing (or clear with None).
+    Locked read-modify-write so it composes with the batch's own writes; the
+    key rides through start_run/set_stage/finish_file untouched."""
+    with _lock():
+        d = read()
+        if info is None:
+            d.pop("recording", None)
+        else:
+            d["recording"] = info
+        _write(d)
+
+
+def clear_recording():
+    set_recording(None)
+
+
+def recording():
+    return read().get("recording")
 
 
 def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None):

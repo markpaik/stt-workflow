@@ -16,8 +16,15 @@ source_dir() {
   echo "${d:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings}"
 }
 
+recordings_dir() {
+  local d=""
+  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_RECORDINGS_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  echo "${d:-$HOME/Library/Application Support/com.stt-workflow/recordings}"
+}
+
 write_batch_plist() {
   mkdir -p "$AGENTS" "$BASE/logs"
+  mkdir -p "$(recordings_dir)"   # launchd can only watch a path that exists
   cat > "$BATCH_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -44,7 +51,10 @@ write_batch_plist() {
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
   <key>WatchPaths</key>
-  <array><string>$(source_dir)</string></array>
+  <array>
+    <string>$(source_dir)</string>
+    <string>$(recordings_dir)</string>
+  </array>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$BASE/logs/stt.out.log</string>
@@ -133,6 +143,23 @@ case "${1:-}" in
   gui-restart)
     launchctl kickstart -k "gui/$U/$GUI_LABEL" && echo "Menu-bar app restarted."
     ;;
+  build-recorder)
+    # the meeting recorder helper (mic + system audio); Swift via the CLT.
+    # The embedded Info.plist + ad-hoc signature give the binary a STABLE
+    # identity, so the mic / system-audio permission grants persist across
+    # launches (only a rebuild re-prompts).
+    if ! xcrun --find swiftc >/dev/null 2>&1; then
+      echo "swiftc not found — install the Command Line Tools: xcode-select --install"; exit 1
+    fi
+    echo "Compiling the meeting recorder…"
+    swiftc "$BASE/native/recorder.swift" -O -o "$BASE/native/stt-recorder" \
+      -framework CoreAudio -framework AudioToolbox \
+      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+      -Xlinker "$BASE/native/Recorder-Info.plist"
+    codesign --force --sign - --identifier com.stt-workflow.recorder "$BASE/native/stt-recorder"
+    mkdir -p "$(recordings_dir)"
+    echo "Built $BASE/native/stt-recorder (recordings land in: $(recordings_dir))"
+    ;;
   *)
-    echo "usage: setup.sh {install-agent|uninstall-agent|reload|kick|status|gui-install|gui-uninstall|gui-restart}"; exit 2 ;;
+    echo "usage: setup.sh {install-agent|uninstall-agent|reload|kick|status|gui-install|gui-uninstall|gui-restart|build-recorder}"; exit 2 ;;
 esac
