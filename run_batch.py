@@ -254,11 +254,23 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
 
+    # the meeting recorder drops a <base>.opts.json next to a stereo capture,
+    # declaring its me/them channel layout; its contents are copied into the
+    # meeting .json by process_file (so a later Redo needs no sidecar)
+    import json as _json
+    input_opts = None
+    side = src.with_suffix(".opts.json")
+    if side.exists():
+        try:
+            input_opts = _json.loads(side.read_text())
+        except (OSError, ValueError):
+            input_opts = None
+
     res = pipeline.process_file(
         src, dest_dir=dest, do_diarize=opts["do_diarize"], strict=opts["strict"],
         do_verify=opts.get("verify", False),
         allowed_names=opts["allowed"], report=report,
-        track_unknowns=opts.get("track_unknowns", True))
+        track_unknowns=opts.get("track_unknowns", True), input_opts=input_opts)
     if cur["stage"]:  # close out the final stage (writing ends when we return)
         stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (_time.monotonic() - cur["t"])
     outputs = [res["txt"], res["json"]] + ([res["emb"]] if res["emb"] else [])
@@ -275,6 +287,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     success = res["txt"].exists() and res["json"].exists() and dest_audio.exists()
     if success and opts["do_move"] and src.resolve() != dest_audio.resolve():
         src.unlink()
+        side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"

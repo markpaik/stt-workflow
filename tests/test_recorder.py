@@ -88,3 +88,25 @@ def test_recover_orphans_sweeps_stray_caf(sandbox):
     names = recorder.recover_orphans()
     assert len(names) == 1
     assert not caf.exists()
+
+
+def test_finalize_writes_layout_sidecar_when_mic_speaker_set(sandbox, monkeypatch):
+    monkeypatch.setattr(config, "MIC_SPEAKER", "Mark Paik")
+    caf = _stereo_caf(config.recordings_dir() / ".rec-side01.caf")
+    status.set_recording({"pid": 999999, "caf": str(caf)})
+    r = recorder.finalize(caf, "Team Call")
+    assert r["ok"]
+    import json
+    side = config.recordings_dir() / f"{r['name']}.opts.json"
+    assert side.exists()
+    opts = json.loads(side.read_text())
+    assert opts == {"channel_layout": "mic_left_system_right", "mic_speaker": "Mark Paik"}
+
+
+def test_finalize_no_sidecar_without_mic_speaker(sandbox, monkeypatch):
+    monkeypatch.setattr(config, "MIC_SPEAKER", None)
+    caf = _stereo_caf(config.recordings_dir() / ".rec-side02.caf")
+    status.set_recording({"pid": 999999, "caf": str(caf)})
+    r = recorder.finalize(caf, "Team Call")
+    assert r["ok"]
+    assert not list(config.recordings_dir().glob("*.opts.json"))

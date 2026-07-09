@@ -401,6 +401,8 @@ def gather_state():
             "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
+            "mic_speaker": config.mic_speaker(),
+            "recorder_ready": (config.PROJECT_DIR / "native" / "stt-recorder").exists(),
             "rates": rates.summary(),
             "relabel_pending": (config.PROJECT_DIR / "relabel_pending.flag").exists(),
             "llm_available": summarize.available(),
@@ -965,6 +967,16 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/punctuate":
                 _env_file_set({"STT_PUNCTUATE": "1" if b.get("on") else "0"})
                 self._json({"ok": True})
+            elif u.path == "/api/mic_speaker":
+                # who "me" is on the meeting recorder's mic channel; enables the
+                # channel-aware path for new recordings (they process as mono
+                # until this is set and that person is enrolled)
+                name = (b.get("name") or "").strip()
+                if name:
+                    _env_file_set({"STT_MIC_SPEAKER": name})
+                else:
+                    _env_file_set({}, remove=("STT_MIC_SPEAKER",))
+                self._json({"ok": True, "mic_speaker": name or None})
             elif u.path == "/api/relabel":
                 _spawn([str(RUN_SH), "relabel", "--all"])
                 self._json({"ok": True})
@@ -1303,6 +1315,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <div class="row"><div class="grow"><div class="name">Punctuation cleanup</div>
     <div class="sub">Restore punctuation &amp; casing (never changes words)</div></div>
     <button class="toggle" id="punctbtn" onclick="togglePunct()"></button></div>
+  <div class="row"><div class="grow"><div class="name">Recorder: your voice</div>
+    <div class="sub" id="micnote">Your name on recorded calls, so the recorder separates you from the others. You must be enrolled as a speaker too.</div></div>
+    <button onclick="setMicSpeaker()" id="micbtn">Set…</button></div>
   <div class="row"><div class="grow"><div class="name">Speed calibration</div>
     <div class="sub" id="ratesnote"></div></div></div>
   <div class="row"><div class="grow"><div class="name">Model updates</div>
@@ -1471,6 +1486,13 @@ function render(){
   // punctuation toggle
   $('#punctbtn').textContent=s.punctuate?'On':'Off';
   $('#punctbtn').style.color=s.punctuate?'var(--ok)':'var(--sub)';
+  // recorder: mic speaker (channel-aware separation)
+  if($('#micbtn')){
+    $('#micbtn').textContent=s.mic_speaker?'Change…':'Set…';
+    $('#micnote').textContent=s.mic_speaker
+      ?`Recorded calls separate ${s.mic_speaker} (you) from the others. Enroll ${s.mic_speaker} as a speaker for this to take effect.`
+      :'Your name on recorded calls, so the recorder separates you from the others. You must be enrolled as a speaker too.';
+  }
   // learned speed rates
   $('#ratesnote').textContent=s.rates&&s.rates.runs
     ?`Measured from ${s.rates.runs} run${s.rates.runs>1?'s':''}: ${s.rates.text} realtime — estimates improve automatically`
@@ -1639,6 +1661,12 @@ async function pickFiles(){
   refresh();
 }
 function togglePunct(){api('/api/punctuate',{on:!S.punctuate}).then(refresh)}
+function setMicSpeaker(){
+  const cur=S.mic_speaker||'';
+  const n=prompt('Your name as it should appear on recorded meetings (exactly as you are enrolled in Speakers). Leave blank to turn this off.',cur);
+  if(n===null)return;
+  api('/api/mic_speaker',{name:n.trim()}).then(refresh);
+}
 
 // ---- full-text search across all transcripts ----
 let searchTimer=null;

@@ -135,6 +135,33 @@ def _embed_turns(pipe, wav_path, turns, overlaps, progress=None):
     return out, failures
 
 
+def embed_spans(wav_path, spans, min_dur=0.5):
+    """Embed each (start, end) span of `wav_path` with the SAME pyannote
+    embedder used for diarization, so the vectors are directly comparable to
+    enrolled voiceprints. Returns a list aligned with `spans` (None where a span
+    is too short or embedding failed). Used for the mic-channel safety net; no
+    overlap cleaning is needed because mic spans are already me-dominant."""
+    import soundfile as sf
+    import torch
+
+    pipe = _get_pipeline()
+    data, sr = sf.read(str(wav_path))
+    wav = torch.tensor(np.asarray(data), dtype=torch.float32)
+    emb = pipe._embedding
+    min_samples = int(max(0.1, min_dur) * sr)
+    out = []
+    for s, e in spans:
+        seg = wav[int(s * sr):int(e * sr)]
+        if seg.shape[-1] < min_samples:
+            out.append(None)
+            continue
+        try:
+            out.append(np.asarray(emb(seg.reshape(1, 1, -1))).reshape(-1))
+        except Exception:
+            out.append(None)
+    return out
+
+
 def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
             allowed_names=None, num_speakers=None, min_speakers=None,
             max_speakers=None, context="", progress=None) -> dict:

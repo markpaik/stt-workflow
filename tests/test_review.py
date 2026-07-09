@@ -739,3 +739,40 @@ def test_find_voice_clips_longest_first_with_true_durations(sandbox):
     # the single-clip wrapper still returns the capped tuple older callers expect
     base, start, dur = review.find_voice_clip("Mark")
     assert (base, start) == ("Mtg", 0.0) and dur <= 12.0
+
+
+def test_channel_aware_mic_speaker_replays_and_drops_on_unenroll(sandbox):
+    """relabel must rebuild the mic speaker's forced turns from the diar cache
+    by re-gating against the CURRENT voiceprint: present while enrolled, gone
+    after un-enrolling (which is how the mic speaker is 'removed' everywhere)."""
+    import relabel
+    from stt import channels
+    # distinct 8-d embeddings so the system centroids never accidentally match
+    e_mark = np.array([1., 0, 0, 0, 0, 0, 0, 0])
+    e_sys = np.array([0, 1., 0, 0, 0, 0, 0, 0])
+
+    data = {"source_file": "Call.m4a", "duration_sec": 6.0, "strict": False,
+            "one_time_speakers": False, "speakers": [], "segments": [],
+            "words": [{"start": 0.3, "end": 0.7, "word": "hello"},   # system turn 0-1
+                      {"start": 3.4, "end": 3.9, "word": "mine"}]}   # mic span 3-5
+    (mfile("Call", ".json")).write_text(json.dumps(data))
+    (mfile("Call", ".txt")).write_text("stub")
+    diarcache.save(mfile("Call", ".diar.npz"),
+                   [{"start": 0.0, "end": 1.0, "cluster": "SPEAKER_00"}],
+                   [e_sys], {"SPEAKER_00": e_sys},
+                   mark_spans=[(3.0, 5.0)], mark_embs=[e_mark],
+                   channel_mode="stereo_channel_aware", mic_speaker="Mark Paik")
+
+    identify.enroll("Mark Paik", e_mark, source="Call")
+    assert relabel.relabel_one("Call")
+    d = json.loads((mfile("Call", ".json")).read_text())
+    assert any(s["id"] == channels.MIC_ID and s["name"] == "Mark Paik"
+               for s in d["speakers"])
+    assert any(seg.get("name") == "Mark Paik" and "mine" in seg["text"].lower()
+               for seg in d["segments"])
+
+    # un-enroll Mark -> his forced turns must vanish on the next relabel
+    identify.remove_person("Mark Paik")
+    assert relabel.relabel_one("Call")
+    d2 = json.loads((mfile("Call", ".json")).read_text())
+    assert not any(s["id"] == channels.MIC_ID for s in d2["speakers"])

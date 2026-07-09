@@ -81,6 +81,22 @@ VERIFY = os.environ.get("STT_VERIFY", "0") == "1"
 # --- Punctuation restoration (fixes Parakeet's lowercase run-ons; word-preserving) ---
 PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
 
+# --- Channel-aware diarization (stereo recordings from the meeting recorder:
+# LEFT = mic/"me", RIGHT = system/"them"). Only engages when a recording
+# declares its layout AND names the mic speaker, who must be enrolled. Every
+# threshold is env-overridable so it can be calibrated against real recordings;
+# the voiceprint safety net + mono fallback keep a mis-tuned day from being
+# worse than plain mono. See stt/channels.py.
+MIC_SPEAKER = os.environ.get("STT_MIC_SPEAKER") or None  # who "me" is; None = feature off
+CHANNEL_FLOOR_DBFS = float(os.environ.get("STT_CHANNEL_FLOOR_DBFS", "-45"))   # mic noise gate
+CHANNEL_DOMINANCE_DB = float(os.environ.get("STT_CHANNEL_DOMINANCE_DB", "8")) # mic must beat system by this
+CHANNEL_ENTER_MS = float(os.environ.get("STT_CHANNEL_ENTER_MS", "200"))       # hysteresis: enter me-active
+CHANNEL_EXIT_MS = float(os.environ.get("STT_CHANNEL_EXIT_MS", "250"))         # hysteresis: leave me-active
+CHANNEL_BRIDGE_MS = float(os.environ.get("STT_CHANNEL_BRIDGE_MS", "200"))     # merge me-spans closer than this
+CHANNEL_MIN_SPAN_MS = float(os.environ.get("STT_CHANNEL_MIN_SPAN_MS", "300")) # drop me-spans shorter than this
+CHANNEL_FORCE_MIN = float(os.environ.get("STT_CHANNEL_FORCE_MIN", "0.55"))    # cosine gate: span really the mic speaker
+CHANNEL_PASS_FRACTION = float(os.environ.get("STT_CHANNEL_PASS_FRACTION", "0.5"))  # below this -> abandon, use mono
+
 # Append accepted/rejected identity-match scores here to build a real calibration
 # picture (enrolled-vs-stranger score distributions) over time.
 CALIBRATION_LOG = PROJECT_DIR / "calibration.jsonl"
@@ -126,6 +142,14 @@ def meetings_dir() -> Path:
 
 def recordings_dir() -> Path:
     return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
+
+
+def mic_speaker() -> str | None:
+    """Who "me" is on the meeting recorder's mic channel — read fresh from
+    stt.env so the menu-bar recorder (launched by launchd without stt.env in
+    its environment) still picks up a change without a rebuild. None = the
+    channel-aware path stays off and recordings process as mono."""
+    return _env_file().get("STT_MIC_SPEAKER") or MIC_SPEAKER
 
 
 # --- Per-meeting folder layout ---
