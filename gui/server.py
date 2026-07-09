@@ -1034,6 +1034,18 @@ h2{font:650 14px/1.2 -apple-system,system-ui,sans-serif;letter-spacing:-.015em;m
 display:flex;align-items:center;gap:8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
 padding:22px 24px;margin:18px 0}
+/* Two tracks on wide windows: fluid work column + fixed reference column.
+   minmax(0,1fr) + min-width:0 children so no content can force the track
+   past its container (the failure mode that broke the old grid). */
+@media(min-width:1180px){
+  body{max-width:1280px}
+  #cols{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px;align-items:start}
+  #colmain,#colside{min-width:0}
+  #colside{position:sticky;top:66px}
+  #spkcard h2{flex-wrap:wrap}
+  #spkcard #spkfilter{width:100%;order:9;margin-top:6px}
+  #spkcard .inset{max-height:calc(100vh - 330px)}
+}
 .row{display:flex;align-items:center;gap:10px;padding:10px 0;
 border-bottom:1px solid var(--hairline)}
 .row:last-child{border-bottom:0}
@@ -1183,6 +1195,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <span id="battery" class="chip"></span>
 </div>
 
+<div id="cols">
+<div id="colmain">
+
 <div class="card" id="activecard" style="display:none">
   <h2>Processing now</h2><div id="active"></div>
   <div class="row" style="border:0;padding-top:12px">
@@ -1297,7 +1312,10 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   </div>
 </div>
 
-<div class="card">
+</div>
+<aside id="colside">
+
+<div class="card" id="spkcard">
   <h2>Speakers <span class="grow"></span>
     <label class="sub" style="font-weight:400;white-space:nowrap" title="Show only voices without a name yet"><input type="checkbox" id="spkunk" class="checkbox" style="vertical-align:-2px" onchange="render()"> unidentified only</label>
     <input type="text" id="spkfilter" placeholder="Find a speaker…" oninput="render()" style="width:min(220px,34vw);font-size:13px"></h2>
@@ -1306,6 +1324,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <div id="unknowns"></div>
   </div>
   <div id="relnote" class="muted" style="display:none;margin-top:8px"></div>
+</div>
+
+</aside>
 </div>
 
 <dialog id="dlg"></dialog>
