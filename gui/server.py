@@ -2412,7 +2412,7 @@ async function askSend(){
   askRender();$('#askq').focus();
 }
 async function genSummary(base){
-  $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… '+(S.llm_backend==='local'?'(~15–30s)':'(a few seconds)');
+  $('#sumbody').innerHTML='<span class="spin"></span> Reading the transcript… '+(S.llm_backend==='local'?'(~10-20s)':'(a few seconds)');
   const r=await api('/api/suggest?base='+encodeURIComponent(base));
   $('#sumbody').textContent=r.summary||r.error||'No summary produced.';
   await refresh();
