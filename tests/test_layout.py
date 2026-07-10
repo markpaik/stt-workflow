@@ -72,12 +72,54 @@ def test_rename_renames_folder_and_every_file(sandbox):
     assert d["renamed_from"] == "Old Name 05212026"
 
 
-def test_rename_refuses_collision(sandbox):
+def test_rename_collision_uniquifies_instead_of_refusing(sandbox):
+    """Two recordings can legitimately end up wanting the same name (a
+    recurring meeting recorded twice in one day) — the rename lands as
+    'B (2)' rather than bouncing with an error, matching the recorder's own
+    naming."""
     mfile("A", ".json").write_text("{}")
     mfile("B", ".json").write_text("{}")
     r = summarize.rename_meeting("A", "B")
-    assert not r["ok"] and "exists" in r["error"]
-    assert config.meeting_dir("A").is_dir()  # nothing was touched
+    assert r["ok"] and r["base"] == "B (2)"
+    assert not config.meeting_dir("A").exists()
+    assert config.meeting_dir("B (2)").is_dir()
+    assert config.meeting_dir("B").is_dir()  # the existing meeting untouched
+
+
+def test_rename_appends_meeting_date_for_recurring_names(sandbox):
+    """Typing just 'Weekly Check-in' must not collide across weeks: the
+    meeting's own date is appended to the FILES (MMDDYYYY, so dates.py parses
+    it), while the panel shows the clean name via its title field."""
+    mfile("Voice Memo 042", ".json").write_text(json.dumps(
+        {"source_file": "Voice Memo 042.m4a", "date": "2026-07-03",
+         "segments": [], "speakers": [], "words": []}))
+    r = summarize.rename_meeting("Voice Memo 042", "Weekly Check-in")
+    assert r["ok"] and r["base"] == "Weekly Check-in 07032026"
+    assert config.meeting_dir("Weekly Check-in 07032026").is_dir()
+    # a name the user dated explicitly is left exactly as typed
+    mfile("Voice Memo 043", ".json").write_text(json.dumps(
+        {"source_file": "Voice Memo 043.m4a", "date": "2026-07-10",
+         "segments": [], "speakers": [], "words": []}))
+    r2 = summarize.rename_meeting("Voice Memo 043", "Special Review 06152026")
+    assert r2["ok"] and r2["base"] == "Special Review 06152026"
+    # same clean name, SAME date (recorded twice that day) -> ' (2)'
+    mfile("Voice Memo 044", ".json").write_text(json.dumps(
+        {"source_file": "Voice Memo 044.m4a", "date": "2026-07-03",
+         "segments": [], "speakers": [], "words": []}))
+    r3 = summarize.rename_meeting("Voice Memo 044", "Weekly Check-in")
+    assert r3["ok"] and r3["base"] == "Weekly Check-in 07032026 (2)"
+
+
+def test_display_title_strips_only_a_trailing_date_stamp(sandbox):
+    from gui import server as srv
+    assert srv._display_title("Weekly Check-in 07032026") == "Weekly Check-in"
+    assert srv._display_title("LT Meeting 05212026") == "LT Meeting"
+    # an 8-digit run that is NOT a valid date is part of the name
+    assert srv._display_title("Case 99999999") == "Case 99999999"
+    # a date in the middle is not a trailing stamp
+    assert srv._display_title("Recording 07032026 1430") == "Recording 07032026 1430"
+    # a bare date never strips to nothing
+    assert srv._display_title("07032026") == "07032026"
 
 
 def test_set_meeting_date(sandbox):

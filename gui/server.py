@@ -239,6 +239,18 @@ def _kick_jobs():
     _spawn(jobs.spawn_args(nxt[0]))
 
 
+def _display_title(base: str) -> str:
+    """The folder name with a trailing date stamp removed for display, so
+    'Weekly Check-in 07102026' shows as 'Weekly Check-in' (the meeting's date is
+    shown separately). The date lives in the filename to keep recurring meetings
+    unique on disk; the panel shows the clean name. Strips only a trailing
+    8-digit run that actually parses as a date, and never the whole name."""
+    m = re.search(r"\s+(\d{8})$", base)
+    if m and dates.meeting_date(m.group(1)) is not None:
+        return base[:m.start()].rstrip() or base
+    return base
+
+
 def _meeting_meta(j: Path, dst_dir: Path):
     """Metadata for one meeting JSON, cached by mtime — the panel polls every 2s
     and transcripts run to hundreds of KB; parse each file once per change."""
@@ -254,11 +266,16 @@ def _meeting_meta(j: Path, dst_dir: Path):
         from datetime import date as _date
         from datetime import datetime as _dt
         audio_mtime = (audio_p or j).stat().st_mtime
+        # stored date wins (stamped at process time, human-editable);
+        # filename/mtime derivation only for pre-migration jsons
+        iso = (d.get("date") or dates.meeting_date(j.stem)
+               or _date.fromtimestamp(audio_mtime).isoformat())
         meta = {"base": j.stem,
-                # stored date wins (stamped at process time, human-editable);
-                # filename/mtime derivation only for pre-migration jsons
-                "date": d.get("date") or dates.meeting_date(j.stem)
-                        or _date.fromtimestamp(audio_mtime).isoformat(),
+                "date": iso,
+                # display name: the folder carries the date so recurring
+                # meetings stay unique on disk, but the panel shows the clean
+                # name (the date is shown separately)
+                "title": _display_title(j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
                 "strict": d.get("strict", False),
@@ -1564,16 +1581,19 @@ function render(){
   // collapsible groups (month, or first letter when sorted by name)
   const mq=($('#mfilter').value||'').toLowerCase();
   const msort=($('#msort')&&$('#msort').value)||'date';
-  const shown=s.meetings.filter(m=>!mq||m.base.toLowerCase().includes(mq)
+  const mtit=m=>m.title||m.base;  // clean display name (date stripped)
+  const shown=s.meetings.filter(m=>!mq||mtit(m).toLowerCase().includes(mq)
+    ||m.base.toLowerCase().includes(mq)
     ||m.speakers.join(' ').toLowerCase().includes(mq))
     .slice().sort(msort==='name'
-      ?(a,b)=>a.base.toLowerCase().localeCompare(b.base.toLowerCase())
+      ?(a,b)=>mtit(a).toLowerCase().localeCompare(mtit(b).toLowerCase())
+        ||(b.date||'').localeCompare(a.date||'')  // recurring names: newest first
       :(a,b)=>(b.date||'').localeCompare(a.date||''));
   if(document.querySelector('#meetings .inline-edit'))return;  // typing in place — don't wipe it
   const groups=[];
   for(const m of shown){
     const key=msort==='name'
-      ?(/^[a-z]/i.test(m.base)?m.base[0].toUpperCase():'#')
+      ?(/^[a-z]/i.test(mtit(m))?mtit(m)[0].toUpperCase():'#')
       :(m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'}):'Undated');
     if(!groups.length||groups[groups.length-1].key!==key)groups.push({key,rows:[]});
     groups[groups.length-1].rows.push(m);
@@ -1587,7 +1607,7 @@ function render(){
   const mrow=m=>{
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
     return `<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
-    <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}',event)" title="Click to rename">${esc(m.base)}</span></div>
+    <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}','${escJs(mtit(m))}',event)" title="Click to rename">${esc(mtit(m))}</span></div>
     <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
@@ -1693,8 +1713,9 @@ function scheduleSearch(){
 // ---- per-meeting menu: export / copy / reveal / rename / reprocess ----
 function openMeetingMenu(base){
   const m=S.meetings.find(x=>x.base===base)||{};
+  const title=m.title||base;
   $('#dlg').classList.remove('wide');
-  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(title)}</h1>
   <div class="row" style="margin-top:8px"><div class="grow"><div class="name">Export as Word</div>
     <div class="sub">Styled .docx → Downloads</div></div>
     <button onclick="doExport('${escJs(base)}','docx',this)">Export</button></div>
@@ -1845,8 +1866,9 @@ async function stopRun(){
 }
 async function openRedo(base,audio){
   const ed=await api('/api/edits?base='+encodeURIComponent(base));
+  const title=(S.meetings.find(x=>x.base===base)||{}).title||base;
   $('#dlg').classList.remove('wide');
-  $('#dlg').innerHTML=`<h1 style="font-size:18px">Reprocess “${esc(base)}”</h1>
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Reprocess “${esc(title)}”</h1>
   <p class="muted" style="margin-top:8px">Re-runs transcription + speaker detection from the stored audio with the current model and speaker library. The existing transcript is replaced.</p>
   ${ed.n?`<p class="muted" style="margin-top:8px;color:var(--warn,#c60)"><b>⚠ This meeting has ${ed.n} manual edit${ed.n>1?'s':''}</b> (corrections, added or removed lines). A redo rebuilds everything from the audio, so they will no longer apply — they’re archived to a “.reviews.superseded.json” file next to the transcript, not deleted.</p>`:''}
   <label class="sub" style="display:block;margin-top:10px"><input type="checkbox" id="redostrict" class="checkbox" style="vertical-align:-3px"> strict mode — never guess an uncertain speaker (for confidential conversations)</label>
@@ -1915,17 +1937,18 @@ document.addEventListener('mouseover',e=>{
   },250);
 });
 document.addEventListener('scroll',()=>{$('#tipbox').style.display='none'},true);
-function inlineRename(base,ev){
+function inlineRename(base,title,ev){
   ev.stopPropagation();
   $('#tipbox').style.display='none';
   const el=ev.currentTarget;
-  el.outerHTML=`<input class="inline-edit" id="ire" value="${esc(base)}" size="${Math.min(60,base.length+4)}">`;
+  // edit the CLEAN name; the date is re-appended to the filename on save
+  el.outerHTML=`<input class="inline-edit" id="ire" value="${esc(title)}" size="${Math.min(60,title.length+4)}">`;
   const inp=$('#ire');inp.focus();inp.select();
   let done=false;
   const finish=async save=>{
     if(done)return;done=true;
     const nm=inp.value.trim();
-    if(save&&nm&&nm!==base){
+    if(save&&nm&&nm!==title){
       const r=await api('/api/rename',{base,new:nm});
       if(!r.ok)alert(r.error||'Rename failed');
     }
@@ -1976,8 +1999,9 @@ async function openTranscript(base,target=null){
   TV={base,segs:d.segments,speakers:d.speaker_options,people:d.people||[],color};
   const legend=d.speakers.map(w=>`<span class="chip"><span class="sdot" style="background:${color[w]}"></span>${esc(w)}</span>`).join(' ');
   $('#dlg').classList.add('wide');
-  const proc=(S.meetings.find(x=>x.base===base)||{}).processed_at;
-  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
+  const _mm=S.meetings.find(x=>x.base===base)||{};
+  const proc=_mm.processed_at;
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(_mm.title||base)}</h1>
   <div class="sub" style="margin:6px 0 2px">${legend}${d.strict?' <span class="chip warn">strict</span>':''}</div>
   ${proc?`<div class="sub" style="color:var(--muted,#8a8f98);margin-bottom:4px">Processed ${esc(fmtWhen(proc))}</div>`:''}
   <div style="display:flex;gap:8px;align-items:center">
@@ -2396,9 +2420,10 @@ function openSpeakerActions(key,display,meeting){
   dlg.showModal();
 }
 function openRename(base){
+  const cur=(S.meetings.find(x=>x.base===base)||{}).title||base;
   $('#dlg').innerHTML=`<h1 style="font-size:18px">Rename recording</h1>
-  <p class="muted" style="margin-top:8px">Suggest a name from what was actually discussed (runs locally — nothing leaves this Mac), or type your own.</p>
-  <input type="text" id="newname" value="${esc(base)}" style="width:100%;margin-top:10px">
+  <p class="muted" style="margin-top:8px">Suggest a name from what was actually discussed (runs locally — nothing leaves this Mac), or type your own. The date is kept in the filename automatically, so a recurring name is fine.</p>
+  <input type="text" id="newname" value="${esc(cur)}" style="width:100%;margin-top:10px">
   <label class="sub" style="display:block;margin-top:10px">Meeting date
     <input type="date" id="mdate" value="${esc((S.meetings.find(x=>x.base===base)||{}).date||'')}"
       style="margin-left:8px;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:6px;padding:3px 6px">
@@ -2416,7 +2441,7 @@ function openRename(base){
 function openSummary(base){
   const m=S.meetings.find(x=>x.base===base)||{};
   const steps=(m.next_steps||[]).length?`<div style="font-weight:600;margin-top:10px">Committed next steps</div><ul style="margin:6px 0 0 18px">${m.next_steps.map(s=>`<li class="muted">${esc(s)}</li>`).join('')}</ul>`:'';
-  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(base)}</h1>
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">${esc(m.title||base)}</h1>
   <div style="margin-top:10px;max-height:340px;overflow:auto"><div id="sumbody" class="muted">${m.summary?esc(m.summary):('No summary yet — generate one below. '+(S.llm_backend==='local'?'Runs locally; nothing leaves this Mac.':'Uses your cloud assistant.'))}</div>${steps}</div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
     <button onclick="openAsk('${escJs(base)}')" ${S.llm_available?'':'disabled'}>Ask a question…</button>
@@ -2432,7 +2457,7 @@ function openAsk(base){
   // same meeting: the thread survives close/reopen (it dies with the page,
   // or when you ask about a different meeting — never written to disk)
   if(!ASK||ASK.base!==base)ASK={base,hist:[],busy:false};
-  $('#askmeet').textContent=base;
+  $('#askmeet').textContent=(S.meetings.find(x=>x.base===base)||{}).title||base;
   $('#askpriv').textContent='Answers come from this transcript only. '
     +(S.llm_backend==='local'?'They are generated on this Mac; nothing leaves the machine.':'They are generated by your cloud assistant (the transcript text is sent to it for this).')
     +' Follow-up questions understand the earlier ones. The thread is never saved.';
@@ -2482,17 +2507,18 @@ async function genSummary(base){
 async function suggest(base){
   $('#sumnote').innerHTML='<span class="spin"></span> Reading the transcript…';
   const r=await api('/api/suggest?base='+encodeURIComponent(base));
-  if(r.suggested_name){$('#newname').value=r.suggested_name;$('#sumnote').textContent=r.summary||''}
+  if(r.title||r.suggested_name){$('#newname').value=r.title||r.suggested_name;$('#sumnote').textContent=r.summary||''}
   else $('#sumnote').textContent=r.error||'Could not suggest a name.';
 }
 async function doRename(base){
   const m=S.meetings.find(x=>x.base===base)||{};
+  const title=m.title||base;
   const nm=$('#newname').value.trim(),dt=$('#mdate').value;
   let cur=base;
-  if(nm&&nm!==base){
+  if(nm&&nm!==title){
     const r=await api('/api/rename',{base,new:nm});
     if(!r.ok){$('#sumnote').textContent=r.error||'Rename failed';return}
-    cur=nm;
+    cur=r.base||nm;  // the date was re-appended to the filename
   }
   if(dt&&dt!==m.date){
     const r=await api('/api/set_date',{base:cur,date:dt});
