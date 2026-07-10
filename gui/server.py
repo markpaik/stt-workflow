@@ -490,7 +490,7 @@ def _cloud_key_status() -> dict:
         return {}
 
 
-def _snippet_for(meeting: str, speaker_key: str, secs: float = 12.0):
+def _snippet_for(meeting: str, speaker_key: str, secs: float = 30.0):
     """Extract an audio snippet of `speaker_key` (display, id, name, or uid),
     up to `secs` seconds of their longest turn — never past the turn's end, so
     a longer request can't bleed into another person's voice mid-identification.
@@ -580,9 +580,9 @@ class Handler(BaseHTTPRequestHandler):
                     # find_voice_clip searches the real library instead
                     meeting = ""
                 try:
-                    secs = float(q.get("secs", 12.0))
+                    secs = float(q.get("secs", 30.0))  # default sample length for ▶ playback
                 except ValueError:
-                    secs = 12.0
+                    secs = 30.0
                 f = _snippet_for(meeting, q["speaker"], secs=secs)
                 if f is None:
                     self._json({"error": "no snippet"}, 404)
