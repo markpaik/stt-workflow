@@ -347,20 +347,50 @@ def suggest_title(base: str) -> dict:
     return result
 
 
+def _unique_base(candidate: str, current: str) -> str:
+    """A folder name not already taken by ANOTHER meeting. A genuine same-name
+    same-date duplicate (recurring meeting recorded twice in one day) gets a
+    ' (2)' suffix rather than being refused."""
+    if candidate == current or not config.meeting_dir(candidate).exists():
+        return candidate
+    i = 2
+    while config.meeting_dir(f"{candidate} ({i})").exists():
+        i += 1
+    return f"{candidate} ({i})"
+
+
 def rename_meeting(base: str, new_base: str) -> dict:
     """Rename a meeting: every file inside its folder (whatever the suffix —
     transcript, audio, caches, review/verify sidecars) AND the folder itself,
-    so the on-disk name always matches what the GUI shows. Refuses
-    collisions. Returns {ok, renamed: [...]}."""
+    so the on-disk name always matches what the GUI shows.
+
+    Recurring meetings keep their files unique WITHOUT the user hand-typing a
+    date: when the typed name carries no date, the meeting's date is appended
+    (MMDDYYYY), so 'Weekly Check-in' becomes 'Weekly Check-in 07102026' on disk
+    while the GUI still shows just 'Weekly Check-in'. A name that already has a
+    date run is left as typed. Returns {ok, renamed, base}."""
+    from . import dates
     new_base = re.sub(r'[<>:"/\\|?*]', "", new_base).strip()
-    if not new_base or new_base == base:
-        return {"ok": False, "error": "empty or unchanged name"}
+    if not new_base:
+        return {"ok": False, "error": "empty name"}
     old_dir = config.meeting_dir(base)
-    new_dir = config.meeting_dir(new_base)
     if not old_dir.is_dir():
         return {"ok": False, "error": f"no meeting folder for '{base}'"}
-    if new_dir.exists():
-        return {"ok": False, "error": f"'{new_base}' already exists"}
+    # append the meeting's own date when the typed name has none
+    iso = ""
+    try:
+        iso = json.loads(config.meeting_file(base, ".json").read_text()).get("date", "")
+    except (OSError, ValueError):
+        pass
+    if iso and dates.meeting_date(new_base) is None:
+        try:
+            new_base = f"{new_base} {datetime.fromisoformat(iso).strftime('%m%d%Y')}"
+        except ValueError:
+            pass
+    if new_base == base:
+        return {"ok": True, "renamed": [], "base": base}  # no visible change
+    new_base = _unique_base(new_base, base)
+    new_dir = config.meeting_dir(new_base)
     # Serialize against a concurrent relabel_one(base), which holds the same
     # per-base lock for its whole read->rewrite span; the lock file lives in
     # meetings_dir/.locks (a sibling of the folder), so it survives the rename.
@@ -396,7 +426,7 @@ def rename_meeting(base: str, new_base: str) -> dict:
                 j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
             except Exception:
                 pass
-    return {"ok": bool(renamed), "renamed": renamed}
+    return {"ok": bool(renamed), "renamed": renamed, "base": new_base}
 
 
 def set_meeting_date(base: str, date_str: str) -> dict:
