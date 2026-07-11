@@ -39,6 +39,46 @@ def is_processed(m: dict, key: str, mtime: float) -> bool:
     return True
 
 
+def retarget(old_dir, new_dir, old_base=None, new_base=None):
+    """Follow a meeting folder that MOVED (rename, date re-stamp, archive) in the
+    recorded output paths.
+
+    Without this, is_processed() self-heals on the now-missing outputs and reports
+    the source file as brand new — so if the original audio is still sitting in a
+    watched folder (keep-original setups), the next run silently RE-TRANSCRIBES the
+    meeting you just renamed or archived, resurrecting it as a duplicate.
+
+    A rename moves the folder AND renames every file inside it (the
+    <base>/<base>.* invariant), so the recorded FILENAMES have to follow too —
+    retargeting only the directory would leave the paths pointing at names that
+    no longer exist, which is the very failure this exists to prevent. Never
+    raises: manifest hygiene must not block the move itself."""
+    try:
+        old_dir, new_dir = Path(old_dir), Path(new_dir)
+        m = load()
+        changed = False
+        for rec in m["processed"].values():
+            outs = rec.get("outputs") or []
+            new = []
+            for o in outs:
+                p = Path(o)
+                if p.parent != old_dir:
+                    new.append(o)
+                    continue
+                name = p.name
+                if old_base and new_base and name.startswith(old_base + "."):
+                    name = new_base + name[len(old_base):]
+                new.append(str(new_dir / name))
+            if new != outs:
+                rec["outputs"] = new
+                changed = True
+        if changed:
+            save(m)
+        return changed
+    except Exception:
+        return False
+
+
 def mark(m: dict, key: str, mtime: float, outputs: list):
     m["processed"][key] = {
         "mtime": mtime,

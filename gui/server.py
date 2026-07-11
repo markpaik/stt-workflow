@@ -240,15 +240,13 @@ def _kick_jobs():
 
 
 def _display_title(base: str) -> str:
-    """The folder name with a trailing date stamp removed for display, so
-    'Weekly Check-in 07102026' shows as 'Weekly Check-in' (the meeting's date is
-    shown separately). The date lives in the filename to keep recurring meetings
-    unique on disk; the panel shows the clean name. Strips only a trailing
-    8-digit run that actually parses as a date, and never the whole name."""
-    m = re.search(r"\s+(\d{8})$", base)
-    if m and dates.meeting_date(m.group(1)) is not None:
-        return base[:m.start()].rstrip() or base
-    return base
+    """The folder name minus its trailing date stamp, so 'Weekly Check-in 07102026'
+    shows as 'Weekly Check-in' (the date is shown separately). The date lives in
+    the FILENAME to keep recurring meetings unique on disk; the panel shows the
+    clean name. dates.strip_stamp is the single definition of that rule — the
+    pipeline, rename, the date editor, and the recorder all stamp through the same
+    helpers, so what the panel strips is exactly what they add."""
+    return dates.strip_stamp(base)
 
 
 def _meeting_meta(j: Path, dst_dir: Path):
@@ -286,6 +284,11 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "summary": d.get("ai_summary", ""),
                 "next_steps": d.get("ai_next_steps", []),
                 "category": d.get("category"),  # work | personal | None
+                # ONLY an explicit False means "not yet named/dated by a human".
+                # Meetings processed before the inbox existed carry no key at all,
+                # and must not retroactively flood it — so a missing key = reviewed.
+                "needs_review": d.get("reviewed") is False,
+                "suggested": d.get("ai_title") or "",
                 # when transcription last ran (new or redo). Older transcripts
                 # predate this field — fall back to generated_at, then mtime.
                 "processed_at": (d.get("processed_at") or d.get("generated_at")
@@ -955,6 +958,52 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+            elif u.path == "/api/accept_meeting":
+                # inbox: name/date/tag it, and mark it reviewed so it joins the list
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                self._json(summarize.apply_meeting_edits(
+                    b["base"], title=(b.get("name") or None),
+                    date=(b.get("date") or None), category=b.get("category"),
+                    reviewed=True))
+            elif u.path == "/api/bulk":
+                # multi-select actions. Every op below gates on live/archived
+                # MEMBERSHIP internally before it builds a path, so an unknown or
+                # traversal base is simply refused per-item — never applied.
+                from stt import archive, summarize
+                action = str(b.get("action") or "")
+                value, confirmed = b.get("value"), bool(b.get("confirm"))
+                results = []
+                for bs in [str(x) for x in (b.get("bases") or [])][:500]:
+                    if action == "category":
+                        r = summarize.set_meeting_category(bs, value or "")
+                    elif action == "date":
+                        r = summarize.set_meeting_date(bs, value or "")
+                    elif action == "rename":
+                        # each keeps its OWN date stamp, so renaming a run of
+                        # recurring meetings to one name still leaves them distinct
+                        r = summarize.rename_meeting(bs, value or "")
+                    elif action == "accept":
+                        r = summarize.apply_meeting_edits(bs, reviewed=True)
+                    elif action == "archive":
+                        r = archive.archive_meeting(bs)
+                    elif action == "restore":
+                        r = archive.restore_meeting(bs)
+                    elif action in ("delete", "drop_audio") and not confirmed:
+                        r = {"ok": False, "error": "missing confirmation"}
+                    elif action == "delete":
+                        r = archive.delete_meeting(bs)
+                    elif action == "drop_audio":
+                        r = archive.drop_audio(bs)
+                    else:
+                        r = {"ok": False, "error": f"unknown action '{action}'"}
+                    results.append({"base": bs, **r})
+                self._json({"ok": all(r.get("ok") for r in results),
+                            "n_ok": sum(1 for r in results if r.get("ok")),
+                            "freed_mb": round(sum(r.get("freed_mb") or 0
+                                                  for r in results), 1),
+                            "results": results})
             elif u.path == "/api/archive_meeting":
                 if not self._require_base(b.get("base")):
                     return
@@ -1158,6 +1207,16 @@ font-variant-numeric:tabular-nums}
 .chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
 .chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
 .chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
+/* inbox: new transcripts wait to be named/dated before joining the main list */
+#inboxcard{border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+#inboxcount{color:var(--accent)}
+#inbox input[type=text]{font-size:14px;font-weight:600}
+#inbox .row{align-items:center;gap:8px;flex-wrap:wrap}
+/* multi-select toolbar */
+#selbar{display:none;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0 2px;
+padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--chip)}
+#selbar b{font-size:13px;margin-right:2px;white-space:nowrap}
+.mchk{flex:none;margin-right:2px}
 /* one-click Work/Personal tag, right on the row. Untagged sits back until the
    row is hovered, so 40+ untagged meetings don't turn the list into confetti. */
 .chip.cat{cursor:pointer;user-select:none;padding:1px 9px}
@@ -1418,6 +1477,13 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 </aside>
 <div id="flyveil" onclick="flyCloseAll()"></div>
 
+<div class="card" id="inboxcard" style="display:none">
+  <h2><span id="inboxcount">Needs naming</span> <span class="grow"></span>
+    <button onclick="acceptAll()" title="Accept every one below with the name and date shown">Accept all</button></h2>
+  <div class="sub" style="margin:-4px 0 8px">New transcripts wait here so they can't slip unnoticed into a long list. Name it, check the date, then Accept.</div>
+  <div id="inbox" class="inset"></div>
+</div>
+
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
     <button id="archbtn" onclick="openArchived()" title="Archived meetings — set aside, restorable anytime" style="font-size:12px;display:none"></button>
@@ -1433,6 +1499,7 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <input type="text" id="mfilter" placeholder="Search words or titles…"
            oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
   <div id="searchhits"></div>
+  <div id="selbar"></div>
   <div style="display:flex;gap:10px;align-items:stretch">
     <div id="mrail"></div>
     <div id="meetings" class="inset" style="flex:1;min-width:0"></div>
@@ -1512,6 +1579,120 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
+
+// ---- inbox: a new transcript is named/dated before it joins the list ----
+// The gate exists so that at 100+ transcripts a fresh one can't land in the middle
+// of the pile unnoticed. Rendering is SKIPPED while a field in here has focus —
+// the panel re-renders every 2s and would otherwise eat what you're typing.
+function renderInbox(s,mtit){
+  const inbox=s.meetings.filter(m=>m.needs_review);
+  $('#inboxcard').style.display=inbox.length?'':'none';
+  if(!inbox.length)return;
+  $('#inboxcount').textContent='Needs naming · '+inbox.length;
+  const box=$('#inbox');
+  if(document.activeElement&&box.contains(document.activeElement))return;  // typing
+  box.innerHTML=inbox.map(m=>{
+    const nm=m.suggested||mtit(m);
+    const who=m.speakers.map(esc).join(', ')||'no speakers identified';
+    return `<div class="row" data-ib="${esc(m.base)}">
+      <div class="grow">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <input type="text" class="ibname" value="${esc(nm)}" placeholder="Name this meeting"
+                 style="width:min(320px,44vw)" onkeydown="if(event.key==='Enter')ibAccept('${escJs(m.base)}',this)">
+          <input type="date" class="ibdate" value="${esc(m.date||'')}">
+          <select class="ibcat">
+            <option value="">no tag</option>
+            <option value="work"${m.category==='work'?' selected':''}>Work</option>
+            <option value="personal"${m.category==='personal'?' selected':''}>Personal</option>
+          </select>
+        </div>
+        <div class="sub" style="margin-top:4px">${m.minutes} min · ${who}${m.summary?' · '+esc(m.summary.slice(0,90)):''}</div>
+      </div>
+      <button class="primary" onclick="ibAccept('${escJs(m.base)}',this)">Accept</button>
+    </div>`;}).join('');
+}
+async function ibAccept(base,el){
+  const row=el.closest('[data-ib]');
+  const btn=row.querySelector('button.primary');
+  btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
+  const r=await api('/api/accept_meeting',{base,
+    name:row.querySelector('.ibname').value.trim(),
+    date:row.querySelector('.ibdate').value,
+    category:row.querySelector('.ibcat').value});
+  if(!r.ok){alert(r.error||'failed');btn.disabled=false;btn.textContent='Accept';return}
+  refresh();
+}
+async function acceptAll(){
+  const rows=[...document.querySelectorAll('#inbox [data-ib]')];
+  if(!rows.length)return;
+  if(!confirm('Accept all '+rows.length+' with the name and date shown?'))return;
+  for(const row of rows){
+    await api('/api/accept_meeting',{base:row.dataset.ib,
+      name:row.querySelector('.ibname').value.trim(),
+      date:row.querySelector('.ibdate').value,
+      category:row.querySelector('.ibcat').value});
+  }
+  refresh();
+}
+
+// ---- multi-select + bulk actions ----
+let SEL=new Set();
+function selTog(b,on){on?SEL.add(b):SEL.delete(b);render()}
+function selClear(){SEL.clear();render()}
+function selAllShown(list){
+  const all=list.every(m=>SEL.has(m.base));
+  list.forEach(m=>all?SEL.delete(m.base):SEL.add(m.base));
+  render();
+}
+function renderSelbar(shown){
+  const bar=$('#selbar');
+  bar.style.display=SEL.size?'flex':'none';
+  if(!SEL.size)return;
+  bar.innerHTML=`<b>${SEL.size} selected</b>
+    <button onclick="bulk('category','work')">Work</button>
+    <button onclick="bulk('category','personal')">Personal</button>
+    <button onclick="bulk('category','')">Clear tag</button>
+    <button onclick="bulkRename()" title="One name for all of them — each still keeps its own date, so they stay separate meetings">Rename…</button>
+    <button onclick="bulkDate()">Set date…</button>
+    <button onclick="bulk('archive')">Archive</button>
+    <button onclick="bulkDropAudio()" title="Keep the transcript, delete the audio file">Delete audio…</button>
+    <button style="color:var(--bad)" onclick="bulkDelete()">Delete…</button>
+    <span class="grow"></span>
+    <button onclick="selAllShown(LASTSHOWN)">Select all shown</button>
+    <button onclick="selClear()">Cancel</button>`;
+}
+let LASTSHOWN=[];
+async function bulk(action,value,extra){
+  const bases=[...SEL];
+  if(!bases.length)return;
+  const r=await api('/api/bulk',{bases,action,value,...(extra||{})});
+  const fails=(r.results||[]).filter(x=>!x.ok);
+  if(fails.length)alert(`${fails.length} of ${bases.length} could not be done:\n\n`
+    +fails.slice(0,8).map(f=>'• '+f.base+' — '+(f.error||'failed')).join('\n'));
+  else if(r.freed_mb)alert(`Done. Freed ${r.freed_mb} MB of audio.`);
+  SEL.clear();refresh();
+}
+function bulkRename(){
+  const n=prompt(`One name for all ${SEL.size} selected.\n\nEach keeps its own date in the filename, so recurring meetings stay separate folders.`);
+  if(n&&n.trim())bulk('rename',n.trim());
+}
+function bulkDate(){
+  const d=prompt(`Set the date for all ${SEL.size} selected (YYYY-MM-DD).\n\nThe folder name is re-stamped to match.`);
+  if(d&&d.trim())bulk('date',d.trim());
+}
+function bulkDropAudio(){
+  if(!confirm(`Delete the stored AUDIO for ${SEL.size} meeting(s)? The transcripts are kept.\n\n`
+    +`This frees most of the space, but it cannot be undone:\n`
+    +`• Reprocess (Redo) becomes impossible — it re-transcribes from that file\n`
+    +`• ▶ voice-sample playback stops for speakers first heard in these meetings\n\n`
+    +`Speaker identification itself is unaffected.`))return;
+  bulk('drop_audio',null,{confirm:true});
+}
+function bulkDelete(){
+  if(!confirm(`Permanently delete ${SEL.size} meeting(s) — transcript, audio, and caches?\n\n`
+    +`This cannot be undone. Archive instead if you might want them back.`))return;
+  bulk('delete',null,{confirm:true});
+}
 
 // ---- Work/Personal tag, one click on the row (no menu) ----
 // Cycles untagged -> Work -> Personal -> untagged. The update is applied to the
@@ -1692,7 +1873,11 @@ function render(){
   const ab=$('#archbtn');
   if(ab){ab.style.display=s.archived_count?'':'none';ab.textContent='Archived · '+(s.archived_count||0)}
   const mtit=m=>m.title||m.base;  // clean display name (date stripped)
-  const shown=s.meetings.filter(m=>(!mcat||m.category===mcat)
+  renderInbox(s,mtit);
+  // unreviewed meetings live in the inbox above, NOT in this list — that is the
+  // whole point of the gate: a new transcript cannot slip into the pile unseen
+  const shown=s.meetings.filter(m=>!m.needs_review
+    &&(!mcat||m.category===mcat)
     &&(!mq||mtit(m).toLowerCase().includes(mq)
     ||m.base.toLowerCase().includes(mq)
     ||m.speakers.join(' ').toLowerCase().includes(mq)))
@@ -1715,9 +1900,13 @@ function render(){
     const ov=MG.ov[msort+':'+k];
     return ov!==undefined?!!ov:i===0;  // newest month / first letter open by default
   };
+  LASTSHOWN=shown;
+  renderSelbar(shown);
   const mrow=m=>{
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
-    return `<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
+    return `<div class="row"><input type="checkbox" class="checkbox mchk" ${SEL.has(m.base)?'checked':''}
+      title="Select for bulk actions" onclick="event.stopPropagation();selTog('${escJs(m.base)}',this.checked)">
+    <div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
     <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}','${escJs(mtit(m))}',event)" title="Click to rename">${esc(mtit(m))}</span></div>
     <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''} ${catChip(m)}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>

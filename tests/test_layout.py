@@ -122,14 +122,25 @@ def test_display_title_strips_only_a_trailing_date_stamp(sandbox):
     assert srv._display_title("07032026") == "07032026"
 
 
-def test_set_meeting_date(sandbox):
+def test_set_meeting_date_restamps_the_folder(sandbox):
+    """Correcting a date RE-STAMPS the folder. The date lives in the folder name
+    to keep recurring meetings unique, so if a date edit left the old stamp in
+    place the name and the stored date would silently drift apart (they did)."""
     mfile("Mtg", ".json").write_text(json.dumps(
         {"source_file": "Mtg.m4a", "date": "2026-05-30",
          "segments": [], "speakers": [], "words": []}))
     r = summarize.set_meeting_date("Mtg", "2026-04-21")
-    assert r == {"ok": True, "date": "2026-04-21"}
-    assert json.loads(config.meeting_file("Mtg", ".json").read_text())["date"] == "2026-04-21"
-    assert not summarize.set_meeting_date("Mtg", "yesterday")["ok"]
+    assert r["ok"] and r["date"] == "2026-04-21" and r["base"] == "Mtg 04212026"
+    assert config.meeting_dir("Mtg 04212026").is_dir()
+    assert not config.meeting_dir("Mtg").exists()
+    d = json.loads(config.meeting_file("Mtg 04212026", ".json").read_text())
+    assert d["date"] == "2026-04-21"
+    assert d["source_file"] == "Mtg 04212026.m4a"
+    # correcting it AGAIN replaces the stamp, never appends a second one
+    r2 = summarize.set_meeting_date("Mtg 04212026", "2026-04-22")
+    assert r2["ok"] and r2["base"] == "Mtg 04222026"
+    assert not config.meeting_dir("Mtg 04212026").exists()
+    assert not summarize.set_meeting_date("Mtg 04222026", "yesterday")["ok"]
     assert not summarize.set_meeting_date("Nope", "2026-04-21")["ok"]
 
 
@@ -202,29 +213,34 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     d0 = json.loads(config.meeting_file("Team Sync 05012026", ".json").read_text())
     assert d0["date"] == "2026-05-01"  # stamped from the filename convention
 
-    # 2. rename + human date correction, exactly as the panel does
+    # 2. rename + human date correction, exactly as the panel does. Correcting
+    #    the date RE-STAMPS the folder, so the meeting ends up under the date the
+    #    human actually chose — the name and the stored date stay in lockstep.
     r = summarize.rename_meeting("Team Sync 05012026", "Focus Group 06012026")
-    assert r["ok"]
+    assert r["ok"] and r["base"] == "Focus Group 06012026"
     r = summarize.set_meeting_date("Focus Group 06012026", "2026-06-15")
-    assert r["ok"]
+    assert r["ok"] and r["base"] == "Focus Group 06152026"
+    final = r["base"]
 
     # 3. Redo: the panel passes the STORED (renamed) audio path
-    stored = config.meeting_audio("Focus Group 06012026")
+    stored = config.meeting_audio(final)
     assert stored is not None and "Focus Group" in stored.name
     res2 = pipeline.process_file(stored, dest_dir=config.MEETINGS_DIR,
                                  do_diarize=False, do_verify=False)
 
-    # everything lives under the NEW name only
-    assert res2["json"] == config.meeting_file("Focus Group 06012026", ".json")
-    assert config.meeting_bases() == ["Focus Group 06012026"]
+    # everything lives under the FINAL name only — no resurrection of either
+    # the original name or the pre-correction one
+    assert res2["json"] == config.meeting_file(final, ".json")
+    assert config.meeting_bases() == [final]
     assert not config.meeting_dir("Team Sync 05012026").exists()
+    assert not config.meeting_dir("Focus Group 06012026").exists()
 
     d = json.loads(res2["json"].read_text())
-    assert d["source_file"] == "Focus Group 06012026.m4a"
+    assert d["source_file"] == f"{final}.m4a"
     assert "hello from the pipeline" in " ".join(
         s["text"] for s in d["segments"])
-    # the human's corrected date survives the reprocess — NOT re-derived from
-    # the new filename (which would say 2026-06-01)
+    # the human's corrected date survives the reprocess (it is NOT re-derived
+    # from the filename — which now happens to agree, and must keep agreeing)
     assert d["date"] == "2026-06-15"
 
 
