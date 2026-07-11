@@ -444,7 +444,7 @@ def gather_state():
             "paths": {"source": str(src_dir), "dest": str(dst_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
-            "recorder_ready": (config.PROJECT_DIR / "native" / "stt-recorder").exists(),
+            "recorder_ready": recorder.available(),
             "rates": rates.summary(),
             "relabel_pending": (config.PROJECT_DIR / "relabel_pending.flag").exists(),
             "llm_available": summarize.available(),
@@ -981,9 +981,11 @@ class Handler(BaseHTTPRequestHandler):
                     outs.append(r.returncode)
                 if any(outs):
                     self._json({"ok": False,
-                                "error": "tccutil could not reset — run it from "
-                                         "Terminal: tccutil reset Microphone "
-                                         "com.stt-workflow.recorder"})
+                                "error": "macOS refused the permission reset — "
+                                         "rebuild the recorder (./setup.sh "
+                                         "build-recorder) and try again, or remove "
+                                         "'STT Recorder' by hand in System Settings "
+                                         "> Privacy & Security > Microphone."})
                 else:
                     self._json({"ok": True,
                                 "message": "Permissions reset. Now click Start "

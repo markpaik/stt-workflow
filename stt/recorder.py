@@ -1,4 +1,4 @@
-"""Drive the on-device meeting recorder (native/stt-recorder) and hand its
+"""Drive the on-device meeting recorder (native/STT Recorder.app) and hand its
 output to the pipeline.
 
 The Swift helper captures mic + system audio into a growable stereo PCM CAF
@@ -21,7 +21,9 @@ from pathlib import Path
 
 from . import audio, config, status
 
-BINARY = config.PROJECT_DIR / "native" / "stt-recorder"
+# inside a real .app bundle so TCC/LaunchServices can address it by bundle id
+BINARY = (config.PROJECT_DIR / "native" / "STT Recorder.app"
+          / "Contents" / "MacOS" / "stt-recorder")
 MAX_SECONDS = 4 * 3600          # forgot-to-stop backstop (matches the helper default)
 MIN_FREE_BYTES = 2 * 1024**3    # refuse to start under ~2 GB free
 LOG = config.PROJECT_DIR / "logs" / "recorder.log"
