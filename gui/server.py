@@ -301,6 +301,17 @@ def _meeting_meta(j: Path, dst_dir: Path):
     return meta
 
 
+def _recording_state():
+    """The live capture for the panel: the recorder's own view, plus the captured
+    seconds resolved here (paused spans already excluded) so the browser never
+    re-derives that arithmetic and drifts from the menu bar."""
+    rec = recorder.live_recording()
+    if not rec:
+        return None
+    return {**rec, "elapsed_secs": recorder.elapsed_seconds(rec),
+            "paused": bool(rec.get("paused"))}
+
+
 def gather_state():
     from stt import summarize
     st = status.read()
@@ -411,10 +422,11 @@ def gather_state():
             "recent": st.get("recent", [])[:8],
             "paused": control.is_paused(),
             # NOT the raw status key: that outlives the capture until finalize()
-            # completes (the menu bar's naming dialog blocks in between), so the
-            # panel kept showing "Recording" after the recorder had already
-            # stopped. Same source of truth the menu bar uses.
-            "recording": recorder.live_recording(),
+            # completes, so the panel kept showing "Recording" after the recorder
+            # had already stopped. Same source of truth the menu bar uses, with
+            # the captured-seconds clock resolved server-side so both readouts
+            # agree and neither has to re-derive the paused-span arithmetic.
+            "recording": _recording_state(),
             "queue": queue, "meetings": meetings,
             "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
@@ -1541,7 +1553,15 @@ function render(){
   // batch runs, or with nothing else happening)
   const recg=s.recording;
   $('#recbanner').style.display=recg?'block':'none';
-  if(recg)$('#rectime').textContent='Elapsed '+recElapsed(recg.started_at);
+  if(recg){
+    // elapsed_secs comes from the server (recorder.elapsed_seconds), so it already
+    // excludes paused spans — the panel and the menu bar read the same number
+    const secs=recg.elapsed_secs||0;
+    const h=Math.floor(secs/3600),m=Math.floor(secs%3600/60),ss=secs%60;
+    const t=(h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(ss).padStart(2,'0');
+    $('#rectime').textContent=(recg.paused?'Paused · ':'Elapsed ')+t;
+    $('#recbanner').classList.toggle('paused',!!recg.paused);
+  }
   $('#activecard').style.display=s.running?'block':'none';
   $('#active').innerHTML=(orphaned?`<div class="row"><span class="chip warn">recovering</span>
     <div class="grow"><div class="name">Background workers are still running</div>

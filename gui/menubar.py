@@ -103,13 +103,16 @@ def gather():
             "schedule": read_schedule()}
 
 
-def _fmt_elapsed(started_at):
-    """mm:ss (or h:mm:ss) since an ISO timestamp, for the recording readout."""
-    from datetime import datetime
-    try:
-        secs = max(0, int((datetime.now() - datetime.fromisoformat(started_at)).total_seconds()))
-    except (ValueError, TypeError):
-        return ""
+# Flat, monochrome recording glyphs. Text (not emoji), so they take the menu
+# bar's own tint and stay legible in light, dark, and over a tinted wallpaper —
+# where the 🔴 emoji always stamped the same saturated red.
+REC_LIVE = "●"      # ● a filled dot: the universal "recording" mark
+REC_PAUSED = "‖"    # ‖ two bars: paused
+
+
+def _fmt_hms(secs):
+    """mm:ss (or h:mm:ss) for the recording readout."""
+    secs = max(0, int(secs or 0))
     h, rem = divmod(secs, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
@@ -134,7 +137,9 @@ class STTMenuBar(rumps.App):
 
     @staticmethod
     def _signature(s):
+        rec = s.get("recording") or {}
         return (s["running"], s["paused"], bool(s.get("recording")),
+                bool(rec.get("paused")),  # pause flips the menu item, so rebuild
                 tuple(sorted((n, a["stage"]) for n, a in s["active"].items())),
                 tuple(s["queued"]), tuple(j.get("at") for j in s.get("queued_jobs", [])),
                 tuple((r["name"], r.get("ok")) for r in s["recent"]),
@@ -148,9 +153,14 @@ class STTMenuBar(rumps.App):
             rec = s.get("recording")
             if rec:
                 # a live recording owns the title (its clock ticks every 2s);
-                # a background batch still shows its spinner alongside
+                # a background batch still shows its spinner alongside.
+                # Flat monochrome glyphs, not the 🔴 emoji: they inherit the menu
+                # bar's own tint (so they read correctly in light, dark, and under
+                # a tinted wallpaper) instead of stamping a saturated red dot.
                 busy = SPINNER[self._frame] if s["running"] else ""
-                self.title = f" 🔴 {_fmt_elapsed(rec.get('started_at'))} {busy}".rstrip()
+                glyph = REC_PAUSED if rec.get("paused") else REC_LIVE
+                clock = _fmt_hms(recorder.elapsed_seconds(rec))
+                self.title = f" {glyph} {clock} {busy}".rstrip()
             elif s["running"]:
                 n_act = max(1, len(s["active"]))
                 etas = [status.estimate_progress(a, n_act)[1] for a in s["active"].values()]
@@ -225,13 +235,20 @@ class STTMenuBar(rumps.App):
         rec = s.get("recording")
         items.append(rumps.separator)
         if rec:
+            paused = bool(rec.get("paused"))
+            clock = _fmt_hms(recorder.elapsed_seconds(rec))
+            items.append(_disabled(
+                f"{REC_PAUSED if paused else REC_LIVE}  "
+                f"{'Paused' if paused else 'Recording'}  ·  {clock}"))
             items.append(rumps.MenuItem(
-                f"■  Stop recording  ({_fmt_elapsed(rec.get('started_at'))})",
-                callback=self.stop_recording))
+                "▶  Resume recording" if paused else "‖  Pause recording",
+                callback=self.toggle_pause_recording))
+            items.append(rumps.MenuItem("■  Stop and save", callback=self.stop_recording))
         elif recorder.available():
-            items.append(rumps.MenuItem("●  Start recording", callback=self.start_recording))
+            items.append(rumps.MenuItem(f"{REC_LIVE}  Start recording",
+                                        callback=self.start_recording))
         else:
-            items.append(_disabled("●  Recording unavailable — build it (see Open logs)"))
+            items.append(_disabled(f"{REC_LIVE}  Recording unavailable — build it (see Open logs)"))
 
         # --- controls ---
         items.append(rumps.separator)
@@ -293,36 +310,49 @@ class STTMenuBar(rumps.App):
                            "Capturing this meeting. Grant Microphone and "
                            "'System Audio Recording Only' if macOS asks.")
 
+    def toggle_pause_recording(self, _):
+        rec = (gather() or {}).get("recording") or {}
+        r = recorder.resume() if rec.get("paused") else recorder.pause()
+        if not r.get("ok"):
+            rumps.notification("STT workflow", "Recording", r.get("error", "unknown error"))
+        self._last_sig = None  # force the menu to redraw with the flipped item
+        self.refresh(None)
+
     def stop_recording(self, _):
-        caf = recorder.halt()  # end capture first, so we don't record the naming pause
+        caf = recorder.halt()  # end capture first, so we don't record the stop pause
         if caf is None:
             self.refresh(None)
             return
-        try:
-            resp = rumps.Window(
-                title="Name this recording",
-                message="It will process and appear in your transcripts.",
-                default_text="", ok="Save", cancel="Skip",
-                dimensions=(320, 24)).run()
-            name = resp.text.strip() if resp.clicked else None
-        except Exception:
-            name = None
-        r = recorder.finalize(caf, name)
+        # NO naming dialog here. rumps.Window blocks the main thread inside
+        # NSAlert.runModal, which FROZE the entire menu bar until it was answered
+        # — and it can open behind another window or on another Space, where it is
+        # easy to never see. The capture is saved immediately under a default name
+        # and queued; you name it in the panel, which also suggests a title from
+        # the transcript and stamps the date into the filename for you.
+        r = recorder.finalize(caf, None)
         self.refresh(None)
         if r.get("ok"):
+            self._spawn_batch()  # process it now; a no-op if a batch holds the lock
             rumps.notification("STT workflow", "Recording saved",
-                               f"“{r['name']}” — processing now.")
+                               f"“{r['name']}” — processing. Rename it in the panel.")
         else:
             rumps.notification("STT workflow", "Recording problem",
                                r.get("error", "could not save the recording"))
 
     # ---- actions ----
-    def run_now(self, _):
+    def _spawn_batch(self):
+        """Kick a run. Harmless when one is already going: the spawn hits the
+        single-instance lock and exits, and the running batch's end-of-run rescan
+        picks up anything that landed while it worked (a recording finished
+        mid-batch queues itself this way instead of waiting for the next trigger)."""
         # manual runs override the pause flag and hold the Mac awake
         subprocess.Popen(["caffeinate", "-i", "-s",
                           str(config.PROJECT_DIR / "run.sh"), "batch", "--ignore-pause"],
                          start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def run_now(self, _):
+        self._spawn_batch()
         rumps.notification("STT workflow", "Run started", "Processing any new recordings…")
 
     def _open_recent(self, sender):

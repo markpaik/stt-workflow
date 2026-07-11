@@ -169,6 +169,58 @@ def test_panel_never_shows_a_recording_that_has_stopped(sandbox, monkeypatch):
     assert srv.gather_state()["recording"] is not None             # a live one shows
 
 
+def test_pause_and_resume_signal_the_recorder_and_track_state(sandbox, monkeypatch):
+    """Pause stops the helper WRITING frames (SIGUSR1) without ending the capture;
+    resume (SIGUSR2) starts it again. The signals must reach the recorder itself —
+    it is spawned directly for exactly this reason, since SIGUSR1 to a caffeinate
+    wrapper would kill it."""
+    import signal as _sig
+    sent = []
+    status.set_recording({"pid": 4242, "caf": "/x/.rec-a.caf",
+                          "started_monotonic": 0.0, "paused": False, "paused_total": 0.0})
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: str(pid) == "4242")
+    monkeypatch.setattr(recorder.os, "kill", lambda pid, s: sent.append((pid, s)))
+
+    assert recorder.pause() == {"ok": True, "paused": True}
+    assert sent == [(4242, _sig.SIGUSR1)]
+    assert status.recording()["paused"] is True
+    assert recorder.pause()["ok"]                    # idempotent: no second signal
+    assert len(sent) == 1
+
+    assert recorder.resume() == {"ok": True, "paused": False}
+    assert sent[-1] == (4242, _sig.SIGUSR2)
+    assert status.recording()["paused"] is False
+    assert "paused_at" not in status.recording()     # the span was banked and closed
+
+
+def test_pause_refused_when_not_recording(sandbox):
+    assert not recorder.pause()["ok"]
+    assert not recorder.resume()["ok"]
+    status.set_recording({"pid": 999999, "caf": "/x/.rec-a.caf"})  # dead pid
+    assert not recorder.pause()["ok"]
+
+
+def test_elapsed_seconds_excludes_paused_spans(sandbox, monkeypatch):
+    """The readout counts RECORDED audio, not wall-clock since Start — otherwise
+    a 10-minute coffee break would inflate a 2-minute recording to 12."""
+    clock = {"t": 100.0}
+    monkeypatch.setattr(recorder.time, "monotonic", lambda: clock["t"])
+    rec = {"started_monotonic": 100.0, "paused": False, "paused_total": 0.0}
+    clock["t"] = 130.0
+    assert recorder.elapsed_seconds(rec) == 30            # 30s recorded
+
+    # paused at t=130; the clock keeps running but the readout must not
+    rec = {**rec, "paused": True, "paused_at": 130.0}
+    clock["t"] = 190.0
+    assert recorder.elapsed_seconds(rec) == 30            # still 30s, frozen
+
+    # resumed after a 60s pause, then 10s more recorded
+    rec = {"started_monotonic": 100.0, "paused": False, "paused_total": 60.0}
+    clock["t"] = 200.0
+    assert recorder.elapsed_seconds(rec) == 40            # 100s wall - 60s paused
+    assert recorder.elapsed_seconds(None) == 0
+
+
 def test_recorder_running_requires_recorder_identity(sandbox, monkeypatch):
     """C3: a recycled PID that is alive but is NOT our recorder must not read as
     a live recording — otherwise start() refuses forever and a real orphan is
