@@ -1146,6 +1146,14 @@ font-variant-numeric:tabular-nums}
 .chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
 .chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
 .chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
+/* one-click Work/Personal tag, right on the row. Untagged sits back until the
+   row is hovered, so 40+ untagged meetings don't turn the list into confetti. */
+.chip.cat{cursor:pointer;user-select:none;padding:1px 9px}
+.chip.cat:hover{border-color:var(--sub)}
+.chip.cat.none{opacity:0;transition:opacity .12s}
+.row:hover .chip.cat.none,.chip.cat.none:focus-visible{opacity:.7}
+.chip.cat.work{border-color:transparent;background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}
+.chip.cat.personal{border-color:transparent;background:color-mix(in srgb,var(--ok) 13%,transparent);color:var(--ok)}
 button{font:inherit;font-size:13.5px;font-weight:500;border:1px solid var(--line);
 border-radius:8px;padding:6px 14px;cursor:pointer;background:var(--card);color:var(--ink);
 transition:background .15s,border-color .15s,transform .02s}
@@ -1493,6 +1501,30 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
+// ---- Work/Personal tag, one click on the row (no menu) ----
+// Cycles untagged -> Work -> Personal -> untagged. The update is applied to the
+// local state and re-rendered BEFORE the request lands, so the chip flips
+// instantly instead of waiting for the next 2s poll.
+const CAT_NEXT={'':'work',work:'personal',personal:''};
+const CAT_LABEL={work:'Work',personal:'Personal'};
+function catChip(m){
+  const c=m.category||'';
+  const nxt=CAT_NEXT[c];
+  const lbl=CAT_LABEL[c]||'+ tag';
+  const t=c?`Tagged ${CAT_LABEL[c]} — click for ${nxt?CAT_LABEL[nxt]:'no tag'}`
+          :'Tag as Work — click again for Personal, once more to clear';
+  const call=`cycleCat(event,'${escJs(m.base)}','${nxt}')`;
+  return `<span class="chip cat ${c||'none'}" role="button" tabindex="0" title="${t}"
+    onclick="${call}" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();${call}}">${lbl}</span>`;
+}
+async function cycleCat(ev,base,next){
+  ev.stopPropagation();  // the row itself is clickable — don't open anything
+  const m=S.meetings.find(x=>x.base===base);
+  if(m){m.category=next||null;render()}
+  const r=await api('/api/set_category',{base,category:next});
+  if(!r.ok)alert(r.error||'failed');
+  refresh();
+}
 function render(){
   const s=S;
   // header
@@ -1667,7 +1699,7 @@ function render(){
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
     return `<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
     <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}','${escJs(mtit(m))}',event)" title="Click to rename">${esc(mtit(m))}</span></div>
-    <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}${m.category?` · <span class="chip" title="Category — set from the ⋯ menu">${m.category==='work'?'Work':'Personal'}</span>`:''}
+    <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''} ${catChip(m)}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
     <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
@@ -1791,7 +1823,7 @@ function openMeetingMenu(base){
     <div class="sub">Retitle this recording (updates all files)</div></div>
     <button onclick="dlg.close();openRename('${escJs(base)}')">Rename…</button></div>
   <div class="row"><div class="grow"><div class="name">Category</div>
-    <div class="sub">Flag as Work or Personal — the transcripts list can filter by it. Click again to clear.</div></div>
+    <div class="sub">Also one click on the row itself. The transcripts list filters by it.</div></div>
     <button ${m.category==='work'?'class="primary"':''} onclick="setCategory('${escJs(base)}','${m.category==='work'?'':'work'}')">Work</button>
     <button ${m.category==='personal'?'class="primary"':''} onclick="setCategory('${escJs(base)}','${m.category==='personal'?'':'personal'}')">Personal</button></div>
   ${m.audio?`<div class="row"><div class="grow"><div class="name">Reprocess</div>
