@@ -146,6 +146,8 @@ class STTMenuBar(rumps.App):
         self._frame = 0
         self._last_sig = None
         self._stall_warned = None  # caf path already warned about (once per capture)
+        self._rec_cache = None     # last known live recording, for the 1s clock tick
+        self._busy_cache = ""      # spinner suffix while a batch runs alongside
         panel.start_server()  # local control panel at http://127.0.0.1:8737
         try:  # a recording orphaned by a crash/forced quit: salvage its audio
             saved = recorder.recover_orphans()
@@ -156,7 +158,30 @@ class STTMenuBar(rumps.App):
             pass
         self.timer = rumps.Timer(self.refresh, 2.0)
         self.timer.start()
+        # a second, 1s timer so the recording clock ticks LIVE. It does no
+        # polling at all — it recomputes the title from the recording state the
+        # 2s refresh cached (elapsed_seconds is pure monotonic arithmetic), so
+        # the clock advances every second without doubling the status/queue reads.
+        self.rec_tick = rumps.Timer(self._tick_recording, 1.0)
+        self.rec_tick.start()
         self.refresh(None)
+
+    def _rec_title(self, rec, busy):
+        """The menu-bar title for a live recording; shared by the 2s refresh and
+        the 1s clock tick so the two can never render it differently."""
+        glyph = REC_PAUSED if rec.get("paused") else REC_LIVE
+        clock = _fmt_hms(recorder.elapsed_seconds(rec))
+        stalled = recorder.capture_stalled(rec)
+        return f" {glyph}{' ⚠' if stalled else ''} {clock} {busy}".rstrip(), stalled
+
+    def _tick_recording(self, _):
+        rec = self._rec_cache
+        if not rec:
+            return  # no live recording: the 2s refresh owns the title
+        try:
+            self.title, _ = self._rec_title(rec, self._busy_cache)
+        except Exception:
+            pass
 
     @staticmethod
     def _signature(s):
@@ -174,16 +199,15 @@ class STTMenuBar(rumps.App):
             self._frame = (self._frame + 1) % len(SPINNER)
             # title (badge/spinner) updates every tick; it doesn't disturb an open menu
             rec = s.get("recording")
+            self._rec_cache = rec       # the 1s clock tick renders from this
+            self._busy_cache = SPINNER[self._frame] if (rec and s["running"]) else ""
             if rec:
-                # a live recording owns the title (its clock ticks every 2s);
-                # a background batch still shows its spinner alongside.
-                # Flat monochrome glyphs, not the 🔴 emoji: they inherit the menu
-                # bar's own tint (so they read correctly in light, dark, and under
-                # a tinted wallpaper) instead of stamping a saturated red dot.
-                busy = SPINNER[self._frame] if s["running"] else ""
-                glyph = REC_PAUSED if rec.get("paused") else REC_LIVE
-                clock = _fmt_hms(recorder.elapsed_seconds(rec))
-                stalled = recorder.capture_stalled(rec)
+                # a live recording owns the title (the 1s tick keeps its clock
+                # live between these polls); a background batch still shows its
+                # spinner alongside. Flat monochrome glyphs, not the 🔴 emoji:
+                # they inherit the menu bar's own tint (legible in light, dark,
+                # and under a tinted wallpaper) instead of a saturated red dot.
+                self.title, stalled = self._rec_title(rec, self._busy_cache)
                 if stalled and self._stall_warned != rec.get("caf"):
                     # say it NOW, ten seconds in — not at stop, when the meeting
                     # audio is already gone for good
@@ -193,7 +217,6 @@ class STTMenuBar(rumps.App):
                         "Grant Microphone and 'System Audio Recording Only' in "
                         "System Settings > Privacy & Security, then stop and "
                         "start again. (Rebuilding the recorder resets these.)")
-                self.title = f" {glyph}{' ⚠' if stalled else ''} {clock} {busy}".rstrip()
             elif s["running"]:
                 n_act = max(1, len(s["active"]))
                 etas = [status.estimate_progress(a, n_act)[1] for a in s["active"].values()]
