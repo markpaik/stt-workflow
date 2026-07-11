@@ -9,6 +9,7 @@ import contextlib
 import fcntl
 import json
 import os
+import threading
 import time as _time
 from datetime import datetime
 
@@ -43,6 +44,9 @@ def _write(d):
         pass
 
 
+_lock_state = threading.local()
+
+
 @contextlib.contextmanager
 def _lock():
     """Serialize a read-modify-write across processes. The main run_batch process
@@ -50,7 +54,18 @@ def _lock():
     lost updates (a worker's write built from a pre-read snapshot clobbered
     another worker's just-published stage). Mirrors identify.lock_registry /
     jobs._mutate. A lock-acquire failure degrades to an unlocked write rather
-    than raising — status reporting must never break the pipeline."""
+    than raising — status reporting must never break the pipeline.
+
+    Reentrant per THREAD: run_batch's SIGTERM handler calls end_run() while the
+    main thread may already be inside a _lock() (mid finish_file/start_run).
+    flock treats the handler's fresh fd as a DIFFERENT holder, so it would block
+    on a lock this very process holds — a self-deadlock the SIGKILL escalation
+    only breaks 8s later, meanwhile losing the clean shutdown. When this thread
+    already holds it, skip the OS lock and write directly; we are the sole writer
+    in that window. Thread-local, so genuine concurrent threads still serialize."""
+    if getattr(_lock_state, "held", False):
+        yield
+        return
     lk = None
     try:
         lk = open(STATUS_PATH.with_suffix(".lock"), "w")
@@ -59,9 +74,11 @@ def _lock():
         if lk is not None:
             lk.close()
         lk = None
+    _lock_state.held = True
     try:
         yield
     finally:
+        _lock_state.held = False
         if lk is not None:
             try:
                 fcntl.flock(lk, fcntl.LOCK_UN)
