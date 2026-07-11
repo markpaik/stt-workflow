@@ -121,6 +121,54 @@ def test_finalize_no_sidecar_without_mic_speaker(sandbox, monkeypatch):
     assert not list(config.recordings_dir().glob("*.opts.json"))
 
 
+def test_halt_ends_the_live_recording_before_the_naming_dialog(sandbox, monkeypatch):
+    """The reported bug: Stop killed the capture, but the menu bar's naming dialog
+    is MODAL and finalize() (which clears the state) only runs after it is
+    answered. Until then the raw status entry still said 'recording', so the panel
+    kept showing a recording that had already stopped. halt() must end the LIVE
+    state immediately, while keeping the entry so recover_orphans still finds the
+    CAF if we die before finalize."""
+    caf = config.recordings_dir() / ".rec-halt01.caf"
+    caf.parent.mkdir(parents=True, exist_ok=True)
+    caf.write_bytes(b"\0" * 100)
+    status.set_recording({"pid": 4242, "caf": str(caf)})
+    # pretend that pid is our live recorder, and that it exits on the SIGINT
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: str(pid) == "4242")
+    monkeypatch.setattr(recorder, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(recorder.os, "killpg", lambda *a: None)
+    monkeypatch.setattr(recorder.os, "getpgid", lambda pid: 4242)
+
+    out = recorder.halt()
+    assert out == caf
+    # capture is over: NOTHING may report a live recording from here on
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: False)
+    assert recorder.live_recording() is None
+    # but the entry survives, so a crash before finalize is still recoverable
+    assert status.recording()["caf"] == str(caf)
+    assert status.recording()["pid"] is None
+
+
+def test_live_recording_is_the_one_source_of_truth(sandbox, monkeypatch):
+    """A status entry alone never means 'recording' — it outlives the capture
+    until finalize, and a recycled pid can fake liveness."""
+    assert recorder.live_recording() is None                      # nothing set
+    status.set_recording({"pid": 999999, "caf": "/x/.rec-a.caf"})  # dead pid
+    assert recorder.live_recording() is None
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: True)
+    assert recorder.live_recording()["caf"] == "/x/.rec-a.caf"    # genuinely live
+
+
+def test_panel_never_shows_a_recording_that_has_stopped(sandbox, monkeypatch):
+    """The exact regression: the panel read the raw status key with no liveness
+    check while the menu bar filtered on a dead pid, so a stopped recording stayed
+    on the page forever. Both now answer from recorder.live_recording()."""
+    from gui import server as srv
+    status.set_recording({"pid": 999999, "caf": "/x/.rec-a.caf"})  # stopped/dead
+    assert srv.gather_state()["recording"] is None
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: True)
+    assert srv.gather_state()["recording"] is not None             # a live one shows
+
+
 def test_recorder_running_requires_recorder_identity(sandbox, monkeypatch):
     """C3: a recycled PID that is alive but is NOT our recorder must not read as
     a live recording — otherwise start() refuses forever and a real orphan is

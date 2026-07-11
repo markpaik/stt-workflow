@@ -93,9 +93,9 @@ def gather():
         done_count = len(config.meeting_bases())
     except Exception:
         done_count = 0
-    rec = st.get("recording")
-    if rec and not _pid_alive(rec.get("pid")):
-        rec = None  # a dead recorder is handled by recover_orphans, not shown live
+    # one shared source of truth with the panel (they used to answer this
+    # separately, and drifted): only a capture that is genuinely running shows.
+    rec = recorder.live_recording()
     return {"running": running, "active": active, "queued": queued,
             "queued_jobs": queued_jobs,
             "paused": control.is_paused(), "recording": rec,

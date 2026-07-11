@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from stt import (config, control, dates, export, identify, jobs, manifest, rates,
-                 review, search, status, unknowns)
+                 recorder, review, search, status, unknowns)
 
 PORT = 8737
 AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
@@ -409,7 +409,11 @@ def gather_state():
                             for j in jobs.items()],
             "recent": st.get("recent", [])[:8],
             "paused": control.is_paused(),
-            "recording": st.get("recording"),
+            # NOT the raw status key: that outlives the capture until finalize()
+            # completes (the menu bar's naming dialog blocks in between), so the
+            # panel kept showing "Recording" after the recorder had already
+            # stopped. Same source of truth the menu bar uses.
+            "recording": recorder.live_recording(),
             "queue": queue, "meetings": meetings,
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
