@@ -23,6 +23,7 @@ manifest.json
 status.json
 calibration.jsonl
 rates.jsonl
+results.jsonl
 logs/
 work/
 ab_out/
