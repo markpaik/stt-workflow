@@ -558,3 +558,64 @@ def test_iter_sources_sweeps_recordings_folder(sandbox):
     assert "Team Call 07092026.m4a" in names
     assert not any(n.startswith(".") for n in names)
     assert len(names) == len(set(names))  # no dupes across folders
+
+
+def test_iter_sources_flags_a_cross_folder_name_collision(sandbox, capsys):
+    """C7: two DIFFERENT files that merely share a basename across the source and
+    recordings folders collide on the same meeting folder (base = stem) and
+    manifest key. iter_sources yields one AND surfaces the clash on stderr rather
+    than silently dropping the second."""
+    from stt import config
+    src = config.source_dir()
+    rec = config.recordings_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
+    (src / "Weekly Sync 07092026.m4a").write_bytes(b"one")
+    (rec / "Weekly Sync 07092026.m4a").write_bytes(b"a different recording")
+    names = [p.name for p in run_batch.iter_sources(src)]
+    assert names.count("Weekly Sync 07092026.m4a") == 1
+    assert "more than one watched folder" in capsys.readouterr().err
+
+
+def test_process_one_copies_audio_atomically(sandbox, monkeypatch):
+    """C8: the source audio is copied into the meetings store via .part +
+    os.replace. A crash mid-copy must not leave a truncated file that the
+    success guard (dest_audio.exists()) would count as done and then delete the
+    original against."""
+    from pathlib import Path
+
+    import pytest
+
+    from stt import config, icloud, pipeline
+
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    audio_src = src / "Sync 05012026.m4a"
+    audio_src.write_bytes(b"REAL AUDIO BYTES")
+
+    def fake_process_file(s, dest_dir=None, **kw):
+        base = Path(s).stem
+        config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+        j = config.meeting_file(base, ".json", dest_dir)
+        j.write_text("{}")
+        t = config.meeting_file(base, ".txt", dest_dir)
+        t.write_text("x")
+        return {"base": base, "txt": t, "json": j, "emb": None,
+                "duration_sec": 1.0, "n_speakers": 1, "identified": []}
+    monkeypatch.setattr(pipeline, "process_file", fake_process_file)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+
+    real_replace = run_batch.os.replace
+
+    def crash_on_publish(a, b, *r, **k):
+        if str(a).endswith(".part"):          # the audio publish, not status writes
+            raise OSError("crash during audio copy")
+        return real_replace(a, b, *r, **k)
+    monkeypatch.setattr(run_batch.os, "replace", crash_on_publish)
+
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": True}
+    with pytest.raises(OSError):
+        run_batch.process_one(str(audio_src), str(config.MEETINGS_DIR), opts)
+    assert not config.meeting_file("Sync 05012026", ".m4a").exists()  # nothing published
+    assert audio_src.exists()                                          # original preserved

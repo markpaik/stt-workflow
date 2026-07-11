@@ -9,6 +9,7 @@ import contextlib
 import fcntl
 import json
 import os
+import threading
 import time as _time
 from datetime import datetime
 
@@ -43,6 +44,9 @@ def _write(d):
         pass
 
 
+_lock_state = threading.local()
+
+
 @contextlib.contextmanager
 def _lock():
     """Serialize a read-modify-write across processes. The main run_batch process
@@ -50,7 +54,18 @@ def _lock():
     lost updates (a worker's write built from a pre-read snapshot clobbered
     another worker's just-published stage). Mirrors identify.lock_registry /
     jobs._mutate. A lock-acquire failure degrades to an unlocked write rather
-    than raising — status reporting must never break the pipeline."""
+    than raising — status reporting must never break the pipeline.
+
+    Reentrant per THREAD: run_batch's SIGTERM handler calls end_run() while the
+    main thread may already be inside a _lock() (mid finish_file/start_run).
+    flock treats the handler's fresh fd as a DIFFERENT holder, so it would block
+    on a lock this very process holds — a self-deadlock the SIGKILL escalation
+    only breaks 8s later, meanwhile losing the clean shutdown. When this thread
+    already holds it, skip the OS lock and write directly; we are the sole writer
+    in that window. Thread-local, so genuine concurrent threads still serialize."""
+    if getattr(_lock_state, "held", False):
+        yield
+        return
     lk = None
     try:
         lk = open(STATUS_PATH.with_suffix(".lock"), "w")
@@ -59,9 +74,11 @@ def _lock():
         if lk is not None:
             lk.close()
         lk = None
+    _lock_state.held = True
     try:
         yield
     finally:
+        _lock_state.held = False
         if lk is not None:
             try:
                 fcntl.flock(lk, fcntl.LOCK_UN)
@@ -282,6 +299,27 @@ def clear_stage(name):
             _write(d)
 
 
+HISTORY_MAX_BYTES = 4 * 1024 * 1024   # ~tens of thousands of results (years of use)
+HISTORY_KEEP_LINES = 20000            # trimmed back to this most-recent count
+
+
+def _append_history(entry):
+    """Append one result to the permanent log, and keep it from growing without
+    bound: once it passes a generous size, rewrite it with only the most recent
+    lines (atomic). Called only from finish_file under the status lock, so the
+    rare trim never races another writer. Must never break the pipeline."""
+    try:
+        with open(HISTORY_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        if HISTORY_LOG.stat().st_size > HISTORY_MAX_BYTES:
+            lines = HISTORY_LOG.read_text().splitlines()[-HISTORY_KEEP_LINES:]
+            tmp = HISTORY_LOG.with_suffix(".jsonl.tmp")
+            tmp.write_text("\n".join(lines) + "\n")
+            os.replace(tmp, HISTORY_LOG)
+    except OSError:
+        pass
+
+
 def finish_file(name, ok, summary=""):
     with _lock():
         d = read()
@@ -291,11 +329,7 @@ def finish_file(name, ok, summary=""):
         d["recent"] = recent[:20]
         d.get("active", {}).pop(name, None)
         _write(d)
-        try:  # the permanent history — appending must never break the pipeline
-            with open(HISTORY_LOG, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except OSError:
-            pass
+        _append_history(entry)  # the permanent, size-capped history log
 
 
 def history():

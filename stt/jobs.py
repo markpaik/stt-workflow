@@ -13,6 +13,7 @@ without touching the queue, so the job simply waits for the next kick.
 import fcntl
 import json
 import os
+import threading
 import time
 
 from . import config
@@ -38,21 +39,38 @@ def split_list(s: str) -> list:
     return s.split(FIELD_SEP) if FIELD_SEP in s else s.split(",")
 
 
+_lock_state = threading.local()
+
+
+def _apply(fn):
+    try:
+        cur = json.loads(PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        cur = []
+    out, ret = fn(cur)
+    # atomic: a kill mid-write (forced quit, the SIGKILL escalation in
+    # stop_run itself) must never truncate this file — a truncated read
+    # degrades silently to "queue empty", dropping every pending job
+    tmp = PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out, indent=2))
+    os.replace(tmp, PATH)
+    return ret
+
+
 def _mutate(fn):
+    # Reentrant per THREAD: run_batch's SIGTERM handler re-queues via add() while
+    # the main thread may already hold this flock; flock treats the handler's new
+    # fd as a different holder, so it would self-deadlock. When this thread holds
+    # it, do the read-modify-write without re-locking (sole writer in that window).
+    if getattr(_lock_state, "held", False):
+        return _apply(fn)
     with open(_LOCK, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
+        _lock_state.held = True
         try:
-            cur = json.loads(PATH.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            cur = []
-        out, ret = fn(cur)
-        # atomic: a kill mid-write (forced quit, the SIGKILL escalation in
-        # stop_run itself) must never truncate this file — a truncated read
-        # degrades silently to "queue empty", dropping every pending job
-        tmp = PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(out, indent=2))
-        os.replace(tmp, PATH)
-        return ret
+            return _apply(fn)
+        finally:
+            _lock_state.held = False
 
 
 def add(job: dict) -> dict:

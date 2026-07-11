@@ -114,10 +114,16 @@ def _plan_channels(base, src, mic_speaker):
     if stats["sys_dead"]:
         return "mono_fallback_sys_dead", wav_mic, wav_sys, None, stats
     mark_vp = identify.load_voiceprints().get(mic_speaker)
-    if mark_vp is None:
-        return "mono_fallback_no_enroll", wav_mic, wav_sys, None, stats
     spans = channels.mic_spans(wav_mic, wav_sys)
     embs = diarize.embed_spans(wav_mic, spans)
+    stats["n_mic_spans"] = len(spans)
+    if mark_vp is None:
+        # the mic speaker is not enrolled yet: without a voiceprint to gate them
+        # this pass falls back to mono. But cache the (ungated) spans + their
+        # embeddings so enrolling them later and running relabel reconstructs the
+        # mic overlay in seconds, no full re-transcription needed (C6).
+        plan = {"spans": spans, "embs": embs, "score": None} if spans else None
+        return "mono_fallback_no_enroll", wav_mic, wav_sys, plan, stats
     kept, kept_embs, scores = [], [], []
     for sp, em in zip(spans, embs):
         if em is None:
@@ -128,8 +134,7 @@ def _plan_channels(base, src, mic_speaker):
             kept_embs.append(em)
             scores.append(sc)
     frac = (len(kept) / len(spans)) if spans else 0.0
-    stats.update({"n_mic_spans": len(spans), "n_kept": len(kept),
-                  "pass_fraction": round(frac, 3)})
+    stats.update({"n_kept": len(kept), "pass_fraction": round(frac, 3)})
     if not spans:
         # nobody dominated the mic at all (an all-listening meeting, or the mic
         # speaker never spoke) -> nothing to overlay; process as mono
@@ -263,66 +268,75 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     processed_at = _dt.datetime.now().isoformat(timespec="seconds")
     header = output.txt_header(src.name, dur, speakers, strict, processed_at)
 
-    meta = {
-        "source_file": src.name,
-        # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
-        # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
-        # often weeks after the meeting. Grouping and sorting read this
-        # stored field; a human can correct it in the panel.
-        "date": _meeting_date(src, json_path),
-        "processed_at": processed_at,
-        "duration_sec": round(dur, 1),
-        "asr_engine": asr_out["engine"],
-        "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
-        "n_speakers": len(labels),
-        "strict": strict,
-        "one_time_speakers": not track_unknowns,
-        "punctuated": bool(config.PUNCTUATE),
-        "verify_engine": verify_engine,
-        "overlap_spans": [[s, e] for s, e in overlaps],
-        "refine_stats": diar["refine_stats"] if diar else None,
-    }
-    if channel_layout:  # a recording that declared a me/them layout
-        meta["channel_layout"] = channel_layout
-        meta["mic_speaker"] = mic_speaker
-        meta["channel_mode"] = channel_mode  # stereo_channel_aware or a mono_fallback_*
-        if channel_stats:
-            meta["channel_stats"] = channel_stats
-    # a redo invalidates old review decisions (new cluster ids) and any stale
-    # verify regions (new word timings) — archive/remove them, never half-apply
+    # Hold this meeting's per-base lock for the WHOLE write phase: the date
+    # resolution (which reads the stored json to preserve a human's correction),
+    # decision archiving, and every output/cache write. Without it a Redo raced
+    # a concurrent panel edit (set_date / review) or a relabel on the SAME base
+    # — all of which take this exact lock — so whichever write landed last
+    # silently won, or a rename moved the folder out from under these writes.
+    # The lock spans only this fast tail, never the minutes of ASR/diarization.
     from . import review
-    review.archive_decisions(base, dest_dir=dest_dir)
-    if verify_regions is None:
-        verify.sidecar_path(base, dest_dir).unlink(missing_ok=True)
+    with review.lock_meeting(base):
+        meta = {
+            "source_file": src.name,
+            # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
+            # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
+            # often weeks after the meeting. Grouping and sorting read this
+            # stored field; a human can correct it in the panel. Read under the
+            # lock so a set_meeting_date landing mid-write is not clobbered.
+            "date": _meeting_date(src, json_path),
+            "processed_at": processed_at,
+            "duration_sec": round(dur, 1),
+            "asr_engine": asr_out["engine"],
+            "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
+            "n_speakers": len(labels),
+            "strict": strict,
+            "one_time_speakers": not track_unknowns,
+            "punctuated": bool(config.PUNCTUATE),
+            "verify_engine": verify_engine,
+            "overlap_spans": [[s, e] for s, e in overlaps],
+            "refine_stats": diar["refine_stats"] if diar else None,
+        }
+        if channel_layout:  # a recording that declared a me/them layout
+            meta["channel_layout"] = channel_layout
+            meta["mic_speaker"] = mic_speaker
+            meta["channel_mode"] = channel_mode  # stereo_channel_aware or a mono_fallback_*
+            if channel_stats:
+                meta["channel_stats"] = channel_stats
+        # a redo invalidates old review decisions (new cluster ids) and any stale
+        # verify regions (new word timings) — archive/remove them, never half-apply
+        review.archive_decisions(base, dest_dir=dest_dir)
+        if verify_regions is None:
+            verify.sidecar_path(base, dest_dir).unlink(missing_ok=True)
 
-    output.write_txt(txt_path, segments, header=header)
-    output.write_json(json_path, meta, speakers, segments, labeled_words)
-    if verify_regions is not None:
-        # sidecar: relabel rebuilds segments from the diar cache and re-flags from this
-        verify.save_sidecar(base, verify_regions, verify_engine, dest_dir=dest_dir)
+        output.write_txt(txt_path, segments, header=header)
+        output.write_json(json_path, meta, speakers, segments, labeled_words)
+        if verify_regions is not None:
+            # sidecar: relabel rebuilds segments from the diar cache and re-flags from this
+            verify.save_sidecar(base, verify_regions, verify_engine, dest_dir=dest_dir)
 
-    saved_emb = None
-    if save_embeddings and diar and diar.get("embeddings"):
-        # atomic: write to a temp sibling then os.replace, so a crash mid-write
-        # can't leave a truncated cache next to a complete transcript. Pass a
-        # file handle (not the path) so np.savez does not append its own .npz to
-        # the .tmp name and leave os.replace chasing a file that isn't there.
-        emb_tmp = emb_path.with_suffix(emb_path.suffix + ".tmp")
-        with open(emb_tmp, "wb") as fh:
-            np.savez(fh, **{k: v for k, v in diar["embeddings"].items()})
-        os.replace(emb_tmp, emb_path)
-        saved_emb = emb_path
-        # cache raw turns + per-turn embeddings + overlaps so relabel can
-        # re-attribute later without re-diarizing. Persist the SYSTEM-channel
-        # overlaps only (not the mic/system double-talk added by combine) plus
-        # the mic spans + their embeddings, so relabel reconstructs the exact
-        # same overlay by re-gating against the CURRENT voiceprint.
-        mark = mic_plan or {}
-        diarcache.save(diar_path, diar["raw_turns"], diar["turn_embeddings"],
-                       diar["embeddings"], overlaps=diar["overlaps"],
-                       mark_spans=mark.get("spans"), mark_embs=mark.get("embs"),
-                       channel_mode=channel_mode if channel_layout else None,
-                       mic_speaker=mic_speaker)
+        saved_emb = None
+        if save_embeddings and diar and diar.get("embeddings"):
+            # atomic: write to a temp sibling then os.replace, so a crash mid-write
+            # can't leave a truncated cache next to a complete transcript. Pass a
+            # file handle (not the path) so np.savez does not append its own .npz to
+            # the .tmp name and leave os.replace chasing a file that isn't there.
+            emb_tmp = emb_path.with_suffix(emb_path.suffix + ".tmp")
+            with open(emb_tmp, "wb") as fh:
+                np.savez(fh, **{k: v for k, v in diar["embeddings"].items()})
+            os.replace(emb_tmp, emb_path)
+            saved_emb = emb_path
+            # cache raw turns + per-turn embeddings + overlaps so relabel can
+            # re-attribute later without re-diarizing. Persist the SYSTEM-channel
+            # overlaps only (not the mic/system double-talk added by combine) plus
+            # the mic spans + their embeddings, so relabel reconstructs the exact
+            # same overlay by re-gating against the CURRENT voiceprint.
+            mark = mic_plan or {}
+            diarcache.save(diar_path, diar["raw_turns"], diar["turn_embeddings"],
+                           diar["embeddings"], overlaps=diar["overlaps"],
+                           mark_spans=mark.get("spans"), mark_embs=mark.get("embs"),
+                           channel_mode=channel_mode if channel_layout else None,
+                           mic_speaker=mic_speaker)
 
     return {
         "base": base, "txt": txt_path, "json": json_path, "emb": saved_emb,

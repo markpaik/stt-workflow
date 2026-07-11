@@ -367,3 +367,20 @@ def test_recording_key_roundtrips_and_survives_a_run(sandbox):
     assert status.recording()["pid"] == 4242  # outlives the whole run
     status.clear_recording()
     assert status.recording() is None
+
+
+def test_history_log_is_trimmed_when_it_grows_too_large(sandbox, monkeypatch):
+    """R1: the permanent results log must not grow without bound. Once it passes
+    the size cap, finish_file rewrites it keeping only the most recent lines,
+    and history() still returns them newest-first."""
+    import json
+
+    from stt import status
+    monkeypatch.setattr(status, "HISTORY_MAX_BYTES", 50)   # tiny cap for the test
+    monkeypatch.setattr(status, "HISTORY_KEEP_LINES", 3)
+    for i in range(50):
+        status.finish_file(f"m{i}.m4a", True, "x" * 40)
+    lines = status.HISTORY_LOG.read_text().splitlines()
+    assert len(lines) <= 3                                   # bounded, not 50
+    assert json.loads(lines[-1])["name"] == "m49.m4a"        # kept the most recent
+    assert status.history()[0]["name"] == "m49.m4a"          # still browsable
