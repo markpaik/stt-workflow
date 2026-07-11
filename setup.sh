@@ -144,33 +144,42 @@ case "${1:-}" in
     launchctl kickstart -k "gui/$U/$GUI_LABEL" && echo "Menu-bar app restarted."
     ;;
   build-recorder)
-    # the meeting recorder helper (mic + system audio); Swift via the CLT.
-    # IMPORTANT: the ad-hoc signature is pinned to the EXACT build (its cdhash),
-    # and macOS ties the Microphone / System Audio grants to that hash — so any
-    # rebuild that changes the binary ORPHANS the existing grants. There is no
-    # prompt and no error afterwards: recordings simply capture zero frames.
-    # The hash change is detected below and announced; the menu bar also warns
-    # live (⚠ in the title) when a recording is not capturing.
+    # The meeting recorder helper (mic + system audio); Swift via the CLT.
+    # Built as a REAL .app bundle, not a bare binary: LaunchServices only knows
+    # bundles, and TCC resets address apps by bundle id — a bare binary made
+    # "tccutil reset ... com.stt-workflow.recorder" fail with 'No such bundle
+    # identifier', which left no way to recover permissions except Settings
+    # surgery. As a bundle, the panel's Fix-permissions button works and the
+    # privacy panes show 'STT Recorder' instead of an anonymous binary.
+    # STILL TRUE: the ad-hoc signature is pinned to the exact build (cdhash), so
+    # any rebuild that changes the binary orphans the grants — silently, no
+    # prompt, zero frames. Detected and announced below; the menu bar and panel
+    # also warn live when a recording is not capturing.
     if ! xcrun --find swiftc >/dev/null 2>&1; then
       echo "swiftc not found — install the Command Line Tools: xcode-select --install"; exit 1
     fi
-    OLD_CDHASH="$(codesign -dvvv "$BASE/native/stt-recorder" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
+    APP="$BASE/native/STT Recorder.app"
+    BIN="$APP/Contents/MacOS/stt-recorder"
+    OLD_CDHASH="$(codesign -dvvv "$BIN" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
     echo "Compiling the meeting recorder…"
-    swiftc "$BASE/native/recorder.swift" -O -o "$BASE/native/stt-recorder" \
-      -framework CoreAudio -framework AudioToolbox \
-      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-      -Xlinker "$BASE/native/Recorder-Info.plist"
-    codesign --force --sign - --identifier com.stt-workflow.recorder "$BASE/native/stt-recorder"
+    mkdir -p "$APP/Contents/MacOS"
+    cp "$BASE/native/Recorder-Info.plist" "$APP/Contents/Info.plist"
+    swiftc "$BASE/native/recorder.swift" -O -o "$BIN" \
+      -framework CoreAudio -framework AudioToolbox
+    codesign --force --sign - --identifier com.stt-workflow.recorder "$APP"
+    # register the bundle so tccutil/Settings can address it by id
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
+    rm -f "$BASE/native/stt-recorder"   # the pre-bundle bare binary
     mkdir -p "$(recordings_dir)"
-    echo "Built $BASE/native/stt-recorder (recordings land in: $(recordings_dir))"
-    NEW_CDHASH="$(codesign -dvvv "$BASE/native/stt-recorder" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
+    echo "Built $APP (recordings land in: $(recordings_dir))"
+    NEW_CDHASH="$(codesign -dvvv "$BIN" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
     if [ -n "$OLD_CDHASH" ] && [ "$OLD_CDHASH" != "$NEW_CDHASH" ]; then
       echo
-      echo "*** The binary CHANGED — macOS has silently dropped its microphone and"
-      echo "*** system-audio permissions. Recordings will capture NOTHING until you run:"
+      echo "*** The recorder CHANGED — macOS has silently dropped its microphone and"
+      echo "*** system-audio permissions. Use the panel's Fix permissions button, or:"
       echo "***   tccutil reset Microphone com.stt-workflow.recorder"
       echo "***   tccutil reset AudioCapture com.stt-workflow.recorder"
-      echo "*** and then start a recording and grant both prompts again."
+      echo "*** then start a recording and grant the prompts again."
     fi
     ;;
   *)
