@@ -193,6 +193,33 @@ def test_pause_and_resume_signal_the_recorder_and_track_state(sandbox, monkeypat
     assert "paused_at" not in status.recording()     # the span was banked and closed
 
 
+def test_recording_outcomes_land_as_status_notes_not_notifications(sandbox, monkeypatch):
+    """Feedback lives IN the menu and panel via a persisted note — notification
+    banners either failed to display from this unbundled app or arrived as
+    unwanted osascript alerts. Empty capture -> ⚠ note naming permissions;
+    success -> ✓ note; the next start supersedes whatever is there."""
+    caf = config.recordings_dir() / ".rec-empty.caf"
+    caf.parent.mkdir(parents=True, exist_ok=True)
+    caf.write_bytes(b"\0" * 100)
+    status.set_recording({"pid": 1, "caf": str(caf)})
+    assert not recorder.finalize(caf, "x")["ok"]
+    note = status.recorder_note()
+    assert note and note["ok"] is False and "permission" in note["text"].lower()
+
+    caf2 = _stereo_caf(config.recordings_dir() / ".rec-good.caf")
+    status.set_recording({"pid": 1, "caf": str(caf2)})
+    r = recorder.finalize(caf2, "Team Call")
+    assert r["ok"]
+    note = status.recorder_note()
+    assert note["ok"] is True and r["name"] in note["text"]
+
+    # a batch starting mid-display must not wipe it (start_run rebuilds status)
+    status.start_run(["a.m4a"])
+    assert status.recorder_note()["ok"] is True
+    status.clear_recorder_note()
+    assert status.recorder_note() is None
+
+
 def test_capture_stalled_flags_a_header_only_caf(sandbox, monkeypatch, tmp_path):
     """A TCC denial delivers no frames and raises no error — the only tell is a
     CAF that never grows. The detector must fire ~10s in (so the menu bar warns

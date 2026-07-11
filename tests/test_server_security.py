@@ -201,6 +201,34 @@ def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
         assert status == 403, f"{path} not origin-gated"
 
 
+# ---------- recorder permission fix ----------
+
+def test_fix_recorder_permissions_is_scoped_to_our_bundle_only(running_server, monkeypatch):
+    """The endpoint may ONLY reset TCC for com.stt-workflow.recorder — never a
+    bare service-wide reset (which would revoke every app's grant)."""
+    from gui import server as srv
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = stderr = ""
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return R()
+    monkeypatch.setattr(srv.subprocess, "run", fake_run)
+    status, body = _post(running_server, "/api/fix_recorder_permissions", {})
+    assert status == 200 and body["ok"]
+    assert len(calls) == 2
+    for argv in calls:
+        assert argv[0] == "/usr/bin/tccutil" and argv[1] == "reset"
+        assert argv[-1] == "com.stt-workflow.recorder"   # always scoped
+    # and it is origin-gated like every other POST
+    status, _ = _post(running_server, "/api/fix_recorder_permissions", {},
+                      headers={"Origin": "https://evil.example.com"})
+    assert status == 403
+
+
 # ---------- archive / category endpoints ----------
 
 def test_archive_category_endpoints_reject_unknown_base(running_server):

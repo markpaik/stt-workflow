@@ -312,7 +312,10 @@ def _recording_state():
     if not rec:
         return None
     return {**rec, "elapsed_secs": recorder.elapsed_seconds(rec),
-            "paused": bool(rec.get("paused"))}
+            "paused": bool(rec.get("paused")),
+            # header-only CAF ~10s in = TCC denial: the panel shows a red strip
+            # with the Fix-permissions button WHILE the meeting can still be saved
+            "stalled": recorder.capture_stalled(rec)}
 
 
 def gather_state():
@@ -430,6 +433,7 @@ def gather_state():
             # the captured-seconds clock resolved server-side so both readouts
             # agree and neither has to re-derive the paused-span arithmetic.
             "recording": _recording_state(),
+            "recorder_note": st.get("recorder_note"),
             "queue": queue, "meetings": meetings,
             "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
@@ -958,6 +962,33 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+            elif u.path == "/api/recorder_note":
+                # dismiss the last-recording outcome strip
+                status.clear_recorder_note()
+                self._json({"ok": True})
+            elif u.path == "/api/fix_recorder_permissions":
+                # Reset THIS APP's TCC entries so macOS re-prompts on the next
+                # Start. Needed because the recorder is ad-hoc signed: a rebuild
+                # changes its cdhash and orphans the grants with no prompt and no
+                # error. Scoped strictly to our own bundle id — tccutil cannot
+                # touch anything else here — and the actual granting still happens
+                # in the OS permission dialogs.
+                outs = []
+                for svc in ("Microphone", "AudioCapture"):
+                    r = subprocess.run(["/usr/bin/tccutil", "reset", svc,
+                                        "com.stt-workflow.recorder"],
+                                       capture_output=True, text=True, timeout=15)
+                    outs.append(r.returncode)
+                if any(outs):
+                    self._json({"ok": False,
+                                "error": "tccutil could not reset — run it from "
+                                         "Terminal: tccutil reset Microphone "
+                                         "com.stt-workflow.recorder"})
+                else:
+                    self._json({"ok": True,
+                                "message": "Permissions reset. Now click Start "
+                                           "recording in the menu bar and grant "
+                                           "BOTH prompts when macOS asks."})
             elif u.path == "/api/accept_meeting":
                 # inbox: name/date/tag it, and mark it reviewed so it joins the list
                 if not self._require_base(b.get("base")):
@@ -1207,6 +1238,15 @@ font-variant-numeric:tabular-nums}
 .chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
 .chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
 .chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
+/* recorder outcome / stall strips — in-place feedback, not notifications */
+.recstrip{border:1px solid var(--line);border-radius:10px;padding:9px 12px;
+font-size:13.5px;margin:10px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.recstrip.good{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));
+background:color-mix(in srgb,var(--ok) 7%,var(--card));color:var(--ink)}
+.recstrip.bad{border-color:color-mix(in srgb,var(--bad) 50%,var(--line));
+background:color-mix(in srgb,var(--bad) 7%,var(--card));color:var(--ink)}
+.recstrip button{font-size:12.5px;padding:3px 10px}
+.recstrip .dismiss{margin-left:auto;border:0;background:none;color:var(--sub);padding:2px 6px}
 /* inbox: new transcripts wait to be named/dated before joining the main list */
 #inboxcard{border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
 #inboxcount{color:var(--accent)}
@@ -1372,8 +1412,15 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
     <div class="grow"><div class="name">Recording a meeting</div>
     <div class="sub" id="rectime"></div></div>
   </div>
+  <div id="recstall" style="display:none" class="recstrip bad">
+    <b>Not capturing audio.</b> macOS is not delivering the microphone / system
+    sound (a recorder rebuild resets its permissions).
+    <button onclick="fixRecPerms(this)">Fix permissions</button>
+  </div>
   <div class="sub" style="margin-top:8px">Started from the menu bar. Stop it there to name it and process it. This audio stays on your Mac.</div>
 </div>
+
+<div id="recnote" style="display:none"></div>
 
 <div class="card" id="activecard" style="display:none">
   <h2>Processing now</h2><div id="active"></div>
@@ -1580,6 +1627,15 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
+// ---- recorder permissions ----
+async function fixRecPerms(btn){
+  btn.disabled=true;btn.textContent='Resetting…';
+  const r=await api('/api/fix_recorder_permissions',{});
+  const host=btn.parentElement;
+  host.innerHTML=r.ok?('✓ '+esc(r.message)):('⚠ '+esc(r.error||'failed'));
+  host.className='recstrip '+(r.ok?'good':'bad');
+}
+
 // ---- live recording clock ----
 // The state poll is 2s, which made the recording timer jump in 2s steps. A 1s
 // local tick advances the displayed clock between polls; each poll then
@@ -1757,6 +1813,20 @@ function render(){
     // excludes paused spans — the panel and the menu bar read the same number
     drawRecClock(recg);
     $('#recbanner').classList.toggle('paused',!!recg.paused);
+    $('#recstall').style.display=recg.stalled?'block':'none';
+  }
+  // the last recording's outcome — saved, recovered, or captured nothing. This
+  // (plus the menu-bar line) replaced notification banners, which either failed
+  // to display from this unbundled app or arrived as unwanted osascript alerts.
+  const rn=s.recorder_note;
+  const rnEl=$('#recnote');
+  rnEl.style.display=rn?'block':'none';
+  if(rn&&rnEl.dataset.at!==rn.at){
+    rnEl.dataset.at=rn.at;
+    rnEl.className='recstrip '+(rn.ok?'good':'bad');
+    rnEl.innerHTML=`${rn.ok?'✓':'⚠'} ${esc(rn.text)}
+      ${!rn.ok&&/[Mm]icrophone|audio/.test(rn.text)?'<button onclick="fixRecPerms(this)">Fix permissions</button>':''}
+      <button class="dismiss" title="Dismiss" onclick="api('/api/recorder_note',{clear:true}).then(refresh)">✕</button>`;
   }
   $('#activecard').style.display=s.running?'block':'none';
   $('#active').innerHTML=(orphaned?`<div class="row"><span class="chip warn">recovering</span>

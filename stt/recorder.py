@@ -120,6 +120,7 @@ def start() -> dict:
             stdout=log, stderr=log, start_new_session=True, cwd=str(config.PROJECT_DIR))
         subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(proc.pid)],
                          stdout=log, stderr=log, start_new_session=True)
+    status.clear_recorder_note()  # a new capture supersedes the last outcome
     status.set_recording({
         "pid": proc.pid, "caf": str(caf),
         "started_at": status._now(),
@@ -257,6 +258,9 @@ def finalize(caf: Path, name=None) -> dict:
     if not caf.exists() or caf.stat().st_size < 8192:  # header-only = zero audio
         _clear_if_ours()
         caf.unlink(missing_ok=True)
+        status.set_recorder_note(False, "The recording captured NO audio — grant "
+                                 "Microphone and 'System Audio Recording Only' "
+                                 "(the panel has a Fix permissions button).")
         return {"ok": False, "error": "nothing was captured (permission denied?)"}
     staging = staging_dir()
     final = final_name(name)
@@ -270,6 +274,8 @@ def finalize(caf: Path, name=None) -> dict:
                        capture_output=True)
     if r.returncode != 0:
         part.unlink(missing_ok=True)
+        status.set_recorder_note(False, "The recording could not be transcoded — "
+                                 "see logs/recorder.log.")
         return {"ok": False, "error": "could not transcode the recording",
                 "detail": r.stderr[-400:].decode(errors="replace")}
     # declare the me/them channel layout for channel-aware diarization BEFORE
@@ -289,6 +295,8 @@ def finalize(caf: Path, name=None) -> dict:
     caf.unlink(missing_ok=True)
     os.replace(part, dst)
     _clear_if_ours()
+    status.set_recorder_note(True, f"Saved \u201c{final}\u201d — processing; it "
+                             "will wait in the panel for a name.")
     return {"ok": True, "path": str(dst), "name": final}
 
 
