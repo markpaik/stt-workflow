@@ -68,6 +68,28 @@ def test_sanity_flags(sandbox, tmp_path):
     assert st3["mic_dead"] and not st3["sys_dead"]
 
 
+def test_real_channel_analysis_is_json_serializable(sandbox, tmp_path):
+    """The first real stereo recordings failed the WHOLE pipeline with 'Object
+    of type bool is not JSON serializable': sanity() built its flags from
+    np.float64 comparisons (np.bool_) and mic_spans emitted np.float64
+    timestamps, all of which land in the meeting JSON. The pipeline tests
+    mocked these with plain Python values, so only real audio could catch it —
+    this runs the REAL functions and round-trips their output through
+    json.dumps, exactly like output.write_json does."""
+    import json
+    sr = 16000
+    mic = np.concatenate([_tone(sr, 1, 0.0), _tone(sr, 2, 0.5)])
+    sysd = np.concatenate([_tone(sr, 1, 0.5), _tone(sr, 2, 0.02)])
+    st = channels.sanity(_write(tmp_path / "m.wav", mic),
+                         _write(tmp_path / "s.wav", sysd))
+    spans = channels.mic_spans(tmp_path / "m.wav", tmp_path / "s.wav")
+    assert spans  # the fixture really produces a span, so the types are real
+    round_tripped = json.loads(json.dumps({"stats": st, "spans": spans}))
+    assert round_tripped["stats"]["mic_dead"] is False
+    for v in st.values():
+        assert not type(v).__module__.startswith("numpy"), (v, type(v))
+
+
 def test_mic_spans_handles_silence_and_tiny_audio(sandbox, tmp_path):
     """G4: numeric edges must not crash or divide by zero — all-silence yields no
     spans, and audio shorter than one analysis frame is handled cleanly."""

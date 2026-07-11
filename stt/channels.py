@@ -78,7 +78,9 @@ def _spans_from_active(active, times, hop, enter_ms, exit_ms, bridge_ms, min_spa
             bridged[-1] = (bridged[-1][0], sp[1])
         else:
             bridged.append(list(sp))
-    return [(round(s, 3), round(e, 3)) for s, e in bridged
+    # plain python floats: these spans become turn timestamps in the meeting
+    # JSON, and numpy scalars are not JSON serializable
+    return [(round(float(s), 3), round(float(e), 3)) for s, e in bridged
             if (e - s) >= min_span_ms / 1000]
 
 
@@ -109,7 +111,11 @@ def sanity(mic_path, sys_path):
 
     def _db(x):
         r = float(np.sqrt(np.mean(x * x))) if len(x) else 0.0
-        return 20 * np.log10(r) if r > 1e-9 else -120.0
+        # float(): np.log10 hands back an np.float64, and every value built on
+        # it (the < comparisons become np.bool_) lands in the meeting JSON as
+        # channel_stats — where json.dumps refuses numpy scalars. The first
+        # real stereo recordings failed the whole pipeline on exactly that.
+        return float(20 * np.log10(r)) if r > 1e-9 else -120.0
 
     mdb, sdb = _db(mic), _db(sysd)
     # dual-mono = the two "channels" are the same signal (a mono file dressed as
@@ -119,8 +125,9 @@ def sanity(mic_path, sys_path):
         corr = float(np.dot(mic, sysd) / (np.linalg.norm(mic) * np.linalg.norm(sysd)))
         diff = float(np.mean(np.abs(mic - sysd)) / (np.mean(np.abs(mic)) + 1e-9))
         dual = corr > 0.98 and diff < 0.05
-    return {"dual_mono": dual, "mic_dead": mdb < config.CHANNEL_FLOOR_DBFS,
-            "sys_dead": sdb < config.CHANNEL_FLOOR_DBFS,
+    return {"dual_mono": bool(dual),
+            "mic_dead": bool(mdb < config.CHANNEL_FLOOR_DBFS),
+            "sys_dead": bool(sdb < config.CHANNEL_FLOOR_DBFS),
             "mic_rms_db": round(mdb, 1), "sys_rms_db": round(sdb, 1)}
 
 
