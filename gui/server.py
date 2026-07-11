@@ -1569,12 +1569,17 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 <aside id="setfly" class="fly">
   <h2 style="margin-bottom:4px">Settings <span class="grow"></span>
     <button class="themebtn" onclick="toggleSettings(false)" title="Close settings">✕</button></h2>
+  <div id="pausebanner" class="recstrip bad" style="display:none">
+    <b>Automatic runs are paused.</b> Both triggers below still fire — the run just
+    quits without processing. Only manual runs work.
+    <button onclick="api('/api/resume',{}).then(refresh)">Resume</button>
+  </div>
   <div class="row"><div class="grow"><div class="name">Folder watch</div>
     <div class="sub" id="watchnote"></div></div>
-    <button class="toggle" id="watchbtn" onclick="togWatch()" title="On: a new recording starts processing within moments of landing. Off: files wait for the nightly run or a manual click."></button></div>
+    <button class="toggle" id="watchbtn" onclick="togWatch()" title="On: a new recording starts processing within moments of landing. Off: files wait for the nightly run or a manual click. Overridden while automatic runs are paused."></button></div>
   <div class="row"><div class="grow"><div class="name">Nightly run</div>
     <div class="sub" id="schedtext"></div></div>
-    <button class="toggle" id="nightbtn" onclick="togNightly()" title="On: everything new processes at the scheduled time. Independent of the folder watch."></button>
+    <button class="toggle" id="nightbtn" onclick="togNightly()" title="On: everything new processes at the scheduled time. Independent of the folder watch, but overridden while automatic runs are paused."></button>
     <button onclick="openSchedule()" id="schedchg">Change…</button></div>
   <div class="row"><div class="grow"><div class="name">Transcription model</div>
     <div class="sub" id="modelnote"></div></div>
@@ -2001,6 +2006,9 @@ function render(){
   $('#selall').textContent=selected.size>=selectable.length&&selectable.length?'Deselect all':'Select all';
   // pause button
   $('#pausebtn').textContent=s.paused?'Resume automatic runs':'Pause automatic runs';
+  $('#pausebtn').title=s.paused
+    ?'Automatic runs are paused: the folder watch and the nightly run both still fire, but each run quits without processing. Manual runs still work.'
+    :'Master switch: stops the folder watch, the nightly run, and login catch-up from processing anything. Manual runs still work.';
   $('#pausebtn').onclick=()=>api(s.paused?'/api/resume':'/api/pause',{}).then(refresh);
   // recent results (successes and failures)
   const rec=s.recent||[];
@@ -2054,17 +2062,24 @@ function render(){
     ||`<div class="sub" style="padding-top:8px">${sq?'No unidentified voice matches “'+esc(sq)+'”.':'No unidentified voices right now.'}</div>`;
   $('#relnote').style.display=s.relabel_pending?'block':'none';
   $('#relnote').textContent='Applying names to all transcripts… (moments)';
-  // settings — the two automatic triggers, independently switchable
+  // settings — the two automatic TRIGGERS. Pause is not a third trigger: it is a
+  // master gate OVER them (run_batch exits on startup while paused.flag exists,
+  // whatever fired it). So a healthy-looking "Folder watch: On" is inert while
+  // paused — the trigger still fires, the run just quits. Say so, loudly, rather
+  // than leave a switch that looks live and does nothing.
   const sc=s.schedule;
+  $('#pausebanner').style.display=s.paused?'flex':'none';
   $('#watchbtn').textContent=sc.watch?'On':'Off';
-  $('#watchbtn').style.color=sc.watch?'var(--ok)':'var(--sub)';
+  $('#watchbtn').style.color=s.paused?'var(--sub)':(sc.watch?'var(--ok)':'var(--sub)');
   $('#watchbtn').disabled=!sc.installed;
   $('#watchnote').textContent=!sc.installed
     ?'Not installed — run ./setup.sh install-agent'
-    :(sc.watch?'New recordings process within moments of landing (while the Mac is awake)'
-              :'Off — new files wait for the nightly run or a manual click');
+    :(s.paused?(sc.watch?'On, but PAUSED — a new file wakes the agent and it exits without processing'
+                        :'Off (and automatic runs are paused anyway)')
+              :(sc.watch?'New recordings process within moments of landing (while the Mac is awake)'
+                        :'Off — new files wait for the nightly run or a manual click'));
   $('#nightbtn').textContent=sc.nightly?'On':'Off';
-  $('#nightbtn').style.color=sc.nightly?'var(--ok)':'var(--sub)';
+  $('#nightbtn').style.color=s.paused?'var(--sub)':(sc.nightly?'var(--ok)':'var(--sub)');
   $('#nightbtn').disabled=!sc.installed;
   $('#schedchg').style.display=sc.nightly?'inline-block':'none';
   $('#schedtext').textContent=!sc.installed?'Not installed'
