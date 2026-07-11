@@ -110,3 +110,55 @@ def test_finalize_no_sidecar_without_mic_speaker(sandbox, monkeypatch):
     r = recorder.finalize(caf, "Team Call")
     assert r["ok"]
     assert not list(config.recordings_dir().glob("*.opts.json"))
+
+
+def test_recorder_running_requires_recorder_identity(sandbox, monkeypatch):
+    """C3: a recycled PID that is alive but is NOT our recorder must not read as
+    a live recording — otherwise start() refuses forever and a real orphan is
+    never recovered. Identity comes from the process command line."""
+    import os as _os
+    # this pytest process is alive but its command line is not stt-recorder
+    assert not recorder._recorder_running(_os.getpid())
+    assert not recorder._recorder_running(999999)          # dead pid
+    assert not recorder._recorder_running(None)
+    # alive AND the command line carries the recorder binary -> recognized
+    monkeypatch.setattr(recorder, "_proc_cmdline",
+                        lambda pid: "/usr/bin/caffeinate -i /x/native/stt-recorder /y.caf")
+    assert recorder._recorder_running(_os.getpid())
+
+
+def test_recover_orphans_keeps_a_live_recording(sandbox, monkeypatch):
+    """C4: the menu bar can restart while a detached recorder keeps running.
+    Sweeping an OLD stray CAF from an earlier crash must finalize the stray but
+    leave the LIVE recording's status intact (finalize clears only the state
+    that names the CAF it finalized)."""
+    live = {"pid": 4242, "caf": str(config.recordings_dir() / ".rec-live.caf")}
+    config.recordings_dir().mkdir(parents=True, exist_ok=True)
+    status.set_recording(live)
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: str(pid) == "4242")
+    stray = _stereo_caf(config.recordings_dir() / ".rec-stray.caf")  # not the live one
+    names = recorder.recover_orphans()
+    assert len(names) == 1 and not stray.exists()   # the stray was recovered
+    assert status.recording() == live               # the live recording untouched
+
+
+def test_finalize_drops_caf_before_publishing_so_a_crash_cannot_duplicate(sandbox, monkeypatch):
+    """C2: if the machine dies between the transcode and publishing the m4a, no
+    CAF may survive for recover_orphans to re-finalize into a DUPLICATE meeting.
+    Simulate a crash exactly at the publish step and assert the CAF is gone."""
+    caf = _stereo_caf(config.recordings_dir() / ".rec-crash.caf")
+    status.set_recording({"pid": 999999, "caf": str(caf)})
+    real_replace = recorder.os.replace
+
+    def crash_on_publish(src, dst, *a, **k):
+        if str(src).endswith(".part"):        # the m4a publish, not status writes
+            raise OSError("simulated crash before publish")
+        return real_replace(src, dst, *a, **k)
+    monkeypatch.setattr(recorder.os, "replace", crash_on_publish)
+
+    with pytest.raises(OSError):
+        recorder.finalize(caf, "Team Call")
+    assert not caf.exists()                    # dropped BEFORE the failed publish
+    # a later recovery finds no stray CAF, so it cannot mint a duplicate
+    assert recorder.recover_orphans() == []
+    assert not list(config.recordings_dir().glob("*.m4a"))  # nothing published
