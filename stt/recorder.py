@@ -38,6 +38,8 @@ def staging_dir() -> Path:
 
 
 def _pid_alive(pid) -> bool:
+    """Basic liveness — used only to poll for exit AFTER we have already
+    identified and SIGINT'd our recorder. os.kill(pid, 0): no exception = alive."""
     if not pid:
         return False
     try:
@@ -45,6 +47,25 @@ def _pid_alive(pid) -> bool:
         return True
     except (OSError, ValueError):
         return False
+
+
+def _proc_cmdline(pid) -> str:
+    try:
+        return subprocess.run(["/bin/ps", "-p", str(int(pid)), "-o", "command="],
+                              capture_output=True, text=True, timeout=5).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
+def _recorder_running(pid) -> bool:
+    """True only when pid is live AND actually our recorder. A bare os.kill(pid,
+    0) reads a RECYCLED pid as a live recording — which would refuse every new
+    start, make halt() SIGINT an unrelated process group, and hide a genuine
+    orphan from recovery. The stored pid is the caffeinate wrapper whose command
+    line carries the stt-recorder binary path (see start())."""
+    if not _pid_alive(pid):
+        return False
+    return "stt-recorder" in _proc_cmdline(pid)
 
 
 def _free_bytes(path: Path) -> int:
@@ -66,7 +87,7 @@ def start() -> dict:
     if not available():
         return {"ok": False, "error": "recorder not built — run ./setup.sh build-recorder"}
     rec = status.recording()
-    if rec and _pid_alive(rec.get("pid")):
+    if rec and _recorder_running(rec.get("pid")):
         return {"ok": False, "error": "already recording"}
     staging = staging_dir()
     if _free_bytes(staging) < MIN_FREE_BYTES:
@@ -95,7 +116,7 @@ def halt() -> Path | None:
     if not rec:
         return None
     pid, caf = rec.get("pid"), Path(rec.get("caf", ""))
-    if _pid_alive(pid):
+    if _recorder_running(pid):  # identity-checked: never SIGINT a recycled pid's group
         try:  # SIGINT the whole group -> helper finalizes the CAF, caffeinate exits
             os.killpg(os.getpgid(int(pid)), signal.SIGINT)
         except (OSError, ProcessLookupError):
@@ -121,8 +142,18 @@ def finalize(caf: Path, name=None) -> dict:
     """Transcode a finished CAF to a named stereo m4a in the watched folder,
     atomically (only a complete file ever becomes visible), then drop the CAF."""
     caf = Path(caf)
+
+    def _clear_if_ours():
+        # drop the recording state ONLY when it still points at THIS capture.
+        # recover_orphans finalizes stray CAFs from earlier crashes; the menu bar
+        # can restart while a detached recorder keeps running, so an unconditional
+        # clear here would wipe a DIFFERENT, live recording's state.
+        rec = status.recording()
+        if not rec or rec.get("caf") == str(caf):
+            status.clear_recording()
+
     if not caf.exists() or caf.stat().st_size < 8192:  # header-only = zero audio
-        status.clear_recording()
+        _clear_if_ours()
         caf.unlink(missing_ok=True)
         return {"ok": False, "error": "nothing was captured (permission denied?)"}
     staging = staging_dir()
@@ -145,12 +176,17 @@ def finalize(caf: Path, name=None) -> dict:
     # otherwise the recording just processes as mono.
     mic = config.mic_speaker()
     if mic:
-        import json
         (staging / f"{final}.opts.json").write_text(json.dumps(
             {"channel_layout": "mic_left_system_right", "mic_speaker": mic}))
-    os.replace(part, dst)
+    # Drop the CAF now that the transcode is safely captured in `part`, BEFORE
+    # publishing the m4a. A crash between the os.replace and the unlink used to
+    # leave the CAF behind for recover_orphans to re-finalize into a DUPLICATE
+    # meeting under a second name. With the CAF gone first, the worst a crash in
+    # the (microsecond) window before os.replace can do is discard the hidden,
+    # watcher-skipped .part and lose this one capture — never a silent double.
     caf.unlink(missing_ok=True)
-    status.clear_recording()
+    os.replace(part, dst)
+    _clear_if_ours()
     return {"ok": True, "path": str(dst), "name": final}
 
 
@@ -194,7 +230,7 @@ def recover_orphans() -> list:
     Called at menu-bar startup. Returns the names recovered."""
     recovered = []
     rec = status.recording()
-    if rec and not _pid_alive(rec.get("pid")):
+    if rec and not _recorder_running(rec.get("pid")):  # dead OR a recycled pid
         caf = Path(rec.get("caf", ""))
         r = finalize(caf, None)  # default 'Recording ...' name; clears the state
         if r.get("ok"):
