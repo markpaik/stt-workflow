@@ -145,12 +145,16 @@ case "${1:-}" in
     ;;
   build-recorder)
     # the meeting recorder helper (mic + system audio); Swift via the CLT.
-    # The embedded Info.plist + ad-hoc signature give the binary a STABLE
-    # identity, so the mic / system-audio permission grants persist across
-    # launches (only a rebuild re-prompts).
+    # IMPORTANT: the ad-hoc signature is pinned to the EXACT build (its cdhash),
+    # and macOS ties the Microphone / System Audio grants to that hash — so any
+    # rebuild that changes the binary ORPHANS the existing grants. There is no
+    # prompt and no error afterwards: recordings simply capture zero frames.
+    # The hash change is detected below and announced; the menu bar also warns
+    # live (⚠ in the title) when a recording is not capturing.
     if ! xcrun --find swiftc >/dev/null 2>&1; then
       echo "swiftc not found — install the Command Line Tools: xcode-select --install"; exit 1
     fi
+    OLD_CDHASH="$(codesign -dvvv "$BASE/native/stt-recorder" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
     echo "Compiling the meeting recorder…"
     swiftc "$BASE/native/recorder.swift" -O -o "$BASE/native/stt-recorder" \
       -framework CoreAudio -framework AudioToolbox \
@@ -159,6 +163,15 @@ case "${1:-}" in
     codesign --force --sign - --identifier com.stt-workflow.recorder "$BASE/native/stt-recorder"
     mkdir -p "$(recordings_dir)"
     echo "Built $BASE/native/stt-recorder (recordings land in: $(recordings_dir))"
+    NEW_CDHASH="$(codesign -dvvv "$BASE/native/stt-recorder" 2>&1 | awk -F= '/^CDHash/{print $2}' || true)"
+    if [ -n "$OLD_CDHASH" ] && [ "$OLD_CDHASH" != "$NEW_CDHASH" ]; then
+      echo
+      echo "*** The binary CHANGED — macOS has silently dropped its microphone and"
+      echo "*** system-audio permissions. Recordings will capture NOTHING until you run:"
+      echo "***   tccutil reset Microphone com.stt-workflow.recorder"
+      echo "***   tccutil reset AudioCapture com.stt-workflow.recorder"
+      echo "*** and then start a recording and grant both prompts again."
+    fi
     ;;
   *)
     echo "usage: setup.sh {install-agent|uninstall-agent|reload|kick|status|gui-install|gui-uninstall|gui-restart|build-recorder}"; exit 2 ;;

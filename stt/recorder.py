@@ -167,6 +167,28 @@ def resume() -> dict:
     return {"ok": True, "paused": False}
 
 
+STALL_AFTER_SECS = 8
+
+
+def capture_stalled(rec) -> bool:
+    """True when a live recording SHOULD have audio by now but its CAF is still
+    header-only. That is the signature of a TCC denial: macOS keeps the device
+    running and simply delivers no frames — nothing errors, nothing prompts.
+    The common trigger is a REBUILD of the recorder: the ad-hoc signature is
+    pinned to the exact build (cdhash), so rebuilding orphans the old grant.
+    This lets the menu bar say so ~10 seconds into the meeting, instead of the
+    user discovering an empty capture at stop. A paused recording does not
+    grow and does not count as stalled."""
+    if not rec or rec.get("paused"):
+        return False
+    if elapsed_seconds(rec) < STALL_AFTER_SECS:
+        return False
+    try:
+        return Path(rec.get("caf", "")).stat().st_size < 8192
+    except OSError:
+        return False
+
+
 def elapsed_seconds(rec) -> int:
     """Seconds of audio actually CAPTURED so far — wall-clock since Start minus
     every paused span. One definition, shared by the menu bar and the panel, so

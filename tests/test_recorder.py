@@ -193,6 +193,30 @@ def test_pause_and_resume_signal_the_recorder_and_track_state(sandbox, monkeypat
     assert "paused_at" not in status.recording()     # the span was banked and closed
 
 
+def test_capture_stalled_flags_a_header_only_caf(sandbox, monkeypatch, tmp_path):
+    """A TCC denial delivers no frames and raises no error — the only tell is a
+    CAF that never grows. The detector must fire ~10s in (so the menu bar warns
+    DURING the meeting), never during the first seconds, never while paused, and
+    never once real audio is flowing."""
+    caf = tmp_path / ".rec-x.caf"
+    caf.write_bytes(b"\0" * 4096)                       # header-only
+    clock = {"t": 100.0}
+    monkeypatch.setattr(recorder.time, "monotonic", lambda: clock["t"])
+    rec = {"caf": str(caf), "started_monotonic": 100.0,
+           "paused": False, "paused_total": 0.0}
+
+    clock["t"] = 103.0
+    assert not recorder.capture_stalled(rec)            # too early to judge
+    clock["t"] = 112.0
+    assert recorder.capture_stalled(rec)                # 12s in, still no audio
+    assert not recorder.capture_stalled({**rec, "paused": True,
+                                         "paused_at": 100.0})  # paused ≠ stalled
+    caf.write_bytes(b"\0" * 50000)                      # audio is flowing
+    assert not recorder.capture_stalled(rec)
+    assert not recorder.capture_stalled(None)
+    assert not recorder.capture_stalled({**rec, "caf": str(tmp_path / "gone.caf")})
+
+
 def test_pause_refused_when_not_recording(sandbox):
     assert not recorder.pause()["ok"]
     assert not recorder.resume()["ok"]
