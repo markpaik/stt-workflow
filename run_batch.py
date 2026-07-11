@@ -102,11 +102,12 @@ def spawn_chained_job(job: dict):
     from stt import jobs
     logs_dir = config.PROJECT_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    log = open(logs_dir / "spawned.log", "a")
     args = jobs.spawn_args(job)
-    log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
-    log.flush()
-    subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
+    # `with` so the parent releases its copy of the log fd once the child dups it
+    with open(logs_dir / "spawned.log", "a") as log:
+        log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
+        log.flush()
+        subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
 def summarize_one(key) -> bool:
