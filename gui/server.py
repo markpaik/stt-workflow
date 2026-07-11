@@ -324,8 +324,20 @@ def gather_state():
     m = manifest.load()
     src_dir, dst_dir = config.source_dir(), config.meetings_dir()
     queue = []
+    # BOTH watched folders: the iCloud source AND the recorder's staging dir.
+    # Only the source used to be listed, so a finished recording waited for the
+    # batch completely invisibly — "I stopped, where did it go?"
+    _qfiles, _qseen = [], set()
+    for _qd in (src_dir, config.recordings_dir()):
+        try:
+            for p in sorted(_qd.iterdir()):
+                if p.name not in _qseen:
+                    _qseen.add(p.name)
+                    _qfiles.append(p)
+        except OSError:
+            pass
     try:
-        for p in sorted(src_dir.iterdir()):
+        for p in _qfiles:
             if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
                 done = manifest.is_processed(m, p.name, p.stat().st_mtime)
                 dur = None if done else _est_duration(p)
