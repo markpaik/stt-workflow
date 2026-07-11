@@ -151,7 +151,23 @@ def recording():
     return read().get("recording")
 
 
-def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None):
+def meeting_active(base: str) -> bool:
+    """Is the batch writing meeting `base` RIGHT NOW? Guards every folder move
+    (rename/archive/delete) against racing a run. Active entries are keyed by
+    SOURCE file name, but the meeting folder can be date-stamped ('LT Weekly
+    Meeting' -> 'LT Weekly Meeting 06042026'), so the stem alone stopped
+    matching new meetings — each entry also carries the resolved `base` the run
+    announced via set_stage."""
+    for k, v in read().get("active", {}).items():
+        if os.path.splitext(os.path.basename(k))[0] == base:
+            return True
+        if isinstance(v, dict) and v.get("base") == base:
+            return True
+    return False
+
+
+def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None,
+              base=None):
     """progress: 0..1 within the current stage (None = unknown); duration: audio
     seconds (sent once, then remembered). diarize/verify: this file's actual
     settings (sent once, then remembered) — estimate_progress() needs to know
@@ -181,6 +197,8 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
             entry["done_secs"] = done_secs
         if duration or prev.get("duration"):
             entry["duration"] = duration or prev.get("duration")
+        if base or prev.get("base"):  # the resolved meeting folder (sent once)
+            entry["base"] = base or prev.get("base")
         if diarize is not None or "diarize" in prev:
             entry["diarize"] = diarize if diarize is not None else prev.get("diarize")
         if verify is not None or "verify" in prev:

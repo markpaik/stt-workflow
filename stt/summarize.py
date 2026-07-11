@@ -357,7 +357,11 @@ def _unique_base(candidate: str, current: str) -> str:
     def taken(n):
         return config.meeting_dir(n).exists() or (config.archive_dir() / n).exists()
 
-    if candidate == current or not taken(candidate):
+    # case-insensitive self-match: APFS is case-insensitive by default, so a
+    # capitalization fix ('board prep' -> 'Board Prep') sees its own folder via
+    # Path.exists() — an exact-string compare here appended a spurious ' (2)'
+    # to every case-only retitle
+    if candidate.lower() == current.lower() or not taken(candidate):
         return candidate
     i = 2
     while taken(f"{candidate} ({i})"):
@@ -387,7 +391,7 @@ def _write_json(j: Path, d: dict):
 
 def _is_active(base: str) -> bool:
     from . import status as _status
-    return base in {Path(k).stem for k in _status.read().get("active", {})}
+    return _status.meeting_active(base)
 
 
 def _move_folder(base: str, new_base: str) -> list:
@@ -487,16 +491,28 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
 
         want = base
         if title is not None or date is not None:
-            typed = dates.meeting_date(new_title) if new_title else None
-            if typed:
-                # they typed the date into the name: keep the stored date equal to
-                # it, or the folder and the date would disagree from the start
-                d["date"] = typed
+            # a typed date counts only as a TRAILING stamp ('Review 06152026').
+            # meeting_date() over the whole title also matched mid-name digit
+            # runs — accepting the recorder default 'Recording 07112026 1032'
+            # with a corrected date silently threw the correction away.
+            trailing = (new_title is not None
+                        and dates.strip_stamp(new_title) != new_title)
+            if trailing:
+                # the name is taken exactly as typed. It also becomes the stored
+                # date — UNLESS the date picker was set too (an explicit date
+                # always wins), and never a FUTURE date (a name like 'Planning
+                # Retreat 12312026' describes an event, not when it was recorded)
+                typed = dates.meeting_date(new_title)
+                from datetime import date as _today
+                if iso is None and typed and typed <= _today.today().isoformat():
+                    d["date"] = typed
                 want = new_title
             else:
-                stem = new_title if new_title is not None else dates.strip_stamp(base)
+                stem = new_title if new_title is not None else base
                 on = d.get("date") or ""
-                want = dates.stamp(stem, on) if on else stem
+                # restamp: replaces an existing stamp (peeling any ' (N)' twin
+                # suffix first) rather than appending a second date
+                want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
 
         _write_json(j, d)

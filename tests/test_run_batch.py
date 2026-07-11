@@ -604,6 +604,7 @@ def test_process_one_copies_audio_atomically(sandbox, monkeypatch):
                 "duration_sec": 1.0, "n_speakers": 1, "identified": []}
     monkeypatch.setattr(pipeline, "process_file", fake_process_file)
     monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    # the audio-copy folder comes from the RESOLVED base process_file returned
 
     real_replace = run_batch.os.replace
 

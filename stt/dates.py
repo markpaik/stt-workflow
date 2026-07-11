@@ -60,8 +60,16 @@ def stamp(name: str, iso: str) -> str:
         return name
 
 
+_UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
+
+
 def restamp(base: str, iso: str) -> str:
     """The folder name this meeting SHOULD have: its title plus its date. Both
     idempotent and self-correcting — re-stamping an already-stamped name with a
-    corrected date replaces the old stamp rather than appending a second one."""
-    return stamp(strip_stamp(base), iso)
+    corrected date replaces the old stamp rather than appending a second one.
+    A ' (N)' collision suffix (same-name same-date twins) is peeled off first —
+    the stamp hides behind it ('Weekly 07032026 (2)') and re-stamping blindly
+    would append a second date; the caller's uniquify re-adds the suffix if the
+    new name still collides."""
+    stem = _UNIQ_SUFFIX.sub("", base)
+    return stamp(strip_stamp(stem), iso)

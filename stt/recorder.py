@@ -22,8 +22,9 @@ from pathlib import Path
 from . import audio, config, status
 
 # inside a real .app bundle so TCC/LaunchServices can address it by bundle id
-BINARY = (config.PROJECT_DIR / "native" / "STT Recorder.app"
-          / "Contents" / "MacOS" / "stt-recorder")
+APP = config.PROJECT_DIR / "native" / "STT Recorder.app"
+BINARY = APP / "Contents" / "MacOS" / "stt-recorder"
+SWIFT_SRC = config.PROJECT_DIR / "native" / "recorder.swift"
 MAX_SECONDS = 4 * 3600          # forgot-to-stop backstop (matches the helper default)
 MIN_FREE_BYTES = 2 * 1024**3    # refuse to start under ~2 GB free
 LOG = config.PROJECT_DIR / "logs" / "recorder.log"
@@ -31,6 +32,17 @@ LOG = config.PROJECT_DIR / "logs" / "recorder.log"
 
 def available() -> bool:
     return BINARY.exists() and os.access(BINARY, os.X_OK)
+
+
+def stale() -> bool:
+    """The Swift source is newer than the installed binary — the binary may
+    predate features whose SIGNALS it does not handle (an old build treats the
+    pause SIGUSR1 as a kill: default disposition terminates it mid-meeting).
+    start() and pause() refuse instead, pointing at the rebuild."""
+    try:
+        return SWIFT_SRC.stat().st_mtime > BINARY.stat().st_mtime
+    except OSError:
+        return False
 
 
 def staging_dir() -> Path:
@@ -96,9 +108,11 @@ def _stamp(now=None):
 
 def start() -> dict:
     """Begin a recording. Returns {ok, error?}. Refuses a second concurrent
-    recording and a near-full disk."""
+    recording, a near-full disk, and a binary older than its source."""
     if not available():
         return {"ok": False, "error": "recorder not built — run ./setup.sh build-recorder"}
+    if stale():
+        return {"ok": False, "error": "recorder needs a rebuild — run ./setup.sh build-recorder"}
     rec = status.recording()
     if rec and _recorder_running(rec.get("pid")):
         return {"ok": False, "error": "already recording"}
@@ -108,28 +122,44 @@ def start() -> dict:
     # dot-prefixed so the batch watcher never ingests the in-progress capture
     caf = staging / f".rec-{uuid.uuid4().hex[:8]}.caf"
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    # Spawn the recorder DIRECTLY and keep the Mac awake with a SEPARATE
-    # `caffeinate -i -w <pid>` (it asserts for as long as that pid lives, then
-    # exits on its own). The helper used to run *inside* caffeinate, which made
-    # the stored pid caffeinate's — and pause/resume (SIGUSR1/SIGUSR2) sent to
-    # caffeinate would KILL it, since terminate is their default action. Owning
-    # the recorder's own pid means every signal lands exactly where we mean it.
-    # `with` so the long-lived menu bar releases its copy of the log fd once the
-    # children dup it — otherwise every recording leaks one fd for the session.
+    # Launch through LaunchServices (open -n), NOT as our own child process.
+    # TCC charges a child's permission requests to its RESPONSIBLE process —
+    # spawned from the menu bar that was python3.12, which has no usage strings,
+    # so macOS auto-DENIED the microphone without ever showing a prompt (the
+    # empty-capture mystery: no error, no prompt, zero frames). An app launched
+    # by LaunchServices is its own responsible process, so the prompts belong to
+    # "STT Recorder" (which has the usage strings) and grants stick to it.
+    # stderr goes nowhere under open(1), so the app appends to --log itself.
+    r = subprocess.run(
+        ["/usr/bin/open", "-n", "-a", str(APP), "--args",
+         str(caf), "--max-seconds", str(MAX_SECONDS), "--log", str(LOG)],
+        capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        return {"ok": False, "error": f"could not launch the recorder "
+                                      f"({r.stderr.strip() or r.returncode})"}
+    # open(1) does not hand back the pid — find the instance recording OUR caf
+    pid = None
+    for _ in range(50):  # up to ~5s for LaunchServices to spawn it
+        out = subprocess.run(["/usr/bin/pgrep", "-f", caf.name],
+                             capture_output=True, text=True).stdout.split()
+        if out:
+            pid = int(out[0])
+            break
+        time.sleep(0.1)
+    if pid is None:
+        return {"ok": False, "error": "the recorder did not launch — see logs/recorder.log"}
+    # keep the Mac awake for exactly the recorder's lifetime
     with open(LOG, "a") as log:
-        proc = subprocess.Popen(
-            [str(BINARY), str(caf), "--max-seconds", str(MAX_SECONDS)],
-            stdout=log, stderr=log, start_new_session=True, cwd=str(config.PROJECT_DIR))
-        subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(proc.pid)],
+        subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(pid)],
                          stdout=log, stderr=log, start_new_session=True)
     status.clear_recorder_note()  # a new capture supersedes the last outcome
     status.set_recording({
-        "pid": proc.pid, "caf": str(caf),
+        "pid": pid, "caf": str(caf),
         "started_at": status._now(),
         "started_monotonic": time.monotonic(),
         "paused": False, "paused_total": 0.0,
     })
-    return {"ok": True, "pid": proc.pid, "caf": str(caf)}
+    return {"ok": True, "pid": pid, "caf": str(caf)}
 
 
 def pause() -> dict:
@@ -138,6 +168,11 @@ def pause() -> dict:
     rec = status.recording()
     if not rec or not _recorder_running(rec.get("pid")):
         return {"ok": False, "error": "not recording"}
+    if stale():
+        # an old build has no SIGUSR1 handler — the default disposition would
+        # TERMINATE it and silently end the capture mid-meeting
+        return {"ok": False, "error": "recorder was updated — pause needs a rebuild "
+                                      "(./setup.sh build-recorder); Stop still works"}
     if rec.get("paused"):
         return {"ok": True, "paused": True}
     try:

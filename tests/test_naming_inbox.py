@@ -172,6 +172,158 @@ def test_accept_names_dates_tags_and_releases_in_one_step(sandbox):
     assert d["date"] == "2026-07-09" and d["category"] == "work" and d["reviewed"] is True
 
 
+# ---------- the review's confirmed findings ----------
+
+def test_plain_named_source_processes_end_to_end_into_the_stamped_folder(sandbox, monkeypatch):
+    """Review finding 1 (critical): run_batch derived the audio-copy folder and
+    the summary key from src.stem while process_file stamped a different base —
+    the copy raised FileNotFoundError, the file was marked FAILED, and every
+    later run re-transcribed it from scratch, forever."""
+    import run_batch
+    from stt import icloud, pipeline
+    from tests.test_layout import _fake_asr
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+
+    src = _audio(config.source_dir() / "LT Weekly Meeting.m4a")
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": True}
+    res = run_batch.process_one(str(src), str(config.MEETINGS_DIR), opts)
+    assert res["ok"]
+    base = res["base"]
+    assert base.startswith("LT Weekly Meeting ") and dates.meeting_date(base)
+    assert config.meeting_audio(base) is not None   # audio landed in the STAMPED folder
+    assert not src.exists()                          # move-after-success consumed it
+
+
+def test_resolve_base_same_named_different_recording_never_clobbers(sandbox, tmp_path):
+    """Findings 2 + 4: name (even name+date) is not identity. A different file
+    that happens to share the name gets ' (2)'; the SAME file reprocessed (same
+    mtime, e.g. a Redo or force) resolves back to its own meeting."""
+    import shutil
+
+    from stt import pipeline
+    src = _audio(tmp_path / "Sync 05012026.m4a")
+    d = _meeting("Sync 05012026", date="2026-05-01",
+                 source_mtime=round(src.stat().st_mtime, 3))
+    # the same recording, reprocessed -> its own folder
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026"
+    # a DIFFERENT file under the same name (same-day second session, re-export)
+    src2 = tmp_path / "other" / "Sync 05012026.m4a"
+    src2.parent.mkdir()
+    shutil.copy(src, src2)                       # copy (not copy2): new mtime
+    import os as _os
+    _os.utime(src2, (src.stat().st_atime, src.stat().st_mtime + 3600))
+    assert pipeline.resolve_base(src2, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+
+
+def test_resolve_base_reuses_its_own_suffixed_slot(sandbox, tmp_path):
+    """Finding 8: a source whose meeting already lives at '<stamped> (2)' must
+    resolve back to that folder on reprocess, not mint '(3)'."""
+    from stt import pipeline
+    src = _audio(tmp_path / "Sync 05012026.m4a")
+    _meeting("Sync 05012026",                        # someone else's meeting
+             source_file="A Different Recording.m4a")
+    _meeting("Sync 05012026 (2)",                    # THIS source's meeting: it
+             source_file="Sync 05012026.m4a",        # records the SOURCE name,
+             source_mtime=round(src.stat().st_mtime, 3))  # not the folder name
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+
+
+def test_resolve_base_never_reuses_an_archived_name(sandbox, tmp_path):
+    """Finding 7: registries key meetings by name — a live meeting squatting on
+    an archived name would corrupt that meeting's restore."""
+    from stt import pipeline
+    _meeting("Sync 05012026")
+    archive.archive_meeting("Sync 05012026")
+    src = _audio(tmp_path / "Sync 05012026.m4a")
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+
+
+def test_active_guard_recognizes_the_stamped_base(sandbox):
+    """Finding 6: active entries are keyed by SOURCE name; the stamped folder
+    name differs, so the mid-run rename/archive refusal went dead for new
+    meetings. The run announces its resolved base; the guard must honor it."""
+    from stt import status
+    _meeting("LT Weekly Meeting 06042026")
+    status.set_stage("LT Weekly Meeting.m4a", "transcribing",
+                     base="LT Weekly Meeting 06042026")
+    r = summarize.rename_meeting("LT Weekly Meeting 06042026", "New Name")
+    assert not r["ok"] and "processed" in r["error"]
+    assert not archive.archive_meeting("LT Weekly Meeting 06042026")["ok"]
+
+
+def test_explicit_date_beats_a_mid_title_digit_run(sandbox):
+    """Finding 5: accepting the recorder default 'Recording 07112026 1032' with
+    a corrected date silently discarded the correction — the mid-name digit run
+    won. Only a TRAILING stamp counts, and the picker always wins."""
+    _meeting("Recording 07112026 1032", date="2026-07-11", reviewed=False)
+    r = summarize.apply_meeting_edits("Recording 07112026 1032",
+                                      title="Recording 07112026 1032",
+                                      date="2026-07-15", reviewed=True)
+    assert r["ok"]
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["date"] == "2026-07-15"          # the picker won
+
+
+def test_a_future_trailing_date_is_kept_in_the_name_but_not_stored(sandbox):
+    """Finding 15: 'Planning Retreat 12312026' names an EVENT; storing it as the
+    meeting date would sort the meeting above every real one for months."""
+    _meeting("Mtg 05012026", date="2026-05-01")
+    r = summarize.rename_meeting("Mtg 05012026", "Planning Retreat 12312026")
+    assert r["ok"] and r["base"] == "Planning Retreat 12312026"  # name as typed
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["date"] == "2026-05-01"          # stored date untouched
+
+
+def test_date_restamp_replaces_not_appends_on_a_twin(sandbox):
+    """Finding 9: 'Weekly 07032026 (2)' + a corrected date must not become
+    'Weekly 07032026 (2) 07102026'."""
+    _meeting("Weekly 07032026 (2)", date="2026-07-03")
+    r = summarize.set_meeting_date("Weekly 07032026 (2)", "2026-07-10")
+    assert r["ok"] and r["base"] == "Weekly 07102026"
+
+
+def test_case_only_retitle_does_not_mint_a_twin(sandbox):
+    """Finding 10: on case-insensitive APFS, a capitalization fix saw its own
+    folder as taken and appended ' (2)'."""
+    _meeting("board prep 07092026", date="2026-07-09")
+    r = summarize.rename_meeting("board prep 07092026", "Board Prep 07092026")
+    assert r["ok"] and r["base"] == "Board Prep 07092026"
+
+
+def test_restore_stamps_a_legacy_plain_name(sandbox):
+    """Finding 11: a meeting archived before the convention restores under its
+    plain name — which would shadow its recurring series all over again."""
+    _meeting("LT Weekly Meeting", date="2026-06-04")
+    archive.archive_meeting("LT Weekly Meeting")
+    r = archive.restore_meeting("LT Weekly Meeting")
+    assert r["ok"] and r["base"] == "LT Weekly Meeting 06042026"
+    assert config.meeting_bases() == ["LT Weekly Meeting 06042026"]
+
+
+def test_stale_recorder_refuses_start_and_pause(sandbox, monkeypatch, tmp_path):
+    """Finding 3: an old binary has no SIGUSR1 handler — the default disposition
+    would TERMINATE it mid-meeting. A binary older than its source refuses."""
+    from stt import recorder, status
+    binary = tmp_path / "stt-recorder"
+    swift = tmp_path / "recorder.swift"
+    binary.write_bytes(b"x")
+    import os as _os, time as _time
+    swift.write_text("//")
+    _os.utime(binary, (1, 1))                  # binary predates the source
+    monkeypatch.setattr(recorder, "BINARY", binary)
+    monkeypatch.setattr(recorder, "SWIFT_SRC", swift)
+    monkeypatch.setattr(recorder.os, "access", lambda p, m: True)
+    r = recorder.start()
+    assert not r["ok"] and "rebuild" in r["error"]
+    status.set_recording({"pid": 4242, "caf": "/x/.rec-a.caf"})
+    monkeypatch.setattr(recorder, "_recorder_running", lambda pid: True)
+    r = recorder.pause()
+    assert not r["ok"] and "rebuild" in r["error"]
+
+
 # ---------- bulk-only ops ----------
 
 def test_drop_audio_keeps_the_transcript(sandbox):

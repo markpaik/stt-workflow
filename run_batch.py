@@ -110,19 +110,21 @@ def spawn_chained_job(job: dict):
         subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
-def summarize_one(key) -> bool:
+def summarize_one(key, base=None) -> bool:
     """Draft the AI title/summary for ONE just-finished meeting (local Qwen
     via .venv-llm). Runs right after the file completes, not at end-of-run:
     with a long backlog the end is hours away, and a Stop before it would
     lose the summaries for everything already finished. Quietly a no-op when
     the LLM venv isn't installed or the meeting already has a summary; a
-    failure never breaks the run (the end-of-run sweep retries it)."""
+    failure never breaks the run (the end-of-run sweep retries it).
+    `base` is the RESOLVED meeting folder — date-stamped for plain-named
+    sources, so it can differ from the source stem."""
     import json as _json
 
     from stt import status as st, summarize
     if not summarize.available():
         return False
-    base = Path(key).stem
+    base = base or Path(key).stem
     try:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
@@ -148,7 +150,11 @@ def auto_summarize(keys) -> int:
     if not summarize.available():
         print("  (auto-summary skipped: local LLM not installed)")
         return 0
-    return sum(1 for key in keys if summarize_one(key))
+    n = 0
+    for item in keys:  # (key, resolved_base) pairs; bare keys tolerated
+        key, base = item if isinstance(item, tuple) else (item, None)
+        n += bool(summarize_one(key, base))
+    return n
 
 
 def warn_if_registry_lost(dest: Path):
@@ -247,6 +253,12 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     key = src.name
     mtime = src.stat().st_mtime
 
+    # the meeting folder this file will land in — date-stamped for plain names,
+    # so it can DIFFER from src.stem. Announced in the live status so the panel's
+    # is-this-meeting-being-written-right-now guards (rename/archive/delete)
+    # recognize the stamped name too, not just the source stem.
+    resolved_base = pipeline.resolve_base(src, dest)
+
     # time each stage (monotonic: does not tick during sleep, so a lid-close
     # can't poison the speed calibration) and forward to the live status
     stage_secs = {}
@@ -258,7 +270,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (now - cur["t"])
         if cur["stage"] != stage:
             cur["stage"], cur["t"] = stage, now
-        st.set_stage(k, stage, progress=progress, duration=duration,
+        st.set_stage(k, stage, progress=progress, duration=duration, base=resolved_base,
                     diarize=opts["do_diarize"], verify=opts.get("verify", False))
 
     report("downloading")
@@ -286,12 +298,18 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
         stage_secs[cur["stage"]] = stage_secs.get(cur["stage"], 0.0) + (_time.monotonic() - cur["t"])
     outputs = [res["txt"], res["json"]] + ([res["emb"]] if res["emb"] else [])
 
+    # everything after transcription keys off the base process_file RESOLVED —
+    # which is date-stamped for plain-named sources, not src.stem. Deriving the
+    # folder from the stem here targeted a folder that was never created: the
+    # audio copy raised, the file was marked FAILED, and every subsequent run
+    # re-transcribed it from scratch, forever.
+    base = res["base"]
     if src.suffix.lower() in config.VIDEO_EXTS:
-        dest_audio = config.meeting_file(src.stem, ".m4a", dest)
+        dest_audio = config.meeting_file(base, ".m4a", dest)
         if not dest_audio.exists():
             audio.extract_audio(src, dest_audio)
     else:
-        dest_audio = config.meeting_file(src.stem, src.suffix, dest)
+        dest_audio = config.meeting_file(base, src.suffix, dest)
         if src.resolve() != dest_audio.resolve():
             # atomic: copy to a sibling .part then os.replace, so a crash mid-copy
             # (or a killed worker) can't leave a truncated audio that success=
@@ -309,7 +327,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
-    return {"ok": success, "key": key, "mtime": mtime,
+    return {"ok": success, "key": key, "base": base, "mtime": mtime,
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs}
@@ -494,12 +512,12 @@ def main():
                          rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
-            succeeded.append(res["key"])
+            succeeded.append((res["key"], res.get("base")))
             processed += 1
             # the description lands NOW, while the next file transcribes —
             # not hours later when the whole backlog ends (and never lost to
             # a Stop pressed before then)
-            summarize_one(res["key"])
+            summarize_one(res["key"], res.get("base"))
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
