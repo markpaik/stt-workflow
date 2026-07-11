@@ -365,138 +365,175 @@ def _unique_base(candidate: str, current: str) -> str:
     return f"{candidate} ({i})"
 
 
-def rename_meeting(base: str, new_base: str) -> dict:
-    """Rename a meeting: every file inside its folder (whatever the suffix —
-    transcript, audio, caches, review/verify sidecars) AND the folder itself,
-    so the on-disk name always matches what the GUI shows.
-
-    Recurring meetings keep their files unique WITHOUT the user hand-typing a
-    date: when the typed name carries no date, the meeting's date is appended
-    (MMDDYYYY), so 'Weekly Check-in' becomes 'Weekly Check-in 07102026' on disk
-    while the GUI still shows just 'Weekly Check-in'. A name that already has a
-    date run is left as typed. Returns {ok, renamed, base}."""
-    from . import dates
-    # sanitize to a safe folder/file name (mirror recorder.final_name): drop
-    # path/wildcard/control chars, then leading dots — a bare "." or ".." would
-    # otherwise survive the class strip and, with no trailing date appended,
-    # resolve the meeting folder to the parent dir or a hidden name. Collapse
-    # whitespace runs and cap the length as the recorder does.
-    new_base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", new_base).strip().lstrip(".")
-    new_base = re.sub(r"\s+", " ", new_base)[:120].strip()
-    if not new_base:
-        return {"ok": False, "error": "empty name"}
-    old_dir = config.meeting_dir(base)
-    if not old_dir.is_dir():
-        return {"ok": False, "error": f"no meeting folder for '{base}'"}
-    # refuse while a Redo is reprocessing this meeting: process_file computed the
-    # old-name paths at its start and writes them at the end, so moving the folder
-    # mid-run would leave the run recreating the old folder (a duplicate). The
-    # lock alone can't stop this — the rename would land in the gap before the
-    # run's write phase takes the lock — so we skip, as relabel_one does.
-    from . import status as _status
-    if base in {Path(k).stem for k in _status.read().get("active", {})}:
-        return {"ok": False,
-                "error": "this meeting is being processed right now — rename it again in a moment"}
-    # append the meeting's own date when the typed name has none
-    iso = ""
-    try:
-        iso = json.loads(config.meeting_file(base, ".json").read_text()).get("date", "")
-    except (OSError, ValueError):
-        pass
-    if iso and dates.meeting_date(new_base) is None:
-        try:
-            new_base = f"{new_base} {datetime.fromisoformat(iso).strftime('%m%d%Y')}"
-        except ValueError:
-            pass
-    if new_base == base:
-        return {"ok": True, "renamed": [], "base": base}  # no visible change
-    new_base = _unique_base(new_base, base)
-    new_dir = config.meeting_dir(new_base)
-    # Serialize against a concurrent relabel_one(base), which holds the same
-    # per-base lock for its whole read->rewrite span; the lock file lives in
-    # meetings_dir/.locks (a sibling of the folder), so it survives the rename.
-    from . import review
-    renamed = []
-    prefix = base + "."
-    with review.lock_meeting(base):
-        for f in sorted(old_dir.iterdir()):
-            if f.is_file() and f.name.startswith(prefix):
-                dst = old_dir / (new_base + f.name[len(base):])
-                f.rename(dst)
-                renamed.append(dst.name)
-        old_dir.rename(new_dir)
-        # the speaker registries reference meetings BY NAME: every unknown's
-        # "heard in" list and every enrolled sample's source drive their ▶
-        # voice playback, so a rename that skips them leaves dead play buttons
-        from . import identify, unknowns
-        try:
-            unknowns.rename_meeting_refs(base, new_base)
-            identify.rename_source_refs(base, new_base)
-        except Exception as e:
-            print(f"   rename: registry references not updated ({e})",
-                  file=sys.stderr)
-        # keep the source_file field coherent for future relabels
-        j = config.meeting_file(new_base, ".json")
-        if j.exists():
-            try:
-                d = json.loads(j.read_text())
-                old_sf = d.get("source_file", "")
-                suf = Path(old_sf).suffix or ".m4a"
-                d["source_file"] = new_base + suf
-                d["renamed_from"] = base
-                j.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-            except Exception:
-                pass
-    return {"ok": bool(renamed), "renamed": renamed, "base": new_base}
-
-
-def set_meeting_date(base: str, date_str: str) -> dict:
-    """Correct a meeting's stored date (drives month grouping/sorting in the
-    panel). The pipeline stamps its best guess at process time; a human fixes
-    the odd one here — never by renaming files."""
-    from datetime import date as _date
-
-    from . import review
-    try:
-        iso = _date.fromisoformat(str(date_str).strip()).isoformat()
-    except ValueError:
-        return {"ok": False, "error": "date should look like 2026-07-04"}
-    j = config.meeting_file(base, ".json")
-    if not j.exists():
-        return {"ok": False, "error": f"no transcript for '{base}'"}
-    with review.lock_meeting(base):
-        d = json.loads(j.read_text())
-        d["date"] = iso
-        tmp = j.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        os.replace(tmp, j)
-    return {"ok": True, "date": iso}
 
 
 CATEGORIES = ("work", "personal")
 
 
-def set_meeting_category(base: str, category: str) -> dict:
-    """Flag a meeting as Work or Personal (or clear the flag with ""). A json
-    field, NOT a folder move: the folder name is the meeting's identity
-    everywhere (registries, locks, endpoints), so organizing by moving folders
-    would turn a flag change into a rename-level operation. Same pattern as
-    set_meeting_date; relabel and review edits pass unknown fields through, and
-    process_file preserves it across a Redo like the corrected date."""
-    from . import review
-    category = str(category or "").strip().lower()
-    if category and category not in CATEGORIES:
-        return {"ok": False, "error": "category must be work, personal, or empty"}
+def _sanitize_name(s: str) -> str:
+    """A safe folder/file name (mirrors recorder.final_name): drop path/wildcard/
+    control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
+    the class strip and resolve the meeting folder to the parent dir or a hidden
+    name. Collapse whitespace runs and cap the length."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(s)).strip().lstrip(".")
+    return re.sub(r"\s+", " ", s)[:120].strip()
+
+
+def _write_json(j: Path, d: dict):
+    tmp = j.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+    os.replace(tmp, j)
+
+
+def _is_active(base: str) -> bool:
+    from . import status as _status
+    return base in {Path(k).stem for k in _status.read().get("active", {})}
+
+
+def _move_folder(base: str, new_base: str) -> list:
+    """Rename the meeting folder and every file inside it, then follow the move
+    everywhere the old name is referenced: the speaker registries (which key
+    meetings BY NAME, so a stale ref is a dead ▶ play button), the stored
+    source_file, and the manifest's output paths — without that last one, a
+    source still sitting in a watched folder reads as unprocessed and the next
+    run silently re-transcribes the meeting into a duplicate.
+    The caller holds lock_meeting(base)."""
+    from . import identify, manifest, unknowns
+    old_dir, new_dir = config.meeting_dir(base), config.meeting_dir(new_base)
+    renamed = []
+    prefix = base + "."
+    for f in sorted(old_dir.iterdir()):
+        if f.is_file() and f.name.startswith(prefix):
+            dst = old_dir / (new_base + f.name[len(base):])
+            f.rename(dst)
+            renamed.append(dst.name)
+    old_dir.rename(new_dir)
+    try:
+        unknowns.rename_meeting_refs(base, new_base)
+        identify.rename_source_refs(base, new_base)
+    except Exception as e:
+        print(f"   rename: registry references not updated ({e})", file=sys.stderr)
+    manifest.retarget(old_dir, new_dir, base, new_base)
+    j = config.meeting_file(new_base, ".json")
+    if j.exists():
+        try:
+            d = json.loads(j.read_text())
+            d["source_file"] = new_base + (Path(d.get("source_file", "")).suffix or ".m4a")
+            d["renamed_from"] = base
+            _write_json(j, d)
+        except (OSError, ValueError):
+            pass
+    return renamed
+
+
+def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
+                        reviewed=None) -> dict:
+    """The ONE place a meeting's human-owned fields change: title, date,
+    Work/Personal category, and whether it still needs review.
+
+    The invariant it enforces: the folder is named "<title> MMDDYYYY". That is
+    what keeps recurring meetings ('LT Weekly Meeting') unique on disk, and it is
+    the whole reason the date lives in the name. So correcting a date RE-STAMPS
+    the folder instead of letting the name and the stored date drift apart — they
+    used to, because set_meeting_date only ever rewrote the json.
+
+    Only a title or date edit moves the folder. Tagging a category (or accepting
+    from the inbox without renaming) must not silently rename anything.
+    Returns {ok, base, renamed, date, category, reviewed}.
+    """
+    from . import dates, review
+
+    if base not in config.meeting_bases():
+        return {"ok": False, "error": f"no meeting '{base}'"}
+    if _is_active(base):
+        return {"ok": False,
+                "error": "this meeting is being processed right now — try again in a moment"}
+
+    iso = None
+    if date is not None:
+        from datetime import date as _date
+        try:
+            iso = _date.fromisoformat(str(date).strip()).isoformat()
+        except ValueError:
+            return {"ok": False, "error": "date should look like 2026-07-04"}
+
+    cat = None
+    if category is not None:
+        cat = str(category or "").strip().lower()
+        if cat and cat not in CATEGORIES:
+            return {"ok": False, "error": "category must be work, personal, or empty"}
+
+    new_title = None
+    if title is not None:
+        new_title = _sanitize_name(title)
+        if not new_title:
+            return {"ok": False, "error": "empty name"}
+
     j = config.meeting_file(base, ".json")
-    if not j.exists():
-        return {"ok": False, "error": f"no transcript for '{base}'"}
     with review.lock_meeting(base):
-        d = json.loads(j.read_text())
-        if category:
-            d["category"] = category
-        else:
-            d.pop("category", None)
-        tmp = j.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-        os.replace(tmp, j)
-    return {"ok": True, "category": category or None}
+        try:
+            d = json.loads(j.read_text())
+        except (OSError, ValueError):
+            return {"ok": False, "error": f"no transcript for '{base}'"}
+        if iso is not None:
+            d["date"] = iso
+        if category is not None:
+            if cat:
+                d["category"] = cat
+            else:
+                d.pop("category", None)
+        if reviewed is not None:
+            d["reviewed"] = bool(reviewed)
+
+        want = base
+        if title is not None or date is not None:
+            typed = dates.meeting_date(new_title) if new_title else None
+            if typed:
+                # they typed the date into the name: keep the stored date equal to
+                # it, or the folder and the date would disagree from the start
+                d["date"] = typed
+                want = new_title
+            else:
+                stem = new_title if new_title is not None else dates.strip_stamp(base)
+                on = d.get("date") or ""
+                want = dates.stamp(stem, on) if on else stem
+            want = _unique_base(want, base)
+
+        _write_json(j, d)
+        renamed = _move_folder(base, want) if want != base else []
+
+    return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
+            "category": d.get("category"), "reviewed": d.get("reviewed")}
+
+
+def rename_meeting(base: str, new_base: str) -> dict:
+    """Retitle a meeting. The meeting's date is appended (MMDDYYYY) when the
+    typed name carries none, so 'Weekly Check-in' lands as
+    'Weekly Check-in 07102026' on disk while the panel still shows the clean
+    name. A name that already has a date is taken as typed (and becomes the
+    stored date). Returns {ok, renamed, base}."""
+    r = apply_meeting_edits(base, title=new_base)
+    if not r["ok"]:
+        return r
+    return {"ok": True, "renamed": r["renamed"], "base": r["base"]}
+
+
+def set_meeting_date(base: str, date_str: str) -> dict:
+    """Correct a meeting's date. This RE-STAMPS the folder so its name keeps
+    matching the date (that is what keeps recurring meetings unique); the panel
+    shows the clean title either way. Returns {ok, date, base}."""
+    r = apply_meeting_edits(base, date=date_str)
+    if not r["ok"]:
+        return r
+    return {"ok": True, "date": r["date"], "base": r["base"]}
+
+
+def set_meeting_category(base: str, category: str) -> dict:
+    """Flag a meeting Work or Personal (or clear it with ""). A json field, not a
+    folder move: the folder name is the meeting's identity everywhere (registries,
+    locks, endpoints), so organizing by folders would make a flag change a
+    rename-level operation. Preserved across a Redo like the corrected date."""
+    r = apply_meeting_edits(base, category=category)
+    if not r["ok"]:
+        return r
+    return {"ok": True, "category": r["category"]}

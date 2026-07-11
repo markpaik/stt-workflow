@@ -75,6 +75,45 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     return fallback
 
 
+def resolve_base(src: Path, dest_dir=None) -> str:
+    """The meeting folder name for this source file.
+
+    A NEW recording whose FILENAME carries no date gets the meeting's date stamped
+    into the folder: 'LT Weekly Meeting' -> 'LT Weekly Meeting 06042026'. That is
+    what stops two recordings of the SAME recurring meeting — which naturally share
+    a filename — from resolving to the same folder and silently overwriting each
+    other's transcript. (Only the panel's rename used to stamp a date; anything
+    arriving with a plain name kept it, so 'LT Weekly Meeting.m4a' twice meant one
+    transcript eating the other.)
+
+    A reprocess always resolves to the folder the meeting ALREADY lives in, so a
+    Redo never renames anything behind the user's back."""
+    import json as _json
+
+    from . import dates
+    dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
+    base = src.stem
+    if config.meeting_file(base, ".json", dest_dir).exists():
+        return base                       # an existing meeting: leave its name alone
+    if dates.meeting_date(base) is not None:
+        return base                       # the filename already carries its date
+    stamped = dates.stamp(base, _meeting_date(src, None))
+    if stamped == base:                   # no date could be resolved at all
+        return base
+    j = config.meeting_file(stamped, ".json", dest_dir)
+    if j.exists():
+        try:
+            if _json.loads(j.read_text()).get("source_file") == src.name:
+                return stamped            # the same recording, reprocessed
+        except (OSError, ValueError):
+            pass
+        i = 2                             # a DIFFERENT meeting owns it: never clobber
+        while config.meeting_dir(f"{stamped} ({i})", dest_dir).exists():
+            i += 1
+        return f"{stamped} ({i})"
+    return stamped
+
+
 def _resolve_channel(src: Path, existing_json: Path, input_opts):
     """(channel_layout, mic_speaker) for a stereo me/them recording, or
     (None, None). Precedence mirrors _meeting_date: explicit input_opts, then
@@ -156,7 +195,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     strict = config.STRICT if strict is None else strict
     do_verify = config.VERIFY if do_verify is None else do_verify
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
-    base = src.stem
+    base = resolve_base(src, dest_dir)
     config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
     txt_path = config.meeting_file(base, ".txt", dest_dir)
     json_path = config.meeting_file(base, ".json", dest_dir)
@@ -277,13 +316,20 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # The lock spans only this fast tail, never the minutes of ASR/diarization.
     from . import review
     with review.lock_meeting(base):
-        # human-owned flags survive a Redo exactly like the corrected date:
-        # the Work/Personal category was set in the panel, and rebuilding the
-        # meta from scratch must not silently clear it
-        category = None
+        # human-owned flags survive a Redo exactly like the corrected date: the
+        # Work/Personal category and the reviewed state were set in the panel, and
+        # rebuilding the meta from scratch must not silently clear them.
+        # A brand-new meeting has no prior json, so it lands reviewed=False and
+        # queues in the panel's inbox for naming/dating rather than dropping
+        # unannounced into a list of a hundred. (Meetings processed before this
+        # existed carry NO reviewed key at all, and the panel treats a missing key
+        # as already-reviewed — so nothing retroactively floods the inbox.)
+        category, reviewed = None, False
         try:
             import json as _json
-            category = _json.loads(json_path.read_text()).get("category")
+            prev = _json.loads(json_path.read_text())
+            category = prev.get("category")
+            reviewed = prev.get("reviewed", True)  # an existing meeting stays put
         except (OSError, ValueError):
             pass
         meta = {
@@ -308,6 +354,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         }
         if category:
             meta["category"] = category
+        meta["reviewed"] = bool(reviewed)
         if channel_layout:  # a recording that declared a me/them layout
             meta["channel_layout"] = channel_layout
             meta["mic_speaker"] = mic_speaker
