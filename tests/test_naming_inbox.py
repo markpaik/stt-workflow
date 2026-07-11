@@ -36,6 +36,37 @@ def _meeting(base, date="2026-05-01", **extra):
 
 # ---------- the shared date-stamp rule ----------
 
+def test_restamp_replaces_a_mid_name_date_instead_of_appending():
+    """The recorder's own default name puts the date in the MIDDLE
+    ('Recording 07112026 1814'). Stripping only a TRAILING stamp missed it, so
+    re-stamping appended a second date and produced real folders on disk called
+    'Recording 07112026 1814 07112026'."""
+    assert dates.restamp("Recording 07112026 1814", "2026-07-11") == "Recording 07112026 1814"
+    assert dates.restamp("Recording 07112026 1814", "2026-07-15") == "Recording 07152026 1814"
+    # the trailing convention still works, and a twin suffix is peeled first
+    assert dates.restamp("Weekly 07032026", "2026-07-10") == "Weekly 07102026"
+    assert dates.restamp("Weekly 07032026 (2)", "2026-07-10") == "Weekly 07102026"
+    assert dates.restamp("No Date Here", "2026-07-10") == "No Date Here 07102026"
+    # idempotent: one date in, one date out, no matter how many times
+    n = "Recording 07112026 1814"
+    for _ in range(3):
+        n = dates.restamp(n, "2026-07-11")
+    assert n == "Recording 07112026 1814"
+
+
+def test_a_failed_run_leaves_no_duplicate_behind(sandbox, tmp_path):
+    """A run that dies after process_file's mkdir but before it writes the json
+    leaves an EMPTY folder. Treating that shell as taken made every retry claim
+    the next suffix — one file failing four times left (2)(3)(4)(5) behind it."""
+    from stt import pipeline
+    src = _audio(tmp_path / "Sync 05012026.m4a")
+    config.meeting_dir("Sync 05012026").mkdir(parents=True)   # the shell
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026"
+    # and a REAL meeting owned by someone else still gets stepped over
+    _meeting("Sync 05012026", source_file="Someone Else.m4a")
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+
+
 def test_stamp_helpers_round_trip():
     assert dates.strip_stamp("Weekly Check-in 07102026") == "Weekly Check-in"
     assert dates.strip_stamp("Case 99999999") == "Case 99999999"   # not a date

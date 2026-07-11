@@ -346,7 +346,8 @@ def _recording_state():
 
 
 def gather_state():
-    from stt import summarize
+    from stt import holds, summarize
+    _held = holds.items()
     st = status.read()
     m = manifest.load()
     src_dir, dst_dir = config.source_dir(), config.meetings_dir()
@@ -382,7 +383,7 @@ def gather_state():
                 queue.append({"name": p.name, "size_mb": round(p.stat().st_size / 1e6, 1),
                               "video": p.suffix.lower() in config.VIDEO_EXTS,
                               "processed": done, "est_min": est_min,
-                              "est_detail": est_detail})
+                              "held": p.name in _held, "est_detail": est_detail})
     except Exception:
         pass
     meetings = []
@@ -472,7 +473,7 @@ def gather_state():
             # the captured-seconds clock resolved server-side so both readouts
             # agree and neither has to re-derive the paused-span arithmetic.
             "recording": _recording_state(),
-            "recorder_note": st.get("recorder_note"),
+            "recorder_note": status.recorder_note(),  # expires a success on its own
             "queue": queue, "meetings": meetings,
             "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
@@ -1018,6 +1019,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+            elif u.path == "/api/queue_hold":
+                # park a waiting file: automatic runs skip it until released.
+                # Same membership gate as preview/delete.
+                from stt import holds
+                f = _queue_file(b.get("name"))
+                if f is None:
+                    self._json({"ok": False, "error": "no such queued file"})
+                    return
+                self._json({"ok": True, "held": holds.toggle(f.name)})
             elif u.path == "/api/queue_delete":
                 # bin a waiting source file (a bad take, a test recording) before
                 # it ever becomes a meeting. Same membership gate as the preview.
@@ -1339,6 +1349,19 @@ background:color-mix(in srgb,var(--bad) 7%,var(--card));color:var(--ink)}
 #inboxcount{color:var(--accent)}
 #inbox input[type=text]{font-size:14px;font-weight:600}
 #inbox .row{align-items:center;gap:8px;flex-wrap:wrap}
+/* the native date field is a raw OS control (light chrome, system-blue calendar
+   glyph) that read as pasted-in next to everything else. color-scheme hands the
+   whole widget — digits, spinner, picker glyph — to the current theme, and the
+   rest matches the panel's own inputs. */
+input[type=date]{color-scheme:inherit;font:inherit;font-size:13.5px;
+background:var(--card);color:var(--ink);border:1px solid var(--line);
+border-radius:8px;padding:6px 10px;line-height:1.2}
+input[type=date]:hover{border-color:var(--sub)}
+input[type=date]:focus{outline:3px solid color-mix(in srgb,var(--accent) 35%,transparent);
+outline-offset:1px;border-color:var(--accent)}
+input[type=date]::-webkit-calendar-picker-indicator{opacity:.55;cursor:pointer;
+filter:grayscale(1)}
+input[type=date]:hover::-webkit-calendar-picker-indicator{opacity:1}
 /* multi-select toolbar */
 #selbar{display:none;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0 2px;
 padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--chip)}
@@ -2040,6 +2063,10 @@ function render(){
     rnEl.innerHTML=`${rn.ok?'✓':'⚠'} ${esc(rn.text)}
       ${!rn.ok&&/[Mm]icrophone|audio/.test(rn.text)?'<button onclick="fixRecPerms(this)">Fix permissions</button>':''}
       <button class="dismiss" title="Dismiss" onclick="api('/api/recorder_note',{clear:true}).then(refresh)">✕</button>`;
+    // a SUCCESS is just an acknowledgement — it clears itself. A FAILURE needs a
+    // decision (grant permissions, look at the log), so it stays until dismissed.
+    clearTimeout(rnEl._t);
+    if(rn.ok)rnEl._t=setTimeout(()=>{api('/api/recorder_note',{clear:true}).then(refresh)},8000);
   }
   $('#activecard').style.display=s.running?'block':'none';
   $('#active').innerHTML=(orphaned?`<div class="row"><span class="chip warn">recovering</span>
@@ -2064,16 +2091,20 @@ function render(){
   $('#queue').innerHTML=qjobs+(s.queue.length?s.queue.map(f=>{
     const running=s.active&&s.active[f.name];
     const pend=(s.pending||[]).includes(f.name);
-    const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':(f.video?'<span class="chip">video</span>':'');
+    const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':f.held?'<span class="chip warn">on hold</span>':(f.video?'<span class="chip">video</span>':'');
     const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${escJs(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
-    const est=(!f.processed&&f.est_min)?` · <span ${f.est_detail?`title="${esc(f.est_detail)}"`:''}>~${f.est_min} min to process</span>`:'';
+    const est=(!f.processed&&f.est_min&&!f.held)?` · <span ${f.est_detail?`title="${esc(f.est_detail)}"`:''}>~${f.est_min} min to process</span>`
+      :(f.held?' · automatic runs skip this until you release it':'');
+    const hold=(!f.processed&&!running&&!pend)?`<button class="segbtn${f.held?' on':''}"
+      title="${f.held?'Release — automatic runs can process it again':'Hold — keep it in the queue and let automatic runs skip it'}"
+      onclick="api('/api/queue_hold',{name:'${escJs(f.name)}'}).then(r=>{if(!r.ok)alert(r.error||'failed');refresh()})">${f.held?'▶':'❚❚'}</button>`:'';
     // listen before it costs you minutes of transcription, and bin a bad take
     // without going to Finder. Not offered while the file is being processed.
     const play=f.video?'':`<button class="clipbtn" data-clip="q:${escJs(f.name)}" title="Listen to this recording"
       onclick="playClip(this,'/api/queue_audio?name='+encodeURIComponent('${escJs(f.name)}'))">▶</button>`;
     const del=(!running&&!pend)?`<button class="segbtn" title="Delete this file — it never becomes a meeting"
       onclick="delQueued('${escJs(f.name)}')">✕</button>`:'';
-    return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}${play}${del}</div>`;
+    return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}${play}${hold}${del}</div>`;
   }).join(''):(qjobs?'':'<div class="sub">Nothing waiting.</div>'));
   $('#runsel').disabled=!selected.size||s.running;
   $('#runall').disabled=s.running||!newFiles.length;
@@ -2230,6 +2261,8 @@ function render(){
     <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''} ${catChip(m)}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
+    ${m.audio?`<button class="clipbtn" data-clip="t:${escJs(m.base)}" title="Listen without opening it"
+      onclick="playClip(this,'/api/audio?base='+encodeURIComponent('${escJs(m.base)}'))">▶</button>`:''}
     <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
     <button onclick="openSummary('${escJs(m.base)}')">Summary</button>
     <button onclick="openAsk('${escJs(m.base)}')" ${S.llm_available?'':'disabled'} title="${S.llm_available?'Ask questions about this meeting, answered on this Mac':'Needs the local model (.venv-llm) installed'}">Ask</button>

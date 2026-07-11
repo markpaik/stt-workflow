@@ -150,10 +150,12 @@ def resolve_base(src: Path, dest_dir=None) -> str:
             if _owns_meeting(cand, src, dest_dir):
                 return cand              # this recording's own meeting: reuse it
             continue                     # someone else's transcript: never clobber
-        if config.meeting_dir(cand, dest_dir).exists():
-            continue                     # folder mid-creation or damaged: skip it
         if (archive / cand).exists():
             continue                     # archived meetings keep their names too
+        # free — OR an empty shell left by a run that died after process_file's
+        # mkdir but before it wrote the json. Reuse it. Treating a shell as taken
+        # made every failed retry claim the NEXT suffix, so one file that failed
+        # four times left (2)(3)(4)(5) behind it.
         return cand
 
 
