@@ -103,7 +103,7 @@ def gather():
     return {"running": running, "active": active, "queued": queued,
             "queued_jobs": queued_jobs,
             "paused": control.is_paused(), "recording": rec,
-            "recorder_note": st.get("recorder_note"),
+            "recorder_note": status.recorder_note(),  # expires a success on its own
             "recent": st.get("recent", [])[:6], "done_count": done_count,
             "schedule": read_schedule()}
 
@@ -351,13 +351,17 @@ class STTMenuBar(rumps.App):
         # easy to never see. The capture is saved immediately under a default name
         # and queued; you name it in the panel, which also suggests a title from
         # the transcript and stamps the date into the filename for you.
-        r = recorder.finalize(caf, None)
-        # finalize wrote the outcome note (saved / captured nothing) — it shows
-        # as a line in this menu and a banner in the panel, plus ⚠ in the title
-        # on failure. No notification banners: they arrived as unwanted
-        # osascript alerts, when they arrived at all.
-        if r.get("ok"):
-            self._spawn_batch()  # process it now; a no-op if a batch holds the lock
+        recorder.finalize(caf, None)
+        # NO forced run. Finishing a recording used to kick a full batch with
+        # --ignore-pause, which (a) swept EVERY waiting file, dragging along
+        # anything deliberately held back, and (b) overrode the user's own pause
+        # setting to do it. A finished recording is just a new file in a watched
+        # folder: the folder-watch trigger picks it up like any other, and honors
+        # pause and holds. If automation is off, it waits in the queue — which is
+        # exactly what a queue is for.
+        # finalize wrote the outcome note (saved / captured nothing): it shows as
+        # a line in this menu and a strip in the panel, plus ⚠ in the title on
+        # failure. No notification banners.
         self._last_sig = None
         self.refresh(None)
 

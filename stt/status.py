@@ -126,8 +126,23 @@ def clear_recorder_note():
             _write(d)
 
 
+NOTE_TTL_SECS = 20  # a success is an acknowledgement, not a task
+
+
 def recorder_note():
-    return read().get("recorder_note")
+    """The last recording's outcome. A SUCCESS expires on its own (it is just an
+    acknowledgement — nothing to act on), so it never needs dismissing. A FAILURE
+    persists until dismissed: it asks for a decision (grant permissions, check the
+    log), and silently expiring it would be exactly the disappearing-error problem
+    that made every empty capture look like 'nothing happened'."""
+    n = read().get("recorder_note")
+    if not n or not n.get("ok"):
+        return n
+    try:
+        age = (datetime.now() - datetime.fromisoformat(n["at"])).total_seconds()
+        return None if age > NOTE_TTL_SECS else n
+    except (ValueError, TypeError, KeyError):
+        return n
 
 
 def set_recording(info):

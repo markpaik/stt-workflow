@@ -19,16 +19,21 @@ def _valid(y, m, d):
         return None
 
 
+def _run_date(run: str):
+    """ISO date for ONE 8-digit run, else None. MMDDYYYY is the house
+    convention; YYYYMMDD accepted when unambiguous."""
+    mmddyyyy = _valid(int(run[4:8]), int(run[0:2]), int(run[2:4]))
+    if mmddyyyy:
+        return mmddyyyy
+    return _valid(int(run[0:4]), int(run[4:6]), int(run[6:8]))
+
+
 def meeting_date(name: str):
-    """ISO date parsed from an 8-digit run in `name`, else None.
-    MMDDYYYY is the house convention; YYYYMMDD accepted when unambiguous."""
+    """ISO date parsed from an 8-digit run in `name`, else None."""
     for run in _DIGITS8.findall(name):
-        mmddyyyy = _valid(int(run[4:8]), int(run[0:2]), int(run[2:4]))
-        if mmddyyyy:
-            return mmddyyyy
-        yyyymmdd = _valid(int(run[0:4]), int(run[4:6]), int(run[6:8]))
-        if yyyymmdd:
-            return yyyymmdd
+        iso = _run_date(run)
+        if iso:
+            return iso
     return None
 
 
@@ -64,12 +69,22 @@ _UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
 
 
 def restamp(base: str, iso: str) -> str:
-    """The folder name this meeting SHOULD have: its title plus its date. Both
-    idempotent and self-correcting — re-stamping an already-stamped name with a
-    corrected date replaces the old stamp rather than appending a second one.
-    A ' (N)' collision suffix (same-name same-date twins) is peeled off first —
-    the stamp hides behind it ('Weekly 07032026 (2)') and re-stamping blindly
-    would append a second date; the caller's uniquify re-adds the suffix if the
-    new name still collides."""
+    """The folder name this meeting SHOULD have: its title carrying `iso` as its
+    one and only date.
+
+    A name that ALREADY has a date gets it replaced IN PLACE, wherever it sits.
+    Stripping only a TRAILING stamp missed the recorder's own default name —
+    'Recording 07112026 1814' puts the date in the MIDDLE, so re-stamping
+    appended a second one and produced 'Recording 07112026 1814 07112026'.
+    A ' (N)' twin suffix is peeled first (the caller's uniquify re-adds it if the
+    new name still collides). Idempotent: restamping with the same date is a
+    no-op."""
     stem = _UNIQ_SUFFIX.sub("", base)
-    return stamp(strip_stamp(stem), iso)
+    try:
+        new = date.fromisoformat(iso).strftime("%m%d%Y")
+    except (ValueError, TypeError):
+        return stem
+    for m in _DIGITS8.finditer(stem):
+        if _run_date(m.group(1)) is not None:   # the first REAL date in the name
+            return stem[:m.start()] + new + stem[m.end():]
+    return stamp(stem, iso)                      # no date yet: append one

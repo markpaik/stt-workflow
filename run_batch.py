@@ -78,6 +78,36 @@ def clean_scratch():
     for p in (list(config.MEETINGS_DIR.glob("*.tmp")) + list(config.MEETINGS_DIR.glob("*/*.tmp"))
               + list(config.MEETINGS_DIR.glob("*.part")) + list(config.MEETINGS_DIR.glob("*/*.part"))):
         p.unlink(missing_ok=True)
+    _sweep_shells()
+
+
+def _sweep_shells() -> int:
+    """Drop meeting folders left behind with NO transcript json — process_file
+    mkdirs the folder up front, so a run that dies before the write phase strands
+    an empty shell (or one holding just a stray .txt). They are invisible in the
+    panel (meeting_bases requires the json) but they pile up, and they used to
+    push every retry onto the next ' (N)' suffix.
+
+    Safe by construction: this runs at batch start holding the single-instance
+    lock, so nothing is mid-write, and a folder with no json is by definition not
+    a meeting. Anything holding AUDIO is left alone — that would be real data."""
+    import shutil as _shutil
+    n = 0
+    try:
+        for p in sorted(config.MEETINGS_DIR.iterdir()):
+            if not p.is_dir() or p.name.startswith("."):
+                continue
+            if (p / f"{p.name}.json").exists():
+                continue
+            if any(f.suffix.lower() in config.AUDIO_SUFFIXES for f in p.iterdir()):
+                continue  # holds audio: never ours to delete
+            _shutil.rmtree(p)
+            n += 1
+    except OSError:
+        pass
+    if n:
+        print(f"cleaned up {n} empty meeting folder(s) from interrupted runs", flush=True)
+    return n
 
 
 def job_spec_from_args(args, todo) -> dict:
@@ -456,12 +486,21 @@ def main():
                     skipped += 1
             else:
                 print(f"   skip (not a file): {p}", file=sys.stderr)
+    from stt import holds
+    held = holds.items()
     for src in iter_sources(source):
         if args.paths and wanted is None:
             break  # explicit-paths run: don't also sweep the source folder
         if wanted is not None and src.name not in wanted:
             continue
         if args.only and args.only.lower() not in src.name.lower():
+            continue
+        # a held file is parked ON PURPOSE: every automatic sweep leaves it alone.
+        # Naming it explicitly (--files / "Run selected") still processes it —
+        # that is the user asking for it by name, which outranks the park.
+        if src.name in held and wanted is None:
+            print(f"   on hold, skipping: {src.name}", flush=True)
+            skipped += 1
             continue
         try:
             mtime = src.stat().st_mtime
@@ -508,6 +547,7 @@ def main():
         if res["ok"]:
             manifest.mark(m, res["key"], res["mtime"], res["outputs"])
             manifest.save(m)
+            holds.release(res["key"])  # processed: the park can't outlive the file
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
                          rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
@@ -599,6 +639,7 @@ def main():
             # audio, stuck iCloud placeholder) would loop the rescan forever.
             more = [src for src in iter_sources(source)
                     if src.name not in failed_names
+                    and src.name not in holds.items()  # re-read: held mid-run counts
                     and not manifest.is_processed(m, src.name, src.stat().st_mtime)]
             if not more:
                 break
