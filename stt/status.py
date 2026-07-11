@@ -103,7 +103,31 @@ def start_run(pending):
         _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
                 "active": {}, "pending": list(pending),
                 "recent": prev.get("recent", []),
-                "recording": prev.get("recording")})
+                "recording": prev.get("recording"),
+                "recorder_note": prev.get("recorder_note")})
+
+
+def set_recorder_note(ok, text):
+    """The last recording's outcome ('Saved X — processing' / 'captured NO
+    audio…'), persisted so BOTH surfaces show it in place: notifications from
+    this unbundled python app either fail or arrive as unwanted osascript
+    banners, so the menu bar and the panel are the feedback channel. Cleared by
+    the next start (or dismissed in the panel)."""
+    with _lock():
+        d = read()
+        d["recorder_note"] = {"ok": bool(ok), "text": str(text), "at": _now()}
+        _write(d)
+
+
+def clear_recorder_note():
+    with _lock():
+        d = read()
+        if d.pop("recorder_note", None) is not None:
+            _write(d)
+
+
+def recorder_note():
+    return read().get("recorder_note")
 
 
 def set_recording(info):
