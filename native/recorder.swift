@@ -81,6 +81,7 @@ final class Recorder {
     private let ioQueue = DispatchQueue(label: "stt.recorder.io")
     private let tapDesc: CATapDescription
     private var stopped = false
+    private var paused = false
     private var warnedFrames = false
     private var framesWritten = 0
 
@@ -184,8 +185,22 @@ final class Recorder {
     // one IO cycle: sub-device streams come first in the buffer list, taps
     // are always appended last — so buffer[0] is the mic, the last buffer is
     // the system tap (HAL virtual format: Float32, non-interleaved per stream)
+    // Pause/resume (SIGUSR1/SIGUSR2). The IO cycle keeps running — we simply stop
+    // WRITING frames — so the audio device is never torn down and restarted, and
+    // the paused span is just absent from the file. The recording is therefore the
+    // concatenation of the parts you actually kept, which is what you want when
+    // you step out of a meeting. Flipped on ioQueue (serial, the same queue the
+    // IOProc block runs on) so it can't race a write mid-buffer.
+    func setPaused(_ p: Bool) {
+        ioQueue.async {
+            guard !self.stopped, self.paused != p else { return }
+            self.paused = p
+            log(p ? "paused" : "resumed")
+        }
+    }
+
     private func handle(_ abl: UnsafePointer<AudioBufferList>) {
-        guard !stopped, let file else { return }
+        guard !stopped, !paused, let file else { return }
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
         guard buffers.count >= 1 else { return }
         let micBuf = buffers[0]
@@ -290,6 +305,17 @@ for sig in [SIGINT, SIGTERM] {
     src.setEventHandler { recorder.shutdown(code: 0) }
     src.activate()
     _ = Unmanaged.passRetained(src)  // keep the source alive for the process lifetime
+}
+
+// SIGUSR1 pauses, SIGUSR2 resumes. Explicit rather than one toggling signal, so a
+// duplicate or lost signal can never leave the recorder in the opposite state to
+// what the menu bar believes.
+for (sig, wantPaused) in [(SIGUSR1, true), (SIGUSR2, false)] {
+    signal(sig, SIG_IGN)
+    let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    src.setEventHandler { recorder.setPaused(wantPaused) }
+    src.activate()
+    _ = Unmanaged.passRetained(src)
 }
 
 DispatchQueue.main.asyncAfter(deadline: .now() + maxSeconds) {

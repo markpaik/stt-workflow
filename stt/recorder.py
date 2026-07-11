@@ -106,20 +106,80 @@ def start() -> dict:
     # dot-prefixed so the batch watcher never ingests the in-progress capture
     caf = staging / f".rec-{uuid.uuid4().hex[:8]}.caf"
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    # caffeinate -i keeps the Mac awake for the call; start_new_session makes
-    # caffeinate the group leader so one signal to the group reaches the helper.
+    # Spawn the recorder DIRECTLY and keep the Mac awake with a SEPARATE
+    # `caffeinate -i -w <pid>` (it asserts for as long as that pid lives, then
+    # exits on its own). The helper used to run *inside* caffeinate, which made
+    # the stored pid caffeinate's — and pause/resume (SIGUSR1/SIGUSR2) sent to
+    # caffeinate would KILL it, since terminate is their default action. Owning
+    # the recorder's own pid means every signal lands exactly where we mean it.
     # `with` so the long-lived menu bar releases its copy of the log fd once the
-    # child dups it — otherwise every recording leaks one fd for the session.
+    # children dup it — otherwise every recording leaks one fd for the session.
     with open(LOG, "a") as log:
         proc = subprocess.Popen(
-            ["/usr/bin/caffeinate", "-i", str(BINARY), str(caf), "--max-seconds", str(MAX_SECONDS)],
+            [str(BINARY), str(caf), "--max-seconds", str(MAX_SECONDS)],
             stdout=log, stderr=log, start_new_session=True, cwd=str(config.PROJECT_DIR))
+        subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(proc.pid)],
+                         stdout=log, stderr=log, start_new_session=True)
     status.set_recording({
         "pid": proc.pid, "caf": str(caf),
         "started_at": status._now(),
         "started_monotonic": time.monotonic(),
+        "paused": False, "paused_total": 0.0,
     })
     return {"ok": True, "pid": proc.pid, "caf": str(caf)}
+
+
+def pause() -> dict:
+    """Stop writing frames without ending the capture. The audio device stays
+    up, so the paused span is simply absent from the recording."""
+    rec = status.recording()
+    if not rec or not _recorder_running(rec.get("pid")):
+        return {"ok": False, "error": "not recording"}
+    if rec.get("paused"):
+        return {"ok": True, "paused": True}
+    try:
+        os.kill(int(rec["pid"]), signal.SIGUSR1)
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"could not pause ({e})"}
+    status.set_recording({**rec, "paused": True, "paused_at": time.monotonic()})
+    return {"ok": True, "paused": True}
+
+
+def resume() -> dict:
+    rec = status.recording()
+    if not rec or not _recorder_running(rec.get("pid")):
+        return {"ok": False, "error": "not recording"}
+    if not rec.get("paused"):
+        return {"ok": True, "paused": False}
+    try:
+        os.kill(int(rec["pid"]), signal.SIGUSR2)
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"could not resume ({e})"}
+    # bank the time spent paused so the readout tracks RECORDED audio, not
+    # wall-clock since Start (monotonic: a clock change can't inflate it)
+    banked = float(rec.get("paused_total") or 0.0)
+    at = rec.get("paused_at")
+    if at is not None:
+        banked += max(0.0, time.monotonic() - float(at))
+    new = {**rec, "paused": False, "paused_total": banked}
+    new.pop("paused_at", None)
+    status.set_recording(new)
+    return {"ok": True, "paused": False}
+
+
+def elapsed_seconds(rec) -> int:
+    """Seconds of audio actually CAPTURED so far — wall-clock since Start minus
+    every paused span. One definition, shared by the menu bar and the panel, so
+    the two readouts can't disagree."""
+    if not rec:
+        return 0
+    started = rec.get("started_monotonic")
+    if started is None:
+        return 0
+    secs = time.monotonic() - float(started) - float(rec.get("paused_total") or 0.0)
+    if rec.get("paused") and rec.get("paused_at") is not None:
+        secs -= max(0.0, time.monotonic() - float(rec["paused_at"]))
+    return max(0, int(secs))
 
 
 def halt() -> Path | None:
