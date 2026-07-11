@@ -201,6 +201,66 @@ def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
         assert status == 403, f"{path} not origin-gated"
 
 
+# ---------- archive / category endpoints ----------
+
+def test_archive_category_endpoints_reject_unknown_base(running_server):
+    """set_category and archive_meeting turn the client's base into a path, so
+    they gate on live-meeting membership like every other base endpoint."""
+    for path, payload in [
+        ("/api/set_category", {"base": "../../etc/passwd", "category": "work"}),
+        ("/api/archive_meeting", {"base": "../../etc/passwd"}),
+    ]:
+        status, _ = _post(running_server, path, payload)
+        assert status == 400, path
+    # restore/delete gate on ARCHIVED (or either) membership inside the handler,
+    # so they answer 200 with ok:false rather than 400 — never touching a path
+    status, body = _post(running_server, "/api/restore_meeting", {"base": "../../etc/passwd"})
+    assert status == 200 and not body["ok"]
+    status, body = _post(running_server, "/api/delete_meeting",
+                         {"base": "../../etc/passwd", "confirm": True})
+    assert status == 200 and not body["ok"]
+
+
+def test_delete_requires_explicit_confirmation(running_server):
+    _make_meeting("Legit Meeting")
+    status, body = _post(running_server, "/api/delete_meeting", {"base": "Legit Meeting"})
+    assert status == 200 and not body["ok"] and "confirm" in body["error"]
+    from stt import config
+    assert "Legit Meeting" in config.meeting_bases()  # still there
+
+
+def test_archived_meeting_stops_answering_on_the_live_endpoints(running_server):
+    """Archiving is enforced by the membership gate, so an archived meeting must
+    fall out of transcript/export/ask — not just out of the rendered list."""
+    from stt import config
+    _make_meeting("Secret Meeting")
+    status, _ = _get(running_server, "/api/transcript?base=Secret%20Meeting")
+    assert status == 200
+    status, body = _post(running_server, "/api/archive_meeting", {"base": "Secret Meeting"})
+    assert status == 200 and body["ok"]
+    assert config.archived_bases() == ["Secret Meeting"]
+    for path in ("/api/transcript?base=Secret%20Meeting", "/api/txt?base=Secret%20Meeting"):
+        status, _ = _get(running_server, path)
+        assert status == 400, path
+    status, _ = _post(running_server, "/api/export", {"base": "Secret Meeting", "fmt": "docx"})
+    assert status == 400
+    # and it comes back cleanly
+    status, body = _post(running_server, "/api/restore_meeting", {"base": "Secret Meeting"})
+    assert status == 200 and body["ok"]
+    status, _ = _get(running_server, "/api/transcript?base=Secret%20Meeting")
+    assert status == 200
+
+
+def test_archive_endpoints_are_blocked_from_a_foreign_origin(running_server):
+    for path, payload in [("/api/archive_meeting", {"base": "x"}),
+                          ("/api/restore_meeting", {"base": "x"}),
+                          ("/api/delete_meeting", {"base": "x", "confirm": True}),
+                          ("/api/set_category", {"base": "x", "category": "work"})]:
+        status, _ = _post(running_server, path, payload,
+                          headers={"Origin": "https://evil.example.com"})
+        assert status == 403, path
+
+
 # ---------- check_updates() timeout ----------
 
 def test_check_updates_passes_a_timeout_to_hf_api(monkeypatch):

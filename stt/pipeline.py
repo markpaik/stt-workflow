@@ -277,6 +277,15 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # The lock spans only this fast tail, never the minutes of ASR/diarization.
     from . import review
     with review.lock_meeting(base):
+        # human-owned flags survive a Redo exactly like the corrected date:
+        # the Work/Personal category was set in the panel, and rebuilding the
+        # meta from scratch must not silently clear it
+        category = None
+        try:
+            import json as _json
+            category = _json.loads(json_path.read_text()).get("category")
+        except (OSError, ValueError):
+            pass
         meta = {
             "source_file": src.name,
             # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
@@ -297,6 +306,8 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             "overlap_spans": [[s, e] for s, e in overlaps],
             "refine_stats": diar["refine_stats"] if diar else None,
         }
+        if category:
+            meta["category"] = category
         if channel_layout:  # a recording that declared a me/them layout
             meta["channel_layout"] = channel_layout
             meta["mic_speaker"] = mic_speaker

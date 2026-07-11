@@ -348,13 +348,19 @@ def suggest_title(base: str) -> dict:
 
 
 def _unique_base(candidate: str, current: str) -> str:
-    """A folder name not already taken by ANOTHER meeting. A genuine same-name
-    same-date duplicate (recurring meeting recorded twice in one day) gets a
-    ' (2)' suffix rather than being refused."""
-    if candidate == current or not config.meeting_dir(candidate).exists():
+    """A folder name not already taken by ANOTHER meeting — live OR archived. A
+    genuine same-name same-date duplicate (recurring meeting recorded twice in
+    one day) gets a ' (2)' suffix rather than being refused. Archived names
+    count as taken so a base stays unique across the whole store: the speaker
+    registries reference meetings by name, and a live meeting reusing an
+    archived one's name would make a later restore ambiguous."""
+    def taken(n):
+        return config.meeting_dir(n).exists() or (config.archive_dir() / n).exists()
+
+    if candidate == current or not taken(candidate):
         return candidate
     i = 2
-    while config.meeting_dir(f"{candidate} ({i})").exists():
+    while taken(f"{candidate} ({i})"):
         i += 1
     return f"{candidate} ({i})"
 
@@ -465,3 +471,32 @@ def set_meeting_date(base: str, date_str: str) -> dict:
         tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
         os.replace(tmp, j)
     return {"ok": True, "date": iso}
+
+
+CATEGORIES = ("work", "personal")
+
+
+def set_meeting_category(base: str, category: str) -> dict:
+    """Flag a meeting as Work or Personal (or clear the flag with ""). A json
+    field, NOT a folder move: the folder name is the meeting's identity
+    everywhere (registries, locks, endpoints), so organizing by moving folders
+    would turn a flag change into a rename-level operation. Same pattern as
+    set_meeting_date; relabel and review edits pass unknown fields through, and
+    process_file preserves it across a Redo like the corrected date."""
+    from . import review
+    category = str(category or "").strip().lower()
+    if category and category not in CATEGORIES:
+        return {"ok": False, "error": "category must be work, personal, or empty"}
+    j = config.meeting_file(base, ".json")
+    if not j.exists():
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    with review.lock_meeting(base):
+        d = json.loads(j.read_text())
+        if category:
+            d["category"] = category
+        else:
+            d.pop("category", None)
+        tmp = j.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+        os.replace(tmp, j)
+    return {"ok": True, "category": category or None}

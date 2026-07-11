@@ -235,7 +235,11 @@ def _uniquify(base: str) -> str:
     staging = config.recordings_dir()
 
     def taken(n):
-        return (staging / f"{n}.m4a").exists() or config.meeting_dir(n).exists()
+        # archived names count too: registries reference meetings by name, so a
+        # new recording reusing an archived meeting's name would make a later
+        # restore ambiguous (whose voice clips are whose?)
+        return ((staging / f"{n}.m4a").exists() or config.meeting_dir(n).exists()
+                or (config.archive_dir() / n).exists())
 
     if not taken(base):
         return base

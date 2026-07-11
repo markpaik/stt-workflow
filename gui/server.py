@@ -285,6 +285,7 @@ def _meeting_meta(j: Path, dst_dir: Path):
                                      if s.get("flags") and review.is_minor(s)),
                 "summary": d.get("ai_summary", ""),
                 "next_steps": d.get("ai_next_steps", []),
+                "category": d.get("category"),  # work | personal | None
                 # when transcription last ran (new or redo). Older transcripts
                 # predate this field — fall back to generated_at, then mtime.
                 "processed_at": (d.get("processed_at") or d.get("generated_at")
@@ -415,6 +416,7 @@ def gather_state():
             # stopped. Same source of truth the menu bar uses.
             "recording": recorder.live_recording(),
             "queue": queue, "meetings": meetings,
+            "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
             "schedule": read_schedule(), "model": current_model(),
@@ -624,6 +626,22 @@ class Handler(BaseHTTPRequestHandler):
                 # the complete processing history (results.jsonl merged with
                 # the status ring); filtering happens client-side
                 self._json({"results": status.history()})
+            elif u.path == "/api/archived":
+                # archived meetings, newest first — small list, parsed on demand
+                items = []
+                for b in config.archived_bases():
+                    d = {}
+                    try:
+                        d = json.loads(
+                            (config.archive_dir() / b / f"{b}.json").read_text())
+                    except (OSError, ValueError):
+                        pass
+                    items.append({"base": b, "title": _display_title(b),
+                                  "date": d.get("date") or dates.meeting_date(b) or "",
+                                  "category": d.get("category"),
+                                  "minutes": round(d.get("duration_sec", 0) / 60)})
+                items.sort(key=lambda r: r["date"] or "", reverse=True)
+                self._json({"items": items})
             elif u.path == "/api/voice_clips":
                 # for the "Who is this?" dialog: this unknown's longest turn in
                 # EACH meeting it was heard in — meeting names come from the
@@ -920,6 +938,31 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.set_meeting_date(b["base"], b.get("date", "")))
+            elif u.path == "/api/set_category":
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+            elif u.path == "/api/archive_meeting":
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import archive
+                self._json(archive.archive_meeting(b["base"]))
+            elif u.path == "/api/restore_meeting":
+                # NOT _require_base: the base is by definition not a live
+                # meeting. restore_meeting gates on archived-list membership
+                # before any path is built — same defense, different universe.
+                from stt import archive
+                self._json(archive.restore_meeting(str(b.get("base") or "")))
+            elif u.path == "/api/delete_meeting":
+                # live or archived; delete_meeting gates on membership in one
+                # of the two lists before any path is built. confirm is a
+                # seatbelt so nothing deletes on a malformed call.
+                if not b.get("confirm"):
+                    self._json({"ok": False, "error": "missing confirmation"})
+                    return
+                from stt import archive
+                self._json(archive.delete_meeting(str(b.get("base") or "")))
             elif u.path == "/api/review":
                 if not self._require_base(b.get("base")):
                     return
@@ -1357,6 +1400,12 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <div class="card">
   <h2>Transcripts <span class="grow"></span>
+    <button id="archbtn" onclick="openArchived()" title="Archived meetings — set aside, restorable anytime" style="font-size:12px;display:none"></button>
+    <select id="mcat" onchange="localStorage.setItem('stt_mcat',this.value);render()" title="Show every meeting, or only Work / Personal ones" style="font-size:13px">
+      <option value="">all</option>
+      <option value="work">work</option>
+      <option value="personal">personal</option>
+    </select>
     <select id="msort" onchange="localStorage.setItem('stt_msort',this.value);render()" title="How the list is ordered and grouped" style="font-size:13px">
       <option value="date">by month</option>
       <option value="name">by name</option>
@@ -1587,10 +1636,14 @@ function render(){
   // collapsible groups (month, or first letter when sorted by name)
   const mq=($('#mfilter').value||'').toLowerCase();
   const msort=($('#msort')&&$('#msort').value)||'date';
+  const mcat=($('#mcat')&&$('#mcat').value)||'';
+  const ab=$('#archbtn');
+  if(ab){ab.style.display=s.archived_count?'':'none';ab.textContent='Archived · '+(s.archived_count||0)}
   const mtit=m=>m.title||m.base;  // clean display name (date stripped)
-  const shown=s.meetings.filter(m=>!mq||mtit(m).toLowerCase().includes(mq)
+  const shown=s.meetings.filter(m=>(!mcat||m.category===mcat)
+    &&(!mq||mtit(m).toLowerCase().includes(mq)
     ||m.base.toLowerCase().includes(mq)
-    ||m.speakers.join(' ').toLowerCase().includes(mq))
+    ||m.speakers.join(' ').toLowerCase().includes(mq)))
     .slice().sort(msort==='name'
       ?(a,b)=>mtit(a).toLowerCase().localeCompare(mtit(b).toLowerCase())
         ||(b.date||'').localeCompare(a.date||'')  // recurring names: newest first
@@ -1614,7 +1667,7 @@ function render(){
     const day=m.date?new Date(m.date+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'}):'';
     return `<div class="row"><div class="grow${m.summary?' hastip':''}" data-base="${esc(m.base)}">
     <div class="name"><span class="mtitle" onclick="inlineRename('${escJs(m.base)}','${escJs(mtit(m))}',event)" title="Click to rename">${esc(mtit(m))}</span></div>
-    <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}
+    <div class="sub">${day?`<span class="mdate" onclick="inlineDate('${escJs(m.base)}','${esc(m.date)}',event)" title="Click to change the meeting date">${day}</span> · `:''}${m.minutes} min · ${m.speakers.map(esc).join(', ')}${m.strict?' · strict':''}${m.category?` · <span class="chip" title="Category — set from the ⋯ menu">${m.category==='work'?'Work':'Personal'}</span>`:''}
       ${m.flagged?` <span class="chip warn" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Step through each uncertain segment with its audio — accept or fix it">⚠ ${m.flagged} to review</span>`:(m.flagged_minor?` <span class="chip" style="cursor:pointer" onclick="openReview('${escJs(m.base)}')" title="Only sub-second crosstalk crumbs — bulk-accept or skim them">${m.flagged_minor} minor</span>`:'')}</div>
     ${m.summary?`<div class="sub" style="margin-top:3px;font-style:italic">${esc(m.summary.length>150?m.summary.slice(0,150)+'…':m.summary)}</div>`:''}</div>
     <button class="primary" onclick="openTranscript('${escJs(m.base)}')">Read</button>
@@ -1737,11 +1790,71 @@ function openMeetingMenu(base){
   <div class="row"><div class="grow"><div class="name">Rename</div>
     <div class="sub">Retitle this recording (updates all files)</div></div>
     <button onclick="dlg.close();openRename('${escJs(base)}')">Rename…</button></div>
-  ${m.audio?`<div class="row" style="border:0"><div class="grow"><div class="name">Reprocess</div>
+  <div class="row"><div class="grow"><div class="name">Category</div>
+    <div class="sub">Flag as Work or Personal — the transcripts list can filter by it. Click again to clear.</div></div>
+    <button ${m.category==='work'?'class="primary"':''} onclick="setCategory('${escJs(base)}','${m.category==='work'?'':'work'}')">Work</button>
+    <button ${m.category==='personal'?'class="primary"':''} onclick="setCategory('${escJs(base)}','${m.category==='personal'?'':'personal'}')">Personal</button></div>
+  ${m.audio?`<div class="row"><div class="grow"><div class="name">Reprocess</div>
     <div class="sub">Re-run transcription + speakers from the stored audio</div></div>
     <button onclick="dlg.close();openRedo('${escJs(base)}','${escJs(m.audio)}')">Redo…</button></div>`:''}
+  <div class="row"><div class="grow"><div class="name">Archive</div>
+    <div class="sub">Set aside, out of the main view — restorable anytime</div></div>
+    <button onclick="doArchive('${escJs(base)}')">Archive</button></div>
+  <div class="row" style="border:0"><div class="grow"><div class="name" style="color:var(--bad,#e5484d)">Delete</div>
+    <div class="sub">Remove the transcript, audio copy, and caches permanently</div></div>
+    <button style="color:var(--bad,#e5484d)" onclick="dlg.close();openDelete('${escJs(base)}','${escJs(title)}',0)">Delete…</button></div>
   <div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="dlg.close()">Close</button></div>`;
   dlg.showModal();
+}
+async function setCategory(base,cat){
+  const r=await api('/api/set_category',{base,category:cat});
+  if(!r.ok){alert(r.error||'failed');return}
+  dlg.close();refresh();
+}
+async function doArchive(base){
+  const r=await api('/api/archive_meeting',{base});
+  if(!r.ok){alert(r.error||'failed');return}
+  dlg.close();refresh();
+}
+function openDelete(base,title,fromArchive){
+  $('#dlg').classList.remove('wide');
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Delete “${esc(title)}”?</h1>
+  <p class="sub" style="margin-top:8px">This permanently removes the transcript, the stored audio, and every cache. It cannot be undone.</p>
+  ${fromArchive?'':'<p class="sub">If you might want it back, <b>Archive</b> instead — it moves the meeting out of the main view but keeps everything restorable.</p>'}
+  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+    <button onclick="${fromArchive?'openArchived()':'dlg.close()'}">Cancel</button>
+    ${fromArchive?'':`<button onclick="doArchive('${escJs(base)}')">Archive instead</button>`}
+    <button style="color:#fff;background:var(--bad,#e5484d);border-color:var(--bad,#e5484d)" onclick="doDelete('${escJs(base)}',${fromArchive?1:0})">Delete forever</button></div>`;
+  dlg.showModal();
+}
+async function doDelete(base,fromArchive){
+  const r=await api('/api/delete_meeting',{base,confirm:true});
+  if(!r.ok){alert(r.error||'failed');return}
+  if(r.note)alert('Deleted. One note: '+r.note);
+  if(fromArchive){openArchived()}else{dlg.close()}
+  refresh();
+}
+async function openArchived(){
+  const d=await api('/api/archived');
+  const items=d.items||[];
+  $('#dlg').classList.remove('wide');
+  $('#dlg').innerHTML=`<h1 style="font-size:18px">Archived meetings</h1>
+  <p class="sub" style="margin-top:4px">Set aside — out of the list, search, and Ask. Restore brings one back exactly as it was.</p>
+  <div class="inset" style="max-height:50vh;overflow:auto;margin-top:8px">`+
+  (items.map(it=>{
+    const day=it.date?new Date(it.date+'T12:00:00').toLocaleDateString([],{year:'numeric',month:'short',day:'numeric'}):'';
+    return `<div class="row"><div class="grow"><div class="name">${esc(it.title||it.base)}</div>
+      <div class="sub">${day}${it.minutes?` · ${it.minutes} min`:''}${it.category?` · ${it.category==='work'?'Work':'Personal'}`:''}</div></div>
+      <button onclick="doRestore('${escJs(it.base)}')">Restore</button>
+      <button style="color:var(--bad,#e5484d)" onclick="openDelete('${escJs(it.base)}','${escJs(it.title||it.base)}',1)">Delete…</button></div>`;
+  }).join('')||'<div class="sub" style="padding:8px">Nothing archived.</div>')+
+  `</div><div style="display:flex;justify-content:flex-end;margin-top:12px"><button onclick="dlg.close()">Close</button></div>`;
+  dlg.showModal();
+}
+async function doRestore(base){
+  const r=await api('/api/restore_meeting',{base});
+  if(!r.ok){alert(r.error||'failed');return}
+  openArchived();refresh();
 }
 async function doExport(base,fmt,btn){
   btn.disabled=true;btn.innerHTML='<span class="spin"></span>';
@@ -2601,6 +2714,7 @@ function cycleTheme(){
 }
 applyTheme(themeNow());
 {const ms=localStorage.getItem('stt_msort');if(ms&&$('#msort'))$('#msort').value=ms}
+{const mc=localStorage.getItem('stt_mcat');if(mc&&$('#mcat'))$('#mcat').value=mc}
 function setModel(){api('/api/model',{model:$('#modelsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch model');refresh()})}
 function setLlm(){api('/api/llm_backend',{backend:$('#llmsel').value}).then(r=>{if(!r.ok)alert(r.error||'Could not switch the assistant');refresh()})}
 function flyToggle(id,open){
