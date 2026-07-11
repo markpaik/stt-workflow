@@ -68,6 +68,17 @@ def _recorder_running(pid) -> bool:
     return "stt-recorder" in _proc_cmdline(pid)
 
 
+def live_recording():
+    """The capture ACTUALLY running right now, or None. The single source of
+    truth for every surface (menu bar title, panel banner) — the raw status entry
+    is NOT enough on its own: it deliberately outlives the capture until
+    finalize() completes (the naming dialog blocks in between), and a recycled
+    pid can fake liveness. Both UIs used to answer this question their own way,
+    which is how a stopped recording kept showing as live in the panel."""
+    rec = status.recording()
+    return rec if rec and _recorder_running(rec.get("pid")) else None
+
+
 def _free_bytes(path: Path) -> int:
     try:
         st = os.statvfs(path)
@@ -127,6 +138,13 @@ def halt() -> Path | None:
             if not _pid_alive(pid):
                 break
             time.sleep(0.1)
+    # Capture is OVER the moment the helper exits. Drop the live pid now so no
+    # surface keeps showing "recording" while the caller prompts for a name — the
+    # menu bar's naming dialog is MODAL and blocks until answered, and finalize()
+    # (which clears the state) only runs after it. An unanswered dialog used to
+    # leave the panel showing a recording that had already stopped. The entry
+    # itself stays, so recover_orphans still knows the CAF if we die here.
+    status.set_recording({**rec, "pid": None, "stopped_at": status._now()})
     return caf
 
 
