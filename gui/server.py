@@ -1580,6 +1580,24 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
+// ---- live recording clock ----
+// The state poll is 2s, which made the recording timer jump in 2s steps. A 1s
+// local tick advances the displayed clock between polls; each poll then
+// overwrites it with the server's number (which excludes paused spans), so any
+// local drift lasts at most one poll.
+function drawRecClock(recg){
+  const secs=recg.elapsed_secs||0;
+  const h=Math.floor(secs/3600),m=Math.floor(secs%3600/60),ss=secs%60;
+  const t=(h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(ss).padStart(2,'0');
+  $('#rectime').textContent=(recg.paused?'Paused · ':'Elapsed ')+t;
+}
+setInterval(()=>{
+  const recg=S&&S.recording;
+  if(!recg||recg.paused)return;
+  recg.elapsed_secs=(recg.elapsed_secs||0)+1;
+  if($('#recbanner').style.display!=='none')drawRecClock(recg);
+},1000);
+
 // ---- inbox: a new transcript is named/dated before it joins the list ----
 // The gate exists so that at 100+ transcripts a fresh one can't land in the middle
 // of the pile unnoticed. Rendering is SKIPPED while a field in here has focus —
@@ -1737,10 +1755,7 @@ function render(){
   if(recg){
     // elapsed_secs comes from the server (recorder.elapsed_seconds), so it already
     // excludes paused spans — the panel and the menu bar read the same number
-    const secs=recg.elapsed_secs||0;
-    const h=Math.floor(secs/3600),m=Math.floor(secs%3600/60),ss=secs%60;
-    const t=(h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(ss).padStart(2,'0');
-    $('#rectime').textContent=(recg.paused?'Paused · ':'Elapsed ')+t;
+    drawRecClock(recg);
     $('#recbanner').classList.toggle('paused',!!recg.paused);
   }
   $('#activecard').style.display=s.running?'block':'none';
