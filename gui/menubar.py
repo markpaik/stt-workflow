@@ -110,6 +110,28 @@ REC_LIVE = "●"      # ● a filled dot: the universal "recording" mark
 REC_PAUSED = "‖"    # ‖ two bars: paused
 
 
+def _notify(title, subtitle, message):
+    """Show a user notification RELIABLY, and never raise.
+
+    rumps.notification needs a bundled app (an Info.plist for
+    UNUserNotificationCenter) and THROWS from this bare python process — so
+    every banner this app ever posted ('Recording saved', 'Recording problem',
+    'Run started') silently died. osascript displays from any process; the
+    argv-safe on-run pattern (same as gui/server._osascript) keeps meeting
+    names and error text out of the script source."""
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript",
+             "-e", "on run argv",
+             "-e", "display notification (item 1 of argv) "
+                   "with title (item 2 of argv) subtitle (item 3 of argv)",
+             "-e", "end run",
+             "--", str(message or ""), str(title or ""), str(subtitle or "")],
+            capture_output=True, timeout=10)
+    except Exception:
+        pass  # a notification must never break the app it is notifying for
+
+
 def _fmt_hms(secs):
     """mm:ss (or h:mm:ss) for the recording readout."""
     secs = max(0, int(secs or 0))
@@ -123,12 +145,13 @@ class STTMenuBar(rumps.App):
         super().__init__("STT", icon=ICON, template=True, quit_button=None)
         self._frame = 0
         self._last_sig = None
+        self._stall_warned = None  # caf path already warned about (once per capture)
         panel.start_server()  # local control panel at http://127.0.0.1:8737
         try:  # a recording orphaned by a crash/forced quit: salvage its audio
             saved = recorder.recover_orphans()
             if saved:
-                rumps.notification("STT workflow", "Recovered a recording",
-                                   f"“{saved[0]}” was saved after an interrupted session.")
+                _notify("STT workflow", "Recovered a recording",
+                        f"“{saved[0]}” was saved after an interrupted session.")
         except Exception:
             pass
         self.timer = rumps.Timer(self.refresh, 2.0)
@@ -160,7 +183,17 @@ class STTMenuBar(rumps.App):
                 busy = SPINNER[self._frame] if s["running"] else ""
                 glyph = REC_PAUSED if rec.get("paused") else REC_LIVE
                 clock = _fmt_hms(recorder.elapsed_seconds(rec))
-                self.title = f" {glyph} {clock} {busy}".rstrip()
+                stalled = recorder.capture_stalled(rec)
+                if stalled and self._stall_warned != rec.get("caf"):
+                    # say it NOW, ten seconds in — not at stop, when the meeting
+                    # audio is already gone for good
+                    self._stall_warned = rec.get("caf")
+                    _notify(
+                        "STT workflow", "Recording is NOT capturing audio",
+                        "Grant Microphone and 'System Audio Recording Only' in "
+                        "System Settings > Privacy & Security, then stop and "
+                        "start again. (Rebuilding the recorder resets these.)")
+                self.title = f" {glyph}{' ⚠' if stalled else ''} {clock} {busy}".rstrip()
             elif s["running"]:
                 n_act = max(1, len(s["active"]))
                 etas = [status.estimate_progress(a, n_act)[1] for a in s["active"].values()]
@@ -274,16 +307,16 @@ class STTMenuBar(rumps.App):
     def stop_run(self, _):
         res = control.stop_run()  # blocks briefly: group-kill, verify, escalate
         if not res["stopped"]:
-            rumps.notification("STT workflow", "Nothing to stop",
+            _notify("STT workflow", "Nothing to stop",
                                "No processing was running.")
         elif res["survivors"]:
-            rumps.notification("STT workflow", "Stop incomplete",
+            _notify("STT workflow", "Stop incomplete",
                                f"Processes still alive: {res['survivors']} — "
                                "try again or check the control panel.")
         else:
             cq = (f" Cancelled {res['cleared_jobs']} queued run(s)."
                   if res.get("cleared_jobs") else "")
-            rumps.notification("STT workflow", "Stopped — verified",
+            _notify("STT workflow", "Stopped — verified",
                                ("Had to force-kill a stuck worker. " if res["forced"] else "")
                                + "Nothing left running; memory released. "
                                "The in-flight file will re-run next time." + cq)
@@ -291,10 +324,10 @@ class STTMenuBar(rumps.App):
     def toggle_pause(self, _):
         if control.is_paused():
             control.resume()
-            rumps.notification("STT workflow", "Resumed", "Automatic runs are back on.")
+            _notify("STT workflow", "Resumed", "Automatic runs are back on.")
         else:
             control.pause()
-            rumps.notification("STT workflow", "Paused",
+            _notify("STT workflow", "Paused",
                                "Nightly/automatic runs will skip until resumed. "
                                "Manual runs still work.")
 
@@ -302,11 +335,11 @@ class STTMenuBar(rumps.App):
     def start_recording(self, _):
         r = recorder.start()
         if not r.get("ok"):
-            rumps.notification("STT workflow", "Could not start recording",
+            _notify("STT workflow", "Could not start recording",
                                r.get("error", "unknown error"))
             return
         self.refresh(None)  # flip the menu/title immediately
-        rumps.notification("STT workflow", "Recording",
+        _notify("STT workflow", "Recording",
                            "Capturing this meeting. Grant Microphone and "
                            "'System Audio Recording Only' if macOS asks.")
 
@@ -314,7 +347,7 @@ class STTMenuBar(rumps.App):
         rec = (gather() or {}).get("recording") or {}
         r = recorder.resume() if rec.get("paused") else recorder.pause()
         if not r.get("ok"):
-            rumps.notification("STT workflow", "Recording", r.get("error", "unknown error"))
+            _notify("STT workflow", "Recording", r.get("error", "unknown error"))
         self._last_sig = None  # force the menu to redraw with the flipped item
         self.refresh(None)
 
@@ -333,11 +366,14 @@ class STTMenuBar(rumps.App):
         self.refresh(None)
         if r.get("ok"):
             self._spawn_batch()  # process it now; a no-op if a batch holds the lock
-            rumps.notification("STT workflow", "Recording saved",
+            _notify("STT workflow", "Recording saved",
                                f"“{r['name']}” — processing. Rename it in the panel.")
         else:
-            rumps.notification("STT workflow", "Recording problem",
-                               r.get("error", "could not save the recording"))
+            # a failure must NEVER be silent — an empty capture (TCC denied, e.g.
+            # after a recorder rebuild reset the grants) looked like "nothing
+            # happened", and the user only found out the meeting was lost later
+            _notify("STT workflow", "Recording could NOT be saved",
+                    r.get("error", "unknown error"))
 
     # ---- actions ----
     def _spawn_batch(self):
@@ -353,7 +389,7 @@ class STTMenuBar(rumps.App):
 
     def run_now(self, _):
         self._spawn_batch()
-        rumps.notification("STT workflow", "Run started", "Processing any new recordings…")
+        _notify("STT workflow", "Run started", "Processing any new recordings…")
 
     def _open_recent(self, sender):
         name = getattr(sender, "_stt_name", "")
