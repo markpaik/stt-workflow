@@ -24,7 +24,7 @@ def _is_active(base: str) -> bool:
     process_file computed its output paths at start and writes them at the end,
     so moving the folder mid-run would resurrect it at the old location.)"""
     from . import status
-    return base in {Path(k).stem for k in status.read().get("active", {})}
+    return status.meeting_active(base)
 
 
 def _unique_slot(parent: Path, base: str) -> str:
@@ -91,6 +91,19 @@ def restore_meeting(base: str) -> dict:
             import sys
             print(f"   restore: registry references not updated ({e})",
                   file=sys.stderr)
+    # a meeting archived before the naming convention restores under its plain
+    # legacy name — which would shadow its whole recurring series again. Stamp
+    # it on the way back in (apply_meeting_edits moves the folder AND drags the
+    # registries/manifest along); best-effort, the restore itself already stands.
+    try:
+        from . import dates, summarize
+        d = json.loads(config.meeting_file(new_base, ".json").read_text())
+        if d.get("date") and dates.meeting_date(new_base) is None:
+            r = summarize.apply_meeting_edits(new_base, date=d["date"])
+            if r.get("ok"):
+                new_base = r["base"]
+    except Exception:
+        pass
     return {"ok": True, "base": new_base}
 
 

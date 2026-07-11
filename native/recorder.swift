@@ -51,9 +51,21 @@ func defaultInputDevice() -> AudioObjectID? {
     return (err == noErr && dev != kAudioObjectUnknown) ? dev : nil
 }
 
+// Launched via open(1)/LaunchServices, stderr goes nowhere — so the app writes
+// its own log when --log is given (appending, same file the menu bar tails).
+var logURL: URL?
+
 func log(_ msg: String) {
     let ts = ISO8601DateFormatter().string(from: Date())
-    FileHandle.standardError.write("[\(ts)] \(msg)\n".data(using: .utf8)!)
+    let line = "[\(ts)] \(msg)\n".data(using: .utf8)!
+    FileHandle.standardError.write(line)
+    if let u = logURL {
+        if let h = try? FileHandle(forWritingTo: u) {
+            h.seekToEndOfFile(); h.write(line); try? h.close()
+        } else {
+            try? line.write(to: u)
+        }
+    }
 }
 
 func fail(_ code: Int32, _ msg: String) -> Never {
@@ -64,11 +76,14 @@ func fail(_ code: Int32, _ msg: String) -> Never {
 // ---------- arguments --------------------------------------------------------
 
 let args = CommandLine.arguments
-guard args.count >= 2 else { fail(2, "usage: stt-recorder <output.caf> [--max-seconds N]") }
+guard args.count >= 2 else { fail(2, "usage: stt-recorder <output.caf> [--max-seconds N] [--log <file>]") }
 let outputURL = URL(fileURLWithPath: args[1])
 var maxSeconds: Double = 4 * 3600
 if let i = args.firstIndex(of: "--max-seconds"), i + 1 < args.count,
    let n = Double(args[i + 1]), n > 0 { maxSeconds = n }
+if let i = args.firstIndex(of: "--log"), i + 1 < args.count {
+    logURL = URL(fileURLWithPath: args[i + 1])
+}
 
 // ---------- the recorder -----------------------------------------------------
 

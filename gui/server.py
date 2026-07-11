@@ -1667,6 +1667,12 @@ function renderInbox(s,mtit){
   $('#inboxcount').textContent='Needs naming · '+inbox.length;
   const box=$('#inbox');
   if(document.activeElement&&box.contains(document.activeElement))return;  // typing
+  // rebuild ONLY when the server data actually changed — the old focus check
+  // alone meant clicking anywhere outside the inbox let the next 2s poll wipe
+  // everything typed into the name/date fields back to the prefill
+  const sig=JSON.stringify(inbox.map(m=>[m.base,m.suggested,m.date,m.category]));
+  if(box.dataset.sig===sig)return;
+  box.dataset.sig=sig;
   box.innerHTML=inbox.map(m=>{
     const nm=m.suggested||mtit(m);
     const who=m.speakers.map(esc).join(', ')||'no speakers identified';
@@ -1702,12 +1708,18 @@ async function acceptAll(){
   const rows=[...document.querySelectorAll('#inbox [data-ib]')];
   if(!rows.length)return;
   if(!confirm('Accept all '+rows.length+' with the name and date shown?'))return;
+  const fails=[];
   for(const row of rows){
-    await api('/api/accept_meeting',{base:row.dataset.ib,
+    const r=await api('/api/accept_meeting',{base:row.dataset.ib,
       name:row.querySelector('.ibname').value.trim(),
       date:row.querySelector('.ibdate').value,
       category:row.querySelector('.ibcat').value});
+    if(!r.ok)fails.push((row.dataset.ib)+' — '+(r.error||'failed'));
   }
+  // per-item failures must not vanish silently: the rows that failed stay in
+  // the inbox (their typed values survive — the DOM is only rebuilt when the
+  // server data changes) and the reason is shown once
+  if(fails.length)alert(fails.length+' could not be accepted:\n\n'+fails.slice(0,8).join('\n'));
   refresh();
 }
 
@@ -1987,6 +1999,11 @@ function render(){
     const ov=MG.ov[msort+':'+k];
     return ov!==undefined?!!ov:i===0;  // newest month / first letter open by default
   };
+  // prune selections whose base no longer exists — a date/title edit re-stamps
+  // the folder name, which would otherwise leave a phantom entry inflating the
+  // toolbar count and silently failing inside every later bulk action
+  {const live=new Set(s.meetings.map(m=>m.base));
+   [...SEL].forEach(b=>{if(!live.has(b))SEL.delete(b)})}
   LASTSHOWN=shown;
   renderSelbar(shown);
   const mrow=m=>{

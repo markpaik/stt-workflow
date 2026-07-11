@@ -75,6 +75,37 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     return fallback
 
 
+def _src_mtime(src: Path):
+    try:
+        return round(src.stat().st_mtime, 3)
+    except OSError:
+        return None
+
+
+def _owns_meeting(base: str, src: Path, dest_dir) -> bool:
+    """Is meeting `base` THIS source file's own meeting (so a reprocess should
+    land back in it), or a different recording that merely shares the name?
+    Identity = the stored source_file name matches AND the recorded source
+    mtime matches (copy2 preserves it, so a Redo from the stored audio agrees;
+    a same-named re-export is a new file with a new mtime and does NOT match).
+    Meetings from before source_mtime was recorded fall back to the name match
+    — their Redo keeps working; they just lack same-name re-export protection."""
+    import json as _json
+    try:
+        d = _json.loads(config.meeting_file(base, ".json", dest_dir).read_text())
+    except (OSError, ValueError):
+        return False
+    if d.get("source_file") != src.name:
+        return False
+    sm = d.get("source_mtime")
+    if sm is None:
+        return True  # legacy meeting: name match is all the identity there is
+    try:
+        return abs(float(sm) - src.stat().st_mtime) < 1.0
+    except (OSError, ValueError):
+        return False
+
+
 def resolve_base(src: Path, dest_dir=None) -> str:
     """The meeting folder name for this source file.
 
@@ -82,36 +113,48 @@ def resolve_base(src: Path, dest_dir=None) -> str:
     into the folder: 'LT Weekly Meeting' -> 'LT Weekly Meeting 06042026'. That is
     what stops two recordings of the SAME recurring meeting — which naturally share
     a filename — from resolving to the same folder and silently overwriting each
-    other's transcript. (Only the panel's rename used to stamp a date; anything
-    arriving with a plain name kept it, so 'LT Weekly Meeting.m4a' twice meant one
-    transcript eating the other.)
+    other's transcript.
 
-    A reprocess always resolves to the folder the meeting ALREADY lives in, so a
-    Redo never renames anything behind the user's back."""
-    import json as _json
-
+    Identity rules, in order:
+    - A Redo (the source IS a meeting's stored audio, living inside its folder)
+      always resolves to that meeting — nothing is renamed behind the user's back.
+    - A name already on disk is reused ONLY if _owns_meeting says this exact
+      recording created it; a different recording that merely shares the name
+      (same title, same date, a same-day second session) gets ' (2)' instead of
+      silently overwriting a transcript.
+    - Archived names count as taken (registries reference meetings by name;
+      a live meeting reusing an archived name would corrupt a later restore)."""
     from . import dates
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
     base = src.stem
-    if config.meeting_file(base, ".json", dest_dir).exists():
-        return base                       # an existing meeting: leave its name alone
-    if dates.meeting_date(base) is not None:
-        return base                       # the filename already carries its date
-    stamped = dates.stamp(base, _meeting_date(src, None))
-    if stamped == base:                   # no date could be resolved at all
+    try:  # a Redo hands us the stored audio inside the meeting's own folder
+        if src.resolve().parent == config.meeting_dir(base, dest_dir).resolve():
+            return base
+    except OSError:
+        pass
+    # this file's own meeting already lives under the plain name (a legacy
+    # pre-stamping meeting reprocessed from the watched folder): stay there —
+    # stamping now would strand the transcript in a NEW folder as a duplicate
+    if (config.meeting_file(base, ".json", dest_dir).exists()
+            and _owns_meeting(base, src, dest_dir)):
         return base
-    j = config.meeting_file(stamped, ".json", dest_dir)
-    if j.exists():
-        try:
-            if _json.loads(j.read_text()).get("source_file") == src.name:
-                return stamped            # the same recording, reprocessed
-        except (OSError, ValueError):
-            pass
-        i = 2                             # a DIFFERENT meeting owns it: never clobber
-        while config.meeting_dir(f"{stamped} ({i})", dest_dir).exists():
-            i += 1
-        return f"{stamped} ({i})"
-    return stamped
+    target = base
+    if dates.meeting_date(base) is None:  # plain name: stamp the meeting's date
+        target = dates.stamp(base, _meeting_date(src, None))
+    archive = config.archive_dir(dest_dir)
+    i = 1
+    while True:
+        cand = target if i == 1 else f"{target} ({i})"
+        i += 1
+        if config.meeting_file(cand, ".json", dest_dir).exists():
+            if _owns_meeting(cand, src, dest_dir):
+                return cand              # this recording's own meeting: reuse it
+            continue                     # someone else's transcript: never clobber
+        if config.meeting_dir(cand, dest_dir).exists():
+            continue                     # folder mid-creation or damaged: skip it
+        if (archive / cand).exists():
+            continue                     # archived meetings keep their names too
+        return cand
 
 
 def _resolve_channel(src: Path, existing_json: Path, input_opts):
@@ -334,6 +377,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             pass
         meta = {
             "source_file": src.name,
+            # identity, not display: resolve_base matches (name, mtime) to tell
+            # "this exact recording, reprocessed" from "a different recording
+            # that shares the filename" (copy2 preserves mtime, so a Redo from
+            # the stored audio still matches; a same-named re-export does not)
+            "source_mtime": _src_mtime(src),
             # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
             # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
             # often weeks after the meeting. Grouping and sorting read this
