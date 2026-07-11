@@ -73,6 +73,15 @@ def test_start_refused_without_binary(sandbox, monkeypatch):
     assert not r["ok"] and "build-recorder" in r["error"]
 
 
+def test_start_refused_when_disk_nearly_full(sandbox, monkeypatch):
+    """G4: recording a long call needs headroom — start() refuses under the free
+    space floor rather than filling the disk and corrupting the capture."""
+    monkeypatch.setattr(recorder, "available", lambda: True)
+    monkeypatch.setattr(recorder, "_free_bytes", lambda p: recorder.MIN_FREE_BYTES - 1)
+    r = recorder.start()
+    assert not r["ok"] and "free" in r["error"]
+
+
 def test_recover_orphans_finalizes_dead_capture(sandbox):
     caf = _stereo_caf(config.recordings_dir() / ".rec-orphan1.caf")
     status.set_recording({"pid": 999999, "caf": str(caf)})  # dead pid
