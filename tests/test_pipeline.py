@@ -190,6 +190,72 @@ def test_dual_mono_falls_back_to_mono(sandbox, monkeypatch):
     assert data["channel_mode"] == "mono_fallback_dual_mono"
 
 
+def test_no_enroll_caches_mic_spans_for_later_relabel(sandbox, monkeypatch):
+    """C6: a stereo recording processed before the mic speaker is enrolled falls
+    back to mono for THIS pass, but caches its (ungated) mic spans + embeddings
+    so enrolling the speaker and running relabel recovers the attribution without
+    a full re-transcription."""
+    import json
+
+    from stt import diarcache, identify
+    _channel_fakes(monkeypatch)
+    monkeypatch.setattr(identify, "load_voiceprints", lambda: {})  # not enrolled yet
+    src = config.PROJECT_DIR / "Early Call 05052026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=True,
+                                do_verify=False, track_unknowns=False, input_opts=OPTS)
+    data = json.loads(res["json"].read_text())
+    assert data["channel_mode"] == "mono_fallback_no_enroll"
+    from stt import channels
+    assert not any(s["id"] == channels.MIC_ID for s in data["speakers"])  # mono this pass
+    # but the mic spans + embeddings survived into the cache for a future relabel
+    ch = diarcache.load_channel(config.meeting_file("Early Call 05052026", ".diar.npz"))
+    assert ch["mic_speaker"] == "Mark Paik" and len(ch["spans"]) == 1
+
+
+def test_sys_dead_channel_falls_back_to_mono(sandbox, monkeypatch):
+    """G4: a dead system channel (mic-only capture) can't be diarized as 'them',
+    so the recording drops to the mono mix."""
+    import json
+    _channel_fakes(monkeypatch, sanity={"dual_mono": False, "sys_dead": True,
+                                        "mic_dead": False, "mic_rms_db": -10.0,
+                                        "sys_rms_db": -80.0})
+    src = config.PROJECT_DIR / "Sys Dead 05062026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=True,
+                                do_verify=False, track_unknowns=False, input_opts=OPTS)
+    assert json.loads(res["json"].read_text())["channel_mode"] == "mono_fallback_sys_dead"
+
+
+def test_no_mic_activity_falls_back_to_mono(sandbox, monkeypatch):
+    """G4: an all-listening meeting where the mic owner never dominates their own
+    channel yields no spans to overlay, so it processes as mono."""
+    import json
+    _channel_fakes(monkeypatch, spans=[])
+    src = config.PROJECT_DIR / "All Listening 05072026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=True,
+                                do_verify=False, track_unknowns=False, input_opts=OPTS)
+    assert json.loads(res["json"].read_text())["channel_mode"] == "mono_fallback_no_me"
+
+
+def test_channel_layout_read_from_an_on_disk_sidecar(sandbox, monkeypatch):
+    """G4: the recorder drops a <base>.opts.json next to a fresh capture. The
+    pipeline must pick the layout up from that on-disk sidecar, not only from an
+    explicit input_opts (the batch reads it, but _resolve_channel is the path a
+    Redo and a direct process_file rely on)."""
+    import json
+    _channel_fakes(monkeypatch)
+    src = config.PROJECT_DIR / "Sidecar Call 05082026.m4a"
+    src.write_bytes(b"x")
+    src.with_suffix(".opts.json").write_text(json.dumps(OPTS))
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=True,
+                                do_verify=False, track_unknowns=False)  # NO input_opts
+    data = json.loads(res["json"].read_text())
+    assert data["channel_mode"] == "stereo_channel_aware"
+    assert data["channel_layout"] == "mic_left_system_right"
+
+
 def test_no_sidecar_is_pure_mono(sandbox, monkeypatch):
     """A recording that never declared a layout must take the byte-identical
     mono path: no channel_* keys, no split helper called."""

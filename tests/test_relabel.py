@@ -103,6 +103,51 @@ def test_two_different_manual_people_across_sessions_get_distinct_ids(sandbox):
     assert manual == {"MANUAL_1": "Louise", "MANUAL_2": "Omar"}
 
 
+def test_relabel_recovers_mic_attribution_after_late_enrollment(sandbox, monkeypatch):
+    """C6: a stereo recording first processed before the mic speaker was enrolled
+    cached its ungated mic spans (mono_fallback_no_enroll). Enrolling the speaker
+    and running relabel must now attribute the mic turns, no re-transcription."""
+    import relabel
+    from stt import channels, identify, refine
+
+    base = "Early Call 05052026"
+    words = [{"start": 0.5, "end": 0.9, "word": "hi"},      # SPEAKER_00
+             {"start": 2.2, "end": 2.6, "word": "there"},   # SPEAKER_01
+             {"start": 3.5, "end": 3.9, "word": "mine"},    # mic (3-5s, system quiet)
+             {"start": 4.2, "end": 4.6, "word": "now"}]      # mic
+    data = {"source_file": f"{base}.m4a", "duration_sec": 6.0, "strict": False,
+            "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Speaker 1"},
+                         {"id": "SPEAKER_01", "name": None, "display": "Speaker 2"}],
+            "segments": [], "words": words}
+    mfile(base, ".json").write_text(json.dumps(data))
+    mfile(base, ".txt").write_text("stub")
+
+    rng = np.random.default_rng(5)
+    raw_turns = [{"start": 0.0, "end": 2.0, "cluster": "SPEAKER_00"},
+                 {"start": 2.0, "end": 3.0, "cluster": "SPEAKER_01"}]  # nothing at 3-5s
+    cent_emb = {"SPEAKER_00": rng.normal(size=256), "SPEAKER_01": rng.normal(size=256)}
+    diarcache.save(mfile(base, ".diar.npz"), raw_turns, [None, None], cent_emb,
+                   mark_spans=[(3.0, 5.0)], mark_embs=[np.ones(256)],
+                   channel_mode="mono_fallback_no_enroll", mic_speaker="Mark Paik")
+
+    # the mic speaker is now enrolled; keep the SYSTEM path clean so the ONLY
+    # Mark attribution comes from the recovered mic overlay
+    monkeypatch.setattr(identify, "load_voiceprints", lambda: {"Mark Paik": np.ones((1, 256))})
+    monkeypatch.setattr(identify, "name_speakers",
+                        lambda emb, **k: {label: {"name": None} for label in emb})
+    monkeypatch.setattr(identify, "score_against", lambda vec, samples: 0.99)
+    monkeypatch.setattr(refine, "resolve_split_clusters", lambda cn, ce, vps: cn)
+    monkeypatch.setattr(config, "REFINE", False)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    assert relabel.relabel_one(base) is True
+    after = json.loads(mfile(base, ".json").read_text())
+    mark = [s for s in after["speakers"] if s["id"] == channels.MIC_ID]
+    assert len(mark) == 1 and mark[0]["name"] == "Mark Paik"
+    mark_segs = [seg for seg in after["segments"] if seg.get("name") == "Mark Paik"]
+    assert mark_segs and "mine" in " ".join(s["text"] for s in mark_segs)
+
+
 def test_one_time_speakers_flag_survives_relabel(sandbox):
     """A meeting processed with 'one-time speakers' must NEVER register its
     unnamed voices globally — including on every later relabel, which

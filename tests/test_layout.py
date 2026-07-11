@@ -226,3 +226,70 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     # the human's corrected date survives the reprocess — NOT re-derived from
     # the new filename (which would say 2026-06-01)
     assert d["date"] == "2026-06-15"
+
+
+def test_rename_refused_while_meeting_is_being_processed(sandbox):
+    """A Redo computes the old-name paths at its start and writes them at the
+    end; renaming the folder mid-run would leave the run recreating the old
+    folder (a duplicate meeting). rename_meeting refuses while the base is in
+    the live status active-set, exactly as relabel_one skips."""
+    from stt import status
+    mfile("Being Processed 05012026", ".json").write_text(json.dumps(
+        {"source_file": "Being Processed 05012026.m4a", "date": "2026-05-01",
+         "segments": [], "speakers": [], "words": []}))
+    status.set_stage("Being Processed 05012026.m4a", "transcribing")
+    r = summarize.rename_meeting("Being Processed 05012026", "New Name 05012026")
+    assert not r["ok"] and "processed" in r["error"]
+    assert config.meeting_dir("Being Processed 05012026").is_dir()  # untouched
+    assert not config.meeting_dir("New Name 05012026").exists()
+
+
+def test_rename_sanitizes_leading_dots_and_control_chars(sandbox):
+    """A rename can never resolve the meeting folder to the parent dir or a
+    hidden name: leading dots and control characters are stripped, matching
+    recorder.final_name. A name that reduces to nothing is refused."""
+    mfile("Src 05012026", ".json").write_text(json.dumps(
+        {"source_file": "Src 05012026.m4a", "date": "2026-05-01",
+         "segments": [], "speakers": [], "words": []}))
+    # ".." -> class strip leaves "..", lstrip(".") empties it -> refused
+    r = summarize.rename_meeting("Src 05012026", "..")
+    assert not r["ok"] and r["error"] == "empty name"
+    assert config.meeting_dir("Src 05012026").is_dir()  # not moved
+    # a leading dot on a real name is dropped; the date is still appended
+    mfile("Src2 05012026", ".json").write_text(json.dumps(
+        {"source_file": "Src2 05012026.m4a", "date": "2026-05-01",
+         "segments": [], "speakers": [], "words": []}))
+    r2 = summarize.rename_meeting("Src2 05012026", ".Hidden\x07 Meeting")
+    assert r2["ok"] and r2["base"] == "Hidden Meeting 05012026"
+    assert config.meeting_dir("Hidden Meeting 05012026").is_dir()
+
+
+def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_path):
+    """The write phase (date resolution + every output/cache write) holds the
+    same per-meeting lock the panel's edits and relabel take, so a Redo can't
+    interleave with a concurrent set_date/review/rename on the same base."""
+    import contextlib
+    import subprocess
+
+    from stt import pipeline, review
+    from stt.audio import FFMPEG
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    entered = []
+    real = review.lock_meeting
+
+    @contextlib.contextmanager
+    def spy(base):
+        entered.append(base)
+        with real(base):
+            yield
+    monkeypatch.setattr(review, "lock_meeting", spy)
+
+    src = tmp_path / "Locked 05012026.m4a"
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=2", "-ac", "1",
+                    "-c:a", "aac", str(src)], check=True, capture_output=True)
+    pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                          do_diarize=False, do_verify=False)
+    assert "Locked 05012026" in entered

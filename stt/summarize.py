@@ -370,12 +370,27 @@ def rename_meeting(base: str, new_base: str) -> dict:
     while the GUI still shows just 'Weekly Check-in'. A name that already has a
     date run is left as typed. Returns {ok, renamed, base}."""
     from . import dates
-    new_base = re.sub(r'[<>:"/\\|?*]', "", new_base).strip()
+    # sanitize to a safe folder/file name (mirror recorder.final_name): drop
+    # path/wildcard/control chars, then leading dots — a bare "." or ".." would
+    # otherwise survive the class strip and, with no trailing date appended,
+    # resolve the meeting folder to the parent dir or a hidden name. Collapse
+    # whitespace runs and cap the length as the recorder does.
+    new_base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", new_base).strip().lstrip(".")
+    new_base = re.sub(r"\s+", " ", new_base)[:120].strip()
     if not new_base:
         return {"ok": False, "error": "empty name"}
     old_dir = config.meeting_dir(base)
     if not old_dir.is_dir():
         return {"ok": False, "error": f"no meeting folder for '{base}'"}
+    # refuse while a Redo is reprocessing this meeting: process_file computed the
+    # old-name paths at its start and writes them at the end, so moving the folder
+    # mid-run would leave the run recreating the old folder (a duplicate). The
+    # lock alone can't stop this — the rename would land in the gap before the
+    # run's write phase takes the lock — so we skip, as relabel_one does.
+    from . import status as _status
+    if base in {Path(k).stem for k in _status.read().get("active", {})}:
+        return {"ok": False,
+                "error": "this meeting is being processed right now — rename it again in a moment"}
     # append the meeting's own date when the typed name has none
     iso = ""
     try:

@@ -62,6 +62,22 @@ def test_sanity_flags(sandbox, tmp_path):
     st2 = channels.sanity(_write(tmp_path / "c.wav", loud),
                           _write(tmp_path / "d.wav", _tone(sr, 2, 0.0)))
     assert st2["sys_dead"] and not st2["dual_mono"]
+    # dead mic channel (G4: was computed but never asserted)
+    st3 = channels.sanity(_write(tmp_path / "e.wav", _tone(sr, 2, 0.0)),
+                          _write(tmp_path / "f.wav", loud))
+    assert st3["mic_dead"] and not st3["sys_dead"]
+
+
+def test_mic_spans_handles_silence_and_tiny_audio(sandbox, tmp_path):
+    """G4: numeric edges must not crash or divide by zero — all-silence yields no
+    spans, and audio shorter than one analysis frame is handled cleanly."""
+    sr = 16000
+    silent = _tone(sr, 2, 0.0)
+    assert channels.mic_spans(_write(tmp_path / "m.wav", silent),
+                              _write(tmp_path / "s.wav", silent)) == []
+    tiny = _tone(sr, 0.01, 0.5)   # 10 ms, shorter than the ~30 ms frame window
+    assert channels.mic_spans(_write(tmp_path / "t1.wav", tiny),
+                              _write(tmp_path / "t2.wav", tiny)) == []
 
 
 def test_combine_turns_overlays_and_trims_overlap():

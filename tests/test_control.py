@@ -196,6 +196,28 @@ def test_group_with_only_project_dir_in_cmdline_is_not_ours(sandbox):
             pass
 
 
+def test_recorder_group_is_never_claimed_as_a_batch(sandbox):
+    """G3: the meeting recorder runs as `caffeinate ... native/stt-recorder` in
+    its own session. The batch Stop must never target it — _group_is_ours claims
+    only run_batch / multiprocessing members, so a recorder-shaped command line
+    is not a batch and Stop cannot kill a live recording."""
+    p = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)",
+                          str(config.PROJECT_DIR / "native" / "stt-recorder")],
+                         start_new_session=True)
+    pgid = os.getpgid(p.pid)
+    try:
+        assert control._group_is_ours(pgid) is False
+        d = status.read()
+        d.update(running=True, pgid=pgid)
+        status._write(d)
+        assert pgid not in control.batch_groups()  # Stop would never reach it
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def test_stopping_flag_marks_intentional_stops(sandbox):
     """mark/clear/stopping_recently is the signal that a Stop was deliberate."""
     assert not control.stopping_recently()

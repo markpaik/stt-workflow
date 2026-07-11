@@ -176,6 +176,31 @@ def test_same_origin_requests_still_work(running_server):
     assert status == 200 and body["ok"]
 
 
+# ---------- speaker-mutation endpoints (G2) ----------
+
+def test_name_endpoint_rejects_an_unknown_meeting_base(running_server):
+    """G2: enroll-from-meeting turns the client's meeting into a .diar.npz path,
+    so it must gate the base the same way transcript/audio/rename do."""
+    status, _ = _post(running_server, "/api/name",
+                      {"meeting": "../../etc/passwd", "speaker": "SPEAKER_00", "name": "X"})
+    assert status == 400
+
+
+def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
+    """G2: every speaker-registry mutation is a POST, so the centralized origin
+    gate refuses a cross-site request before the handler runs. Spot-check the
+    registry-wide ones that a CSRF could otherwise use to rename or drop people."""
+    for path, payload in [
+        ("/api/rename_speaker", {"name": "A", "new": "B"}),
+        ("/api/remove_speaker", {"name": "A"}),
+        ("/api/merge_speakers", {"src": "uid:U001", "dst": "name:B"}),
+        ("/api/forget", {"uid": "U001"}),
+    ]:
+        status, _ = _post(running_server, path, payload,
+                          headers={"Origin": "https://evil.example.com"})
+        assert status == 403, f"{path} not origin-gated"
+
+
 # ---------- check_updates() timeout ----------
 
 def test_check_updates_passes_a_timeout_to_hf_api(monkeypatch):
