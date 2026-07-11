@@ -190,6 +190,29 @@ def test_dual_mono_falls_back_to_mono(sandbox, monkeypatch):
     assert data["channel_mode"] == "mono_fallback_dual_mono"
 
 
+def test_no_enroll_caches_mic_spans_for_later_relabel(sandbox, monkeypatch):
+    """C6: a stereo recording processed before the mic speaker is enrolled falls
+    back to mono for THIS pass, but caches its (ungated) mic spans + embeddings
+    so enrolling the speaker and running relabel recovers the attribution without
+    a full re-transcription."""
+    import json
+
+    from stt import diarcache, identify
+    _channel_fakes(monkeypatch)
+    monkeypatch.setattr(identify, "load_voiceprints", lambda: {})  # not enrolled yet
+    src = config.PROJECT_DIR / "Early Call 05052026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=True,
+                                do_verify=False, track_unknowns=False, input_opts=OPTS)
+    data = json.loads(res["json"].read_text())
+    assert data["channel_mode"] == "mono_fallback_no_enroll"
+    from stt import channels
+    assert not any(s["id"] == channels.MIC_ID for s in data["speakers"])  # mono this pass
+    # but the mic spans + embeddings survived into the cache for a future relabel
+    ch = diarcache.load_channel(config.meeting_file("Early Call 05052026", ".diar.npz"))
+    assert ch["mic_speaker"] == "Mark Paik" and len(ch["spans"]) == 1
+
+
 def test_no_sidecar_is_pure_mono(sandbox, monkeypatch):
     """A recording that never declared a layout must take the byte-identical
     mono path: no channel_* keys, no split helper called."""

@@ -68,9 +68,14 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
 
         # channel-aware recordings: re-overlay the mic owner's turns from the
         # cache, RE-GATED against the CURRENT voiceprint — so un-enrolling the
-        # mic speaker (or improving their prints) updates past meetings too.
+        # mic speaker (or improving their prints) updates past meetings too. This
+        # also RECOVERS a recording first processed before the mic speaker was
+        # enrolled (mono_fallback_no_enroll cached its ungated spans): enrolling
+        # + relabel now attributes them, no full re-transcription (C6). The
+        # whole-file pass-fraction gate mirrors _plan_channels so a bleed / wrong
+        # person still leaves the mono attribution alone.
         ch = diarcache.load_channel(dpath)
-        if ch["mode"] == "stereo_channel_aware" and ch["mic_speaker"]:
+        if ch["mic_speaker"] and ch["spans"] is not None and len(ch["spans"]):
             mark_vp = identify.load_voiceprints().get(ch["mic_speaker"])
             kept, scores = [], []
             if mark_vp is not None:
@@ -81,7 +86,7 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                     if sc >= config.CHANNEL_FORCE_MIN:
                         kept.append(sp)
                         scores.append(sc)
-            if kept:
+            if kept and len(kept) / len(ch["spans"]) >= config.CHANNEL_PASS_FRACTION:
                 turns, names, extra_ov = channels.combine_turns(
                     turns, names, kept, ch["mic_speaker"], sum(scores) / len(scores))
                 overlaps = overlaps + extra_ov

@@ -114,10 +114,16 @@ def _plan_channels(base, src, mic_speaker):
     if stats["sys_dead"]:
         return "mono_fallback_sys_dead", wav_mic, wav_sys, None, stats
     mark_vp = identify.load_voiceprints().get(mic_speaker)
-    if mark_vp is None:
-        return "mono_fallback_no_enroll", wav_mic, wav_sys, None, stats
     spans = channels.mic_spans(wav_mic, wav_sys)
     embs = diarize.embed_spans(wav_mic, spans)
+    stats["n_mic_spans"] = len(spans)
+    if mark_vp is None:
+        # the mic speaker is not enrolled yet: without a voiceprint to gate them
+        # this pass falls back to mono. But cache the (ungated) spans + their
+        # embeddings so enrolling them later and running relabel reconstructs the
+        # mic overlay in seconds, no full re-transcription needed (C6).
+        plan = {"spans": spans, "embs": embs, "score": None} if spans else None
+        return "mono_fallback_no_enroll", wav_mic, wav_sys, plan, stats
     kept, kept_embs, scores = [], [], []
     for sp, em in zip(spans, embs):
         if em is None:
@@ -128,8 +134,7 @@ def _plan_channels(base, src, mic_speaker):
             kept_embs.append(em)
             scores.append(sc)
     frac = (len(kept) / len(spans)) if spans else 0.0
-    stats.update({"n_mic_spans": len(spans), "n_kept": len(kept),
-                  "pass_fraction": round(frac, 3)})
+    stats.update({"n_kept": len(kept), "pass_fraction": round(frac, 3)})
     if not spans:
         # nobody dominated the mic at all (an all-listening meeting, or the mic
         # speaker never spoke) -> nothing to overlay; process as mono
