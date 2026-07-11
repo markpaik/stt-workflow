@@ -201,6 +201,74 @@ def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
         assert status == 403, f"{path} not origin-gated"
 
 
+# ---------- queue preview / delete ----------
+
+def test_queue_file_gate_refuses_anything_outside_the_watched_folders(sandbox):
+    """Queue items have no meeting, so there is no base to gate on — _queue_file
+    IS their gate. It must accept only real audio sitting directly in a watched
+    folder, and refuse traversal, absolute paths, dotfiles (an in-progress
+    .rec-*.caf capture!), non-audio, and symlinks pointing out of the folder."""
+    from stt import config
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "Real Meeting.m4a").write_bytes(b"audio")
+    (src / "notes.txt").write_bytes(b"x")
+    (src / ".rec-live.caf").write_bytes(b"x")
+    secret = config.PROJECT_DIR / "secret.m4a"
+    secret.write_bytes(b"x")
+    (src / "escape.m4a").symlink_to(secret)          # symlink out of the folder
+
+    assert srv._queue_file("Real Meeting.m4a") is not None
+    for bad in ("../../../../etc/passwd", "/etc/passwd", "../secret.m4a",
+                "notes.txt", ".rec-live.caf", "escape.m4a", "nope.m4a", "", None):
+        assert srv._queue_file(bad) is None, bad
+
+
+def test_queue_audio_endpoint_refuses_traversal(running_server):
+    status, _ = _get(running_server, "/api/queue_audio?name=../../etc/passwd")
+    assert status == 400
+    status, _ = _get(running_server, "/api/queue_audio?name=nope.m4a")
+    assert status == 400
+
+
+def test_queue_delete_gates_confirm_membership_and_active(running_server):
+    from stt import config, status as st
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "Bad Take.m4a"
+    f.write_bytes(b"audio")
+    (src / "Bad Take.opts.json").write_bytes(b"{}")   # the recorder's sidecar
+
+    status, body = _post(running_server, "/api/queue_delete", {"name": "Bad Take.m4a"})
+    assert status == 200 and not body["ok"] and "confirm" in body["error"]
+    assert f.exists()
+    status, body = _post(running_server, "/api/queue_delete",
+                         {"name": "../../etc/passwd", "confirm": True})
+    assert status == 200 and not body["ok"]
+    # a file the batch is writing right now is never yanked out from under it
+    st.set_stage("Bad Take.m4a", "transcribing")
+    status, body = _post(running_server, "/api/queue_delete",
+                         {"name": "Bad Take.m4a", "confirm": True})
+    assert status == 200 and not body["ok"] and "processed" in body["error"]
+    assert f.exists()
+    st.clear_stage("Bad Take.m4a")
+    status, body = _post(running_server, "/api/queue_delete",
+                         {"name": "Bad Take.m4a", "confirm": True})
+    assert status == 200 and body["ok"]
+    assert not f.exists()
+    assert not (src / "Bad Take.opts.json").exists()  # sidecar went with it
+
+
+def test_queue_endpoints_are_origin_gated(running_server):
+    status, _ = _get(running_server, "/api/queue_audio?name=x.m4a",
+                     headers={"Origin": "https://evil.example.com"})
+    assert status == 403
+    status, _ = _post(running_server, "/api/queue_delete",
+                      {"name": "x.m4a", "confirm": True},
+                      headers={"Origin": "https://evil.example.com"})
+    assert status == 403
+
+
 # ---------- recorder permission fix ----------
 
 def test_fix_recorder_permissions_is_scoped_to_our_bundle_only(running_server, monkeypatch):

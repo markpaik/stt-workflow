@@ -239,6 +239,33 @@ def _kick_jobs():
     _spawn(jobs.spawn_args(nxt[0]))
 
 
+def _queue_file(name):
+    """The waiting source file called `name`, or None.
+
+    Queue items have no meeting yet, so there is no base to gate on — this is
+    their equivalent of _known_base. A name is accepted ONLY if it lands, after
+    resolution, directly inside one of the watched folders and is a real audio
+    file. Resolving first and then re-checking the parent is what defeats
+    traversal ('../../etc/passwd') and symlinks pointing out of the folder;
+    dotfiles are refused so an in-progress .rec-*.caf capture can't be served
+    or deleted out from under the recorder."""
+    if not name or not isinstance(name, str):
+        return None
+    if "/" in name or "\\" in name or name.startswith("."):
+        return None
+    for folder in (config.source_dir(), config.recordings_dir()):
+        try:
+            p = (folder / name).resolve()
+            if p.parent != folder.resolve() or not p.is_file():
+                continue
+            if p.suffix.lower() not in config.AUDIO_EXTS:
+                continue
+            return p
+        except OSError:
+            continue
+    return None
+
+
 def _display_title(base: str) -> str:
     """The folder name minus its trailing date stamp, so 'Weekly Check-in 07102026'
     shows as 'Weekly Check-in' (the date is shown separately). The date lives in
@@ -602,6 +629,46 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _serve_audio(self, audio_f):
+        """Serve an audio file with byte-range support (a <audio> element seeks
+        with Range requests). Shared by the meeting player and the queue preview
+        so the range/416 edge cases have exactly one implementation."""
+        data = audio_f.read_bytes()
+        ctype = {"m4a": "audio/mp4", "mp4": "audio/mp4", "wav": "audio/wav",
+                 "mp3": "audio/mpeg", "aiff": "audio/aiff", "caf": "audio/x-caf",
+                 "flac": "audio/flac", "aac": "audio/aac"}.get(
+                     audio_f.suffix[1:].lower(), "application/octet-stream")
+        rng = self.headers.get("Range")
+        mo = re.match(r"bytes=(\d*)-(\d*)$", rng or "")
+        if mo and (mo.group(1) or mo.group(2)):
+            total = len(data)
+            if not mo.group(1):
+                # suffix form: bytes=-N means the LAST N bytes, not 0..N
+                n = int(mo.group(2))
+                a, z = max(0, total - n), total - 1
+            else:
+                a = int(mo.group(1))
+                z = int(mo.group(2)) if mo.group(2) else total - 1
+                z = min(z, total - 1)
+            if a > z or a >= total:  # unsatisfiable range
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{total}")
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            chunk = data[a:z + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {a}-{z}/{total}")
+        else:
+            chunk = data
+            self.send_response(200)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(chunk)))
+        self.end_headers()
+        self.wfile.write(chunk)
+
     def _require_base(self, base) -> bool:
         """Validate `base` against real meeting basenames; on failure, send the
         400 and tell the caller to stop. Every handler that turns a client-
@@ -722,40 +789,17 @@ class Handler(BaseHTTPRequestHandler):
                 if audio_f is None:
                     self._json({"error": "no audio"}, 404)
                     return
-                data = audio_f.read_bytes()
-                ctype = {"m4a": "audio/mp4", "mp4": "audio/mp4", "wav": "audio/wav",
-                         "mp3": "audio/mpeg", "aiff": "audio/aiff"}.get(
-                             audio_f.suffix[1:], "application/octet-stream")
-                rng = self.headers.get("Range")
-                mo = re.match(r"bytes=(\d*)-(\d*)$", rng or "")
-                if mo and (mo.group(1) or mo.group(2)):
-                    total = len(data)
-                    if not mo.group(1):
-                        # suffix form: bytes=-N means the LAST N bytes, not 0..N
-                        n = int(mo.group(2))
-                        a, z = max(0, total - n), total - 1
-                    else:
-                        a = int(mo.group(1))
-                        z = int(mo.group(2)) if mo.group(2) else total - 1
-                        z = min(z, total - 1)
-                    if a > z or a >= total:  # unsatisfiable range
-                        self.send_response(416)
-                        self.send_header("Content-Range", f"bytes */{total}")
-                        self.send_header("Content-Type", ctype)
-                        self.send_header("Content-Length", "0")
-                        self.end_headers()
-                        return
-                    chunk = data[a:z + 1]
-                    self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {a}-{z}/{total}")
-                else:
-                    chunk = data
-                    self.send_response(200)
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(chunk)))
-                self.end_headers()
-                self.wfile.write(chunk)
+                self._serve_audio(audio_f)
+            elif u.path == "/api/queue_audio":
+                # a file still WAITING in a watched folder — it has no meeting yet,
+                # so there is no base to gate on. _queue_file resolves the name
+                # against the watched folders themselves and refuses anything that
+                # is not a real audio file sitting directly in one of them.
+                f = _queue_file(q.get("name"))
+                if f is None:
+                    self._json({"error": "no such queued file"}, 400)
+                    return
+                self._serve_audio(f)
             elif u.path == "/api/search":
                 self._json(search.query(q.get("q", "")))
             elif u.path == "/api/txt":
@@ -974,6 +1018,26 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from stt import summarize
                 self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+            elif u.path == "/api/queue_delete":
+                # bin a waiting source file (a bad take, a test recording) before
+                # it ever becomes a meeting. Same membership gate as the preview.
+                if not b.get("confirm"):
+                    self._json({"ok": False, "error": "missing confirmation"})
+                    return
+                name = b.get("name")
+                f = _queue_file(name)
+                if f is None:
+                    self._json({"ok": False, "error": "no such queued file"})
+                    return
+                if name in status.read().get("active", {}):
+                    self._json({"ok": False,
+                                "error": "this file is being processed right now"})
+                    return
+                mb = round(f.stat().st_size / 1e6, 1)
+                f.unlink()
+                # the recorder's channel-layout sidecar travels with its audio
+                f.with_suffix(".opts.json").unlink(missing_ok=True)
+                self._json({"ok": True, "freed_mb": mb})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
@@ -1252,6 +1316,9 @@ font-variant-numeric:tabular-nums}
 .chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
 .chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
 .chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
+/* ▶ listen: queue rows and inbox rows */
+.clipbtn{flex:none;width:30px;padding:4px 0;text-align:center;font-size:12px;
+border-radius:8px;line-height:1.2}
 /* recorder outcome / stall strips — in-place feedback, not notifications */
 .recstrip{border:1px solid var(--line);border-radius:10px;padding:9px 12px;
 font-size:13.5px;margin:10px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -1641,6 +1708,42 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 const STAGES=['downloading','converting','transcribing','diarizing','verifying','writing','summarizing'];
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
+// ---- clip playback (inbox rows, queue rows) ----
+// Tracked by KEY, not by DOM node: the panel re-renders every 2s and rebuilds
+// these buttons, so the ◼ state has to survive that (same reasoning as the
+// speaker-sample player). One clip at a time; clicking the playing one stops it.
+let clipAudio=null, clipKey=null;
+function _syncClipBtns(){
+  const playing=clipAudio&&!clipAudio.paused;
+  document.querySelectorAll('.clipbtn').forEach(b=>{
+    b.textContent=(playing&&b.dataset.clip===clipKey)?'◼':'▶';
+  });
+}
+function stopClip(){
+  if(clipAudio)clipAudio.pause();
+  clipAudio=null;clipKey=null;_syncClipBtns();
+}
+function playClip(btn,url){
+  const key=btn.dataset.clip;
+  if(clipKey===key&&clipAudio&&!clipAudio.paused){stopClip();return}   // toggle off
+  if(clipAudio)clipAudio.pause();
+  document.querySelectorAll('audio').forEach(a=>a.pause());            // exclusive
+  stopVoice();                                                          // and vs speaker samples
+  clipKey=key;btn.textContent='…';
+  clipAudio=new Audio(url);
+  clipAudio.onplaying=_syncClipBtns;
+  clipAudio.onended=clipAudio.onerror=()=>{if(clipKey===key)stopClip()};
+  clipAudio.play().catch(()=>{if(clipKey===key)stopClip()});
+}
+async function delQueued(name){
+  if(!confirm(`Delete “${name}”?\n\nThe audio file is removed and never becomes a `
+    +`meeting. This cannot be undone.`))return;
+  stopClip();
+  const r=await api('/api/queue_delete',{name,confirm:true});
+  if(!r.ok){alert(r.error||'failed');return}
+  refresh();
+}
+
 // ---- recorder permissions ----
 async function fixRecPerms(btn){
   btn.disabled=true;btn.textContent='Resetting…';
@@ -1702,6 +1805,8 @@ function renderInbox(s,mtit){
         </div>
         <div class="sub" style="margin-top:4px">${m.minutes} min · ${who}${m.summary?' · '+esc(m.summary.slice(0,90)):''}</div>
       </div>
+      <button class="clipbtn" data-clip="m:${escJs(m.base)}" title="Listen — the quickest way to know what this meeting was"
+        onclick="playClip(this,'/api/audio?base='+encodeURIComponent('${escJs(m.base)}'))">▶</button>
       <button class="primary" onclick="ibAccept('${escJs(m.base)}',this)">Accept</button>
     </div>`;}).join('');
 }
@@ -1880,8 +1985,14 @@ function render(){
     const chip=running?'<span class="chip live">processing</span>':pend?'<span class="chip live">queued</span>':f.processed?'<span class="chip done">done</span>':(f.video?'<span class="chip">video</span>':'');
     const box=(!f.processed&&!running&&!pend)?`<input type="checkbox" class="checkbox" ${selected.has(f.name)?'checked':''} onchange="tog('${escJs(f.name)}',this.checked)">`:'<span style="width:17px"></span>';
     const est=(!f.processed&&f.est_min)?` · <span ${f.est_detail?`title="${esc(f.est_detail)}"`:''}>~${f.est_min} min to process</span>`:'';
-    return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}</div>`;
-  }).join(''):(qjobs?'':'<div class="sub">Nothing in the iCloud folder.</div>'));
+    // listen before it costs you minutes of transcription, and bin a bad take
+    // without going to Finder. Not offered while the file is being processed.
+    const play=f.video?'':`<button class="clipbtn" data-clip="q:${escJs(f.name)}" title="Listen to this recording"
+      onclick="playClip(this,'/api/queue_audio?name='+encodeURIComponent('${escJs(f.name)}'))">▶</button>`;
+    const del=(!running&&!pend)?`<button class="segbtn" title="Delete this file — it never becomes a meeting"
+      onclick="delQueued('${escJs(f.name)}')">✕</button>`:'';
+    return `<div class="row">${box}<div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">${f.size_mb} MB${est}</div></div>${chip}${play}${del}</div>`;
+  }).join(''):(qjobs?'':'<div class="sub">Nothing waiting.</div>'));
   $('#runsel').disabled=!selected.size||s.running;
   $('#runall').disabled=s.running||!newFiles.length;
   $('#runother').disabled=false;  // extra picks queue behind the current run now
