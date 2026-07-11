@@ -220,9 +220,19 @@ def iter_sources(source: Path):
         folders.append(rec)
     for folder in folders:
         for p in iter_audio(folder):
-            if p.name not in seen:  # a file present in both folders processes once
-                seen.add(p.name)
-                yield p
+            if p.name in seen:
+                # two files that merely SHARE a basename across the source and
+                # recordings folders would collide on the same meeting folder
+                # (base = stem) and the same manifest key: one silently overwrites
+                # or hides the other. Process the first and say so, so the clash
+                # is never invisible. (Recorder names are uniquified against the
+                # store, so this is only a hand-named / re-exported collision.)
+                print(f"   note: '{p.name}' appears in more than one watched "
+                      f"folder — processing the first, skipping {p}",
+                      file=sys.stderr, flush=True)
+                continue
+            seen.add(p.name)
+            yield p
 
 
 def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
@@ -282,7 +292,14 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     else:
         dest_audio = config.meeting_file(src.stem, src.suffix, dest)
         if src.resolve() != dest_audio.resolve():
-            shutil.copy2(src, dest_audio)
+            # atomic: copy to a sibling .part then os.replace, so a crash mid-copy
+            # (or a killed worker) can't leave a truncated audio that success=
+            # dest_audio.exists() would count as done. Matches audio.extract_audio.
+            # The meetings store is not a watched source, so the .part is inert;
+            # clean_scratch (MEETINGS_DIR/*/*.part) sweeps any leftover next start.
+            tmp = dest_audio.with_name(dest_audio.name + ".part")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dest_audio)
 
     success = res["txt"].exists() and res["json"].exists() and dest_audio.exists()
     if success and opts["do_move"] and src.resolve() != dest_audio.resolve():
