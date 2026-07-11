@@ -71,6 +71,27 @@ def rename_meeting_refs(old_base: str, new_base: str) -> int:
     return n
 
 
+def forget_meeting_refs(base: str) -> int:
+    """A permanently DELETED meeting must vanish from every unknown's 'heard in'
+    list — the refs drive ▶ playback and the meetings count, and the audio no
+    longer exists anywhere. Archiving does NOT call this: an archived meeting's
+    refs stay put so a restore brings its voice clips straight back (the clip
+    endpoints already skip non-live meetings gracefully in the meantime).
+    The unknown itself is kept even at zero refs — its embedding still
+    identifies the voice in future meetings. Returns speakers touched."""
+    n = 0
+    with lock_registry():
+        reg = load()
+        for meta in reg["speakers"].values():
+            mts = meta.get("meetings", [])
+            if base in mts:
+                meta["meetings"] = [m for m in mts if m != base]
+                n += 1
+        if n:
+            save(reg)
+    return n
+
+
 def _samples(reg, uid):
     f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
     if not f.exists():

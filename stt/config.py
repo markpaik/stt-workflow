@@ -184,6 +184,32 @@ def meeting_bases(dest_dir=None) -> list:
         return []
 
 
+# --- Archive ---
+# Archived meetings live in a dot-prefixed folder INSIDE the meetings store:
+# same volume (folder moves are atomic os.rename), travels with any backup of
+# the store, and the leading dot means meeting_bases()/globs can never list it —
+# which in turn means every endpoint gated on live-meeting membership excludes
+# archived meetings automatically (list, search, Ask, export, voice clips).
+# A meeting name itself can never collide with it: rename and the recorder both
+# strip leading dots.
+ARCHIVE_DIRNAME = ".archive"
+
+
+def archive_dir(dest_dir=None) -> Path:
+    return Path(dest_dir or meetings_dir()) / ARCHIVE_DIRNAME
+
+
+def archived_bases(dest_dir=None) -> list:
+    """Archived meetings: same folder-holding-its-json rule as meeting_bases."""
+    d = archive_dir(dest_dir)
+    try:
+        return sorted(p.name for p in d.iterdir()
+                      if p.is_dir() and not p.name.startswith(".")
+                      and (p / f"{p.name}.json").exists())
+    except FileNotFoundError:
+        return []
+
+
 def meeting_audio(base: str, dest_dir=None):
     """The meeting's stored audio file, or None."""
     for e in AUDIO_SUFFIXES:
