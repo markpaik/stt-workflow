@@ -1316,9 +1316,15 @@ font-variant-numeric:tabular-nums}
 .chip.live{border-color:transparent;background:color-mix(in srgb,var(--accent) 11%,transparent);color:var(--accent)}
 .chip.done{border-color:transparent;background:color-mix(in srgb,var(--ok) 12%,transparent);color:var(--ok)}
 .chip.warn{border-color:transparent;background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn)}
-/* ▶ listen: queue rows and inbox rows */
+/* ▶ listen: queue rows and inbox rows, with an inline scrubber */
 .clipbtn{flex:none;width:30px;padding:4px 0;text-align:center;font-size:12px;
 border-radius:8px;line-height:1.2}
+.clipbtn.on{border-color:var(--accent);color:var(--accent)}
+.clipplayer{display:flex;align-items:center;gap:8px;padding:8px 10px;margin:0 0 6px;
+border:1px solid var(--line);border-top:0;border-radius:0 0 10px 10px;background:var(--chip)}
+.clipplayer button{font-size:12px;padding:3px 9px;flex:none}
+.clipplayer .sub{font-variant-numeric:tabular-nums;font-size:12px;flex:none;min-width:36px}
+.clipplayer input[type=range]{flex:1;min-width:80px;accent-color:var(--accent);cursor:pointer}
 /* recorder outcome / stall strips — in-place feedback, not notifications */
 .recstrip{border:1px solid var(--line);border-radius:10px;padding:9px 12px;
 font-size:13.5px;margin:10px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -1714,31 +1720,102 @@ const STAGES=['downloading','converting','transcribing','diarizing','verifying',
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 
 // ---- clip playback (inbox rows, queue rows) ----
-// Tracked by KEY, not by DOM node: the panel re-renders every 2s and rebuilds
-// these buttons, so the ◼ state has to survive that (same reasoning as the
-// speaker-sample player). One clip at a time; clicking the playing one stops it.
-let clipAudio=null, clipKey=null;
+// ▶ EXPANDS an inline player under the row: a seek bar, play/pause, stop, and a
+// clock. A bare play button is useless on a 40-minute recording — you need to
+// jump around it to know what it is.
+//
+// CLIPKEY (not a DOM node) is the state, because the panel re-renders every 2s
+// and rebuilds these rows. The <audio> element is therefore kept OUTSIDE the
+// re-rendered markup and re-attached to the row on each render — otherwise every
+// poll would rip the playing element out of the document and the audio would die
+// two seconds in. The server serves byte ranges, so seeking streams rather than
+// re-downloading.
+let clipAudio=null, clipKey=null, clipUrl='';
+function _fmtClock(t){
+  t=Math.max(0,Math.floor(t||0));
+  const m=Math.floor(t/60),s=t%60;
+  return m+':'+String(s).padStart(2,'0');
+}
+function _clipRow(){return document.querySelector(`[data-clip="${(clipKey||'').replace(/"/g,'')}"]`)}
 function _syncClipBtns(){
   const playing=clipAudio&&!clipAudio.paused;
   document.querySelectorAll('.clipbtn').forEach(b=>{
-    b.textContent=(playing&&b.dataset.clip===clipKey)?'◼':'▶';
+    const mine=b.dataset.clip===clipKey;
+    b.textContent=mine?'▾':'▶';
+    b.classList.toggle('on',mine);
   });
+  const pp=$('#clip-pp');
+  if(pp)pp.textContent=playing?'❚❚':'▶';
 }
+function _clipTick(){
+  if(!clipAudio)return;
+  const bar=$('#clip-seek'), cur=$('#clip-cur'), dur=$('#clip-dur');
+  if(!bar)return;
+  const d=isFinite(clipAudio.duration)?clipAudio.duration:0;
+  if(!bar.dataset.dragging){
+    bar.max=d||0;
+    bar.value=clipAudio.currentTime||0;
+  }
+  if(cur)cur.textContent=_fmtClock(clipAudio.currentTime);
+  if(dur)dur.textContent=d?_fmtClock(d):'—:—';
+}
+// the player markup lives in ONE detached element, moved under whichever row is
+// playing — so a re-render can never destroy the element that owns the audio
+let clipBox=null;
+function _clipBox(){
+  if(clipBox)return clipBox;
+  clipBox=document.createElement('div');
+  clipBox.className='clipplayer';
+  clipBox.innerHTML=`<button id="clip-pp" title="Play / pause" onclick="clipToggle()">❚❚</button>
+    <span class="sub" id="clip-cur">0:00</span>
+    <input type="range" id="clip-seek" min="0" max="0" step="0.1" value="0"
+      title="Scrub through the recording"
+      onpointerdown="this.dataset.dragging=1"
+      onpointerup="this.removeAttribute('data-dragging')"
+      oninput="clipSeek(this.value)">
+    <span class="sub" id="clip-dur">—:—</span>
+    <button id="clip-stop" title="Stop and close" onclick="stopClip()">✕</button>`;
+  return clipBox;
+}
+function clipToggle(){
+  if(!clipAudio)return;
+  if(clipAudio.paused)clipAudio.play().catch(()=>{}); else clipAudio.pause();
+  _syncClipBtns();
+}
+function clipSeek(v){if(clipAudio)clipAudio.currentTime=parseFloat(v)||0;_clipTick()}
 function stopClip(){
-  if(clipAudio)clipAudio.pause();
-  clipAudio=null;clipKey=null;_syncClipBtns();
+  if(clipAudio){clipAudio.pause();clipAudio.src='';}
+  clipAudio=null;clipKey=null;clipUrl='';
+  if(clipBox&&clipBox.parentNode)clipBox.parentNode.removeChild(clipBox);
+  _syncClipBtns();
+}
+// re-attach the player under its row after every render (the row is new markup)
+function mountClip(){
+  if(!clipKey)return;
+  const btn=document.querySelector(`.clipbtn[data-clip="${CSS.escape(clipKey)}"]`);
+  if(!btn){return}                       // its row scrolled out of the list
+  const row=btn.closest('.row');
+  const box=_clipBox();
+  if(row&&box.previousSibling!==row){
+    row.insertAdjacentElement('afterend',box);
+  }
+  _clipTick();_syncClipBtns();
 }
 function playClip(btn,url){
   const key=btn.dataset.clip;
-  if(clipKey===key&&clipAudio&&!clipAudio.paused){stopClip();return}   // toggle off
-  if(clipAudio)clipAudio.pause();
-  document.querySelectorAll('audio').forEach(a=>a.pause());            // exclusive
-  stopVoice();                                                          // and vs speaker samples
-  clipKey=key;btn.textContent='…';
+  if(clipKey===key){stopClip();return}          // ▾ collapses it
+  stopClip();
+  document.querySelectorAll('audio').forEach(a=>a.pause());   // exclusive
+  stopVoice();                                                // and vs speaker samples
+  clipKey=key;clipUrl=url;
   clipAudio=new Audio(url);
-  clipAudio.onplaying=_syncClipBtns;
-  clipAudio.onended=clipAudio.onerror=()=>{if(clipKey===key)stopClip()};
-  clipAudio.play().catch(()=>{if(clipKey===key)stopClip()});
+  clipAudio.ontimeupdate=_clipTick;
+  clipAudio.onloadedmetadata=_clipTick;
+  clipAudio.onplay=clipAudio.onpause=_syncClipBtns;
+  clipAudio.onended=()=>{_syncClipBtns();_clipTick()};       // keep the bar; let them replay
+  clipAudio.onerror=()=>{if(clipKey===key){alert('Could not play this audio.');stopClip()}};
+  mountClip();
+  clipAudio.play().catch(()=>{});
 }
 async function delQueued(name){
   if(!confirm(`Delete “${name}”?\n\nThe audio file is removed and never becomes a `
@@ -2179,6 +2256,7 @@ function render(){
     rail.style.display='flex';
   }else rail.style.display='none';
   _syncVoiceBtns();  // re-render rebuilt the ▶ buttons; restore ◼ on the playing one
+  mountClip();       // and re-attach the inline player under its (rebuilt) row
 }
 // Voice-sample playback is tracked by speaker KEY (not DOM node), because the
 // panel re-renders every 2s and rebuilds the buttons — the stop (◼) state must
