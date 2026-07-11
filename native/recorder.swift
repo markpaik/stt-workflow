@@ -226,17 +226,31 @@ final class Recorder {
 
         let (mic, nMic) = monoFrames(micBuf)
         let (sys, nSys) = haveTap ? monoFrames(sysBuf) : ([], 0)
-        let n = haveTap ? min(nMic, nSys) : nMic
+        // max, NOT min: a side that delivers nothing (a missing TCC grant hands
+        // over EMPTY buffers — no error, no prompt) must not starve the other.
+        // min() zeroed whole recordings: the tap grant died, the mic was fine,
+        // and every cycle wrote nothing. The dead side is padded with silence
+        // and named in the log, so a half-granted setup still captures half.
+        let n = max(nMic, nSys)
         guard n > 0 else { return }
-        if haveTap && nMic != nSys && !warnedFrames {
+        if !warnedFrames && (nMic == 0 || (haveTap && nSys == 0)) {
             warnedFrames = true
-            log("note: stream frame counts differ (mic \(nMic) vs tap \(nSys)); using min")
+            if nMic == 0 {
+                log("WARNING: the microphone is delivering NO data — grant "
+                    + "Microphone in System Settings > Privacy & Security")
+            }
+            if haveTap && nSys == 0 {
+                log("WARNING: the system-audio tap is delivering NO data — enable "
+                    + "'STT Recorder' under System Settings > Privacy & Security > "
+                    + "Screen & System Audio Recording (System Audio Recording Only); "
+                    + "macOS shows no prompt for this one")
+            }
         }
 
         var inter = [Float](repeating: 0, count: n * 2)
         for i in 0..<n {
-            inter[i * 2] = mic[i]                       // L = mic
-            inter[i * 2 + 1] = haveTap ? sys[i] : 0     // R = system
+            inter[i * 2] = i < nMic ? mic[i] : 0        // L = mic
+            inter[i * 2 + 1] = i < nSys ? sys[i] : 0    // R = system
         }
         var written = inter  // ExtAudioFileWrite needs a mutable base pointer
         written.withUnsafeMutableBufferPointer { p in
