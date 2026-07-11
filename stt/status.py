@@ -299,6 +299,27 @@ def clear_stage(name):
             _write(d)
 
 
+HISTORY_MAX_BYTES = 4 * 1024 * 1024   # ~tens of thousands of results (years of use)
+HISTORY_KEEP_LINES = 20000            # trimmed back to this most-recent count
+
+
+def _append_history(entry):
+    """Append one result to the permanent log, and keep it from growing without
+    bound: once it passes a generous size, rewrite it with only the most recent
+    lines (atomic). Called only from finish_file under the status lock, so the
+    rare trim never races another writer. Must never break the pipeline."""
+    try:
+        with open(HISTORY_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        if HISTORY_LOG.stat().st_size > HISTORY_MAX_BYTES:
+            lines = HISTORY_LOG.read_text().splitlines()[-HISTORY_KEEP_LINES:]
+            tmp = HISTORY_LOG.with_suffix(".jsonl.tmp")
+            tmp.write_text("\n".join(lines) + "\n")
+            os.replace(tmp, HISTORY_LOG)
+    except OSError:
+        pass
+
+
 def finish_file(name, ok, summary=""):
     with _lock():
         d = read()
@@ -308,11 +329,7 @@ def finish_file(name, ok, summary=""):
         d["recent"] = recent[:20]
         d.get("active", {}).pop(name, None)
         _write(d)
-        try:  # the permanent history — appending must never break the pipeline
-            with open(HISTORY_LOG, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except OSError:
-            pass
+        _append_history(entry)  # the permanent, size-capped history log
 
 
 def history():

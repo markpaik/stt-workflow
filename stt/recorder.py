@@ -95,12 +95,14 @@ def start() -> dict:
     # dot-prefixed so the batch watcher never ingests the in-progress capture
     caf = staging / f".rec-{uuid.uuid4().hex[:8]}.caf"
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    log = open(LOG, "a")
     # caffeinate -i keeps the Mac awake for the call; start_new_session makes
-    # caffeinate the group leader so one signal to the group reaches the helper
-    proc = subprocess.Popen(
-        ["/usr/bin/caffeinate", "-i", str(BINARY), str(caf), "--max-seconds", str(MAX_SECONDS)],
-        stdout=log, stderr=log, start_new_session=True, cwd=str(config.PROJECT_DIR))
+    # caffeinate the group leader so one signal to the group reaches the helper.
+    # `with` so the long-lived menu bar releases its copy of the log fd once the
+    # child dups it — otherwise every recording leaks one fd for the session.
+    with open(LOG, "a") as log:
+        proc = subprocess.Popen(
+            ["/usr/bin/caffeinate", "-i", str(BINARY), str(caf), "--max-seconds", str(MAX_SECONDS)],
+            stdout=log, stderr=log, start_new_session=True, cwd=str(config.PROJECT_DIR))
     status.set_recording({
         "pid": proc.pid, "caf": str(caf),
         "started_at": status._now(),

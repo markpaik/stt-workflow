@@ -538,11 +538,13 @@ def _snippet_for(meeting: str, speaker_key: str, secs: float = 30.0):
 
 
 def _spawn(args):
-    log = open(config.PROJECT_DIR / "logs" / "spawned.log", "a")
-    log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
-    log.flush()
-    subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
-                     stdout=log, stderr=log, start_new_session=True)
+    # `with` so the parent releases its copy of the log fd once the child has
+    # its own dup — the long-lived panel process otherwise leaks one fd per spawn.
+    with open(config.PROJECT_DIR / "logs" / "spawned.log", "a") as log:
+        log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
+        log.flush()
+        subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
+                         stdout=log, stderr=log, start_new_session=True)
 
 
 # ---------- HTTP ----------
