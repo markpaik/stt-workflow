@@ -322,3 +322,28 @@ def test_finalize_drops_caf_before_publishing_so_a_crash_cannot_duplicate(sandbo
     # a later recovery finds no stray CAF, so it cannot mint a duplicate
     assert recorder.recover_orphans() == []
     assert not list(config.recordings_dir().glob("*.m4a"))  # nothing published
+
+
+def test_start_kicks_the_tap_writer_gate(sandbox, monkeypatch):
+    # macOS holds a tap-containing device until some app writes audio; start()
+    # must fire the silent afplay kick so quiet-Mac captures ever begin
+    from stt import recorder
+    calls = []
+
+    class FakeRun:
+        returncode = 0
+        stdout = "123\n"
+        stderr = ""
+
+    monkeypatch.setattr(recorder, "available", lambda: True)
+    monkeypatch.setattr(recorder, "stale", lambda: False)
+    monkeypatch.setattr(recorder.subprocess, "run",
+                        lambda *a, **k: FakeRun())
+    monkeypatch.setattr(recorder.subprocess, "Popen",
+                        lambda cmd, **k: calls.append(cmd) or type(
+                            "P", (), {"pid": 1})())
+    r = recorder.start()
+    assert r["ok"], r
+    kicks = [c for c in calls if c[0] == "/usr/bin/afplay"]
+    assert kicks, "start() never played the silent writer-gate kick"
+    assert kicks[0][1].endswith("silence.wav")
