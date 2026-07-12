@@ -413,16 +413,25 @@ def _failed_sources(st):
             for nm, r in latest.items() if not r.get("ok")}
 
 
-def _one_line(text, cap=160):
-    """A single-sentence preview of a summary — first sentence, else a hard cap."""
+def _preview(text, sentences=2, cap=320):
+    """A short preview of a summary — the first `sentences` sentences when they
+    fit within `cap` chars (roughly two lines' worth), else the text hard-capped
+    with an ellipsis. Runs of whitespace collapse to single spaces first, so the
+    preview is always one clean line."""
     t = " ".join((text or "").split())
     if not t:
         return ""
-    for end in (". ", "? ", "! "):
-        i = t.find(end)
-        if 0 < i <= cap:
-            return t[:i + 1]
-    return t if len(t) <= cap else t[:cap - 1].rstrip() + "…"
+    end = 0
+    for _ in range(sentences):
+        nxt = min((i for i in (t.find(m, end) for m in (". ", "? ", "! ")) if i >= 0),
+                  default=-1)
+        if nxt < 0:
+            end = len(t)      # the final sentence runs to the end of the text
+            break
+        end = nxt + 1         # keep the period, drop its trailing space
+    if end <= cap:
+        return t[:end]
+    return t[:cap - 1].rstrip() + "…"
 
 
 def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
@@ -482,7 +491,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                         "review_substantial": meta["flagged"],
                         "review_minor": meta["flagged_minor"],
                         "has_summary": bool(meta["summary"]),
-                        "summary": _one_line(meta["summary"])})
+                        "summary": _preview(meta["summary"])})
         timeline.append(row)
 
     # --- queue sources: waiting / held / failed. A source in flight is already a

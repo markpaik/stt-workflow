@@ -137,7 +137,9 @@ def test_ready_state(sandbox):
     assert r["title"] == "Weekly Check-in"                            # stamp stripped
     assert r["category"] == "work" and r["has_summary"] is True
     assert r["review_substantial"] == 1 and r["review_minor"] == 1
-    assert r["summary"] == "The team agreed to pilot monthly budgets."  # one line
+    # two sentences carried through — the preview clamps to ~two lines, not one
+    assert r["summary"] == \
+        "The team agreed to pilot monthly budgets. More detail here."
 
 
 def test_failed_state_from_history(sandbox):
@@ -167,6 +169,26 @@ def test_a_recovered_source_is_not_failed(sandbox):
     _history({"name": "Flaky.m4a", "ok": False, "summary": "boom", "at": "2026-07-01T10:00:00"},
              {"name": "Flaky.m4a", "ok": True, "summary": "1 speaker", "at": "2026-07-02T10:00:00"})
     assert _row(srv.gather_state(), id="src:Flaky.m4a") is None
+
+
+# ---------- the summary preview (two sentences, hard cap) ----------
+
+def test_preview_two_sentences_and_cap():
+    """The ready-row summary preview carries ~two lines: the first two sentences
+    when they fit, else a hard cap that ends with an ellipsis."""
+    p = srv._preview
+    # empty in, empty out
+    assert p("") == "" and p(None) == ""
+    # two sentences that fit come through whole
+    assert p("First point made. Second point too.") == \
+        "First point made. Second point too."
+    # a third sentence is dropped — exactly two, no trailing space
+    assert p("One here. Two here. Three here.") == "One here. Two here."
+    # one long unbroken sentence is hard-capped to ~320 chars with an ellipsis
+    out = p("word " * 100)                     # 499 chars, no sentence break
+    assert len(out) == 320 and out.endswith("…")
+    # whitespace (incl. newlines) collapses to single spaces first
+    assert p("A\n\n b.   C d.") == "A b. C d."
 
 
 # ---------- the identity handoff ----------
