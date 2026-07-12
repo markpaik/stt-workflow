@@ -321,7 +321,9 @@ function bodyAndSlot(row){
 
     case 'ready':{
       const bits=[];
-      if(row.date)bits.push(shortDate(row.date));
+      // the date is click-to-edit in place (old page parity); rowDateEdit
+      // swaps it for a date input, /api/set_date re-stamps the folder
+      if(row.date)bits.push(`<span class="rdate" title="Click to change the meeting date" onclick="rowDateEdit(event,'${escJs(row.id)}')">${shortDate(row.date)}</span>`);
       if(row.minutes!=null)bits.push(row.minutes+' min');
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
       // the review count lives INSIDE the meta line as plain amber TEXT
@@ -345,7 +347,7 @@ function bodyAndSlot(row){
           <a class="rexopen" href="#m/${encodeURIComponent(row.id)}">Open transcript &#8594;</a>
         </div></div>`;
       return `<div class="rbody">
-          <div class="rtitle">${esc(row.title)}</div>
+          <div class="rtitle"><span class="rname" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(row.id)}')">${esc(row.title)}</span></div>
           <div class="rmeta">${bits.join(' &middot; ')}</div>
           ${row.has_summary&&row.summary?`<div class="rsummary">${esc(row.summary)}</div>`:''}
           ${exp}
@@ -553,11 +555,12 @@ $('#search').oninput=()=>{render();scheduleSearch();};
 $('#flagchip').onclick=()=>flaggedClear();
 // ready-row click-to-expand: clicking the row body toggles the summary peek;
 // its controls (buttons, links, checkbox, category dot, inputs, the review
-// count) never do, and neither does a click that is selecting text
+// count, the click-to-edit title and date) never do, and neither does a
+// click that is selecting text
 $('#timeline').addEventListener('click',e=>{
   const row=e.target.closest('.row');
   if(!row||row.dataset.state!=='ready')return;
-  if(e.target.closest('button,a,input,select,textarea,label,.rev'))return;
+  if(e.target.closest('button,a,input,select,textarea,label,.rev,.rname,.rdate'))return;
   if(window.getSelection&&String(window.getSelection()))return;
   toggleExpand(row.dataset.id);
 });
@@ -624,7 +627,7 @@ function openPop(el,anchor,fill,ignoreSel){
     document.removeEventListener('keydown',onKey);
     el.hidden=true;el.dataset.open='';el.innerHTML='';
     if(el.id==='processPop')$('#processBtn').setAttribute('aria-expanded','false');
-    if(el.id==='rowmenu')el.dataset.rowid='';
+    if(el.id==='rowmenu'){el.dataset.rowid='';rowActing(null);}
   };
 }
 
@@ -873,6 +876,7 @@ function rowDelete(id,ev){                // two-step confirm in a popover, no b
         <button class="btn danger mini" type="button" onclick="rowDeleteGo('${escJs(id)}')">Delete</button>
       </div></div>`;
   });
+  rowActing(id);
 }
 async function rowDeleteGo(id){
   const r=rowById(id);if(!r||!r.source_file){closePop();return;}
@@ -934,11 +938,21 @@ async function acceptMeeting(id){         // name/date from the row's own form
 }
 
 /* ----------------------------------------------------------- row menu ------ */
+// the row whose menu / delete confirm is open keeps its hover actions in the
+// flow (.acting): the pointer is inside the popover, so :hover alone would
+// drop them, reflowing the row and zeroing the open menu's anchor rect
+function rowActing(id){
+  document.querySelectorAll('#timeline .row.acting').forEach(r=>r.classList.remove('acting'));
+  if(!id)return;
+  const el=document.querySelector('#timeline .row[data-id="'+CSS.escape(id)+'"]');
+  if(el)el.classList.add('acting');
+}
 function rowMenu(id,ev){
   if(ev)ev.stopPropagation();
   const anchor=(ev&&ev.currentTarget)||document.querySelector('.row[data-id="'+CSS.escape(id)+'"] .rslot .iact:last-child');
   const pop=$('#rowmenu');pop.dataset.rowid=id;
   openPop(pop,anchor,()=>fillRowMenu(pop,id));
+  rowActing(id);
 }
 function fillRowMenu(pop,id){
   const m=meetingByBase(id)||{};
@@ -999,7 +1013,7 @@ function rmRename(id){                    // inline: the title becomes an input,
   const titleEl=onPage
     ?document.querySelector('#meetingpage .mtitle')
     :(r=>r&&r.querySelector('.rtitle'))(document.querySelector('.row[data-id="'+CSS.escape(id)+'"]'));
-  if(!titleEl)return;
+  if(!titleEl||titleEl.querySelector('.renameinput'))return;   // already editing
   const cur=(meetingByBase(id)||{}).title||titleEl.textContent||'';
   titleEl.innerHTML=`<input class="renameinput" type="text" value="${esc(cur)}" aria-label="Rename meeting">`;
   const inp=titleEl.querySelector('input');inp.focus();inp.select();
@@ -1007,6 +1021,7 @@ function rmRename(id){                    // inline: the title becomes an input,
   const finish=async save=>{
     if(done)return;done=true;
     const nm=inp.value.trim();
+    let saved=false;
     if(save&&nm&&nm!==cur){
       const r=await api('/api/rename',{base:id,new:nm});
       if(!r.ok){                          // keep the field open, surface the error inline (no alert)
@@ -1017,15 +1032,67 @@ function rmRename(id){                    // inline: the title becomes an input,
         inp.focus();
         return;
       }
+      saved=true;
       // a rename re-stamps the folder, so the base CHANGES: re-route the open
       // page to the new base (the hashchange handler rebuilds it there)
       if(onPage&&r.base&&r.base!==id){location.hash='#m/'+encodeURIComponent(r.base);return;}
+      const r0=rowById(id);if(r0)r0.title=nm;          // optimistic, pre-poll
+      const m0=meetingByBase(id);if(m0)m0.title=nm;
     }
-    if(onPage)titleEl.textContent=cur;    // cancelled / unchanged: restore the title
+    if(onPage)titleEl.textContent=saved?nm:cur;   // cancelled / unchanged: restore
+    else{inp.blur();redrawRows();}    // rebuild the row from S: the .rname span returns
     refresh();
   };
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(true);}else if(e.key==='Escape'){e.preventDefault();finish(false);}};
   inp.onblur=()=>finish(true);
+}
+// click-to-edit on ready rows (the old page's quick path, restored): clicking
+// the TITLE reuses the inline rename above; clicking the DATE in the meta line
+// swaps it for a date input. Both stop the click so the row never expands
+// (the timeline guard also excludes .rname/.rdate), and both survive the 2s
+// poll through drawTimeline's focused-input guard.
+function rowTitleEdit(ev,id){if(ev)ev.stopPropagation();rmRename(id);}
+function rowDateEdit(ev,id){
+  if(ev)ev.stopPropagation();
+  const rowEl=document.querySelector('.row[data-id="'+CSS.escape(id)+'"]');
+  const span=rowEl&&rowEl.querySelector('.rdate');
+  if(!span||rowEl.querySelector('.dateinput'))return;    // already editing
+  const cur=(rowById(id)||{}).date||'';
+  span.outerHTML=`<input type="date" class="dateinput" value="${esc(cur)}" aria-label="Meeting date">`;
+  const inp=rowEl.querySelector('.dateinput');
+  if(!inp)return;
+  inp.focus();
+  let done=false;
+  const finish=async save=>{
+    if(done)return;done=true;
+    const d=inp.value;
+    if(save&&d&&d!==cur){
+      const r=await api('/api/set_date',{base:id,date:d});
+      if(!r.ok){                          // inline on the row, never an alert
+        done=false;
+        const live=document.querySelector('.row[data-id="'+CSS.escape(id)+'"] .rbody')||rowEl;
+        let err=live.querySelector('.nameerr');
+        if(!err){err=document.createElement('div');err.className='nameerr';live.appendChild(err);}
+        err.textContent=r.error||'Date not saved';
+        inp.focus();
+        return;
+      }
+      // the folder re-stamps server-side (the response carries the new base);
+      // optimistically move the date so the row regroups NOW, and let the
+      // refresh right below bring the re-stamped id
+      const r0=rowById(id);if(r0)r0.date=d;
+    }
+    inp.blur();redrawRows();refresh();
+  };
+  inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(true);}else if(e.key==='Escape'){e.preventDefault();finish(false);}};
+  inp.onblur=()=>finish(true);
+}
+// force the next paint to rebuild the rows: an inline edit swapped a span for
+// an input, and the change signature alone would never notice putting it back
+function redrawRows(){
+  const tl=$('#timeline');if(!tl)return;
+  tl.dataset.sig='';
+  if(S&&route.view!=='meeting'){drawTimeline(S);afterRender();}
 }
 async function rmRedo(id){                // mirrors the old redo dialog, as a confirm popover
   const m=meetingByBase(id)||{};
@@ -1267,6 +1334,8 @@ function afterRender(){
   kbRestore();
   const rm=$('#rowmenu');
   if(rm.dataset.open&&rm.dataset.rowid){
+    rowActing(rm.dataset.rowid);   // the rebuilt row regains .acting first, so
+                                   // its action cluster has geometry to anchor to
     const anchor=document.querySelector('.row[data-id="'+CSS.escape(rm.dataset.rowid)+'"] .rslot .iact:last-child');
     if(anchor)_posPop(rm,anchor);else closePop();
   }
@@ -1430,7 +1499,7 @@ function _mHeader(m,base){
     <a class="mback" href="#" onclick="mBack(event)">&#8592; Meetings</a>
     <button class="iact mhmenu" id="mmenu" type="button" title="Export, copy, rename, redo&#8230;"
       aria-label="Meeting actions" onclick="mMenu(event)">&#8943;</button>
-    <h1 class="mtitle">${esc(m.title||base)}</h1>
+    <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta">${bits.join(' &middot; ')}
       <button class="mcat ${dot}" id="mcatdot" type="button"
         title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)"></button>${strict}${flagged}</div>
