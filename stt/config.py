@@ -4,21 +4,45 @@ from pathlib import Path
 
 HOME = Path.home()
 
+# --- Data home override (demo / QA isolation) ------------------------------
+# STT_HOME points the ENTIRE data home at one self-contained directory: the
+# watched source + recordings folders, the meetings store, voiceprints, the
+# manifest, live status + permanent history, queue holds, and the queued-runs
+# file — plus the settings file (stt.env) and scratch (work/, logs/), which all
+# hang off PROJECT_DIR below. It exists so a build, test, or demo run can drive
+# the panel against SYNTHETIC data with zero risk of reading or writing a real
+# recording (see tools/demo_seed.py). It redirects STATE only; the served page
+# and every code/static asset load relative to their own __file__, so the panel
+# still runs straight from this checkout. A specific STT_<X>_DIR env var still
+# wins over STT_HOME for that one path. When STT_HOME is unset, every path below
+# is exactly what it was before — fully backwards compatible.
+STT_HOME = os.environ.get("STT_HOME")
+_HOME = Path(STT_HOME).expanduser() if STT_HOME else None
+
+
+def _home_default(sub: str, hard_default) -> str:
+    """Default for a state path: rooted under STT_HOME when that is set, else the
+    real on-disk location. A specific STT_<X>_DIR env var overrides either."""
+    return str(_HOME / sub if _HOME else hard_default)
+
+
 # --- Paths ---
-ICLOUD_DIR = Path(
-    os.environ.get(
-        "STT_ICLOUD_DIR",
-        HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings",
-    )
-)
-MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR", HOME / "Projects/brain/meetings"))
+ICLOUD_DIR = Path(os.environ.get("STT_ICLOUD_DIR", _home_default(
+    "source", HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")))
+MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR",
+                                   _home_default("meetings", HOME / "Projects/brain/meetings")))
 # where the on-device meeting recorder drops finished captures — a LOCAL folder
 # (not iCloud): these calls are sensitive and the files are large, so they never
 # round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
-RECORDINGS_DIR = Path(os.environ.get(
-    "STT_RECORDINGS_DIR", HOME / "Library/Application Support/com.stt-workflow/recordings"))
+RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
+    "recordings", HOME / "Library/Application Support/com.stt-workflow/recordings")))
+# The state root: manifest, status/history, holds, queue, voiceprints, stt.env,
+# work/, logs/ all hang off this. Defaults to STT_HOME when set (so all of that
+# state travels with the demo home), else this checkout. Code and static assets
+# never key off it — they resolve from __file__ — so the panel runs from the
+# repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
-                                  Path(__file__).resolve().parent.parent))
+                                  _HOME or Path(__file__).resolve().parent.parent))
 VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
                                       PROJECT_DIR / "voiceprints"))
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"
