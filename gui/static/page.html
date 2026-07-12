@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STT Workflow</title>
+<style>
+/*@APP_CSS@*/</style>
+<script>
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint.
+(function(){const q=new URLSearchParams(location.search).get("theme");
+const t=q||localStorage.getItem("stt_theme");
+if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
+</script></head><body>
+<div class="top">
+  <h1>STT Workflow</h1>
+  <span id="statusdot" class="dot"></span><span id="statustext" class="sub"></span>
+  <span class="grow"></span>
+  <button class="themebtn" id="setbtn" onclick="toggleSettings()" title="Settings">⚙</button>
+  <button class="themebtn" id="themebtn" onclick="cycleTheme()" title=""></button>
+  <span id="mem" class="chip" style="display:none" title="Memory held by transcription processes right now"></span>
+  <span id="battery" class="chip"></span>
+</div>
+
+<div id="cols">
+<div id="colmain">
+
+<div class="card" id="recbanner" style="display:none;border-color:color-mix(in srgb,var(--bad) 45%,var(--line))">
+  <div class="row" style="border:0;padding:0;align-items:center">
+    <span class="recdot"></span>
+    <div class="grow"><div class="name">Recording a meeting</div>
+    <div class="sub" id="rectime"></div></div>
+  </div>
+  <div id="recstall" style="display:none" class="recstrip bad">
+    <b>Not capturing audio.</b> macOS is not delivering the microphone / system
+    sound (a recorder rebuild resets its permissions).
+    <button onclick="fixRecPerms(this)">Fix permissions</button>
+  </div>
+  <div class="sub" style="margin-top:8px">Started from the menu bar. Stop it there to name it and process it. This audio stays on your Mac.</div>
+</div>
+
+<div id="recnote" style="display:none"></div>
+
+<div class="card" id="activecard" style="display:none">
+  <h2>Processing now</h2><div id="active"></div>
+  <div class="row" style="border:0;padding-top:12px">
+    <button class="danger" id="stopbtn" onclick="stopRun()">Stop processing</button>
+    <span class="muted" id="stopnote">Stopping is safe — the current file’s original stays in iCloud and will re-run next time.</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Queue <span id="qcount" class="chip"></span><span class="grow"></span>
+    <button class="link" id="selall" onclick="selAll()">Select all</button></h2>
+  <div id="queue" class="inset"></div>
+  <div class="row" style="border:0;padding-top:12px">
+    <button class="primary" id="runsel" onclick="runSelected()">Process selected</button>
+    <button id="runall" onclick="runAll()">Process all new</button>
+    <button id="runother" onclick="pickFiles()" title="Choose files from anywhere on disk">Other files…</button>
+    <span class="grow"></span>
+    <button id="pausebtn"></button>
+  </div>
+  <div style="display:flex;gap:22px;margin-top:10px">
+    <label class="sub" style="white-space:nowrap"><input type="checkbox" id="par2" class="checkbox" style="vertical-align:-3px"> two at a time</label>
+    <label class="sub" style="white-space:nowrap" title="For confidential conversations: never guess an uncertain speaker — flag for review instead"><input type="checkbox" id="strict" class="checkbox" style="vertical-align:-3px"> strict</label>
+    <label class="sub" style="white-space:nowrap" title="A second engine transcribes too; the spots where the engines disagree get flagged for review with both versions. Adds a few minutes per hour of audio."><input type="checkbox" id="verify" class="checkbox" style="vertical-align:-3px"> verify</label>
+    <label class="sub" style="white-space:nowrap" title="Focus groups, interviews with people you'll never need to identify: their voices are NOT added to the Speakers list (and no voice samples are kept for them). The transcript still labels them Speaker 1, 2… and you can still enroll someone from the meeting later."><input type="checkbox" id="onetime" class="checkbox" style="vertical-align:-3px"> one-time speakers</label>
+  </div>
+  <div class="muted" id="parnote" style="margin-top:6px">“Two at a time” uses ~10 CPU cores and gives ≈1.7× throughput. “Strict” never guesses an uncertain speaker — it flags for review (use for confidential conversations). “Verify” has a second engine listen too and flags the disagreements.</div>
+  <div id="recentwrap" style="display:none"><h2 style="margin-top:16px">Recent results
+    <span class="chip" title="The 5 latest results — the full permanent list is one click away">5 latest</span>
+    <span class="grow"></span>
+    <button onclick="openHistory()" title="Every file this pipeline ever processed, searchable and filterable">History…</button></h2><div id="recent"></div></div>
+</div>
+
+<aside id="histfly" class="fly">
+  <h2 style="margin-bottom:4px">Processing history <span class="grow"></span>
+    <button class="themebtn" onclick="flyToggle('#histfly',false)" title="Close history">✕</button></h2>
+  <p class="muted" style="margin-top:6px">Every file this pipeline has processed, newest first. Failures keep their full error text.</p>
+  <div style="display:flex;gap:8px;margin:12px 0 4px">
+    <input type="text" id="histq" placeholder="Filter by name…" autocomplete="off" spellcheck="false"
+      style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:6px 8px"
+      oninput="histRender()">
+    <select id="histok" onchange="histRender()" title="Show everything, or only one outcome" style="font-size:13px">
+      <option value="">all</option><option value="ok">processed</option><option value="fail">failed</option>
+    </select>
+  </div>
+  <div class="sub" id="histcount"></div>
+  <div id="histlist"></div>
+</aside>
+
+<aside id="askfly" class="fly">
+  <h2 style="margin-bottom:2px">Ask <span class="grow"></span>
+    <button class="themebtn" onclick="flyToggle('#askfly',false)" title="Close (the thread stays until you ask about another meeting)">✕</button></h2>
+  <div class="sub" id="askmeet" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+  <p class="muted" id="askpriv" style="margin-top:6px;font-size:12.5px"></p>
+  <div id="askthread"></div>
+  <div id="asknote" class="sub" style="margin-top:6px;flex:none"></div>
+  <div style="display:flex;gap:8px;margin-top:8px;flex:none">
+    <input type="text" id="askq" placeholder="e.g. What did we decide about the rollout?" autocomplete="off" spellcheck="false"
+      style="flex:1;font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--hairline);border-radius:8px;padding:7px 10px"
+      onkeydown="if(event.key==='Enter')askSend()">
+    <button class="primary" id="askbtn" onclick="askSend()">Ask</button>
+  </div>
+</aside>
+
+<aside id="setfly" class="fly">
+  <h2 style="margin-bottom:4px">Settings <span class="grow"></span>
+    <button class="themebtn" onclick="toggleSettings(false)" title="Close settings">✕</button></h2>
+  <div id="pausebanner" class="recstrip bad" style="display:none">
+    <b>Automatic runs are paused.</b> Both triggers below still fire — the run just
+    quits without processing. Only manual runs work.
+    <button onclick="api('/api/resume',{}).then(refresh)">Resume</button>
+  </div>
+  <div class="row"><div class="grow"><div class="name">Folder watch</div>
+    <div class="sub" id="watchnote"></div></div>
+    <button class="toggle" id="watchbtn" onclick="togWatch()" title="On: a new recording starts processing within moments of landing. Off: files wait for the nightly run or a manual click. Overridden while automatic runs are paused."></button></div>
+  <div class="row"><div class="grow"><div class="name">Nightly run</div>
+    <div class="sub" id="schedtext"></div></div>
+    <button class="toggle" id="nightbtn" onclick="togNightly()" title="On: everything new processes at the scheduled time. Independent of the folder watch, but overridden while automatic runs are paused."></button>
+    <button onclick="openSchedule()" id="schedchg">Change…</button></div>
+  <div class="row"><div class="grow"><div class="name">Transcription model</div>
+    <div class="sub" id="modelnote"></div></div>
+    <select id="modelsel" onchange="setModel()"></select></div>
+  <div class="row"><div class="grow"><div class="name">Summaries &amp; Ask</div>
+    <div class="sub" id="llmnote"></div></div>
+    <select id="llmsel" onchange="setLlm()"></select></div>
+  <div class="row"><div class="grow"><div class="name">Cloud transcription</div>
+    <div class="sub" id="cloudnote"></div></div>
+    <button onclick="openCloudKeys()">Cloud keys…</button></div>
+  <div class="row"><div class="grow"><div class="name">Punctuation cleanup</div>
+    <div class="sub">Restore punctuation &amp; casing (never changes words)</div></div>
+    <button class="toggle" id="punctbtn" onclick="togglePunct()"></button></div>
+  <div class="row"><div class="grow"><div class="name">Recorder: your voice</div>
+    <div class="sub" id="micnote">Your name on recorded calls, so the recorder separates you from the others. You must be enrolled as a speaker too.</div></div>
+    <button onclick="setMicSpeaker()" id="micbtn">Set…</button></div>
+  <div class="row"><div class="grow"><div class="name">Speed calibration</div>
+    <div class="sub" id="ratesnote"></div></div></div>
+  <div class="row"><div class="grow"><div class="name">Model updates</div>
+    <div class="sub" id="updnote">Check HuggingFace for newer versions</div></div>
+    <button onclick="checkUpdates()" id="updbtn">Check</button></div>
+  <div class="row"><div class="grow"><div class="name">Watched folder</div>
+    <div class="sub" id="srcpath" style="word-break:break-all"></div></div>
+    <button onclick="pickFolder('source')">Change…</button></div>
+  <div class="row"><div class="grow"><div class="name">Transcripts folder</div>
+    <div class="sub" id="dstpath" style="word-break:break-all"></div></div>
+    <button onclick="pickFolder('dest')">Change…</button></div>
+</aside>
+<div id="flyveil" onclick="flyCloseAll()"></div>
+
+<div class="card" id="inboxcard" style="display:none">
+  <h2><span id="inboxcount">Needs naming</span> <span class="grow"></span>
+    <button onclick="acceptAll()" title="Accept every one below with the name and date shown">Accept all</button></h2>
+  <div class="sub" style="margin:-4px 0 8px">New transcripts wait here so they can't slip unnoticed into a long list. Name it, check the date, then Accept.</div>
+  <div id="inbox" class="inset"></div>
+</div>
+
+<div class="card">
+  <h2>Transcripts <span class="grow"></span>
+    <button id="archbtn" onclick="openArchived()" title="Archived meetings — set aside, restorable anytime" style="font-size:12px;display:none"></button>
+    <select id="mcat" onchange="localStorage.setItem('stt_mcat',this.value);render()" title="Show every meeting, or only Work / Personal ones" style="font-size:13px">
+      <option value="">all</option>
+      <option value="work">work</option>
+      <option value="personal">personal</option>
+    </select>
+    <select id="msort" onchange="localStorage.setItem('stt_msort',this.value);render()" title="How the list is ordered and grouped" style="font-size:13px">
+      <option value="date">by month</option>
+      <option value="name">by name</option>
+    </select>
+    <input type="text" id="mfilter" placeholder="Search words or titles…"
+           oninput="render();scheduleSearch()" style="width:min(340px,45vw);font-size:13px"></h2>
+  <div id="searchhits"></div>
+  <div id="selbar"></div>
+  <div style="display:flex;gap:10px;align-items:stretch">
+    <div id="mrail"></div>
+    <div id="meetings" class="inset" style="flex:1;min-width:0"></div>
+  </div>
+</div>
+
+</div>
+<aside id="colside">
+
+<div class="card" id="spkcard">
+  <h2>Speakers <span class="grow"></span>
+    <label class="sub" style="font-weight:400;white-space:nowrap" title="Show only voices without a name yet"><input type="checkbox" id="spkunk" class="checkbox" style="vertical-align:-2px" onchange="render()"> unidentified only</label>
+    <input type="text" id="spkfilter" placeholder="Find a speaker…" oninput="render()" style="width:min(220px,34vw);font-size:13px"></h2>
+  <div class="inset">
+    <div id="enrolled"></div>
+    <div id="unknowns"></div>
+  </div>
+  <div id="relnote" class="muted" style="display:none;margin-top:8px"></div>
+</div>
+
+</aside>
+</div>
+
+<dialog id="dlg"></dialog>
+<div id="tipbox"></div>
+<script>
+//@APP_JS@</script></body></html>
