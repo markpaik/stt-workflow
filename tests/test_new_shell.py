@@ -1,9 +1,8 @@
-"""The new shell (?ui=new): a second composed page served by the SAME
-marker/mtime mechanism as the old page, without disturbing the old one.
+"""The panel shell: the ONE composed page (gui/static/), assembled by the
+marker/mtime composer and served at /.
 
-Mirrors test_frontend_js / test_layout -- structure and regex over the composed
-page -- plus a live byte-compare proving the routing split leaves plain / (and
-/?ui=old) exactly as they were.
+Structure and regex over the composed page, plus live byte-compares proving
+the routing serves exactly what the composer builds.
 """
 import http.client
 import os
@@ -20,7 +19,6 @@ from gui import server as srv
 
 NODE = shutil.which("node")
 STATIC = Path(srv.__file__).resolve().parent / "static"
-NEW = STATIC / "new"
 
 
 def _compose(static_dir):
@@ -52,66 +50,43 @@ def _get(port, path):
     return status, ctype, body
 
 
-def test_plain_root_serves_the_new_shell(running_server):
-    # the default flipped 2026-07-12 after the full-inventory sweep
-    expected = _compose(NEW).encode()
-    for path in ("/", "/?ui=new"):
+def test_root_serves_the_shell_and_ignores_the_ui_param(running_server):
+    # the shell is the only page. The retired ui query flag is ignored no
+    # matter its value, so a stale bookmark still gets the shell, never a 404.
+    expected = _compose(STATIC).encode()
+    for path in ("/", "/?ui=stale-bookmark", "/?anything=else"):
         status, ctype, body = _get(running_server, path)
         assert status == 200
         assert "text/html" in ctype
-        assert body == expected, f"{path} is not the new shell"
-
-
-def test_ui_old_keeps_the_retired_page_byte_identical(running_server):
-    # the safety hatch: the old page stays reachable and unchanged until deleted
-    status, _ctype, body = _get(running_server, "/?ui=old")
-    assert status == 200
-    assert body == _compose(STATIC).encode(), "?ui=old drifted from the old files"
+        assert body == expected, f"{path} is not the shell"
 
 
 def test_new_shell_has_all_seven_state_hooks():
-    page = _compose(NEW)
+    page = _compose(STATIC)
     for st in ("recording", "waiting", "held", "processing",
                "needs_name", "ready", "failed"):
         assert f'data-state="{st}"' in page, f"missing state hook: {st}"
 
 
 def test_new_shell_carries_both_theme_blocks_and_the_prepaint_snippet():
-    page = _compose(NEW)
+    page = _compose(STATIC)
     # light + dark via prefers-color-scheme AND the manual data-theme overrides
     assert "@media(prefers-color-scheme:dark)" in page
     assert ":root[data-theme=dark]" in page
     assert ":root[data-theme=light]" in page
-    # the same pre-paint theme snippet convention as the old page
+    # the pre-paint theme snippet (no flash of the wrong theme)
     assert 'localStorage.getItem("stt_theme")' in page
     assert "document.documentElement.dataset.theme" in page
 
 
 def test_new_shell_has_no_em_dashes_in_ui_strings():
     # house rule: no em dashes anywhere in the shell's copy
-    assert "—" not in _compose(NEW)
-
-
-def test_old_app_js_gained_the_two_bridge_params():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "get('review')" in js
-    assert "get('who')" in js
-    # ...and still handles the pre-existing open= deep link
-    assert "get('open')" in js
-
-
-def test_old_naming_dialog_explains_deleted_sources_instead_of_a_dead_player():
-    # /api/voice_clips returns reason:"sources_deleted" when every meeting a
-    # voice was heard in is gone; the old dialog must show the plain sentence,
-    # not fall through to an <audio> element that can never load
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "r.reason==='sources_deleted'" in js
-    assert "No audio available. The source recordings were deleted." in js
+    assert "—" not in _compose(STATIC)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS syntax gate skipped")
 def test_new_shell_js_parses():
-    page = _compose(NEW)
+    page = _compose(STATIC)
     scripts = re.findall(r"<script[^>]*>(.*?)</script>", page, re.S)
     assert scripts, "no <script> block in the new shell"
     for i, js in enumerate(scripts):
@@ -130,9 +105,7 @@ def test_new_shell_js_parses():
 # the existing endpoints, so these assert the wiring is real (no leftover stubs)
 # and that the payload shapes still match the server's contract.
 # ---------------------------------------------------------------------------
-NEW_JS = (NEW / "app.js").read_text(encoding="utf-8")
-OLD_JS = (STATIC / "app.js").read_text(encoding="utf-8")
-OLD_PAGE = (STATIC / "page.html").read_text(encoding="utf-8")
+NEW_JS = (STATIC / "app.js").read_text(encoding="utf-8")
 
 # the seams A left named in the read-only shell, all owned by Builder B now
 SEAMS = ["toggleProcess", "scheduleSearch", "trayAct", "trayExpand", "rowListen",
@@ -144,7 +117,7 @@ SEAMS = ["toggleProcess", "scheduleSearch", "trayAct", "trayExpand", "rowListen"
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS syntax gate skipped")
 def test_new_shell_app_js_passes_node_check():
     # the app.js file itself (not just the composed page) is valid JS
-    r = subprocess.run([NODE, "--check", str(NEW / "app.js")],
+    r = subprocess.run([NODE, "--check", str(STATIC / "app.js")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
@@ -163,18 +136,13 @@ def test_every_builder_b_seam_is_defined_and_not_a_stub():
 
 
 def test_run_option_keys_persist_in_the_new_shell():
-    # NOTE: the old page never persisted the four run options (they reset on each
-    # load), so there is no matching key set to agree with -- the keys live ONLY
-    # in the new shell, which now remembers them across its own reloads.
+    # the retired page never persisted the four run options (they reset on
+    # each load); the shell remembers them across its own reloads.
     keys = ["stt_run_par2", "stt_run_strict", "stt_run_verify", "stt_run_onetime"]
     for k in keys:
         assert k in NEW_JS, f"missing run-option persistence key: {k}"
         # written once (optSet) and read back at least once (runOpts) => >= 2
         assert NEW_JS.count(k) >= 2, f"{k} is not both written and read"
-    # the divergence is real and intentional: the byte-frozen old page has none
-    for k in keys:
-        assert k not in OLD_JS and k not in OLD_PAGE, \
-            f"{k} unexpectedly present in the old page"
     # runOpts() maps them onto the /api/run body the server already accepts
     assert re.search(r"function\s+runOpts\s*\(", NEW_JS)
     for field in ("parallel", "strict", "verify", "onetime"):
@@ -202,10 +170,9 @@ def test_row_and_queue_actions_hit_the_expected_endpoints():
                "/api/delete_meeting"):
         assert ep in NEW_JS, f"seam layer never calls {ep}"
     # the edit layer removed the LAST per-meeting bridges: review, naming, and
-    # opening all happen in the shell now -- zero deep-link params remain (the
-    # byte-frozen old page keeps its own)
+    # opening all happen in the shell now -- zero deep-link params remain
     for bridge in ("?review=", "?who=", "?open="):
-        assert bridge not in NEW_JS, f"stale old-page bridge in the new shell: {bridge}"
+        assert bridge not in NEW_JS, f"stale deep-link bridge in the shell: {bridge}"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +183,7 @@ def test_row_and_queue_actions_hit_the_expected_endpoints():
 # the same regex-over-the-composed-page style as the rest of this file.
 # ---------------------------------------------------------------------------
 def test_meeting_page_is_a_hash_route_with_a_container_and_handler():
-    page = _compose(NEW)
+    page = _compose(STATIC)
     # the #m/<base> route, its markup mount, and a live hashchange handler
     assert "#m/" in page
     assert 'id="meetingpage"' in page
@@ -226,7 +193,7 @@ def test_meeting_page_is_a_hash_route_with_a_container_and_handler():
         assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing route fn: {fn}"
     # openMeeting now stays in the shell (sets the hash) instead of navigating away
     assert re.search(r"function\s+openMeeting[^}]*location\.hash\s*=\s*'#m/'", NEW_JS), \
-        "openMeeting must set the #m/ hash, not navigate to the old page"
+        "openMeeting must set the #m/ hash, not navigate away"
 
 
 def test_meeting_page_defines_the_ported_reader_functions():
@@ -277,8 +244,8 @@ def test_review_stepper_is_wired_not_a_seam():
 # aggregate filtering the library, ready-row click-to-expand, and Ask
 # reachability (row menu + in-shell search hits).
 # ---------------------------------------------------------------------------
-NEW_CSS = (NEW / "app.css").read_text(encoding="utf-8")
-NEW_PAGE = (NEW / "page.html").read_text(encoding="utf-8")
+NEW_CSS = (STATIC / "app.css").read_text(encoding="utf-8")
+NEW_PAGE = (STATIC / "page.html").read_text(encoding="utf-8")
 
 
 def test_css_type_floor_is_13px():
@@ -344,7 +311,7 @@ def test_ask_is_reachable_from_the_row_menu_and_search_hits():
     # search hits open the in-shell meeting page and seek to the hit's moment
     assert re.search(r"function\s+openHit\s*\(", NEW_JS)
     assert re.search(r"openHit\('\$\{escJs\(h\.base\)\}',\$\{Number\(h\.start\)", NEW_JS)
-    # the hit no longer bridges to the old page (the tray fallback still may)
+    # the hit opens in the shell; nothing navigates away to a deep link
     assert "onclick=\"location.href='/?open='" not in NEW_JS
 
 
@@ -352,7 +319,7 @@ def test_serif_retired_and_mono_demoted_to_true_data():
     # DESIGN.md Type (revised 2026-07-12): one neutral sans, hierarchy from
     # weight and size. No serif anywhere in the composed shell, and the unused
     # --serif token is gone from the sheet.
-    page = _compose(NEW)
+    page = _compose(STATIC)
     assert "ui-serif" not in page and "New York" not in page
     assert "--serif" not in NEW_CSS
     # mono survives ONLY as true data: the .mono timer/timestamp utility and
@@ -472,9 +439,8 @@ def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():
 
 # ---------------------------------------------------------------------------
 # Builder D: THE DRAWER. The last surface -- one right slide-over holding
-# Settings, Speakers, History, and Archive behind a pinned section nav. After
-# it, the new shell carries ZERO references to the old page. Same
-# regex-over-the-files style as every block above.
+# Settings, Speakers, History, and Archive behind a pinned section nav.
+# Same regex-over-the-files style as every block above.
 # ---------------------------------------------------------------------------
 def test_drawer_mounts_with_the_four_section_nav():
     # the slide-over and its veil are in the page; the nav and the four
@@ -489,15 +455,12 @@ def test_drawer_mounts_with_the_four_section_nav():
         assert sec in NEW_JS, f"missing drawer section mount: {sec}"
     for tab in ("Settings", "Speakers", "History", "Archive"):
         assert tab in NEW_JS, f"missing drawer nav tab: {tab}"
-    # the Archive tab carries the old page's "Archived · N" count when nonzero
+    # the Archive tab carries the "Archived · N" count when nonzero
     assert "archived_count" in NEW_JS
 
 
-def test_gear_opens_the_drawer_and_the_old_page_is_unreferenced():
-    # the gear stops bridging; NOTHING in the new shell names the old page
+def test_gear_opens_the_drawer():
     assert re.search(r"\$\('#gear'\)\.onclick=\(\)=>openDrawer\(\)", NEW_JS)
-    for src in (NEW_JS, NEW_PAGE, NEW_CSS):
-        assert "ui=old" not in src, "the new shell still references the old page"
 
 
 def test_drawer_survives_polls_and_closes_the_house_ways():
@@ -1091,10 +1054,10 @@ def test_boardroom_tokens_shipped_and_signal_retired():
 
 # ---------------------------------------------------------------------------
 # Boardroom Wide (2026-07-12): the vendored UI face. Figtree (OFL) is served
-# by the panel itself from gui/static/new/fonts/ -- never a CDN -- behind a
+# by the panel itself from gui/static/fonts/ -- never a CDN -- behind a
 # strict basename allowlist.
 # ---------------------------------------------------------------------------
-FONTS = NEW / "fonts"
+FONTS = STATIC / "fonts"
 
 
 def test_figtree_is_vendored_with_its_license():
@@ -1120,7 +1083,7 @@ def test_font_route_serves_woff2_and_refuses_traversal(running_server):
 
 
 def test_figtree_fontface_and_stack_ride_the_composed_page():
-    page = _compose(NEW)
+    page = _compose(STATIC)
     assert "@font-face" in page
     assert "font-family:'Figtree'" in page
     assert "font-weight:300 900" in page          # the variable axis, whole

@@ -1,29 +1,29 @@
 # Panel redesign: One Timeline, Newsprint
 
-The approved direction for the panel overhaul. This file is the single source
-of truth for the new UI's visual language and interaction rules; builders
-implement it, they do not reinterpret it. The old UI stays untouched and
-default until the final phase flips the flag.
+The approved direction for the panel overhaul, now fully shipped. This file
+is the single source of truth for the shell's visual language and interaction
+rules; builders implement it, they do not reinterpret it. The old UI was
+deleted 2026-07-12 after the shell reached full parity.
 
 ## The idea
 
 A meeting is one object. Its row is its queue entry, its progress bar, its
 naming form, and its transcript link. The default screen is the library plus
 at most one amber tray of things needing the user. All machinery lives behind
-one popover (runs) and one drawer (settings, final phase).
+one popover (runs) and one drawer (settings).
 
-## Flag mechanics
+## Shell mechanics
 
-- `GET /?ui=new` serves the new shell; plain `/` serves the old page until the
-  final phase flips the default. `/?ui=old` always serves the old page.
-- New frontend lives in `gui/static/new/{page.html,app.css,app.js}`, composed
-  and cached by the same marker/mtime mechanism as the old page.
-- The new shell consumes the `timeline` and `tray` keys of `/api/state` and
-  reuses the existing action endpoints unchanged.
-- Until the meeting page ships, opening a meeting bridges to the old UI via
-  its `?open=<base>` deep link. Tray actions bridge via two SMALL additive
-  params in the old app.js: `?review=<base>` (opens the review dialog) and
-  `?who=<uid>` (opens the who-is-this dialog).
+- The shell is the ONLY frontend: `GET /` serves it. The retired `ui` query
+  flag is ignored entirely, so a stale bookmark carrying it still gets the
+  shell, never a 404. No flags, no bridges, no second page.
+- The frontend lives in `gui/static/{page.html,app.css,app.js}` (vendored
+  fonts in `gui/static/fonts/`), composed via marker comments and cached by
+  mtime in `gui/server.py`, so edits to the parts reload live without a
+  server restart.
+- The shell consumes the `timeline` and `tray` keys of `/api/state` and
+  reuses the existing action endpoints unchanged. Meetings, review, and
+  naming all open inside the shell; no deep-link query params remain.
 
 ## Newsprint tokens
 
@@ -86,9 +86,9 @@ the same fluid cap. Category interaction: the chip itself cycles
 untagged/work/personal on click (untagged rows show a hollow dot that
 cycles, growing the chip once tagged).
 
-Theme plumbing: same pre-paint snippet and `stt_theme` localStorage key as the
-old page, plus `prefers-color-scheme` default. Red appears nowhere except the
-recording state and destructive confirmation buttons.
+Theme plumbing: a pre-paint snippet and the `stt_theme` localStorage key, plus
+`prefers-color-scheme` default. Red appears nowhere except the recording
+state and destructive confirmation buttons.
 
 Rhythm: 8px grid. Layout and surfaces are governed by the Boardroom Wide
 section above (fluid min(1360px, 94vw) cap, card rows with 10px gaps, 14px
@@ -105,7 +105,7 @@ and hover lifts; honor `prefers-reduced-motion`.
 
 Header (sticky, paper ground, hairline bottom): sans-semibold wordmark "Meetings" ·
 status pill · search field (right-aligned) · Process ▾ · theme dot · gear
-(bridges to old settings until the drawer ships).
+(opens the drawer).
 
 Status pill: the ONLY place pipeline state appears. Mono, one at a time, by
 priority: `● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min`
@@ -166,7 +166,7 @@ The right rail's pill is the state:
               (forty chip-wearing rows read as a wall of warnings); the
               rail's green `ready` pill yields to hover actions
               [▶] [Open] [⋯]. The TITLE and the meta's DATE are
-              click-to-edit in place (the old page's quick path, restored
+              click-to-edit in place (the retired page's quick path, restored
               2026-07-12): the title becomes a text input, the date a date
               input; Enter saves (`/api/rename` / `/api/set_date`, the folder
               re-stamps server-side and the row re-sorts on the next poll),
@@ -196,11 +196,11 @@ row hover (left edge) and stay visible while any selection exists.
 Category mark (corrected 2026-07-12 to the Boardroom chips, superseding the
 filled dots): hollow dot = untagged; tagged rows wear the colored chip (Work
 violet, Personal orange) in the right rail. Click cycles either form,
-optimistic update (same endpoint as old chip).
+optimistic update (same /api/set_category endpoint as ever).
 
 Bulk bar: floats bottom-center when selection ≥ 1 (card, shadow): count,
 Work · Personal · Clear tag · Rename… · Set date… · Archive · Delete audio… ·
-Delete… · Select all shown · ✕. Same `/api/bulk` calls as the old selbar.
+Delete… · Select all shown · ✕. All through the same `/api/bulk` endpoint.
 
 Process ▾ popover (from header): Process all new · Process selected · Other
 files… · a Stop processing row while running · Pause/Resume automatic runs ·
@@ -212,7 +212,7 @@ This popover is the ONLY machinery surface in the shell.
 transcript · Show files · Rename… · Redo… · Archive · Delete…. All existing
 endpoints; Redo and Delete keep their confirm steps.
 
-Search: same behavior as old (client filter + debounced full-text ≥3 chars);
+Search: client filter + debounced full-text at ≥3 chars;
 full-text hits render as a quiet sub-list under the search field, mono
 timestamps, click opens the meeting page at that moment (#m route + seek). Filter select (all /
 work / personal) and sort (by month / by name) sit left of the search field,
@@ -258,15 +258,15 @@ update optimistically.
 One right slide-over, width min(560px, 94vw), Newsprint-styled (paper ground,
 hairline left edge, soft shadow), opened by the gear, closed by ✕ / veil /
 Escape. A compact section nav pins at its top: Settings · Speakers · History ·
-Archive. Nothing in the drawer navigates to the old page.
+Archive. Nothing in the drawer navigates away from the shell.
 
 Settings section, in order:
 - Automation: ONE master switch ("Automatic runs"), with Folder watch and
   Nightly run (+ time) indented beneath it and visibly inert (greyed, "off
   while automatic runs are paused") when the master is off. The master state
-  is the same /api/pause//api/resume the pill and Process popover use. This
-  kills the old page's lying toggles: a switch never reads On while doing
-  nothing.
+  is the same /api/pause//api/resume the pill and Process popover use. A
+  switch never reads On while doing nothing (the retired page's toggles
+  lied; these must not).
 - Transcription: model picker; cloud engines listed only when their key is
   set; Cloud keys… opens an in-drawer subview (password fields, saved ticks,
   clear buttons; same /api/cloud_keys).
