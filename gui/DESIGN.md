@@ -141,23 +141,30 @@ months; never do it. Jump rail regenerates from the ordered groups (years as
 anchors, months beneath), small semibold sans, visible only when 3+ groups and no active
 search.
 
-Row, common skeleton: category dot · title · meta (sans, tabular numerals,
-sub) · right slot.
-The right slot is the state:
+Row, common skeleton (corrected 2026-07-12 to match the Boardroom Wide
+sections above, which govern where they and this list disagree): checkbox
+gutter · title · meta (sans, tabular numerals, sub) · right rail. The rail
+carries the state pill on top and, on ready rows, the category chip (hollow
+dot while untagged) with the amber check-count beneath it.
+The right rail's pill is the state:
 
 - recording   `● capturing` in rec red, elapsed ticking; title "Recording now…"
 - waiting     `size · ≈est min` + hover actions [▶ listen] [hold ❚❚] [Process] [✕]
 - held        `❚❚ held` + same hover actions with [release]
-- processing  stage + % + eta in accent sans, tabular numerals; 2px accent hairline progress
-              bar along the row's bottom edge; no actions (Stop lives in the
-              Process ▾ popover)
-- needs_name  the row IS the form, accent-soft ground: title input (prefilled
-              with suggested_title), date input (suggested_date), [▶] [Accept].
+- processing  stage + % + eta in a busy-blue pill, tabular numerals; 2px
+              busy-blue hairline progress bar along the card's bottom edge
+              (Boardroom; supersedes the accent progress); no actions (Stop
+              lives in the Process ▾ popover)
+- needs_name  the row IS the form, a white card wearing the 4px accent left
+              edge (Boardroom; supersedes the accent-soft ground): title input
+              (prefilled with suggested_title, flexing to all available
+              width), date input (suggested_date), [▶] [Accept].
               Enter accepts. No separate inbox card exists.
-- ready       meta = `MMM D · NN min · speakers · 6 to check`, the review
-              count as plain amber TEXT inside the meta line, no chip
-              (forty chip-wearing rows read as a wall of warnings); right
-              slot shows state text that yields to hover actions
+- ready       meta = `MMM D · NN min · speakers`; the review count sits in
+              the right rail beneath the state pill (Boardroom; supersedes
+              the in-meta placement) as plain amber TEXT, no chip
+              (forty chip-wearing rows read as a wall of warnings); the
+              rail's green `ready` pill yields to hover actions
               [▶] [Open] [⋯]. The TITLE and the meta's DATE are
               click-to-edit in place (the old page's quick path, restored
               2026-07-12): the title becomes a text input, the date a date
@@ -186,8 +193,10 @@ never render on top of visible text, in either theme, at any width.
 Checkboxes for bulk selection appear on
 row hover (left edge) and stay visible while any selection exists.
 
-Category dot: hollow = untagged, accent-filled = work, amber-filled =
-personal; click cycles, optimistic update (same endpoint as old chip).
+Category mark (corrected 2026-07-12 to the Boardroom chips, superseding the
+filled dots): hollow dot = untagged; tagged rows wear the colored chip (Work
+violet, Personal orange) in the right rail. Click cycles either form,
+optimistic update (same endpoint as old chip).
 
 Bulk bar: floats bottom-center when selection ≥ 1 (card, shadow): count,
 Work · Personal · Clear tag · Rename… · Set date… · Archive · Delete audio… ·

@@ -1212,6 +1212,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(summarize.suggest_title(q["base"]))
             elif u.path == "/api/check_updates":
                 self._json(check_updates())
+            elif u.path.startswith("/static/fonts/"):
+                # The panel serves its own vendored UI font (Figtree, OFL --
+                # see gui/static/new/fonts/OFL.txt and NOTICE.md), never a
+                # CDN. STRICT basename allowlist built from the actual files:
+                # the request must equal one of them exactly, so a traversal
+                # name (encoded or not) can never resolve to a path.
+                name = u.path[len("/static/fonts/"):]
+                if name not in {p.name for p in _FONT_DIR.glob("*.woff2")}:
+                    self._json({"error": "not found"}, 404)
+                    return
+                body = (_FONT_DIR / name).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "font/woff2")
+                self.send_header("Content-Length", str(len(body)))
+                # the filenames are stable, so a long-lived immutable cache
+                self.send_header("Cache-Control",
+                                 "public, max-age=31536000, immutable")
+                self.end_headers()
+                self.wfile.write(body)
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:
@@ -1662,6 +1681,7 @@ def start_server():
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _NEW_DIR = _STATIC_DIR / "new"
+_FONT_DIR = _NEW_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
 _PAGE_PARTS = ("page.html", "app.css", "app.js")
 # one cache entry per composed page (old + new shell), keyed by its static dir,
 # so editing either page's parts reloads live and neither evicts the other
