@@ -1060,10 +1060,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if u.path == "/":
-                # /?ui=new serves the new shell; plain / and /?ui=old serve the
-                # old page byte-identically until the final phase flips the
-                # default. Same marker/mtime composer, a different static dir.
-                static_dir = _NEW_DIR if q.get("ui") == "new" else _STATIC_DIR
+                # The new shell is the default (flipped 2026-07-12 after the
+                # full-inventory sweep). /?ui=old keeps the retired page as a
+                # safety hatch until it is deleted. Same composer either way.
+                static_dir = _STATIC_DIR if q.get("ui") == "old" else _NEW_DIR
                 body = _page_html(static_dir).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
