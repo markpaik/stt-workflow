@@ -55,9 +55,15 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <main class="wrap">
 
+  <!-- the recorder's SUCCESS note ("Saved X - processing"): good news, so a
+       quiet sub-styled line right under the header, never an amber tray ask.
+       It disappears on its own when the server-side TTL drops it from state.
+       A FAILED note renders in the tray below instead (it asks for a decision). -->
+  <div id="recok" class="recok" hidden aria-live="polite"></div>
+
   <!-- amber "needs you" tray: only present when non-empty, ranked by the server
-       (stall -> failed -> review -> unknown voice). Builder B wires the row
-       verbs and the "and N more" expand. -->
+       (recorder failure -> stall -> failed -> review -> unknown voice). Builder B
+       wires the row verbs and the "and N more" expand. -->
   <section id="tray" class="tray" hidden aria-label="Needs you"></section>
 
   <!-- quiet full-text search sub-list under the search field (Builder B) -->

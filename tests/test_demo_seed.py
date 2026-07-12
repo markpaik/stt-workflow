@@ -180,6 +180,20 @@ def test_queue_holds_and_manifest(seeded):
     assert not manifest.is_processed(m, waiting.name, waiting.stat().st_mtime)
 
 
+def test_seeded_home_carries_a_sandbox_launchd_plist(seeded):
+    """gui/server.py resolves AGENT under STT_HOME, so the home ships a plist
+    copy: the panel's Automation section and /api/schedule exercise it (and
+    only it) — launchctl is skipped entirely under STT_HOME."""
+    import plistlib
+    p = seeded / "LaunchAgents" / "com.stt-workflow.batch.plist"
+    assert p.exists()
+    d = plistlib.loads(p.read_bytes())
+    assert d["Label"] == "com.stt-workflow.batch"
+    assert d["StartCalendarInterval"] == {"Hour": 2, "Minute": 0}
+    assert d["WatchPaths"] == [str(seeded / "source"), str(seeded / "recordings")]
+    assert d["ProgramArguments"] == ["/usr/bin/true"]   # inert: launchd never sees it
+
+
 def test_meeting_audio_is_real_and_segments_fit(seeded):
     import wave
     for b in config.meeting_bases():

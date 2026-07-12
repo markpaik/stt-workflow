@@ -854,6 +854,82 @@ def test_automation_requires_the_agent(sandbox, monkeypatch):
     assert r["ok"] is False and "install-agent" in r["error"]
 
 
+# ---------- STT_HOME sandboxes the launchd agent (QA bit the real one) ----------
+
+def test_agent_path_follows_stt_home_and_defaults_unchanged(tmp_path):
+    """AGENT is derived at import time like every config path, so a fresh
+    interpreter proves the derivation: with a monkeypatched HOME and no
+    STT_HOME it is exactly the old ~/Library/LaunchAgents path; with STT_HOME
+    it moves under the sandbox, so /api/schedule from a QA server can never
+    name the real machine's plist."""
+    import os
+    import subprocess
+    import sys
+    repo = Path(srv.__file__).resolve().parent.parent
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env["PYTHONPATH"] = str(repo)
+    env["HOME"] = str(fake_home)
+    code = "from gui import server as srv; print(srv.AGENT)"
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=str(repo),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == str(
+        fake_home / "Library/LaunchAgents/com.stt-workflow.batch.plist")
+
+    env["STT_HOME"] = str(tmp_path / "home")
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=str(repo),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == str(
+        tmp_path / "home" / "LaunchAgents" / "com.stt-workflow.batch.plist")
+
+
+@pytest.fixture
+def sandboxed_agent(sandbox, monkeypatch):
+    """The STT_HOME QA shape, in-process: config.STT_HOME active, AGENT under
+    the sandbox's LaunchAgents/ (what tools/demo_seed.py now seeds), and every
+    subprocess recorded so a launchctl call cannot hide."""
+    import plistlib
+    p = sandbox / "LaunchAgents" / "com.stt-workflow.batch.plist"
+    p.parent.mkdir()
+    p.write_bytes(plistlib.dumps({
+        "Label": "com.stt-workflow.batch",
+        "ProgramArguments": ["/usr/bin/true"],
+        "StartCalendarInterval": {"Hour": 2, "Minute": 0},
+        "RunAtLoad": True}))
+    monkeypatch.setattr(srv, "AGENT", p)
+    monkeypatch.setattr(config, "STT_HOME", str(sandbox))
+    calls = []
+    monkeypatch.setattr(srv.subprocess, "run",
+                        lambda cmd, **kw: calls.append([str(c) for c in cmd]))
+    return p, calls
+
+
+def test_sandboxed_schedule_writes_the_sandbox_plist_only(sandboxed_agent):
+    """/api/schedule under STT_HOME: the sandbox plist changes, launchctl is
+    never invoked, and the REAL ~/Library/LaunchAgents plist stays untouched
+    (mutating the operator's live agent from QA is the 2026-07-12 incident)."""
+    import plistlib
+    p, calls = sandboxed_agent
+    real = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
+    real_before = real.read_bytes() if real.exists() else None
+
+    srv.write_schedule(23, 30)                 # the /api/schedule handler's call
+    d = plistlib.loads(p.read_bytes())
+    assert d["StartCalendarInterval"] == {"Hour": 23, "Minute": 30}
+    assert calls == []                         # no launchctl (or any subprocess)
+
+    r = srv.write_automation(watch=False)      # the /api/automation path
+    assert r["ok"] is True and r["watch"] is False
+    assert "sandboxed" in r.get("note", "")    # the response says launchctl was skipped
+    assert calls == []
+
+    real_after = real.read_bytes() if real.exists() else None
+    assert real_before == real_after           # the real agent: byte-identical
+
+
 def test_history_endpoint_returns_full_merged_history(running_server):
     from stt import status
     status.start_run(["a.m4a", "b.m4a"])

@@ -19,7 +19,14 @@ from stt import (config, control, dates, export, identify, jobs, manifest, rates
                  recorder, review, search, status, unknowns)
 
 PORT = 8737
-AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
+# The batch agent's launchd plist. Sandboxed like every other state path: under
+# an STT_HOME override (demo/QA homes, tools/demo_seed.py) it resolves to
+# $STT_HOME/LaunchAgents/... so /api/schedule and /api/automation from a QA
+# server can never mutate the REAL machine's agent (which is exactly what
+# happened on 2026-07-12). Unset, it is byte-identical to what it always was.
+AGENT = Path(config._home_default(
+    "LaunchAgents/com.stt-workflow.batch.plist",
+    Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"))
 LABEL = "com.stt-workflow.batch"
 RUN_SH = config.PROJECT_DIR / "run.sh"
 
@@ -132,7 +139,13 @@ def read_schedule():
 
 
 def _agent_reload():
-    """launchd caches plists — every edit must bootout+bootstrap to apply."""
+    """launchd caches plists — every edit must bootout+bootstrap to apply.
+    Under STT_HOME the plist is a sandbox copy launchd has never heard of:
+    write the file only, never launchctl — a QA server registering (or worse,
+    booting out) the operator's real agent is the incident this guard exists
+    to prevent."""
+    if config.STT_HOME:
+        return
     import os
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
@@ -181,7 +194,10 @@ def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
     d["RunAtLoad"] = bool(d.get("WatchPaths")) or "StartCalendarInterval" in d
     AGENT.write_bytes(plistlib.dumps(d))
     _agent_reload()
-    return {"ok": True, **read_schedule()}
+    out = {"ok": True, **read_schedule()}
+    if config.STT_HOME:  # additive: unset behavior stays byte-identical
+        out["note"] = "sandboxed by STT_HOME: plist written, launchctl skipped"
+    return out
 
 
 def write_schedule(hh, mm):
@@ -850,9 +866,7 @@ def set_folder(which: str, path: str):
                 d["WatchPaths"] = _watch_paths()
                 pl.write_bytes(plistlib.dumps(d))
         if AGENT.exists():
-            uid = os.getuid()
-            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
-            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(AGENT)], capture_output=True)
+            _agent_reload()  # same bootout+bootstrap; skipped under STT_HOME
     else:
         config.MEETINGS_DIR = p
         p.mkdir(parents=True, exist_ok=True)
