@@ -54,3 +54,7 @@ __pycache__/
 .DS_Store
 native/stt-recorder
 native/STT Recorder.app/
+
+# runtime state from queue holds
+holds.json
+holds.lock
