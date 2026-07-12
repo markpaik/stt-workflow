@@ -912,7 +912,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if u.path == "/":
-                body = _page_html().encode()
+                # /?ui=new serves the new shell; plain / and /?ui=old serve the
+                # old page byte-identically until the final phase flips the
+                # default. Same marker/mtime composer, a different static dir.
+                static_dir = _NEW_DIR if q.get("ui") == "new" else _STATIC_DIR
+                body = _page_html(static_dir).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -1497,33 +1501,46 @@ def start_server():
 
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+_NEW_DIR = _STATIC_DIR / "new"
 _PAGE_PARTS = ("page.html", "app.css", "app.js")
-_page_cache = {"mtimes": None, "html": None}
+# one cache entry per composed page (old + new shell), keyed by its static dir,
+# so editing either page's parts reloads live and neither evicts the other
+_page_caches: dict = {}
 
 
-def _compose_page():
-    """Assemble the served panel from its static parts. The CSS and JS are full
-    of braces, so the skeleton carries marker comments and we substitute with
-    str.replace -- never .format()/f-strings."""
-    page = (_STATIC_DIR / "page.html").read_text(encoding="utf-8")
-    css = (_STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (_STATIC_DIR / "app.js").read_text(encoding="utf-8")
+def _compose_page(static_dir=_STATIC_DIR):
+    """Assemble a served panel page from its static parts. The CSS and JS are
+    full of braces, so the skeleton carries marker comments and we substitute
+    with str.replace -- never .format()/f-strings. Both the old page (static/)
+    and the new shell (static/new/) compose through this one function."""
+    page = (static_dir / "page.html").read_text(encoding="utf-8")
+    css = (static_dir / "app.css").read_text(encoding="utf-8")
+    js = (static_dir / "app.js").read_text(encoding="utf-8")
     return page.replace("/*@APP_CSS@*/", css).replace("//@APP_JS@", js)
 
 
-def _page_html():
-    """The composed page, recomposed only when a static part changes on disk --
-    editing page.html/app.css/app.js reloads live, with no server restart."""
-    mtimes = tuple((_STATIC_DIR / f).stat().st_mtime_ns for f in _PAGE_PARTS)
-    if _page_cache["html"] is None or _page_cache["mtimes"] != mtimes:
-        _page_cache["html"] = _compose_page()
-        _page_cache["mtimes"] = mtimes
-    return _page_cache["html"]
+def _page_html(static_dir=_STATIC_DIR):
+    """The composed page for `static_dir`, recomposed only when one of its
+    static parts changes on disk -- editing page.html/app.css/app.js reloads
+    live, with no server restart. Cached per directory so the old and new
+    pages never evict each other's cache."""
+    cache = _page_caches.setdefault(static_dir, {"mtimes": None, "html": None})
+    mtimes = tuple((static_dir / f).stat().st_mtime_ns for f in _PAGE_PARTS)
+    if cache["html"] is None or cache["mtimes"] != mtimes:
+        cache["html"] = _compose_page(static_dir)
+        cache["mtimes"] = mtimes
+    return cache["html"]
 
 
-# Module-level constant kept for import-time consumers (tests, tooling); the
-# HTTP handler uses _page_html() so file edits reload without a restart.
-HTML = _compose_page()
+# Module-level constants kept for import-time consumers (tests, tooling); the
+# HTTP handler uses _page_html() so file edits reload without a restart. The
+# new shell is guarded so a checkout missing static/new/ can't crash the menu
+# bar's import of this module.
+HTML = _compose_page(_STATIC_DIR)
+try:
+    HTML_NEW = _compose_page(_NEW_DIR)
+except OSError:
+    HTML_NEW = None
 
 
 if __name__ == "__main__":

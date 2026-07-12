@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meetings</title>
+<style>
+/*@APP_CSS@*/</style>
+<script>
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint so the
+// page never flashes the wrong ground. Same stt_theme key as the old panel.
+(function(){const q=new URLSearchParams(location.search).get("theme");
+const t=q||localStorage.getItem("stt_theme");
+if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
+</script></head><body>
+
+<header class="hdr">
+  <h1 class="wordmark">Meetings</h1>
+  <!-- status pill: the ONLY place pipeline state appears; one line, by priority.
+       Hidden entirely when idle. Clicking it opens the Process popover. -->
+  <button id="pill" class="pill" type="button" hidden aria-live="polite"></button>
+  <span class="grow"></span>
+  <div class="controls">
+    <!-- filter + sort sit left of search, borderless until hover -->
+    <select id="filter" class="ctl" aria-label="Filter by tag"
+            title="Show every meeting, or only Work / Personal ones">
+      <option value="">all</option>
+      <option value="work">work</option>
+      <option value="personal">personal</option>
+    </select>
+    <select id="sort" class="ctl" aria-label="Sort and group"
+            title="How the list is ordered and grouped">
+      <option value="date">by month</option>
+      <option value="name">by name</option>
+    </select>
+    <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+           placeholder="Search titles and words" aria-label="Search meetings">
+    <!-- Process popover trigger. Builder B wires the popover open/close + actions. -->
+    <button id="processBtn" class="btn process" type="button"
+            aria-haspopup="true" aria-expanded="false"
+            title="Process new recordings, pick files, pause automatic runs">Process <span class="caret">&#9662;</span></button>
+    <!-- theme dot: cycles auto / light / dark, reusing the old panel convention -->
+    <button id="themeDot" class="themedot" type="button" title=""></button>
+    <!-- gear bridges to the old panel's settings until the settings drawer ships -->
+    <button id="gear" class="btn gear" type="button"
+            title="Settings (opens the current panel)" aria-label="Settings">&#9881;</button>
+  </div>
+</header>
+
+<!-- Process popover surface (the ONLY machinery surface in the shell). Rendered
+     hidden; Builder B populates and wires it. -->
+<div id="processPop" class="popover" hidden></div>
+
+<main class="wrap">
+
+  <!-- amber "needs you" tray: only present when non-empty, ranked by the server
+       (stall -> failed -> review -> unknown voice). Builder B wires the row
+       verbs and the "and N more" expand. -->
+  <section id="tray" class="tray" hidden aria-label="Needs you"></section>
+
+  <!-- quiet full-text search sub-list under the search field (Builder B) -->
+  <div id="searchhits" class="searchhits" hidden></div>
+
+  <div class="timelinewrap">
+    <!-- jump rail: year / month, visible only at 3+ groups with no active search -->
+    <nav id="rail" class="rail" hidden aria-label="Jump to a month"></nav>
+    <!-- the One Timeline: one row per meeting/file, its state read from /api/state.
+         Row markup and the empty state are rendered by app.js. -->
+    <section id="timeline" class="timeline" aria-label="Meetings"></section>
+  </div>
+
+</main>
+
+<!-- bulk action bar: floats bottom-center when a selection exists. Builder B
+     wires selection state and the /api/bulk calls. -->
+<div id="bulkbar" class="bulkbar" hidden></div>
+
+<!-- shared popover mount for the per-row menu (Builder B) -->
+<div id="rowmenu" class="popover" hidden></div>
+
+<script>
+//@APP_JS@</script></body></html>

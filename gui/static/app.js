@@ -1673,8 +1673,18 @@ function togWatch(){api('/api/automation',{watch:!S.schedule.watch}).then(r=>{if
 function togNightly(){api('/api/automation',{nightly:!S.schedule.nightly}).then(r=>{if(!r.ok)alert(r.error||'Could not change the nightly run');refresh()})}
 async function refresh(){try{S=await api('/api/state');render()}catch(e){}}
 refresh().then(()=>{
-  // deep link: /?open=<meeting> opens that transcript directly
-  const o=new URLSearchParams(location.search).get('open');
+  // deep links, resolved once against the first loaded state. The new shell
+  // (?ui=new) bridges its tray actions here until the meeting page ships:
+  //   ?open=<meeting>   opens that transcript directly
+  //   ?review=<meeting> opens that meeting's review dialog
+  //   ?who=<uid>        opens the who-is-this dialog for that unknown voice
+  const p=new URLSearchParams(location.search);
+  const o=p.get('open');
   if(o&&(S.meetings||[]).some(m=>m.base===o))openTranscript(o);
+  const rv=p.get('review');
+  if(rv&&(S.meetings||[]).some(m=>m.base===rv))openReview(rv);
+  const who=p.get('who');
+  if(who){const u=(S.unknowns||[]).find(x=>x.uid===who);
+    if(u)openName(u.uid,u.display,u.meetings[0]||'');}
 });
 setInterval(refresh,2000);
