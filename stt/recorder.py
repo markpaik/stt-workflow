@@ -106,6 +106,36 @@ def _stamp(now=None):
     return now.strftime("%m%d%Y"), now.strftime("%H%M")
 
 
+def _silence_wav() -> Path:
+    """A 2s all-zero WAV, generated once. On this macOS build an aggregate
+    device that contains a system-audio tap does not start IO until some
+    process is WRITING audio to the output ("waiting for writers") — start a
+    capture on a silent Mac and the whole device, mic included, never cycles:
+    no error, no frames. Playing this inaudible file right after launch opens
+    that gate deterministically (verified: the tap starts within ~10ms of a
+    writer appearing, and keeps running after the writer exits)."""
+    wav = staging_dir().parent / "silence.wav"
+    if not wav.exists():
+        import wave
+        wav.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(48000)
+            w.writeframes(b"\x00\x00" * 96000)
+    return wav
+
+
+def _kick_writer_gate():
+    """Best-effort: play the silent file so the tap's writer gate opens."""
+    try:
+        subprocess.Popen(["/usr/bin/afplay", str(_silence_wav())],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass  # no afplay is no reason to refuse the recording
+
+
 def start() -> dict:
     """Begin a recording. Returns {ok, error?}. Refuses a second concurrent
     recording, a near-full disk, and a binary older than its source."""
@@ -152,6 +182,7 @@ def start() -> dict:
     with open(LOG, "a") as log:
         subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(pid)],
                          stdout=log, stderr=log, start_new_session=True)
+    _kick_writer_gate()  # see _silence_wav: a quiet Mac never starts the tap
     status.clear_recorder_note()  # a new capture supersedes the last outcome
     status.set_recording({
         "pid": pid, "caf": str(caf),
@@ -210,10 +241,12 @@ STALL_AFTER_SECS = 8
 
 def capture_stalled(rec) -> bool:
     """True when a live recording SHOULD have audio by now but its CAF is still
-    header-only. That is the signature of a TCC denial: macOS keeps the device
-    running and simply delivers no frames — nothing errors, nothing prompts.
-    The common trigger is a REBUILD of the recorder: the ad-hoc signature is
-    pinned to the exact build (cdhash), so rebuilding orphans the old grant.
+    header-only. Two known causes, both silent: the tap's writer gate (macOS
+    starts a tap-containing device only once some app plays audio; start()
+    kicks it with a silent file, but a mid-recording device swap can re-arm
+    it), and a TCC denial — classically after a REBUILD, since the ad-hoc
+    signature is pinned to the exact build (cdhash) and rebuilding orphans
+    the old grant.
     This lets the menu bar say so ~10 seconds into the meeting, instead of the
     user discovering an empty capture at stop. A paused recording does not
     grow and does not count as stalled."""
@@ -295,9 +328,13 @@ def finalize(caf: Path, name=None) -> dict:
     if not caf.exists() or caf.stat().st_size < 8192:  # header-only = zero audio
         _clear_if_ours()
         caf.unlink(missing_ok=True)
-        status.set_recorder_note(False, "The recording captured NO audio — grant "
-                                 "Microphone and 'System Audio Recording Only' "
-                                 "(the panel has a Fix permissions button).")
+        status.set_recorder_note(False, "The recording captured NO audio. Usual "
+                                 "cause: nothing was playing sound, and macOS "
+                                 "holds tap captures until some app plays audio "
+                                 "(the recorder now plays a silent kick at start). "
+                                 "Otherwise: grant Microphone and 'System Audio "
+                                 "Recording Only' (the panel has a Fix "
+                                 "permissions button).")
         return {"ok": False, "error": "nothing was captured (permission denied?)"}
     staging = staging_dir()
     final = final_name(name)
