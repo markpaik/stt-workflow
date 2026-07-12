@@ -600,25 +600,30 @@ def test_audio_range_suffix_and_unsatisfiable(running_server):
 
 # ---------- HTML/JS defects (findings #19, #12) ----------
 
-def test_tvrow_escapes_flags_in_title_attribute():
-    """tvRow's title interpolates flag text into an HTML attribute; a flag
-    containing a quote (a speaker name flows into `possible:<name>`) would
-    break out of the attribute without esc()."""
-    html = srv.HTML
-    assert "'Uncertain: '+esc(g.flags.join(', '))+' — tap to listen'" in html
-    # the raw, un-escaped form must be gone
-    assert "'Uncertain: '+g.flags.join(', ')+' — tap to listen'" not in html
+def _shell_js():
+    return (Path(srv.__file__).resolve().parent / "static" / "app.js"
+            ).read_text(encoding="utf-8")
 
 
-def test_spkwirenew_restores_prior_selection_on_cancel():
+def test_flag_title_attribute_escapes_flag_text():
+    """The transcript's uncertainty marker interpolates flag text into an HTML
+    title attribute; a flag containing a quote (a speaker name flows into
+    `possible:<name>`) would break out of the attribute without esc()."""
+    js = _shell_js()
+    assert 'title="Uncertain: ${esc((g.flags||[]).join(\', \'))}"' in js
+    # the raw, un-escaped form must never appear
+    assert 'title="Uncertain: ${(g.flags||[]).join(\', \')}"' not in js
+
+
+def test_speaker_select_restores_prior_selection_on_cancel():
     """Cancelling the New-person prompt must restore the segment's prior
     speaker, not silently jump to option 0 (misattributing the line)."""
-    html = srv.HTML
+    js = _shell_js()
     # remembers the prior real selection and restores it on cancel
-    assert "sel._prev" in html
-    assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in html
-    # the old unconditional reset must be gone
-    assert "if(!nm){sel.selectedIndex=0;return}" not in html
+    assert "sel._prev" in js
+    assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in js
+    # the unconditional reset must never return
+    assert "if(!nm){sel.selectedIndex=0;return}" not in js
 
 
 # ---------- /api/snippet: stale meeting reference falls back, never 400s ----------
