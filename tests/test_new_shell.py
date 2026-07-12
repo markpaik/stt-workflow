@@ -876,6 +876,182 @@ def test_click_to_edit_title_and_date_on_ready_rows():
     assert "rowTitleEdit(event,'${escJs(base)}')" in NEW_JS
 
 
+# ---------------------------------------------------------------------------
+# Flag review, second pass (2026-07-12): the sticky verdict bar (stepping
+# controls that never travel with the inline card), the Enter/a/u fast path,
+# the honest accept-all two-step, and the conveyor/workspace rule -- BAR
+# verdicts advance, CARD work holds position. Same regex-over-the-files style.
+# ---------------------------------------------------------------------------
+def _js_fn(name):
+    """A top-level function's full source (house convention: bodies close with
+    a brace at column 0, nested closers are indented)."""
+    m = re.search(r"(?:async )?function " + re.escape(name) + r"\([\s\S]*?\n\}",
+                  NEW_JS)
+    assert m, f"missing function: {name}"
+    return m.group(0)
+
+
+def test_review_bar_docks_sticky_with_the_verdict_controls():
+    for fn in ("_mRevBar", "reviewBarMount", "reviewBarUnmount", "reviewBarSync",
+               "reviewSave", "reviewUseAltGo", "reviewAcceptAllAsk",
+               "reviewAcceptAllGo"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing fn: {fn}"
+    # the bar is sticky; mStickyTop docks it under the audio bar from the LIVE
+    # header/audio heights (under the shell header when the meeting is audioless)
+    m = re.search(r"(?m)^\.mrevbar\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "position:sticky" in m.group(0)
+    sticky = _js_fn("mStickyTop")
+    assert "mrevbar" in sticky and "offsetHeight" in sticky
+    mount = _js_fn("reviewBarMount")
+    assert "maudio" in mount and ".mhead" in mount
+    # mounting swaps the strip for the bar; exiting restores the strip
+    assert "strip.hidden=true" in mount
+    assert "strip.hidden=false" in _js_fn("reviewBarUnmount")
+    bar = _js_fn("_mRevBar")
+    # Accept is the ONE primary accent button in the bar...
+    assert bar.count("btn primary mini") == 1
+    assert "onclick=\"reviewApply('accept')\"" in bar
+    # ...alongside the arrows, play, use-alt, skip, exit, and the two bulk verbs
+    for frag in ('onclick="reviewGo(-1)"', 'onclick="reviewGo(1)"',
+                 'onclick="reviewPlay()"', 'onclick="reviewUseAltGo()"',
+                 'onclick="reviewExit()"', 'id="mrbcount"', 'id="mrbalt"',
+                 'id="mrbminor"', 'id="mrball"'):
+        assert frag in bar, f"bar lost a control: {frag}"
+    # key hints ride the title attributes only, never visible clutter
+    for hint in ("(p)", "(n)", "(Enter or a)", "(u)", "(Escape)"):
+        assert hint in bar, f"missing title-attribute key hint: {hint}"
+    # the bar re-derives its counts after every resolution; Use alt enables
+    # only when the current flag carries second-engine text
+    sync = _js_fn("reviewBarSync")
+    assert "alt.disabled=!(it&&it.alt&&it.alt.length)" in sync
+    assert "Accept ${minors} minor" in sync
+    assert "Accept all ${n} remaining" in sync
+    # stepping wraps at both ends instead of silently exiting past the last
+    assert "%MR.items.length" in _js_fn("reviewGo")
+
+
+def test_stepping_fast_path_keys_guard_typing_and_popovers():
+    mkey = _js_fn("mKey")
+    # Enter / a / u live behind the typing guard, modifier-free, and defer to
+    # any open popover (the two-step confirms own their own keys)
+    assert re.search(
+        r"!typing&&!e\.metaKey&&!e\.ctrlKey&&!e\.altKey&&MR&&MR\.active&&!_popClose&&!NP"
+        r"\s*&&\(e\.key==='Enter'\|\|e\.key==='a'\|\|e\.key==='u'\)", mkey), \
+        "the fast path must sit behind the typing/modifier/popover/panel guards"
+    # Enter defers to a focused button; Enter and a accept-and-advance
+    assert "e.key==='Enter'&&ae&&ae.tagName==='BUTTON'" in mkey
+    assert "reviewApply('accept')" in mkey
+    # u fires only when the current flag carries second-engine text
+    assert "it.alt&&it.alt.length" in mkey and "reviewUseAltGo()" in mkey
+    # Cmd/Ctrl+Enter commits the open card from anywhere in it (plain Enter in
+    # the textarea stays a newline, kept there by the typing guard)
+    assert re.search(r"\(e\.metaKey\|\|e\.ctrlKey\)&&e\.key==='Enter'"
+                     r"&&document\.getElementById\('mcard'\)", mkey)
+    # Escape still exits stepping ahead of the page cascade, yielding to the
+    # naming panel and any open popover first
+    assert re.search(r"e\.key==='Escape'&&!typing&&!NP&&!_popClose", mkey)
+    assert "reviewExit()" in mkey
+
+
+def test_accept_all_remaining_is_an_honest_house_two_step():
+    ask = _js_fn("reviewAcceptAllAsk")
+    # the confirm is the house popover two-step, never a native dialog (those
+    # are banned shell-wide by the editor test above)
+    assert "openPop(pop,btn" in ask and "ppconfirm" in ask
+    # the copy is honest about what accepting unheard lines means
+    assert "kept exactly as transcribed" in ask
+    assert "trusted as-is" in ask
+    go = _js_fn("reviewAcceptAllGo")
+    # every remaining flag resolves through the EXISTING accept action, one
+    # awaited POST per item, the bar's count dropping as each lands
+    assert "action:'accept'" in go and "await api('/api/review'" in go
+    assert "reviewBarSync()" in go
+    # a failure surfaces in the popover and leaves the rest flagged
+    assert "The rest stay flagged." in go
+    # done: stepping exits (the strip returns, empty) and the poll follows
+    assert "reviewExit()" in go and "refresh()" in go
+
+
+def test_bar_verdicts_advance_and_card_work_holds_position():
+    # the card's Save is reviewSave (hold), and the card sheds every control
+    # the bar now owns: no prev/next/skip/accept duplicates, no counter
+    card = _js_fn("renderReviewCard")
+    assert 'onclick="reviewSave()"' in card
+    for gone in ("reviewGo(", "reviewApply(", "Accept as-is", "Skip", "mcpos"):
+        assert gone not in card, f"the card still carries a bar control: {gone}"
+    # the card keeps its workspace: flag reason, alt preview, speaker + text
+    for kept in ("mcflag", "mcalt", "mSpkSelect", "mctext"):
+        assert kept in card, f"the card lost its workspace piece: {kept}"
+    # Save / split / remove / insert never call the advance path
+    for fn in ("reviewSave", "mEditSave", "mSplitSave", "mDeleteGo",
+               "mInsertSave"):
+        body = _js_fn(fn)
+        assert "reviewGo(" not in body and "renderReviewCard(" not in body, \
+            f"{fn} must hold position, never advance"
+    # a card save resolves the item WITHOUT moving: the hold flag arms and
+    # MR.i comes to name the next unresolved item for the bar to take later
+    save = _js_fn("reviewSave")
+    assert "MR.hold=true" in save and "MR.items.splice(k,1)" in save
+    # bar verdicts DO advance, wrapping to the first when the last resolves
+    apply_ = _js_fn("reviewApply")
+    assert "renderReviewCard()" in apply_ and "MR.items.splice(MR.i,1)" in apply_
+    assert re.search(r"if\(MR\.i>=MR\.items\.length\)MR\.i=0", apply_)
+    # one review POST in flight at a time: a second Enter (or an n mid-save)
+    # can never double-resolve or shift MR.i under the splice
+    assert "MR.busy" in apply_ and "MR.busy" in save
+    assert "MR.busy" in _js_fn("reviewGo")
+    # accept-minor from the bar never rebuilds a surviving card mid-edit
+    assert "NEVER rebuild" in _js_fn("reviewAcceptMinor")
+
+
+def test_structural_reload_restores_scroll_and_stepping_position():
+    body = _js_fn("mReloadSegs")
+    # scroll: captured before the rebuild, restored after (no jump)
+    assert "window.scrollY" in body and "_instantScroll(y)" in body
+    # stepping: the review list is refetched (a structural change shifted its
+    # snapshot indexes) and the position re-anchors by START TIME -- the next
+    # flag at or below the held spot in document order -- never auto-advanced
+    assert "api('/api/review?base='" in body
+    assert "x.start>=a-0.25" in body
+    assert "MR.hold=true" in body
+    # the editor and the gap insert no longer kill stepping (still one card
+    # at a time: mCardEl swaps the open card)
+    for fn in ("mEdit", "mInsertAt"):
+        assert "reviewExit()" not in _js_fn(fn), f"{fn} must not exit stepping"
+    # an edit that resolves the current flag drops it from the walk in place
+    assert "MR.hold=true" in _js_fn("mEditSave")
+
+
+def test_stepper_walks_flags_in_document_order():
+    # the server's list fronts substantial flags (grouped by weight); the
+    # stepper re-sorts to DOCUMENT order -- start time, original index as the
+    # tiebreak -- immediately after the fetch and after every reload, so
+    # prev/next and the counter read the transcript top to bottom
+    order = _js_fn("_revOrder")
+    assert re.search(r"a\.start-b\.start\)\|\|\(a\.index-b\.index", order)
+    assert "_revOrder(d.items)" in _js_fn("reviewStart")
+    assert "_revOrder(rv.items)" in _js_fn("mReloadSegs")
+    # entering from the strip/chip starts at the FIRST flag on the page
+    assert "reviewStart(0)" in NEW_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_stepper_orders_fabricated_out_of_order_flags_by_start_time():
+    # fabricate a server-style list (substantial first, minors last: NOT
+    # document order, with a same-start tie) and assert the walk sequence
+    # comes back sorted by start time, original index breaking the tie
+    src = _js_fn("_revOrder")
+    fixture = ("const items=[{start:41.0,index:9},{start:7.5,index:2},"
+               "{start:7.5,index:1},{start:19.2,index:5}];"
+               "console.log(JSON.stringify(_revOrder(items).map(x=>x.index)));")
+    r = subprocess.run([NODE, "-e", src + "\n" + fixture],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[1,2,5,9]", \
+        f"stepper order is not document order: {r.stdout.strip()}"
+
+
 def test_signal_colorway_tokens_shipped_and_greens_retired():
     # DESIGN.md (2026-07-12): the Signal colorway. Electric indigo accent in
     # both themes; the Newsprint greens and warm grounds are gone. Amber and

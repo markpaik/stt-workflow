@@ -629,6 +629,18 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .mflagbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 2px 0}
 .mflagbar .mflagged{margin:0}
 
+/* the sticky verdict bar: docks under the audio bar (under the header when
+   audioless; mStickyTop sets the inline top from the live heights) so the
+   stepping controls never move while the transcript scrolls beneath */
+.mrevbar{position:sticky;z-index:14;display:flex;align-items:center;gap:8px;
+  flex-wrap:wrap;padding:8px 12px;margin:0 0 8px;border-radius:10px;
+  background:color-mix(in srgb,var(--paper) 90%,transparent);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border:1px solid color-mix(in srgb,var(--amber) 32%,var(--hair))}
+.mrevbar .mrbcount{font:600 13.5px/1 var(--sans);font-variant-numeric:tabular-nums;
+  color:var(--amber);white-space:nowrap}
+.mrevbar .mrbdone{color:var(--sub)}
+
 /* the quiet pencil on every segment; the row keeps its grid, the button floats */
 .mseg{position:relative}
 .msegedit{position:absolute;top:5px;right:6px;opacity:0;visibility:hidden;

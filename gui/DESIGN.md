@@ -27,72 +27,79 @@ one popover (runs) and one drawer (settings, final phase).
 
 ## Newsprint tokens
 
-Type (revised 2026-07-12: Mark found the serif "a bit much"; the house style
-follows the modern workflow-tool consensus — Linear, Notion, Height, Things —
-one neutral sans, hierarchy from weight and size, no second typeface).
-Display and titles: `-apple-system` (SF Pro), weight 600, letter-spacing
--0.01em at 16px and above. Body and ALL meta/labels/group headers/tray text:
-the same sans with `font-variant-numeric: tabular-nums` wherever digits
-align; group headers are 13px semibold uppercase sans with +0.06em
-tracking, not mono (13px floor holds everywhere, test-enforced). Mono (`ui-monospace`, SF Mono) is DEMOTED to true data
-only: timestamps, durations, live clocks, and the status pill. Nothing else
-is mono, nothing is serif. System faces only; nothing downloads. (If a true
-Inter ever becomes wanted, vendor the OFL woff2 into gui/static/ as a local
-asset; never a CDN.)
+Type (revised again 2026-07-12: Mark approved the Boardroom Wide direction and
+asked to adopt Monday's font stylings). UI face: **Figtree**, Monday's own,
+vendored locally as the OFL-licensed variable woff2 in gui/static/ (its
+OFL.txt alongside; loaded via @font-face, served by the panel itself, never a
+CDN; -apple-system remains the fallback stack). Weight does the hierarchy:
+titles 600, wordmark 700, body 400-500, letter-spacing -0.005em at 16px+.
+Sizes keep the calibrated middle landing: titles 17.5px, meta 13px, summary
+previews 14.5px at two clamped lines, floor 13px (test-enforced). Mono
+(`ui-monospace`, SF Mono) stays demoted to true data only: timestamps,
+durations, live clocks, the status pill. Nothing is serif.
 
-Color: the "Signal" colorway (revised 2026-07-12 on Mark's request for a
-modern/futuristic feel; direction follows the Linear/Vercel/Raycast language —
-cool neutrals + one electric accent — NOT neon sci-fi). Warm paper retired;
-the green accent retired; attention gold and record red stay semantic.
+Color and surfaces: the "Boardroom Wide" restyle (approved 2026-07-12 from
+the Monday/Asana research and the revised mockup; supersedes Signal). Rows
+are floating white cards on a cool gray ground; Monday's violet-blue is the
+one interactive accent; states speak in colored pills; attention items wear
+a colored left edge.
 
-Light theme (cool porcelain):
+Light theme:
 
-    --paper  #FAFAFC   page ground
-    --card   #FFFFFF   rows, popovers
-    --ink    #16181D   text
-    --sub    #5F6470   secondary text
-    --hair   #E7E8EC   hairline rules
-    --line   #D6D8DF   control borders
-    --inset  #F2F3F6   hover, wells
-    --accent #4F5DE5   the ONE interactive electric indigo
-    --accent-ink #FFFFFF   --accent-soft #EBEDFC
-    --amber  #8F5F10   attention (tray, review counts)  soft #F7F0DF
-    --rec    #CC3F38   record light ONLY                soft #FBE7E5
+    --paper  #F6F7FB   page ground (cool gray)
+    --card   #FFFFFF   cards, popovers, tray
+    --ink    #1C1E26   text
+    --sub    #6A6F7E   secondary text (verify 4.5:1 on card)
+    --hair   #ECEDF4   card borders
+    --line   #E0E2EC   control borders
+    --inset  #F3F4F9   hover wells inside cards
+    --accent #6161FF   Monday violet-blue: buttons, links, focus, naming edge
+    --acc-ink #FFFFFF  --accent-soft #EEF0FF
+    --ok     #2E9E5B on #E8F6EE     ready/status-good pill
+    --busy   #2264D1 on #E8EFFC     transcribing pill + progress
+    --amber  #8F5F10   attention    soft #FBF1DC
+    --rec    #CC3F38   record light ONLY   soft #FBE7E5
+    Category chips: Work #4B4FD9 on #EEF0FF, Personal #B4690E on #FFF1E5.
 
-Dark theme (blue graphite, the showcase):
+Dark theme: ground #131417, cards #1B1D23 keeping their lift (deeper
+shadows), ink #E9EAEE, sub #9AA0AB, accent #8F94FF (text on accent #10122E),
+accent-soft #23244A, status/chips shift to their dark-soft pairs; every text
+pair verified 4.5:1 programmatically, adjusting tokens hue-true when a pair
+misses (the Signal precedent).
 
-    --paper #0F1114  --card #16181D  --ink #E9EAEE  --sub #9AA0AB
-    --hair  #23262C  --line #333741  --inset #1C1F24
-    --accent #7B87FF (text on accent #0D0F2A)  --accent-soft #1E2140
-    --amber #E0A94F  soft #2B2415     --rec #F0605A  soft #34191B
+Surfaces: cards radius 14px with a soft shadow (0 1px 4px, hover deepens to
+0 4px 16px), 10px gaps between rows, tray as a white card with a 4px amber
+left edge, naming rows with a 4px accent left edge, primary buttons
+pill-shaped with a soft accent shadow (0 4px 14px accent at 30%). The old
+glow touches retire with Signal; the focus ring stays accent for
+accessibility. Progress hairline becomes the busy blue. Hairlines separate
+nothing on the gray ground; the cards themselves do the separating.
 
-Futurism is three touches, no more: a soft accent glow on focus rings and
-primary buttons (`0 0 0 3px` accent at ~20%), the same glow on the processing
-progress hairline, and a subtle opacity pulse on the recording pill (killed
-under reduced motion). No gradients on surfaces; paper stays flat. All text
-token pairs must clear 4.5:1 contrast in both themes, verified
-programmatically, not by eye. (Shipped amber and rec run darker than this
-section's first draft for exactly that reason: #9A6A1A and #D7443E measured
-4.15:1 and 4.22:1 on the light ground.)
+Layout, use-the-space rule (Mark, 2026-07-12): the column cap goes fluid,
+max-width min(1360px, 94vw). Card content spreads: the left block (title,
+meta, summary) takes all available width with summaries running the card's
+width, and a right-aligned rail carries the state pill with the category
+chip and amber check-count beneath it, so no dead zone opens between text
+and state. Inputs grow: the naming row's title input flexes to all available
+width. The meeting page and drawer live on the same gray ground as cards at
+the same fluid cap. Category interaction: the chip itself cycles
+untagged/work/personal on click (untagged rows show a hollow dot that
+cycles, growing the chip once tagged).
 
 Theme plumbing: same pre-paint snippet and `stt_theme` localStorage key as the
 old page, plus `prefers-color-scheme` default. Red appears nowhere except the
 recording state and destructive confirmation buttons.
 
-Rhythm: 8px grid, reading-room density (revised 2026-07-11 after review on
-real data: the first cut read compressed; type scale bumped again 2026-07-12
-on Mark's feedback that fonts still read small on his display). The content
-column caps at 920px, centered; shorter lines read bigger and summaries wrap
-instead of truncating mid-clause. Type floor 13px: titles 18.5px sans semibold, meta
-13.5px sans (tabular numerals), summary previews 15px with 1.5 leading, clamped to TWO lines
-(the full summary lives on the meeting page); buttons and pill 13-13.5px.
-Rows get 15-16px vertical padding; month headers carry ~30px top margin so
-months read as chapters, not rows in one continuous ruled list. Mark's
-display is the calibration target, not preview screenshots taken in narrow
-tabs. Radius 8px on controls, 12px on floating surfaces. Borders are
-hairlines, not shadows; shadows only on floating surfaces (popover, bulk
-bar): a soft two-layer `0 1px 2px …, 0 10px 34px …`. Motion 150–200ms ease,
-used for state morphs and hover reveals; honor `prefers-reduced-motion`.
+Rhythm: 8px grid. Layout and surfaces are governed by the Boardroom Wide
+section above (fluid min(1360px, 94vw) cap, card rows with 10px gaps, 14px
+card radius, soft shadows); type sizes by its Type section (titles 17.5px,
+meta 13px, summaries 14.5px at two clamped lines, floor 13px,
+test-enforced). Superseded for the record: the 920px reading column and
+18.5px titles of the Newsprint/Signal era. Rows keep 15-16px vertical
+padding inside their cards; month headers carry ~30px top margin so months
+read as chapters. Mark's display is the calibration target, not preview
+screenshots taken in narrow tabs. Motion 150-200ms ease for state morphs
+and hover lifts; honor `prefers-reduced-motion`.
 
 ## Anatomy
 
@@ -205,6 +212,37 @@ borderless until hover.
 Empty states, in sub text, centered: library empty → "Record a meeting from
 the menu bar, or drop an audio file here."; search empty → "No matches.";
 tray absent entirely when empty.
+
+## Reviewing and editing on the meeting page
+
+Stepping is a conveyor; editing is a workspace (Mark's rule, 2026-07-12,
+after live feedback: the stepping controls traveled with the inline card so
+the mouse chased them down the page, and approving an accurate flag took too
+many moves). Clicking the amber strip (or n) starts stepping and docks a
+compact verdict bar directly under the sticky audio bar — under the shell
+header when the meeting has no audio — whose controls NEVER move while the
+transcript scrolls beneath: `⚠ 2 of 6 · ‹ › · ▶ Play · ✓ Accept · Use alt ·
+Skip · ✕ done`, plus "Accept N minor" when crumbs exist and, at the far end,
+"Accept all N remaining…" behind the house two-step confirm (its copy says
+plainly that unheard lines are trusted as-is). ✓ Accept is the one primary
+accent button; Use alt enables only when the flag carries second-engine
+text. Flags step in DOCUMENT ORDER, by segment start time, never the server
+list's grouping (Mark's rule, same day: hopping around the transcript loses
+the reader); advancing lands on the next unresolved flag BELOW the current
+position. Bar actions are verdicts and AUTO-ADVANCE to the next unresolved
+flag (stepping wraps at both ends; ✕ or Escape exits and the strip returns).
+Keyboard, never while typing: Enter or `a` accepts-and-advances, `u` takes
+the second engine, n/p step, Escape exits; keys appear as title-attribute
+hints only, never visible clutter.
+
+Card actions are work at a spot the user chose and NEVER advance: the inline
+card keeps the flag reason, alt preview, speaker + text editing, and Save,
+and Save, split, remove, and insert all hold both scroll and stepping
+position (structural reloads re-anchor by segment start time), update the
+counters in place, and wait for an explicit next. Cmd+Enter saves from the
+textarea; plain Enter stays a newline. Polls and bar resolutions never
+collapse an open editor. Counts everywhere (bar, strip, row meta, tray)
+update optimistically.
 
 ## The drawer
 
