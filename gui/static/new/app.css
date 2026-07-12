@@ -48,8 +48,11 @@
    bulkbar, pill, popovers all start hidden and are toggled by .hidden) */
 [hidden]{display:none!important}
 html{scroll-behavior:smooth}
+/* reading-room column: 860px of content (908 cap minus the two 24px gutters),
+   centered; header content and timeline share it. Revised 2026-07-11: the first
+   cut at 1080 read compressed, with lines too long and summaries truncated. */
 body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
-  max-width:1080px;margin:0 auto;padding:0 24px 64px;-webkit-font-smoothing:antialiased;
+  max-width:908px;margin:0 auto;padding:0 24px 64px;-webkit-font-smoothing:antialiased;
   font-variant-numeric:tabular-nums}
 .grow{flex:1;min-width:0}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -92,7 +95,7 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .btn:hover{background:var(--inset);border-color:var(--sub)}
 .btn.process{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
 .btn.process:hover{background:var(--accent-soft);border-color:var(--accent)}
-.btn.process .caret{font-size:11px;opacity:.8}
+.btn.process .caret{font-size:12.5px;opacity:.8}
 .btn.gear{width:34px;height:34px;padding:0;justify-content:center;font-size:15px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);font-weight:600}
 .btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000);
@@ -119,19 +122,28 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .tray{margin:14px 0 6px;background:var(--amber-soft);
   border:1px solid color-mix(in srgb,var(--amber) 32%,var(--hair));
   border-radius:12px;padding:8px 14px 12px}
-.tray .trayhdr{font:600 11px/1.2 var(--mono);letter-spacing:.11em;
+.tray .trayhdr{font:600 12.5px/1.2 var(--mono);letter-spacing:.11em;
   text-transform:uppercase;color:var(--amber);padding:6px 0 4px}
 .trayrow{display:flex;align-items:center;gap:10px;padding:7px 0;
   border-top:1px solid color-mix(in srgb,var(--amber) 18%,transparent)}
 .trayrow:first-of-type{border-top:0}
 .trayrow .tw-title{font:500 14px/1.3 var(--serif);color:var(--ink);flex:none;
   max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* an aggregate line ("Flagged lines in N meetings") is the whole line, uncapped */
+.trayrow .tw-title.agg{flex:1;min-width:0;max-width:none}
 .trayrow .tw-detail{color:var(--sub);font-size:13px;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .trayrow .tw-verb{margin-left:auto;flex:none}
-.tray .traymore{background:none;border:0;color:var(--amber);cursor:pointer;
-  font:500 12.5px/1 var(--sans);padding:8px 0 2px}
-.tray .traymore:hover{text-decoration:underline;text-underline-offset:3px}
+/* expanded per-meeting / per-voice rows under an aggregate line */
+.traysub{display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0 6px 16px;
+  border-top:1px solid color-mix(in srgb,var(--amber) 12%,transparent)}
+.traysub:hover{background:color-mix(in srgb,var(--amber) 8%,transparent);border-radius:6px}
+.traysub .ts-title{font:500 13px/1.3 var(--serif);color:var(--ink);flex:none;
+  max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.traysub .ts-meta{font:400 12.5px/1.2 var(--mono);font-variant-numeric:tabular-nums;
+  color:var(--sub);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.traysub .ts-count{margin-left:auto;flex:none;color:var(--amber);
+  font:500 12.5px/1 var(--mono);font-variant-numeric:tabular-nums}
 
 /* ------------------------------------------------- timeline + rail -------- */
 .timelinewrap{display:flex;gap:12px;align-items:flex-start;margin-top:6px}
@@ -141,21 +153,23 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .rail{display:flex;flex-direction:column;gap:1px;flex:none;padding-top:14px;
   position:sticky;top:74px;max-height:calc(100vh - 96px);overflow-y:auto;
   overscroll-behavior:contain;font-family:var(--mono)}
-.rail .railyr{font:700 10px/1.2 var(--mono);letter-spacing:.1em;color:var(--sub);
+.rail .railyr{font:700 12.5px/1.2 var(--mono);letter-spacing:.1em;color:var(--sub);
   padding:8px 8px 2px}
 .railbtn{border:0;background:none;color:var(--sub);text-align:left;cursor:pointer;
-  font:500 11px/1.2 var(--mono);letter-spacing:.05em;text-transform:uppercase;
+  font:500 12.5px/1.2 var(--mono);letter-spacing:.05em;text-transform:uppercase;
   padding:3px 8px;border-radius:6px}
 .railbtn:hover{background:var(--accent-soft);color:var(--accent)}
 
-/* month / Today / Yesterday group header, small-caps mono */
-.mgroup{font:600 11px/1.2 var(--mono);font-variant-numeric:tabular-nums;
+/* month / Today / Yesterday group header, small-caps mono. ~30px top margin so
+   each month reads as a chapter, not a row in one continuous ruled list. */
+.mgroup{font:600 12.5px/1.2 var(--mono);font-variant-numeric:tabular-nums;
   letter-spacing:.1em;text-transform:uppercase;color:var(--sub);
-  padding:18px 2px 4px;border-bottom:1px solid var(--hair);margin-bottom:2px;
+  padding:8px 2px 5px;border-bottom:1px solid var(--hair);margin:30px 0 2px;
   scroll-margin-top:84px}
+.mgroup:first-child{margin-top:8px}   /* no chapter gap at the very top */
 
 /* ---------------------------------------------------------------- row ----- */
-.row{display:flex;align-items:center;gap:11px;min-height:46px;padding:6px 8px;
+.row{display:flex;align-items:center;gap:11px;min-height:46px;padding:15px 8px;
   border-bottom:1px solid var(--hair);position:relative;border-radius:8px;
   transition:background .15s ease}
 .row:last-child{border-bottom:0}
@@ -175,13 +189,20 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .cat.none{opacity:.45}
 .row:hover .cat.none{opacity:.8}
 
-.rbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-.rtitle{font:500 15px/1.3 var(--serif);color:var(--ink);
+.rbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.rtitle{font:500 17px/1.3 var(--serif);color:var(--ink);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rmeta{font:400 12px/1.35 var(--mono);font-variant-numeric:tabular-nums;color:var(--sub);
+.rmeta{font:400 13px/1.4 var(--mono);font-variant-numeric:tabular-nums;color:var(--sub);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rsummary{font:italic 400 13px/1.4 var(--serif);color:var(--sub);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the review count as plain amber mono TEXT in the meta line, no chip */
+.rmeta .rev{color:var(--amber);cursor:pointer}
+.rmeta .rev.minor{color:var(--sub)}
+.rmeta .rev:hover{text-decoration:underline;text-underline-offset:2px}
+/* summary preview: two full lines, then clip. -webkit-line-clamp with a
+   max-height fallback for engines that ignore it. */
+.rsummary{font:italic 400 14px/1.5 var(--serif);color:var(--sub);
+  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;max-height:calc(1.5em * 2)}
 
 /* right slot: one quiet line of state text at rest; buttons appear on
    hover/focus, overlaid at the right edge so they never reserve blank space.
@@ -196,12 +217,6 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row:hover .ractions,.row:focus-within .ractions{opacity:1;visibility:visible}
 /* only states that HAVE hover actions mark their resting text .yields */
 .row:hover .yields,.row:focus-within .yields{visibility:hidden}
-
-/* review badges */
-.badge{font:500 11.5px/1 var(--mono);font-variant-numeric:tabular-nums;
-  border-radius:99px;padding:3px 9px;white-space:nowrap;cursor:pointer;flex:none}
-.badge.review{color:var(--amber);background:var(--amber-soft)}
-.badge.minor{color:var(--sub);background:var(--inset)}
 
 /* --- per-state row treatments (all seven states) --- */
 .row[data-state="recording"] .rstate{color:var(--rec)}
@@ -233,7 +248,7 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   outline-offset:1px;border-color:var(--accent)}
 
 /* small icon action buttons inside rows */
-.iact{font:500 12px/1 var(--sans);color:var(--ink);background:var(--card);
+.iact{font:500 12.5px/1 var(--sans);color:var(--ink);background:var(--card);
   border:1px solid var(--line);border-radius:7px;padding:5px 9px;cursor:pointer}
 .iact:hover{background:var(--inset);border-color:var(--sub)}
 .iact.play{width:28px;padding:5px 0;text-align:center}
@@ -282,10 +297,10 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .ppitem:disabled{opacity:.4;cursor:default}
 .ppitem.danger{color:var(--rec)}
 .ppitem.danger:hover:not(:disabled){background:var(--rec-soft)}
-.ppitem .ppc{margin-left:auto;font:500 11.5px/1 var(--mono);color:var(--sub);
+.ppitem .ppc{margin-left:auto;font:500 12.5px/1 var(--mono);color:var(--sub);
   background:var(--inset);border-radius:99px;padding:2px 7px}
 .ppsep{height:1px;background:var(--hair);margin:5px 4px}
-.pphdr{font:600 10.5px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+.pphdr{font:600 12.5px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;
   color:var(--sub);padding:7px 10px 3px}
 
 /* run-option / redo checkbox rows: label above a one-line explanation */
@@ -294,12 +309,12 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .ppopt:hover{background:var(--inset)}
 .ppopt>input{margin-top:2px;accent-color:var(--accent);flex:none}
 .ppopt-l{display:block;font:500 13px/1.3 var(--sans);color:var(--ink)}
-.ppopt-n{display:block;font:400 11.5px/1.35 var(--sans);color:var(--sub);margin-top:1px}
+.ppopt-n{display:block;font:400 12.5px/1.35 var(--sans);color:var(--sub);margin-top:1px}
 
 /* small confirm popover nested in the row menu (Redo, Delete) */
 .ppconfirm{padding:4px 6px}
 .ppctitle{font:600 14px/1.3 var(--serif);color:var(--ink);padding:4px 6px 2px}
-.ppcnote{font:400 12px/1.4 var(--sans);color:var(--sub);padding:2px 6px}
+.ppcnote{font:400 12.5px/1.4 var(--sans);color:var(--sub);padding:2px 6px}
 .ppcnote.warn{color:var(--amber)}
 .ppcnote.err{color:var(--rec)}
 .ppcrow{display:flex;gap:6px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
@@ -317,7 +332,7 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 /* inline clip player, mounted as a sibling under the listening row */
 .clipplayer{display:flex;align-items:center;gap:9px;padding:8px 12px;margin:0 0 2px;
   background:var(--inset);border-radius:8px}
-.clipplayer .clip-t{font-size:11.5px;color:var(--sub);min-width:34px;text-align:center}
+.clipplayer .clip-t{font-size:12.5px;color:var(--sub);min-width:34px;text-align:center}
 .clipplayer input[type=range]{flex:1;min-width:0;accent-color:var(--accent);height:4px;cursor:pointer}
 .clipplayer .iact.play{border-color:var(--line)}
 
@@ -327,18 +342,18 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 
 /* inline error surfaced on a needs_name row when Accept fails (no banner) */
 .nameerr{flex-basis:100%;color:var(--rec);
-  font:400 12px/1.35 var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
+  font:400 12.5px/1.35 var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
 
 /* full-text search hits under the search field */
-.searchhits .hitshdr{font:600 10.5px/1.2 var(--mono);letter-spacing:.09em;
+.searchhits .hitshdr{font:600 12.5px/1.2 var(--mono);letter-spacing:.09em;
   text-transform:uppercase;color:var(--sub);padding:8px 2px 4px}
 .searchhits .hit{display:flex;gap:10px;align-items:baseline;padding:7px 8px;
   border-radius:7px;cursor:pointer;border-bottom:1px solid var(--hair)}
 .searchhits .hit:last-child{border-bottom:0}
 .searchhits .hit:hover{background:var(--inset)}
-.searchhits .hit-t{color:var(--accent);flex:none;min-width:40px;font-size:11.5px}
-.searchhits .hit-w{font:500 12px/1.4 var(--sans);color:var(--ink);flex:none;
+.searchhits .hit-t{color:var(--accent);flex:none;min-width:40px;font-size:12.5px}
+.searchhits .hit-w{font:500 12.5px/1.4 var(--sans);color:var(--ink);flex:none;
   max-width:22%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .searchhits .hit-x{font:400 12.5px/1.45 var(--sans);color:var(--sub);min-width:0}
-.searchhits .hit-b{font-family:var(--mono);font-size:11px;color:var(--sub);opacity:.7}
+.searchhits .hit-b{font-family:var(--mono);font-size:12.5px;color:var(--sub);opacity:.7}
 .searchhits mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}

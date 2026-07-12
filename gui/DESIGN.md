@@ -58,11 +58,17 @@ Theme plumbing: same pre-paint snippet and `stt_theme` localStorage key as the
 old page, plus `prefers-color-scheme` default. Red appears nowhere except the
 recording state and destructive confirmation buttons.
 
-Rhythm: 8px grid. Rows 46px tall (denser than the old cards). Radius 8px on
-controls, 12px on floating surfaces. Borders are hairlines, not shadows;
-shadows only on floating surfaces (popover, bulk bar): a soft two-layer
-`0 1px 2px …, 0 10px 34px …`. Motion 150–200ms ease, used for state morphs and
-hover reveals; honor `prefers-reduced-motion`.
+Rhythm: 8px grid, reading-room density (revised 2026-07-11 after review on
+real data: the first cut read compressed). The content column caps at 860px,
+centered; shorter lines read bigger and summaries wrap instead of truncating
+mid-clause. Type floor 12.5px: titles 17px serif, meta 13px mono, summary
+previews 14px with 1.5 leading, clamped to TWO lines (the full summary lives
+on the meeting page). Rows get 15-16px vertical padding; month headers carry
+~30px top margin so months read as chapters, not rows in one continuous ruled
+list. Radius 8px on controls, 12px on floating surfaces. Borders are
+hairlines, not shadows; shadows only on floating surfaces (popover, bulk
+bar): a soft two-layer `0 1px 2px …, 0 10px 34px …`. Motion 150–200ms ease,
+used for state morphs and hover reveals; honor `prefers-reduced-motion`.
 
 ## Anatomy
 
@@ -72,19 +78,29 @@ status pill · search field (right-aligned) · Process ▾ · theme dot · gear
 
 Status pill: the ONLY place pipeline state appears. Mono, one at a time, by
 priority: `● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min`
-(accent) → `⏸ paused · 3 waiting` (amber) → `3 waiting` → nothing when idle
-(the pill disappears; idle needs no announcement). Clicking the pill opens the
-Process ▾ popover.
+(accent) → `⏸ paused · 3 waiting` (amber, always with the waiting count when
+nonzero) → `3 waiting` → nothing when idle (the pill disappears; idle needs
+no announcement). Clicking the pill opens the Process ▾ popover.
 
 Tray (only when non-empty): amber-soft band under the header, small-caps mono
-header "NEEDS YOU · N", one line per item, ranked (stall → failed → review →
-unknown voice), each with a right-aligned action verb. The tray never scrolls;
-if more than 4 items, the 4 highest with "and N more…" expanding in place.
+header "NEEDS YOU". Rare, urgent kinds (recorder stall, failures) get one
+line PER ITEM; chronic kinds aggregate to one line PER KIND that expands in
+place: "Flagged lines in N meetings" and "N voices need names". Revised
+2026-07-11 after real data showed 40 flagged meetings turning the tray into a
+wall of 46 asks; a tray that shouts daily is worse than no tray. The tray
+therefore never exceeds a handful of lines no matter the backlog.
 
-Timeline: full-width list on paper, month group headers in small-caps mono
-(`JULY 2026 · 6`), Today/Yesterday labels for the current groups when
-grouping by date. Jump rail (year/month) survives from the old UI, restyled
-mono, visible only when 3+ groups and no active search.
+Timeline: a centered list on paper in two zones. First an UNLABELED pinned
+cluster of everything actionable, in this order: recording, processing,
+needs_name, failed, held, waiting — these never sink into date groups no
+matter how old their files are (a failed April file must sit at the top, not
+buried in April). Below it, ready meetings sorted AND grouped by the same
+key: meeting date, newest first, with month group headers in small-caps mono
+(`JULY 2026 · 6`) and Today/Yesterday labels only for rows actually dated
+today/yesterday. Sorting by one key while grouping by another fragments the
+months; never do it. Jump rail regenerates from the ordered groups (years as
+anchors, months beneath), mono, visible only when 3+ groups and no active
+search.
 
 Row, common skeleton: category dot · title · meta (mono, sub) · right slot.
 The right slot is the state:
@@ -98,9 +114,11 @@ The right slot is the state:
 - needs_name  the row IS the form, accent-soft ground: title input (prefilled
               with suggested_title), date input (suggested_date), [▶] [Accept].
               Enter accepts. No separate inbox card exists.
-- ready       meta = `MMM D · NN min · speakers`; badges: review counts in
-              amber mono (`6 to check`); right slot shows state text that
-              yields to hover actions [▶] [Open] [⋯]
+- ready       meta = `MMM D · NN min · speakers · 6 to check`, the review
+              count as plain amber mono TEXT inside the meta line, no chip
+              (forty chip-wearing rows read as a wall of warnings); right
+              slot shows state text that yields to hover actions
+              [▶] [Open] [⋯]
 - failed      `failed` in rec red + one-line error, sub; hover: [Retry] [✕];
               note "original stays in the watched folder"
 

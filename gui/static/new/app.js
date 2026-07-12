@@ -42,6 +42,15 @@ function dateBucket(iso){
 function nameBucket(title){const t=(title||'').trim();
   return /^[a-z]/i.test(t)?t[0].toUpperCase():'#';}
 
+// two-zone ordering (by-date view). The actionable states pin to an UNLABELED
+// cluster above every date group, in this fixed order, so a failed April file
+// sits at the top rather than buried in April. Everything else (ready) groups
+// by its own meeting date. Sorting by one key while grouping by another is what
+// fragmented the months; the ready zone therefore sorts AND groups by dateKey.
+const PIN_ORDER={recording:0,processing:1,needs_name:2,failed:3,held:4,waiting:5};
+const PINNED=new Set(Object.keys(PIN_ORDER));
+function dateKey(r){return r.date||((r.when||'').slice(0,10));}   // fall back to last-activity
+
 /* ============================ status pill ============================ *
  * The ONLY place pipeline state appears, one line, by priority:
  *   REC ticking  ->  transcribing N  ->  paused N waiting  ->  N waiting  ->  hidden
@@ -50,6 +59,8 @@ function drawPill(s){
   const pill=$('#pill');
   const rec=s.recording;
   const waiting=(s.timeline||[]).filter(r=>r.state==='waiting').length;
+  // paused shows the whole queued backlog (waiting + held), not just waiting
+  const queued=(s.timeline||[]).filter(r=>r.state==='waiting'||r.state==='held').length;
   let cls='pill',html='',show=true;
   if(rec){
     cls='pill rec';
@@ -62,7 +73,7 @@ function drawPill(s){
     html=`transcribing ${n}${eta}`;
   }else if(s.paused){
     cls='pill amber';
-    html=`&#9208; paused${waiting?` &middot; ${waiting} waiting`:''}`;
+    html=`&#9208; paused${queued?` &middot; ${queued} waiting`:''}`;
   }else if(waiting){
     cls='pill';
     html=`${waiting} waiting`;
@@ -83,28 +94,81 @@ setInterval(()=>{
 },1000);
 
 /* ============================ tray ============================ *
- * Amber "needs you" band, ranked by the server. At most 4 rows; a 5th+
- * collapses into "and N more" (Builder B wires the expand).
+ * Amber "needs you" band. Rare, urgent kinds (recorder stall, failures) get one
+ * line PER ITEM. Chronic kinds aggregate to one line PER KIND that expands in
+ * place: flagged reviews -> "Flagged lines in N meetings", unknown voices ->
+ * "N voices need names". With a single meeting/voice, no aggregation: the line
+ * links straight through. trayOpen (toggled by trayExpand) folds into the
+ * signature so an expanded group survives the 2s polls.
  */
-const TRAY_VERB={recorder_stall:'Fix',failed:'Retry',review:'Review',unknown_voice:'Name'};
+function _trayVerb(label,onclick){
+  return `<button class="btn mini tw-verb" type="button" onclick="${onclick}">${label}</button>`;
+}
+function _trayRow(title,detail,verb){
+  return `<div class="trayrow">
+    <span class="tw-title">${esc(title)}</span>
+    <span class="tw-detail">${esc(detail)}</span>
+    ${verb}</div>`;
+}
+function _trayAgg(label,verb){
+  return `<div class="trayrow"><span class="tw-title agg">${esc(label)}</span>${verb}</div>`;
+}
+function _traySub(title,meta,count,href){
+  return `<div class="traysub" onclick="location.href=${href}" tabindex="0">
+    <span class="ts-title">${esc(title)}</span>
+    <span class="ts-meta">${meta}</span>
+    ${count?`<span class="ts-count">${esc(count)}</span>`:''}</div>`;
+}
 function drawTray(s){
   const tray=$('#tray');
   const items=s.tray||[];
   if(!items.length){tray.hidden=true;tray.dataset.sig='';tray.innerHTML='';return;}
-  // trayExpanded (set by trayExpand) folds into the signature so toggling it
-  // rebuilds, and so a later poll keeps the tray expanded instead of collapsing it
-  const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count]))+'|'+trayExpanded;
+  const stalls=items.filter(t=>t.kind==='recorder_stall');
+  const fails=items.filter(t=>t.kind==='failed');
+  const reviews=items.filter(t=>t.kind==='review');
+  const voices=items.filter(t=>t.kind==='unknown_voice');
+  // the two expand flags fold into the signature so a poll keeps them open
+  const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count]))
+    +'|'+trayOpen.review+'|'+trayOpen.voices;
   if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
   tray.dataset.sig=sig;tray.hidden=false;
-  const CAP=4,shown=trayExpanded?items:items.slice(0,CAP),more=trayExpanded?0:items.length-CAP;
-  tray.innerHTML=`<div class="trayhdr">Needs you &middot; ${items.length}</div>`
-    +shown.map(t=>`<div class="trayrow">
-      <span class="tw-title">${esc(t.title)}</span>
-      <span class="tw-detail">${esc(t.detail)}</span>
-      <button class="btn mini tw-verb" type="button"
-        onclick="trayAct('${escJs(t.kind)}','${escJs(t.target)}')">${TRAY_VERB[t.kind]||'Open'}</button>
-    </div>`).join('')
-    +(more>0?`<button class="traymore" type="button" onclick="trayExpand()">and ${more} more&#8230;</button>`:'');
+
+  let h=`<div class="trayhdr">Needs you</div>`;
+  // rare + urgent: one line each, acted on in place
+  for(const t of stalls)
+    h+=_trayRow(t.title,t.detail,_trayVerb('Fix',`trayAct('recorder_stall','${escJs(t.target)}')`));
+  for(const t of fails)
+    h+=_trayRow(t.title,t.detail,_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
+
+  // flagged reviews: 1 -> direct; 2+ -> one line that expands to per-meeting rows
+  if(reviews.length===1)
+    h+=_trayRow(reviews[0].title,reviews[0].detail,
+        _trayVerb('Review &#8594;',`trayAct('review','${escJs(reviews[0].target)}')`));
+  else if(reviews.length>1){
+    h+=_trayAgg(`Flagged lines in ${reviews.length} meetings`,
+        _trayVerb(trayOpen.review?'Hide':'Review &#8594;',`trayExpand('review')`));
+    if(trayOpen.review)h+=reviews.map(t=>{
+      const r=rowById(t.target);
+      const meta=r&&r.date?esc(shortDate(r.date)):'';
+      return _traySub(t.title,meta,t.count+' to check',
+        `'/?review='+encodeURIComponent('${escJs(t.target)}')`);
+    }).join('');
+  }
+
+  // unknown voices: 1 -> direct; 2+ -> one line that expands to per-voice rows
+  if(voices.length===1)
+    h+=_trayRow(voices[0].title,voices[0].detail,
+        _trayVerb('Name &#8594;',`trayAct('unknown_voice','${escJs(voices[0].target)}')`));
+  else if(voices.length>1){
+    h+=_trayAgg(`${voices.length} voices need names`,
+        _trayVerb(trayOpen.voices?'Hide':'Name &#8594;',`trayExpand('voices')`));
+    if(trayOpen.voices)h+=voices.map(t=>{
+      const n=t.count;
+      return _traySub(t.title,'heard in '+n+' meeting'+(n!==1?'s':''),'',
+        `'/?who='+encodeURIComponent('${escJs(t.target)}')`);
+    }).join('');
+  }
+  tray.innerHTML=h;
 }
 
 /* ============================ timeline ============================ *
@@ -198,18 +262,19 @@ function bodyAndSlot(row){
       if(row.date)bits.push(shortDate(row.date));
       if(row.minutes!=null)bits.push(row.minutes+' min');
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
-      let badge='';
+      // the review count lives INSIDE the meta line as plain amber mono TEXT
+      // (no chip); forty chip-wearing rows read as a wall of warnings. Still
+      // click-to-review via the same bridge.
       if(row.review_substantial)
-        badge=`<span class="badge review yields" onclick="openReviewBadge('${escJs(row.id)}')" title="Step through the flagged segments">${row.review_substantial} to check</span>`;
+        bits.push(`<span class="rev" onclick="openReviewBadge('${escJs(row.id)}')" title="Step through the flagged segments">${row.review_substantial} to check</span>`);
       else if(row.review_minor)
-        badge=`<span class="badge minor yields" onclick="openReviewBadge('${escJs(row.id)}')" title="Minor crumbs to skim">${row.review_minor} minor</span>`;
+        bits.push(`<span class="rev minor" onclick="openReviewBadge('${escJs(row.id)}')" title="Minor crumbs to skim">${row.review_minor} minor</span>`);
       return `<div class="rbody">
           <div class="rtitle">${esc(row.title)}</div>
           <div class="rmeta">${bits.join(' &middot; ')}</div>
           ${row.has_summary&&row.summary?`<div class="rsummary">${esc(row.summary)}</div>`:''}
         </div>
         <div class="rslot">
-          ${badge}
           ${slotActions(
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen without opening">&#9654;</button>
              <button class="iact" type="button" onclick="openMeeting('${escJs(row.id)}')">Open</button>
@@ -273,18 +338,35 @@ function drawTimeline(s){
     $('#rail').hidden=true;tl.dataset.sig='NOMATCH:'+cat+':'+q;return;
   }
 
-  const ordered=sort==='name'
-    ? rows.slice().sort((a,b)=>(a.title||'').toLowerCase().localeCompare((b.title||'').toLowerCase())
-        ||(b.date||'').localeCompare(a.date||''))
-    : rows;   // by-date keeps the server's pinned + newest-first order
-
+  // ---- ordering + grouping ----
+  // by-name: one flat alphabetical list, letter groups (unchanged).
+  // by-date: the pinned actionable cluster first (one unlabeled group), then the
+  // ready rows sorted AND grouped by the SAME key (meeting date, newest first).
   const groups=[];
-  for(const r of ordered){
-    const key=sort==='name'?nameBucket(r.title):dateBucket(r.date);
-    if(!groups.length||groups[groups.length-1].key!==key)groups.push({key,rows:[]});
-    groups[groups.length-1].rows.push(r);
+  if(sort==='name'){
+    const ordered=rows.slice().sort((a,b)=>
+      (a.title||'').toLowerCase().localeCompare((b.title||'').toLowerCase())
+      ||(b.date||'').localeCompare(a.date||''));
+    for(const r of ordered){
+      const key=nameBucket(r.title);
+      if(!groups.length||groups[groups.length-1].key!==key)groups.push({key,rows:[]});
+      groups[groups.length-1].rows.push(r);
+    }
+  }else{
+    const pinned=rows.filter(r=>PINNED.has(r.state)).sort((a,b)=>
+      (PIN_ORDER[a.state]-PIN_ORDER[b.state])||(b.when||'').localeCompare(a.when||''));
+    const rest=rows.filter(r=>!PINNED.has(r.state)).sort((a,b)=>
+      dateKey(b).localeCompare(dateKey(a))||(b.when||'').localeCompare(a.when||''));
+    if(pinned.length)groups.push({key:'',pinned:true,rows:pinned});
+    for(const r of rest){
+      const key=dateBucket(dateKey(r));
+      const last=groups[groups.length-1];
+      if(!last||last.pinned||last.key!==key)groups.push({key,rows:[]});
+      groups[groups.length-1].rows.push(r);
+    }
   }
 
+  const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
   const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
   // never wipe a half-typed name in a needs_name field; a later unchanged poll
@@ -294,27 +376,36 @@ function drawTimeline(s){
   if(ae&&tl.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName))return;
   tl.dataset.sig=sig;
   tl.innerHTML=groups.map((g,i)=>
-    `<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`
+    (g.pinned?'':`<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`)
     +g.rows.map(rowHTML).join('')).join('');
   drawRail(groups,q.length>0,sort);
 }
 
-/* jump rail: year / month, only at 3+ groups with no active search */
+/* jump rail: regenerated from the ORDERED date groups (the pinned cluster has no
+ * rail entry). By date: TODAY/YST first, then a year anchor before each year's
+ * first month, months beneath. By name: the letter groups. 3+ groups, no search. */
+function _railBtn(i,g,short){
+  return `<button class="railbtn" type="button" onclick="railJump(${i})"
+    title="Jump to ${esc(g.key)} (${g.rows.length})">${esc(short)}</button>`;
+}
 function drawRail(groups,hasSearch,sort){
   const rail=$('#rail');
-  if(groups.length<3||hasSearch){rail.hidden=true;rail.innerHTML='';return;}
+  const railGroups=groups.filter(g=>!g.pinned);        // the pinned cluster is never in the rail
+  if(railGroups.length<3||hasSearch){rail.hidden=true;rail.innerHTML='';return;}
   rail.hidden=false;
   let lastYr='';
   rail.innerHTML=groups.map((g,i)=>{
-    let head='',short;
-    if(sort==='date'){
-      const yr=(g.key.match(/\d{4}/)||[])[0]
-        ||(g.rows[0]&&g.rows[0].date?g.rows[0].date.slice(0,4):'');
-      if(yr&&yr!==lastYr){head=`<div class="railyr">${yr}</div>`;lastYr=yr;}
-      short=g.key==='Today'?'TDY':g.key==='Yesterday'?'YST':g.key==='Undated'?'NA':g.key.slice(0,3);
-    }else{short=g.key;}
-    return head+`<button class="railbtn" type="button" onclick="railJump(${i})"
-      title="Jump to ${esc(g.key)} (${g.rows.length})">${esc(short)}</button>`;
+    if(g.pinned)return '';
+    if(sort!=='date')return _railBtn(i,g,g.key);
+    if(g.key==='Today')return _railBtn(i,g,'TDY');
+    if(g.key==='Yesterday')return _railBtn(i,g,'YST');
+    if(g.key==='Undated')return _railBtn(i,g,'NA');
+    // a month group: anchor its year the first time that year appears
+    const yr=(g.key.match(/\d{4}/)||[])[0]
+      ||(g.rows[0]&&g.rows[0].date?g.rows[0].date.slice(0,4):'');
+    let head='';
+    if(yr&&yr!==lastYr){head=`<div class="railyr">${yr}</div>`;lastYr=yr;}
+    return head+_railBtn(i,g,g.key.slice(0,3));
   }).join('');
 }
 function railJump(i){const el=document.getElementById('grp-'+i);
@@ -480,8 +571,10 @@ function ppPause(btn){
 }
 
 /* ------------------------------------------------------------- tray -------- */
-let trayExpanded=false;
-function trayExpand(){trayExpanded=true;drawTray(S);}
+// which aggregate groups are expanded; folded into drawTray's signature so a
+// poll never collapses one the user just opened
+let trayOpen={review:false,voices:false};
+function trayExpand(group){trayOpen[group]=!trayOpen[group];drawTray(S);}
 async function trayAct(kind,target){
   const ev=window.event;
   if(kind==='recorder_stall'){
