@@ -17,7 +17,7 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'");}
 
 let S=null;
 
-// ---- small formatters (mono data uses tabular-nums via CSS) ----
+// ---- small formatters (digits align via the body's tabular-nums) ----
 function clock(secs){secs=Math.max(0,Math.floor(secs||0));
   const h=Math.floor(secs/3600),m=Math.floor(secs%3600/60),s=secs%60;
   return (h?h+':'+String(m).padStart(2,'0'):String(m))+':'+String(s).padStart(2,'0');}
@@ -119,6 +119,9 @@ function _traySub(title,meta,count,href){
     <span class="ts-meta">${meta}</span>
     ${count?`<span class="ts-count">${esc(count)}</span>`:''}</div>`;
 }
+// an aggregate of MORE than this many items never expands in the tray: the
+// first expansion just rebuilt the 40-row wall inside it (DESIGN, 2026-07-12)
+const TRAY_EXPAND_MAX=8;
 function drawTray(s){
   const tray=$('#tray');
   const items=s.tray||[];
@@ -127,9 +130,10 @@ function drawTray(s){
   const fails=items.filter(t=>t.kind==='failed');
   const reviews=items.filter(t=>t.kind==='review');
   const voices=items.filter(t=>t.kind==='unknown_voice');
-  // the two expand flags fold into the signature so a poll keeps them open
+  // the expand flags AND the library filter fold into the signature so a poll
+  // keeps an open group open and an active line active
   const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count]))
-    +'|'+trayOpen.review+'|'+trayOpen.voices;
+    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly;
   if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
   tray.dataset.sig=sig;tray.hidden=false;
 
@@ -140,10 +144,18 @@ function drawTray(s){
   for(const t of fails)
     h+=_trayRow(t.title,t.detail,_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
 
-  // flagged reviews: 1 -> direct; 2+ -> one line that expands to per-meeting rows
+  // flagged reviews: 1 -> direct; 2..8 -> one line that expands to per-meeting
+  // rows; MORE than 8 -> the line FILTERS the library to flagged rows instead
+  // (full-size rows out there, never a second smaller library in here) and
+  // reads as active while the filter is on
   if(reviews.length===1)
     h+=_trayRow(reviews[0].title,reviews[0].detail,
         _trayVerb('Review &#8594;',`trayAct('review','${escJs(reviews[0].target)}')`));
+  else if(reviews.length>TRAY_EXPAND_MAX){
+    h+=`<div class="trayrow${flaggedOnly?' active':''}"><span class="tw-title agg">${
+      esc(`Flagged lines in ${reviews.length} meetings`)}</span>${
+      _trayVerb(flaggedOnly?'Showing &#10005;':'Review &#8594;','flaggedToggle()')}</div>`;
+  }
   else if(reviews.length>1){
     h+=_trayAgg(`Flagged lines in ${reviews.length} meetings`,
         _trayVerb(trayOpen.review?'Hide':'Review &#8594;',`trayExpand('review')`));
@@ -155,10 +167,15 @@ function drawTray(s){
     }).join('');
   }
 
-  // unknown voices: 1 -> direct; 2+ -> one line that expands to per-voice rows
+  // unknown voices: 1 -> direct; 2..8 -> one line that expands to per-voice
+  // rows; more than 8 never expands (name them one at a time, largest first)
   if(voices.length===1)
     h+=_trayRow(voices[0].title,voices[0].detail,
         _trayVerb('Name &#8594;',`trayAct('unknown_voice','${escJs(voices[0].target)}')`));
+  else if(voices.length>TRAY_EXPAND_MAX){
+    h+=_trayAgg(`${voices.length} voices need names`,
+        _trayVerb('Name &#8594;',`trayAct('unknown_voice','${escJs(voices[0].target)}')`));
+  }
   else if(voices.length>1){
     h+=_trayAgg(`${voices.length} voices need names`,
         _trayVerb(trayOpen.voices?'Hide':'Name &#8594;',`trayExpand('voices')`));
@@ -204,9 +221,10 @@ function bodyAndSlot(row){
   switch(row.state){
 
     case 'recording':{
+      // the elapsed clock is the one piece of true mono data in a row slot
       const state=row.paused
-        ?`&#9208; paused <span id="recRowClock">${clock(row.elapsed_secs)}</span>`
-        :`<span class="capdot"></span>capturing <span id="recRowClock">${clock(row.elapsed_secs)}</span>`;
+        ?`&#9208; paused <span id="recRowClock" class="mono">${clock(row.elapsed_secs)}</span>`
+        :`<span class="capdot"></span>capturing <span id="recRowClock" class="mono">${clock(row.elapsed_secs)}</span>`;
       return `<div class="rbody"><div class="rtitle">Recording now&#8230;</div></div>
         <div class="rslot"><span class="rstate">${state}</span></div>`;
     }
@@ -262,17 +280,31 @@ function bodyAndSlot(row){
       if(row.date)bits.push(shortDate(row.date));
       if(row.minutes!=null)bits.push(row.minutes+' min');
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
-      // the review count lives INSIDE the meta line as plain amber mono TEXT
+      // the review count lives INSIDE the meta line as plain amber TEXT
       // (no chip); forty chip-wearing rows read as a wall of warnings. Still
       // click-to-review via the same bridge.
       if(row.review_substantial)
         bits.push(`<span class="rev" onclick="openReviewBadge('${escJs(row.id)}')" title="Step through the flagged segments">${row.review_substantial} to check</span>`);
       else if(row.review_minor)
         bits.push(`<span class="rev minor" onclick="openReviewBadge('${escJs(row.id)}')" title="Minor crumbs to skim">${row.review_minor} minor</span>`);
+      // click-to-expand peek (replaces the old hover tooltip): the FULL summary
+      // and committed next steps come from the already-polled meetings entry
+      // (the timeline row only carries a preview); no extra fetch. Rendered
+      // collapsed; .row.open (from OPEN) reveals it, height animated in CSS.
+      const m=meetingByBase(row.id)||{};
+      const sum=m.summary||row.summary||'';
+      const steps=(m.next_steps&&m.next_steps.length)
+        ?`<div class="rexsteps-h">Committed next steps</div><ul class="rexsteps">${
+            m.next_steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'';
+      const exp=`<div class="rexp"><div class="rexpin">
+          <div class="rexsum${sum?'':' muted'}">${esc(sum||'No summary yet.')}</div>${steps}
+          <a class="rexopen" href="#m/${encodeURIComponent(row.id)}">Open transcript &#8594;</a>
+        </div></div>`;
       return `<div class="rbody">
           <div class="rtitle">${esc(row.title)}</div>
           <div class="rmeta">${bits.join(' &middot; ')}</div>
           ${row.has_summary&&row.summary?`<div class="rsummary">${esc(row.summary)}</div>`:''}
+          ${exp}
         </div>
         <div class="rslot">
           ${slotActions(
@@ -299,17 +331,36 @@ function bodyAndSlot(row){
       return `<div class="rbody"><div class="rtitle">${esc(row.title||'')}</div></div>`;
   }
 }
+// expanded ready rows (click-to-expand peek), keyed by row id. Multiple rows may
+// stay open; the flag folds into sigOf so expansions survive the 2s polls.
+const OPEN=new Set();
+function toggleExpand(id){
+  OPEN.has(id)?OPEN.delete(id):OPEN.add(id);
+  // flip the live row now (the CSS grid-rows transition animates the height,
+  // ~180ms; none under reduced motion); the next poll re-renders it already
+  // in this state, so nothing snaps back
+  const el=document.querySelector('.row[data-id="'+CSS.escape(id)+'"]');
+  if(el)el.classList.toggle('open',OPEN.has(id));
+}
+
 function rowHTML(row){
-  return `<div class="row" data-state="${esc(row.state)}" data-id="${esc(row.id)}" tabindex="0">`
+  const open=row.state==='ready'&&OPEN.has(row.id);
+  return `<div class="row${open?' open':''}" data-state="${esc(row.state)}" data-id="${esc(row.id)}" tabindex="0">`
     +gutter(row)+bodyAndSlot(row)+`</div>`;
 }
 
 // fields that decide whether a rebuild is needed -- elapsed_secs is deliberately
-// excluded (the 1s ticker owns it) so a recording never thrashes the list
-function sigOf(r){return [r.id,r.state,r.title,r.date,r.pct,r.stage,r.eta,r.category,
+// excluded (the 1s ticker owns it) so a recording never thrashes the list.
+// An expanded row folds its open flag (and the full summary/steps it shows)
+// into the signature, so the 2s poll re-renders it still open.
+function sigOf(r){
+  const open=r.state==='ready'&&OPEN.has(r.id);
+  const m=open?(meetingByBase(r.id)||{}):null;
+  return [r.id,r.state,r.title,r.date,r.pct,r.stage,r.eta,r.category,
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
   r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
-  (r.speakers||[]).join(',')];}
+  (r.speakers||[]).join(','),
+  open?1:0,m?(m.summary||''):'',m?(m.next_steps||[]).join(''):''];}
 
 function drawTimeline(s){
   const tl=$('#timeline');
@@ -320,6 +371,9 @@ function drawTimeline(s){
   const all=s.timeline||[];
   const rows=all.filter(r=>{
     if(cat&&r.state==='ready'&&r.category!==cat)return false;   // tag filter: ready rows only
+    // the tray's >8 flagged aggregate: ready rows with nothing to check drop
+    // out; the pinned actionable cluster (recording..waiting) stays visible
+    if(flaggedOnly&&r.state==='ready'&&!(r.review_substantial>0))return false;
     if(q){
       // match the visible name (a needs_name row shows its suggested title) plus speakers
       const hay=((r.title||'')+' '+(r.suggested_title||'')+' '+((r.speakers||[]).join(' '))).toLowerCase();
@@ -328,14 +382,14 @@ function drawTimeline(s){
     return true;
   });
 
-  // empty states (serif, centered), rendered inside the timeline
+  // empty states (quiet, centered), rendered inside the timeline
   if(all.length===0){
     tl.innerHTML=`<p class="empty">Record a meeting from the menu bar.</p>`;
     $('#rail').hidden=true;tl.dataset.sig='EMPTY';return;
   }
   if(rows.length===0){
     tl.innerHTML=`<p class="empty">No matches.</p>`;
-    $('#rail').hidden=true;tl.dataset.sig='NOMATCH:'+cat+':'+q;return;
+    $('#rail').hidden=true;tl.dataset.sig='NOMATCH:'+cat+':'+q+':'+flaggedOnly;return;
   }
 
   // ---- ordering + grouping ----
@@ -367,7 +421,7 @@ function drawTimeline(s){
   }
 
   const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
-  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q;
+  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
   // never wipe a half-typed name in a needs_name field; a later unchanged poll
   // (or a blur) lets the rebuild happen. Only INPUT/SELECT focus blocks it, so
@@ -412,7 +466,13 @@ function railJump(i){const el=document.getElementById('grp-'+i);
   if(el)el.scrollIntoView({behavior:'smooth',block:'start'});}
 
 /* ============================ render loop ============================ */
-function render(){if(!S)return;drawPill(S);drawTray(S);drawTimeline(S);afterRender();}
+// While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
+// live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
+// (guard on route); a pending deep-link build completes once S has arrived.
+function render(){if(!S)return;drawPill(S);drawTray(S);
+  const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
+  if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
+  drawTimeline(S);afterRender();}
 async function refresh(){try{S=await api('/api/state');render();}catch(e){}}
 
 /* ============================ theme (reused convention) ============================ *
@@ -438,6 +498,17 @@ applyTheme(themeNow());
 $('#sort').onchange=()=>{localStorage.setItem('stt_msort',$('#sort').value);render();};
 $('#filter').onchange=()=>{localStorage.setItem('stt_mcat',$('#filter').value);render();};
 $('#search').oninput=()=>{render();scheduleSearch();};
+$('#flagchip').onclick=()=>flaggedClear();
+// ready-row click-to-expand: clicking the row body toggles the summary peek;
+// its controls (buttons, links, checkbox, category dot, inputs, the review
+// count) never do, and neither does a click that is selecting text
+$('#timeline').addEventListener('click',e=>{
+  const row=e.target.closest('.row');
+  if(!row||row.dataset.state!=='ready')return;
+  if(e.target.closest('button,a,input,select,textarea,label,.rev'))return;
+  if(window.getSelection&&String(window.getSelection()))return;
+  toggleExpand(row.dataset.id);
+});
 $('#themeDot').onclick=cycleTheme;
 $('#gear').onclick=()=>{location.href='/?ui=old';};   // bridge until the settings drawer ships
 $('#pill').onclick=toggleProcess;
@@ -575,6 +646,11 @@ function ppPause(btn){
 // poll never collapses one the user just opened
 let trayOpen={review:false,voices:false};
 function trayExpand(group){trayOpen[group]=!trayOpen[group];drawTray(S);}
+// the >8 flagged aggregate's library filter: only ready rows with lines to
+// check show (the pinned actionable cluster stays); the header chip clears it
+let flaggedOnly=false;
+function flaggedToggle(){flaggedOnly=!flaggedOnly;render();}
+function flaggedClear(){flaggedOnly=false;render();}
 async function trayAct(kind,target){
   const ev=window.event;
   if(kind==='recorder_stall'){
@@ -707,7 +783,10 @@ function rowRetry(id){                    // re-run a failed source still in the
   const r=rowById(id);if(!r||!r.source_file)return;
   api('/api/run',{files:[r.source_file],...runOpts()}).then(refresh);
 }
-function openMeeting(id){location.href='/?open='+encodeURIComponent(id);}
+// in-shell route: set the hash and let the hashchange handler open the page
+// (Builder A, at the bottom). No navigation away; back/forward and deep links work.
+function openMeeting(id){location.hash='#m/'+encodeURIComponent(id);}
+// review/who still bridge to the old page until Builder B ports them into the shell
 function openReviewBadge(id){location.href='/?review='+encodeURIComponent(id);}
 function cycleCat(ev,id){                 // untagged -> work -> personal -> untagged
   if(ev)ev.stopPropagation();
@@ -748,6 +827,8 @@ function rowMenu(id,ev){
 function fillRowMenu(pop,id){
   const m=meetingByBase(id)||{};
   pop.innerHTML=`
+    <button class="ppitem" type="button" onclick="rmAsk('${escJs(id)}')">Ask a question</button>
+    <div class="ppsep"></div>
     <button class="ppitem" type="button" onclick="rmExport('${escJs(id)}','docx',this)">Export Word</button>
     <button class="ppitem" type="button" onclick="rmExport('${escJs(id)}','pdf',this)">Export PDF</button>
     <button class="ppitem" type="button" onclick="rmCopy('${escJs(id)}',this)">Copy transcript</button>
@@ -772,6 +853,14 @@ async function rmCopy(id,btn){
     await navigator.clipboard.writeText(txt);
     btn.textContent='Copied ✓';
   }catch(e){btn.textContent='Copy failed';}
+}
+// Ask a question: open the meeting page and land focused in its ask input.
+// pendingOpen is the focus-after-build flag buildMeeting consumes (no timeouts).
+function rmAsk(id){
+  closePop();
+  if(route.view==='meeting'&&route.base===id){const q=$('#maskq');if(q)q.focus();return;}
+  pendingOpen={base:id,ask:true};
+  location.hash='#m/'+encodeURIComponent(id);
 }
 function rmReveal(id){api('/api/export',{base:id,fmt:'reveal'});closePop();}
 function rmArchive(id){api('/api/archive_meeting',{base:id}).then(()=>{closePop();refresh();});}
@@ -999,8 +1088,16 @@ function selAllShown(){
 }
 
 /* --------------------------------------------------------------- search ---- *
- * Debounced full-text (>=3 chars) into #searchhits; a hit bridges to ?open= at
- * click time. The client-side title filter is A's, already wired on #search. */
+ * Debounced full-text (>=3 chars) into #searchhits; a hit opens the in-shell
+ * meeting page (#m/<base>) and seeks the audio to the hit's moment via mSeek
+ * once the page is built. The client-side title filter is A's, on #search. */
+// a hit carries its start time in seconds (the old page passed the segment
+// index to openTranscript; the new page's mSeek takes the time directly)
+function openHit(base,t){
+  if(route.view==='meeting'&&route.base===base){mSeek(t);return;}
+  pendingOpen={base,seek:t};
+  location.hash='#m/'+encodeURIComponent(base);
+}
 let searchTimer=null;
 function scheduleSearch(){
   clearTimeout(searchTimer);
@@ -1015,7 +1112,7 @@ function scheduleSearch(){
     if(!r.hits.length){box.innerHTML=`<div class="hitshdr">No transcript matches &#8220;${esc(r.query)}&#8221;.</div>`;return;}
     box.innerHTML=`<div class="hitshdr">Said in transcripts &middot; ${r.total} match${r.total>1?'es':''}</div>`
       +r.hits.map(h=>{const mm=Math.floor(h.start/60),ss=String(Math.floor(h.start%60)).padStart(2,'0');
-        return `<div class="hit" onclick="location.href='/?open='+encodeURIComponent('${escJs(h.base)}')" title="Open the transcript">
+        return `<div class="hit" onclick="openHit('${escJs(h.base)}',${Number(h.start)||0})" title="Open the transcript at this moment">
           <span class="hit-t mono">${mm}:${ss}</span>
           <span class="hit-w">${esc(h.who)}</span>
           <span class="hit-x">${hl(h.snippet)} <span class="hit-b">${esc(h.base)}</span></span></div>`;}).join('');
@@ -1034,3 +1131,499 @@ function afterRender(){
     if(anchor)_posPop(rm,anchor);else closePop();
   }
 }
+
+/* ============================================================================
+   Builder A: THE MEETING PAGE. A hash route #m/<base> opens ONE scrollable
+   document in place of the timeline -- header, docked audio, summary, flagged
+   strip, transcript, pinned ask bar -- replacing the old page's Read modal,
+   Summary modal, and Ask flyout. The reader (segment render, audio seek +
+   playing-line highlight, in-page find) and the ask thread are ported from the
+   old app.js with the same endpoint semantics; naming/review/editing land in
+   the next pass (seam: reviewStep, on the flagged strip).
+   ============================================================================ */
+
+// bright per-speaker palette, reused verbatim from the old reader's sdot colors
+const HUES=['#0071e3','#34c759','#ff9f0a','#ff375f','#bf5af2','#64d2ff','#ffd60a','#ac8e68'];
+
+let route={view:'timeline',base:null};   // desired view, derived from the hash
+let savedScroll=0;                        // timeline scroll, restored on return
+let MP=null;                              // meeting page + audio player state
+let MF=null;                              // find-in-transcript state {q,rx,hits,cur}
+let mFindT=null;
+const MRATES=[1,1.25,1.5,2];
+const askThreads={};                      // base -> {hist:[{q,a,err}], busy}; dies with the page
+let pendingOpen=null;                     // {base, seek?:secs, ask?:true} -- one deep action
+                                          // (search-hit seek / row-menu ask) consumed by the
+                                          // next buildMeeting; a flag, never a timeout
+
+function parseHash(){
+  const h=location.hash||'';
+  const m=h.match(/^#m\/(.+)$/);
+  return m?{view:'meeting',base:decodeURIComponent(m[1])}:{view:'timeline',base:null};
+}
+function applyRoute(){
+  if(route.view==='meeting')enterMeeting(route.base);
+  else exitMeeting();
+}
+function _instantScroll(y){
+  const el=document.documentElement,prev=el.style.scrollBehavior;
+  el.style.scrollBehavior='auto';window.scrollTo(0,y||0);el.style.scrollBehavior=prev;
+}
+function enterMeeting(base){
+  const already=document.body.classList.contains('route-meeting');
+  if(!already)savedScroll=window.scrollY;   // capture the list position once, on entry
+  document.body.classList.add('route-meeting');
+  $('#meetingpage').hidden=false;
+  closePop();stopClip();
+  document.querySelectorAll('#timeline audio').forEach(a=>{try{a.pause();}catch(e){}});
+  buildMeeting(base);
+  _instantScroll(0);
+}
+function exitMeeting(){
+  if(!document.body.classList.contains('route-meeting'))return;
+  teardownMeeting();
+  document.body.classList.remove('route-meeting');
+  const p=$('#meetingpage');p.hidden=true;p.innerHTML='';
+  if(S)drawTimeline(S);                      // repaint the (possibly changed) list
+  _instantScroll(savedScroll);
+}
+function teardownMeeting(){
+  if(MP){
+    if(MP.audio){try{MP.audio.pause();}catch(e){}MP.audio.src='';MP.audio=null;}
+    if(MP.tick){clearInterval(MP.tick);MP.tick=null;}
+  }
+  window.removeEventListener('scroll',mOnScroll);
+  document.removeEventListener('keydown',mKey);
+  MF=null;MP=null;
+}
+// called by the poll's render() while a meeting is open: finish a deep-link build
+// that was waiting for S, without ever rebuilding an already-built page
+function maybeBuildPending(){
+  if(route.view!=='meeting')return;
+  if(!MP||MP.base!==route.base||MP.pending)buildMeeting(route.base);
+}
+function mBack(ev){if(ev)ev.preventDefault();location.hash='';}   // fires hashchange -> timeline
+
+/* ------------------------------------------------------ build the page ----- */
+async function buildMeeting(base){
+  const m=meetingByBase(base);
+  const page=$('#meetingpage');
+  if(!S||!m){                                // deep link before S loaded, or unknown base
+    page.innerHTML='<div class="mloading"><span class="spin"></span> Loading meeting&#8230;</div>';
+    MP={base,pending:true};
+    return;
+  }
+  if(MP&&MP.base===base&&MP.built)return;    // poll re-entry: already built
+  teardownMeeting();
+  MP={base,built:true,audio:null,segs:[],color:{},follow:true,rate:1,
+      hasAudio:!!m.audio,tick:null,autoScroll:false,nowIdx:null};
+
+  page.innerHTML=
+    _mHeader(m,base)
+    +(m.audio?_mAudioBar():'')
+    +_mSummary(m)
+    +_mFlagged(m)
+    +_mTranscriptShell()
+    +_mAsk(base);
+
+  if(m.audio){mAudioInit(base);mStickyTop();}
+  mAskInit(base);
+  // a pending deep action lands once, as soon as the page skeleton exists:
+  // seek the audio to a search hit's moment (the transcript scroll follows
+  // after the segments load, below) or focus the ask input
+  if(pendingOpen){
+    const p=pendingOpen;pendingOpen=null;    // stale-for-another-base also drops here
+    if(p.base===base){
+      if(p.seek!=null){MP.seekTo=p.seek;if(MP.hasAudio)mSeek(p.seek);}
+      if(p.ask){const q=$('#maskq');if(q)q.focus();}
+    }
+  }
+  document.removeEventListener('keydown',mKey);
+  document.addEventListener('keydown',mKey);   // slash / Cmd-F focus the find field
+
+  let d;
+  try{d=await api('/api/transcript?base='+encodeURIComponent(base));}
+  catch(e){d={error:'The transcript could not be loaded.'};}
+  if(route.view!=='meeting'||route.base!==base)return;   // navigated away mid-fetch
+  const body=$('#mtbody');if(!body)return;
+  if(d.error){body.innerHTML='<div class="mterr">'+esc(d.error)+'</div>';return;}
+  MP.segs=d.segments||[];
+  (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
+  body.innerHTML=MP.segs.map(mSegHTML).join('')
+    ||'<div class="mterr">This transcript has no lines yet.</div>';
+  mLegend(d);
+  // a search hit's moment: scroll its line into view now that the segments
+  // exist (with audio, mSeek above already cued playback; the follow highlight
+  // owns the .mnow mark from here, so only mark it ourselves when audioless)
+  if(MP.seekTo!=null){
+    const t=MP.seekTo;MP.seekTo=null;
+    const i=MP.segs.findIndex(g=>t>=g.start&&t<g.end);
+    const el=i>=0?document.getElementById('mseg'+i):null;
+    if(el){
+      if(!MP.hasAudio){el.classList.add('mnow');MP.nowIdx=i;}
+      el.scrollIntoView({block:'center'});
+    }
+  }
+}
+
+/* --------------------------------------------------------- header block ---- */
+function _mHeader(m,base){
+  const bits=[];
+  if(m.date)bits.push(esc(shortDate(m.date)));
+  if(m.minutes!=null)bits.push(m.minutes+' min');
+  if(m.speakers&&m.speakers.length)bits.push(esc(m.speakers.join(', ')));
+  const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
+  const dotTitle=dot==='work'?'Work':dot==='personal'?'Personal':'Untagged';
+  const strict=m.strict?'<span class="mchip">strict</span>':'';
+  const flagged=m.flagged>0?`<span class="mflagnote">${m.flagged} flagged</span>`:'';
+  return `<div class="mhead">
+    <a class="mback" href="#" onclick="mBack(event)">&#8592; Meetings</a>
+    <h1 class="mtitle">${esc(m.title||base)}</h1>
+    <div class="mmeta">${bits.join(' &middot; ')}
+      <span class="mcat ${dot}" title="${dotTitle}"></span>${strict}${flagged}</div>
+  </div>`;
+}
+
+/* ---------------------------------------------------- docked audio bar ----- *
+ * A custom player (play/pause, buffered scrubber, mono remaining-time, rate
+ * cycle, follow toggle). Sticky just under the shell header. Ported behaviors:
+ * a line click seeks (readyState guard from tvSeek), the playing line highlights,
+ * and the page auto-follows until the reader scrolls against it. */
+function _mAudioBar(){
+  return `<div class="maudio" id="maudio">
+    <button class="mpp iact play" id="mpp" type="button" onclick="mPlayPause()" title="Play / pause">&#9654;</button>
+    <span class="mt mono" id="mcur">0:00</span>
+    <div class="mtrack" id="mtrack">
+      <div class="mbuf" id="mbuf"></div>
+      <input id="mseek" class="mseek" type="range" min="0" max="0" step="0.1" value="0"
+        aria-label="Scrub the recording"
+        onpointerdown="this.dataset.drag=1" onpointerup="this.removeAttribute('data-drag')"
+        oninput="mScrub(this.value)">
+    </div>
+    <span class="mt mono" id="mdur">0:00</span>
+    <span class="meta mono" id="meta" title="Time remaining">&#8722;0:00</span>
+    <button class="mrate" id="mrate" type="button" onclick="mCycleRate()" title="Playback speed">1&#215;</button>
+    <button class="mfollow" id="mfollow" type="button" onclick="mToggleFollow()"
+      aria-pressed="true" title="Auto-scroll to the line that is playing">follow</button>
+  </div>`;
+}
+function mAudioInit(base){
+  const a=new Audio('/api/audio?base='+encodeURIComponent(base));
+  a.preload='metadata';
+  MP.audio=a;
+  a.onloadedmetadata=mAudioTick;
+  a.ontimeupdate=mAudioTick;
+  a.onprogress=mBufTick;
+  a.onplay=a.onpause=mSyncPP;
+  a.onended=()=>{mSyncPP();mAudioTick();};
+  MP.tick=setInterval(mHighlight,300);        // keep the highlight live between timeupdates
+  window.addEventListener('scroll',mOnScroll,{passive:true});
+  mFollowUI();mSyncPP();
+}
+function mAudioTick(){
+  const a=MP&&MP.audio;if(!a)return;
+  const seek=$('#mseek'),cur=$('#mcur'),dur=$('#mdur'),eta=$('#meta');
+  const d=isFinite(a.duration)?a.duration:0;
+  if(seek&&!seek.dataset.drag){seek.max=d||0;seek.value=a.currentTime||0;}
+  if(cur)cur.textContent=clock(a.currentTime);
+  if(dur)dur.textContent=clock(d);
+  if(eta)eta.innerHTML='&#8722;'+clock(Math.max(0,d-(a.currentTime||0)));
+  mBufTick();mHighlight();
+}
+function mBufTick(){
+  const a=MP&&MP.audio,buf=$('#mbuf');if(!a||!buf)return;
+  const d=isFinite(a.duration)?a.duration:0;
+  let end=0;try{if(a.buffered.length)end=a.buffered.end(a.buffered.length-1);}catch(e){}
+  buf.style.width=(d?Math.min(100,end/d*100):0)+'%';
+}
+function mSyncPP(){const b=$('#mpp');if(b)b.innerHTML=(MP&&MP.audio&&!MP.audio.paused)?'&#10073;&#10073;':'&#9654;';}
+function mPlayPause(){const a=MP&&MP.audio;if(!a)return;
+  if(a.paused)a.play().catch(()=>{});else a.pause();mSyncPP();}
+function mScrub(v){const a=MP&&MP.audio;if(!a)return;a.currentTime=parseFloat(v)||0;mAudioTick();}
+function mCycleRate(){
+  if(!MP||!MP.audio)return;
+  MP.rate=MRATES[(MRATES.indexOf(MP.rate)+1)%MRATES.length];
+  MP.audio.playbackRate=MP.rate;
+  const b=$('#mrate');if(b)b.innerHTML=MP.rate+'&#215;';
+}
+// clicking any transcript line seeks there and (re)enables follow -- the reader
+// is navigating by transcript, so following the playhead is what they want
+function mSeek(t){
+  const a=MP&&MP.audio;if(!a)return;
+  MP.follow=true;mFollowUI();
+  const go=()=>{a.currentTime=t;a.play().catch(()=>{});mSyncPP();};
+  a.readyState>=1?go():a.addEventListener('loadedmetadata',go,{once:true});
+}
+function mHighlight(){
+  const a=MP&&MP.audio;if(!a||!MP.segs.length)return;
+  const t=a.currentTime;
+  const i=MP.segs.findIndex(g=>t>=g.start&&t<g.end);
+  if(i===MP.nowIdx)return;
+  if(MP.nowIdx!=null){const pe=document.getElementById('mseg'+MP.nowIdx);if(pe)pe.classList.remove('mnow');}
+  MP.nowIdx=i;
+  if(i<0)return;
+  const el=document.getElementById('mseg'+i);
+  if(!el)return;
+  el.classList.add('mnow');
+  if(MP.follow&&!a.paused){
+    MP.autoScroll=true;                         // suppress the follow-off from our own scroll
+    el.scrollIntoView({block:'center'});
+    clearTimeout(MP._asT);MP._asT=setTimeout(()=>{MP.autoScroll=false;},250);
+  }
+}
+function mOnScroll(){
+  if(!MP||MP.autoScroll)return;                 // ignore our own scrollIntoView
+  if(MP.follow){MP.follow=false;mFollowUI();}    // the reader scrolled against the follow
+}
+function mToggleFollow(){
+  if(!MP)return;
+  MP.follow=!MP.follow;mFollowUI();
+  if(MP.follow){MP.nowIdx=null;mHighlight();}     // snap back to the playing line
+}
+function mFollowUI(){
+  const b=$('#mfollow');if(!b)return;
+  b.classList.toggle('on',!!(MP&&MP.follow));
+  b.setAttribute('aria-pressed',(MP&&MP.follow)?'true':'false');
+}
+
+/* ------------------------------------------------------- summary section --- */
+function _mSummary(m){return `<section class="msection msummary" id="msummary">${_mSummaryInner(m)}</section>`;}
+function _mSummaryInner(m){
+  const has=m.summary&&m.summary.trim();
+  const steps=(m.next_steps&&m.next_steps.length)
+    ?`<div class="mstepshdr">Committed next steps</div><ul class="msteps">${m.next_steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'';
+  if(has){
+    return `<div class="mseclabel">Summary</div>
+      <div class="msumbody" id="msumbody">${esc(m.summary)}</div>${steps}
+      <div class="msumfoot"><button class="btn mini" id="mgenbtn" type="button" onclick="mGenSummary()">Regenerate summary</button></div>`;
+  }
+  // no summary yet: the old page's exact phrasing, with its em dash dropped for
+  // the new shell's no-em-dash house rule
+  const hint='No summary yet. Generate one below. '
+    +(S.llm_backend==='local'?'Runs locally; nothing leaves this Mac.':'Uses your cloud assistant.');
+  return `<div class="mseclabel">Summary</div>
+    <div class="msumbody muted" id="msumbody">${esc(hint)}</div>
+    <div class="msumfoot"><button class="btn primary mini" id="mgenbtn" type="button" onclick="mGenSummary()">Generate summary</button></div>`;
+}
+// wired: GET /api/suggest (same call + persistence as the old genSummary), then
+// refresh S and repaint the summary section. Failure (e.g. no local backend)
+// is surfaced inline, never a crash or a banner.
+async function mGenSummary(){
+  if(!MP)return;const base=MP.base;
+  const btn=$('#mgenbtn'),body=$('#msumbody');
+  if(btn){btn.disabled=true;btn.textContent='Generating…';}
+  const wait='Reading the transcript… '+(S.llm_backend==='local'?'(~10-20s)':'(a few seconds)');
+  if(body)body.innerHTML='<span class="spin"></span> '+esc(wait);
+  let r;
+  try{r=await api('/api/suggest?base='+encodeURIComponent(base));}
+  catch(e){r={error:'The summary service is unavailable.'};}
+  if(route.view!=='meeting'||route.base!==base)return;
+  if(r&&r.summary){
+    await refresh();
+    if(route.view!=='meeting'||route.base!==base)return;
+    const sec=$('#msummary');if(sec)sec.innerHTML=_mSummaryInner(meetingByBase(base)||{});
+  }else{
+    const sec=$('#msummary');if(sec)sec.innerHTML=_mSummaryInner(meetingByBase(base)||{});
+    const b2=$('#msumbody');
+    if(b2){b2.classList.add('mterr');b2.textContent=(r&&r.error)||'No summary produced.';}
+  }
+}
+
+/* -------------------------------------------------------- flagged strip ---- *
+ * Rendering only. Stepping/actions are Builder B's: reviewStep() is the seam. */
+function _mFlagged(m){
+  if(!(m.flagged>0))return '';
+  return `<button class="mflagged" type="button" onclick="reviewStep()"
+    title="Step through the flagged lines">&#9888; ${m.flagged} flagged line${m.flagged>1?'s':''}</button>`;
+}
+function reviewStep(){/* Builder B: step through and act on the flagged segments */}
+
+/* ----------------------------------------------------- transcript + find --- *
+ * Time (mono, click to seek), speaker (weight 600 + per-speaker sdot color),
+ * text; flagged lines get the amber wash. Find is ported from the old reader:
+ * occurrence count, prev/next wrap, highlight + scroll, Escape clears the find
+ * (not the page), slash or Cmd-F focuses the field. */
+function _mTranscriptShell(){
+  return `<section class="msection mtrans">
+    <div class="msechead"><span class="mseclabel">Transcript</span>
+      <span id="mlegend" class="mlegend"></span></div>
+    <div class="mfindbar">
+      <input id="mfind" class="mfind" type="search" autocomplete="off" spellcheck="false"
+        placeholder="Find in transcript ( / or &#8984;F )" aria-label="Find in transcript"
+        oninput="mFindInput()" onkeydown="mFindKey(event)">
+      <span id="mfindn" class="mfindn"></span>
+      <button class="iact" type="button" onclick="mFindNav(-1)" title="Previous match (Shift Enter)">&#8249;</button>
+      <button class="iact" type="button" onclick="mFindNav(1)" title="Next match (Enter)">&#8250;</button>
+    </div>
+    <div id="mtbody" class="mtbody"><div class="mloading"><span class="spin"></span> Loading transcript&#8230;</div></div>
+  </section>`;
+}
+function mLegend(d){
+  const box=$('#mlegend');if(!box)return;
+  box.innerHTML=(d.speakers||[]).map(w=>
+    `<span class="mlg"><span class="msdot" style="background:${MP.color[w]}"></span>${esc(w)}</span>`).join('');
+}
+function mSegHTML(g,i){
+  const mm=Math.floor(g.start/60),ss=String(Math.floor(g.start%60)).padStart(2,'0');
+  const hue=MP.color[g.who]||'var(--sub)';
+  const flag=g.flags&&g.flags.length;
+  const seek=MP.hasAudio?` onclick="mSeek(${g.start})"`:'';
+  return `<div class="mseg${flag?' flagged':''}" id="mseg${i}"${seek}>
+    <span class="mtime mono">${mm}:${ss}</span>
+    <span class="mspk"><span class="msdot" style="background:${hue}"></span>${esc(g.who)}${flag?` <span class="mstar" title="Uncertain: ${esc((g.flags||[]).join(', '))}">*</span>`:''}</span>
+    <span class="mtext">${esc(g.text)}</span>
+  </div>`;
+}
+function mFindInput(){clearTimeout(mFindT);mFindT=setTimeout(()=>mFindRun(true),200);}
+function mFindKey(e){
+  if(e.key==='Enter'){
+    e.preventDefault();clearTimeout(mFindT);
+    const q=$('#mfind').value.trim();
+    if(!MF||MF.q!==q)mFindRun(true);else mFindNav(e.shiftKey?-1:1);
+  }else if(e.key==='Escape'){
+    e.preventDefault();e.stopPropagation();
+    mFindClear();$('#mfind').blur();
+  }
+}
+function mFindRun(reset){
+  const f=$('#mfind'),q=f?(f.value||'').trim():'';
+  const prev=MF;mFindUnmark();MF=null;
+  if(q.length<2){mFindCount();return;}
+  const rx=new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig');
+  const hits=[];
+  MP.segs.forEach((g,i)=>{const mm=g.text.match(rx);if(mm)for(let k=0;k<mm.length;k++)hits.push({i,k});});
+  const cur=hits.length?(reset?0:Math.min(prev?Math.max(prev.cur,0):0,hits.length-1)):-1;
+  MF={q,rx,hits,cur};
+  mFindMark();mFindCount();
+  if(reset&&cur>=0)mFindShow();
+}
+function mFindMark(){
+  if(!MF||!MF.hits.length)return;
+  const rows={};MF.hits.forEach((h,n)=>{(rows[h.i]=rows[h.i]||[]).push(n);});
+  for(const i in rows){
+    const el=document.getElementById('mseg'+i),g=MP.segs[i];
+    if(!el)continue;
+    const x=el.querySelector('.mtext');if(!x)continue;
+    const t=g.text;let out='',last=0,k=0;
+    t.replace(MF.rx,(mm,off)=>{                     // escape AROUND matches so & < > still highlight
+      const n=rows[i][k++];
+      out+=esc(t.slice(last,off))+`<mark${n===MF.cur?' class="cur"':''}>${esc(mm)}</mark>`;
+      last=off+mm.length;return mm;
+    });
+    x.innerHTML=out+esc(t.slice(last));
+  }
+}
+function mFindUnmark(){
+  if(!MF)return;
+  new Set(MF.hits.map(h=>h.i)).forEach(i=>{
+    const el=document.getElementById('mseg'+i),g=MP.segs[i];
+    if(!el||!g)return;
+    const x=el.querySelector('.mtext');if(x)x.innerHTML=esc(g.text);
+  });
+}
+function mFindNav(d){
+  if(!MF||!MF.hits.length)return;
+  MF.cur=(MF.cur+d+MF.hits.length)%MF.hits.length;
+  mFindMark();mFindCount();mFindShow();
+}
+function mFindShow(){
+  const h=MF.hits[MF.cur];if(!h)return;
+  const el=document.getElementById('mseg'+h.i);if(!el)return;
+  (el.querySelector('mark.cur')||el).scrollIntoView({block:'center'});
+}
+function mFindCount(){
+  const n=$('#mfindn');if(!n)return;
+  n.textContent=MF?(MF.hits.length?`${MF.cur+1} of ${MF.hits.length}`:'0 of 0'):'';
+}
+function mFindClear(){
+  clearTimeout(mFindT);mFindUnmark();MF=null;
+  const f=$('#mfind');if(f)f.value='';mFindCount();
+}
+function mKey(e){
+  if(route.view!=='meeting')return;
+  const ae=document.activeElement,typing=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  if((e.metaKey||e.ctrlKey)&&(e.key==='f'||e.key==='F')){
+    e.preventDefault();const f=$('#mfind');if(f){f.focus();f.select();}
+  }else if(e.key==='/'&&!typing){
+    e.preventDefault();const f=$('#mfind');if(f)f.focus();
+  }
+}
+
+/* -------------------------------------------------- pinned ask bar + thread - *
+ * The thread renders in the document flow (question right / answer left); the
+ * input is pinned to the viewport bottom. Ported from the old openAsk/askSend:
+ * the privacy note (local vs cloud), last-3 successful turns ride along as
+ * history, POST /api/ask, the truncated note, disabled when no LLM. In-memory
+ * per meeting until reload; never persisted. */
+function _mAsk(base){
+  const priv='Answers come from this transcript only. '
+    +(S.llm_backend==='local'?'They are generated on this Mac; nothing leaves the machine.'
+      :'They are generated by your cloud assistant (the transcript text is sent to it for this).')
+    +' Follow-up questions understand the earlier ones. The thread is never saved.';
+  return `<section class="msection mask">
+    <div class="mseclabel">Ask</div>
+    <p class="maskpriv">${esc(priv)}</p>
+    <div class="maskthread" id="maskthread"></div>
+    <div class="masknote" id="masknote"></div>
+    <div class="maskbar" id="maskbar">
+      <input class="maskq" id="maskq" type="text" autocomplete="off" spellcheck="false"
+        placeholder="Ask about this meeting" aria-label="Ask about this meeting"
+        onkeydown="if(event.key==='Enter')mAskSend()">
+      <button class="btn primary maskbtn" id="maskbtn" type="button" onclick="mAskSend()">Ask</button>
+    </div>
+  </section>`;
+}
+function mAskInit(base){
+  if(!askThreads[base])askThreads[base]={hist:[],busy:false};
+  const t=askThreads[base],dis=!S.llm_available;
+  const q=$('#maskq'),b=$('#maskbtn');
+  if(q){q.disabled=dis||t.busy;if(dis)q.placeholder='Ask needs the local model installed';}
+  if(b)b.disabled=dis||t.busy;
+  mAskRender(base);
+}
+function mAskRender(base){
+  const t=askThreads[base];if(!t)return;
+  const box=$('#maskthread');if(!box)return;
+  box.innerHTML=t.hist.length?t.hist.map(h=>`
+    <div class="mbub q">${esc(h.q)}</div>
+    <div class="mbub a${h.err?' err':''}">${
+      h.a?esc(h.a):'<span class="spin"></span> Reading the transcript and thinking… '
+        +(S.llm_backend==='local'?'usually 20-60s (the model loads fresh for each question)':'usually a few seconds')}</div>`).join('')
+    :'<div class="maskempty">Ask anything about this meeting: decisions, who said what, commitments…</div>';
+}
+async function mAskSend(){
+  if(!MP)return;const base=MP.base,t=askThreads[base];
+  if(!t||t.busy||!S.llm_available)return;
+  const inp=$('#maskq'),q=inp?inp.value.trim():'';
+  if(!q)return;
+  const hist=t.hist.filter(h=>h.a&&!h.err).slice(-3).map(h=>({q:h.q,a:h.a}));
+  t.hist.push({q,a:''});t.busy=true;
+  if(inp){inp.value='';inp.disabled=true;}
+  const btn=$('#maskbtn');if(btn)btn.disabled=true;
+  const note=$('#masknote');if(note)note.textContent='';
+  mAskRender(base);
+  let r;
+  try{r=await api('/api/ask',{base,question:q,history:hist});}
+  catch(e){r={error:'The assistant is unavailable.'};}
+  const cur=t.hist[t.hist.length-1];
+  if(r&&r.answer)cur.a=r.answer;
+  else{cur.a='⚠ '+((r&&r.error)||'No answer produced.');cur.err=true;}
+  t.busy=false;
+  if(route.view!=='meeting'||route.base!==base)return;   // a different page is open now
+  if(note)note.textContent=r&&r.truncated
+    ?'Long meeting: middle portions were sampled, so details from the middle may be missing.':'';
+  if(inp){inp.disabled=false;inp.focus();}
+  if(btn)btn.disabled=false;
+  mAskRender(base);
+}
+function mStickyTop(){
+  const hdr=$('.hdr'),bar=$('#maudio');
+  if(hdr&&bar)bar.style.top=hdr.offsetHeight+'px';
+}
+
+/* --------------------------------------------------------- route wiring ---- */
+window.addEventListener('hashchange',()=>{route=parseHash();applyRoute();});
+window.addEventListener('resize',()=>{if(route.view==='meeting')mStickyTop();});
+route=parseHash();
+applyRoute();   // deep link (#m/<base>) opens here; if S is not ready yet, render()
+                // finishes the build via maybeBuildPending once the first poll lands

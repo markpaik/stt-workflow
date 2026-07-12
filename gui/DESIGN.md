@@ -27,11 +27,18 @@ one popover (runs) and one drawer (settings, final phase).
 
 ## Newsprint tokens
 
-Type. Display: `ui-serif` ("New York"), weight 600, tight leading, for the
-wordmark, group headers rendered as small caps mono (see below), and meeting
-titles at detail sizes. Body: `-apple-system` (SF Pro Text). Data (timers,
-counts, dates, states): `ui-monospace` (SF Mono) with `tabular-nums`.
-System faces only; nothing downloads.
+Type (revised 2026-07-12: Mark found the serif "a bit much"; the house style
+follows the modern workflow-tool consensus — Linear, Notion, Height, Things —
+one neutral sans, hierarchy from weight and size, no second typeface).
+Display and titles: `-apple-system` (SF Pro), weight 600, letter-spacing
+-0.01em at 16px and above. Body and ALL meta/labels/group headers/tray text:
+the same sans with `font-variant-numeric: tabular-nums` wherever digits
+align; group headers are 13px semibold uppercase sans with +0.06em
+tracking, not mono (13px floor holds everywhere, test-enforced). Mono (`ui-monospace`, SF Mono) is DEMOTED to true data
+only: timestamps, durations, live clocks, and the status pill. Nothing else
+is mono, nothing is serif. System faces only; nothing downloads. (If a true
+Inter ever becomes wanted, vendor the OFL woff2 into gui/static/ as a local
+asset; never a CDN.)
 
 Color, light theme:
 
@@ -59,20 +66,23 @@ old page, plus `prefers-color-scheme` default. Red appears nowhere except the
 recording state and destructive confirmation buttons.
 
 Rhythm: 8px grid, reading-room density (revised 2026-07-11 after review on
-real data: the first cut read compressed). The content column caps at 860px,
-centered; shorter lines read bigger and summaries wrap instead of truncating
-mid-clause. Type floor 12.5px: titles 17px serif, meta 13px mono, summary
-previews 14px with 1.5 leading, clamped to TWO lines (the full summary lives
-on the meeting page). Rows get 15-16px vertical padding; month headers carry
-~30px top margin so months read as chapters, not rows in one continuous ruled
-list. Radius 8px on controls, 12px on floating surfaces. Borders are
+real data: the first cut read compressed; type scale bumped again 2026-07-12
+on Mark's feedback that fonts still read small on his display). The content
+column caps at 920px, centered; shorter lines read bigger and summaries wrap
+instead of truncating mid-clause. Type floor 13px: titles 18.5px sans semibold, meta
+13.5px sans (tabular numerals), summary previews 15px with 1.5 leading, clamped to TWO lines
+(the full summary lives on the meeting page); buttons and pill 13-13.5px.
+Rows get 15-16px vertical padding; month headers carry ~30px top margin so
+months read as chapters, not rows in one continuous ruled list. Mark's
+display is the calibration target, not preview screenshots taken in narrow
+tabs. Radius 8px on controls, 12px on floating surfaces. Borders are
 hairlines, not shadows; shadows only on floating surfaces (popover, bulk
 bar): a soft two-layer `0 1px 2px …, 0 10px 34px …`. Motion 150–200ms ease,
 used for state morphs and hover reveals; honor `prefers-reduced-motion`.
 
 ## Anatomy
 
-Header (sticky, paper ground, hairline bottom): serif wordmark "Meetings" ·
+Header (sticky, paper ground, hairline bottom): sans-semibold wordmark "Meetings" ·
 status pill · search field (right-aligned) · Process ▾ · theme dot · gear
 (bridges to old settings until the drawer ships).
 
@@ -82,43 +92,59 @@ priority: `● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min`
 nonzero) → `3 waiting` → nothing when idle (the pill disappears; idle needs
 no announcement). Clicking the pill opens the Process ▾ popover.
 
-Tray (only when non-empty): amber-soft band under the header, small-caps mono
-header "NEEDS YOU". Rare, urgent kinds (recorder stall, failures) get one
-line PER ITEM; chronic kinds aggregate to one line PER KIND that expands in
-place: "Flagged lines in N meetings" and "N voices need names". Revised
+Tray (only when non-empty): amber-soft band under the header, uppercase
+semibold sans header "NEEDS YOU". Rare, urgent kinds (recorder stall, failures) get one
+line PER ITEM; chronic kinds aggregate to one line PER KIND. Revised
 2026-07-11 after real data showed 40 flagged meetings turning the tray into a
 wall of 46 asks; a tray that shouts daily is worse than no tray. The tray
 therefore never exceeds a handful of lines no matter the backlog.
+
+Aggregate expansion (revised 2026-07-12 after the first expansion rebuilt the
+wall inside the tray): an aggregate with more than 8 items does NOT expand
+in the tray. "Flagged lines in N meetings" instead applies a flagged-only
+FILTER to the library (full-size rows; a small "flagged only ✕" chip appears
+beside the category filter to clear it, and the tray line reads as active).
+Aggregates of 8 or fewer (e.g. "5 voices need names") expand in place, but
+their sub-rows use the library's meta scale (13px, roomy padding), never a
+denser one. The tray must never contain a second, smaller library.
 
 Timeline: a centered list on paper in two zones. First an UNLABELED pinned
 cluster of everything actionable, in this order: recording, processing,
 needs_name, failed, held, waiting — these never sink into date groups no
 matter how old their files are (a failed April file must sit at the top, not
 buried in April). Below it, ready meetings sorted AND grouped by the same
-key: meeting date, newest first, with month group headers in small-caps mono
+key: meeting date, newest first, with month group headers in uppercase semibold sans
 (`JULY 2026 · 6`) and Today/Yesterday labels only for rows actually dated
 today/yesterday. Sorting by one key while grouping by another fragments the
 months; never do it. Jump rail regenerates from the ordered groups (years as
-anchors, months beneath), mono, visible only when 3+ groups and no active
+anchors, months beneath), small semibold sans, visible only when 3+ groups and no active
 search.
 
-Row, common skeleton: category dot · title · meta (mono, sub) · right slot.
+Row, common skeleton: category dot · title · meta (sans, tabular numerals,
+sub) · right slot.
 The right slot is the state:
 
 - recording   `● capturing` in rec red, elapsed ticking; title "Recording now…"
 - waiting     `size · ≈est min` + hover actions [▶ listen] [hold ❚❚] [Process] [✕]
 - held        `❚❚ held` + same hover actions with [release]
-- processing  stage + % + eta in accent mono; 2px accent hairline progress
+- processing  stage + % + eta in accent sans, tabular numerals; 2px accent hairline progress
               bar along the row's bottom edge; no actions (Stop lives in the
               Process ▾ popover)
 - needs_name  the row IS the form, accent-soft ground: title input (prefilled
               with suggested_title), date input (suggested_date), [▶] [Accept].
               Enter accepts. No separate inbox card exists.
 - ready       meta = `MMM D · NN min · speakers · 6 to check`, the review
-              count as plain amber mono TEXT inside the meta line, no chip
+              count as plain amber TEXT inside the meta line, no chip
               (forty chip-wearing rows read as a wall of warnings); right
               slot shows state text that yields to hover actions
-              [▶] [Open] [⋯]
+              [▶] [Open] [⋯]. Clicking the row body (not its controls)
+              expands it in place: full summary + committed next steps +
+              an "Open transcript →" link, collapse on second click,
+              multiple rows may stay open, expansion survives polls, height
+              animates (none under reduced motion). The full summary is
+              already in the polled meetings state; no extra fetch. This
+              replaces the old hover tooltip: hover reveals actions, click
+              peeks the summary, Open reads the meeting.
 - failed      `failed` in rec red + one-line error, sub; hover: [Retry] [✕];
               note "original stays in the watched folder"
 
@@ -145,13 +171,47 @@ endpoints; Redo and Delete keep their confirm steps.
 
 Search: same behavior as old (client filter + debounced full-text ≥3 chars);
 full-text hits render as a quiet sub-list under the search field, mono
-timestamps, click bridges to `?open=` at that moment. Filter select (all /
+timestamps, click opens the meeting page at that moment (#m route + seek). Filter select (all /
 work / personal) and sort (by month / by name) sit left of the search field,
 borderless until hover.
 
-Empty states, in sub text, centered, serif: library empty → "Record a meeting
-from the menu bar, or drop an audio file here."; search empty → "No matches.";
+Empty states, in sub text, centered: library empty → "Record a meeting from
+the menu bar." (the drop line returns when the upload endpoint ships); search empty → "No matches.";
 tray absent entirely when empty.
+
+## The drawer
+
+One right slide-over, width min(560px, 94vw), Newsprint-styled (paper ground,
+hairline left edge, soft shadow), opened by the gear, closed by ✕ / veil /
+Escape. A compact section nav pins at its top: Settings · Speakers · History ·
+Archive. Nothing in the drawer navigates to the old page.
+
+Settings section, in order:
+- Automation: ONE master switch ("Automatic runs"), with Folder watch and
+  Nightly run (+ time) indented beneath it and visibly inert (greyed, "off
+  while automatic runs are paused") when the master is off. The master state
+  is the same /api/pause//api/resume the pill and Process popover use. This
+  kills the old page's lying toggles: a switch never reads On while doing
+  nothing.
+- Transcription: model picker; cloud engines listed only when their key is
+  set; Cloud keys… opens an in-drawer subview (password fields, saved ticks,
+  clear buttons; same /api/cloud_keys).
+- Summaries and Ask: backend picker with the local/cloud privacy note.
+- Recorder: your-voice picker (enrolled names), permission fix button when
+  stalled.
+- Housekeeping: punctuation toggle, model-update check, speed-calibration
+  note, watched folder and transcripts folder with Change… pickers.
+
+Speakers section: enrolled people (voice snippet ▶, sample count, per-sample
+play/reassign/remove, rename, merge, remove) and unknown voices (Who is
+this? opens the shell's naming panel, hide/restore). Same endpoints as the
+old card; relabel-in-progress note surfaces here and as a quiet pill note.
+
+History section: the permanent processing log, name filter + all/ok/failed
+select, day groups, failures keep full error text (same /api/history).
+
+Archive section: archived meetings with Restore and Delete… (two-step,
+in-drawer confirm; same endpoints).
 
 ## What deliberately does not exist in the new shell
 

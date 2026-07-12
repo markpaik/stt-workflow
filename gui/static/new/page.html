@@ -26,6 +26,10 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
       <option value="work">work</option>
       <option value="personal">personal</option>
     </select>
+    <!-- flagged-only chip: appears while the tray's >8 flagged aggregate is
+         filtering the library to rows with lines to check; click clears it -->
+    <button id="flagchip" class="flagchip" type="button" hidden
+            title="Showing only meetings with flagged lines. Click to clear.">flagged only &#10005;</button>
     <select id="sort" class="ctl" aria-label="Sort and group"
             title="How the list is ordered and grouped">
       <option value="date">by month</option>
@@ -68,6 +72,12 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   </div>
 
 </main>
+
+<!-- Meeting page (Builder A): the in-shell #m/<base> route renders one scrollable
+     document here (header, docked audio, summary, flagged strip, transcript,
+     pinned ask bar), in place of the old Read + Summary + Ask surfaces. Hidden
+     until a meeting route is active; its contents are built by app.js. -->
+<article id="meetingpage" class="mpage" hidden aria-label="Meeting"></article>
 
 <!-- bulk action bar: floats bottom-center when a selection exists. Builder B
      wires selection state and the /api/bulk calls. -->
