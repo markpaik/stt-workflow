@@ -1,0 +1,337 @@
+/* ============================================================================
+   Newsprint: the panel redesign's token sheet and shell styling.
+   Light + dark via prefers-color-scheme AND :root[data-theme=...] overrides,
+   exactly like the old page. Read gui/DESIGN.md; this implements it.
+   ============================================================================ */
+
+:root{
+  --paper:#FBFBF9; --card:#FFFFFF; --ink:#1A1C1F; --sub:#5D6167;
+  --hair:#E8E6E0; --line:#D9D6CE; --inset:#F4F3EF;
+  --accent:#1E6B50; --acc-ink:#FFFFFF; --accent-soft:#E4EFEA;
+  --amber:#9A5B10; --amber-soft:#F7EEDF;
+  --rec:#C43C35; --rec-soft:#F7E4E2;
+  --serif:ui-serif,"New York",Georgia,"Times New Roman",serif;
+  --sans:-apple-system,system-ui,"SF Pro Text","Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --shadow:0 1px 2px rgba(20,22,26,.08), 0 10px 34px rgba(20,22,26,.14);
+}
+@media(prefers-color-scheme:dark){:root{
+  --paper:#121416; --card:#1A1D20; --ink:#E9E7E2; --sub:#9BA0A6;
+  --hair:#2A2E32; --line:#383D42; --inset:#212528;
+  --accent:#43B28A; --acc-ink:#0E1512; --accent-soft:#1D2E27;
+  --amber:#D79A4E; --amber-soft:#2B2216;
+  --rec:#E06058; --rec-soft:#331D1B;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.5);
+}}
+/* manual override (theme dot) must win over the OS preference BOTH ways */
+:root[data-theme=dark]{
+  --paper:#121416; --card:#1A1D20; --ink:#E9E7E2; --sub:#9BA0A6;
+  --hair:#2A2E32; --line:#383D42; --inset:#212528;
+  --accent:#43B28A; --acc-ink:#0E1512; --accent-soft:#1D2E27;
+  --amber:#D79A4E; --amber-soft:#2B2216;
+  --rec:#E06058; --rec-soft:#331D1B;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+:root[data-theme=light]{
+  --paper:#FBFBF9; --card:#FFFFFF; --ink:#1A1C1F; --sub:#5D6167;
+  --hair:#E8E6E0; --line:#D9D6CE; --inset:#F4F3EF;
+  --accent:#1E6B50; --acc-ink:#FFFFFF; --accent-soft:#E4EFEA;
+  --amber:#9A5B10; --amber-soft:#F7EEDF;
+  --rec:#C43C35; --rec-soft:#F7E4E2;
+  --shadow:0 1px 2px rgba(20,22,26,.08), 0 10px 34px rgba(20,22,26,.14);
+  color-scheme:light;
+}
+
+*{box-sizing:border-box;margin:0}
+/* the hidden attribute must win over any display rule below (tray, rail,
+   bulkbar, pill, popovers all start hidden and are toggled by .hidden) */
+[hidden]{display:none!important}
+html{scroll-behavior:smooth}
+body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
+  max-width:1080px;margin:0 auto;padding:0 24px 64px;-webkit-font-smoothing:antialiased;
+  font-variant-numeric:tabular-nums}
+.grow{flex:1;min-width:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* -------------------------------------------------------------- header ---- */
+.hdr{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
+  flex-wrap:wrap;padding:16px 2px 12px;
+  background:color-mix(in srgb,var(--paper) 86%,transparent);
+  backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+  border-bottom:1px solid var(--hair)}
+.wordmark{font:600 22px/1.1 var(--serif);letter-spacing:-.01em;color:var(--ink)}
+.controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* status pill: mono, one at a time, colored by priority; hidden when idle */
+.pill{font:500 12.5px/1 var(--mono);font-variant-numeric:tabular-nums;
+  letter-spacing:.01em;color:var(--sub);background:var(--inset);
+  border:1px solid var(--hair);border-radius:99px;padding:5px 11px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.pill:hover{border-color:var(--line)}
+.pill.rec{color:var(--rec);background:var(--rec-soft);border-color:transparent}
+.pill.accent{color:var(--accent);background:var(--accent-soft);border-color:transparent}
+.pill.amber{color:var(--amber);background:var(--amber-soft);border-color:transparent}
+.pill .recdot{width:8px;height:8px;border-radius:50%;background:var(--rec);
+  flex:none;animation:pulse 1.3s infinite}
+
+/* filter + sort: borderless until hover; native search field */
+.ctl{font:500 13px/1 var(--sans);color:var(--sub);background:transparent;
+  border:1px solid transparent;border-radius:8px;padding:6px 8px;cursor:pointer}
+.ctl:hover{border-color:var(--line);color:var(--ink)}
+.search{font:400 13.5px/1.2 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:7px 11px;
+  width:clamp(140px,28vw,280px)}
+.search::placeholder{color:var(--sub)}
+
+/* buttons */
+.btn{font:500 13.5px/1 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;
+  transition:background .16s ease,border-color .16s ease}
+.btn:hover{background:var(--inset);border-color:var(--sub)}
+.btn.process{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
+.btn.process:hover{background:var(--accent-soft);border-color:var(--accent)}
+.btn.process .caret{font-size:11px;opacity:.8}
+.btn.gear{width:34px;height:34px;padding:0;justify-content:center;font-size:15px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);font-weight:600}
+.btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000);
+  border-color:color-mix(in srgb,var(--accent) 88%,#000)}
+.btn.danger{background:transparent;color:var(--rec);
+  border-color:color-mix(in srgb,var(--rec) 42%,transparent)}
+.btn.danger:hover{background:var(--rec-soft);border-color:var(--rec)}
+.btn.mini{padding:4px 9px;font-size:12.5px;border-radius:7px}
+.btn:disabled{opacity:.45;cursor:default}
+
+/* theme dot: a small round control that cycles auto / light / dark */
+.themedot{width:26px;height:26px;border-radius:50%;padding:0;flex:none;cursor:pointer;
+  font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center;
+  color:var(--sub);background:var(--card);border:1px solid var(--line);
+  transition:border-color .16s ease,color .16s ease}
+.themedot:hover{border-color:var(--sub);color:var(--ink)}
+
+/* keyboard focus: visible everywhere */
+:where(button,select,input,.row,.trayrow,.railbtn):focus-visible{
+  outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:2px}
+
+/* --------------------------------------------------------------- tray ----- */
+.tray{margin:14px 0 6px;background:var(--amber-soft);
+  border:1px solid color-mix(in srgb,var(--amber) 32%,var(--hair));
+  border-radius:12px;padding:8px 14px 12px}
+.tray .trayhdr{font:600 11px/1.2 var(--mono);letter-spacing:.11em;
+  text-transform:uppercase;color:var(--amber);padding:6px 0 4px}
+.trayrow{display:flex;align-items:center;gap:10px;padding:7px 0;
+  border-top:1px solid color-mix(in srgb,var(--amber) 18%,transparent)}
+.trayrow:first-of-type{border-top:0}
+.trayrow .tw-title{font:500 14px/1.3 var(--serif);color:var(--ink);flex:none;
+  max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trayrow .tw-detail{color:var(--sub);font-size:13px;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trayrow .tw-verb{margin-left:auto;flex:none}
+.tray .traymore{background:none;border:0;color:var(--amber);cursor:pointer;
+  font:500 12.5px/1 var(--sans);padding:8px 0 2px}
+.tray .traymore:hover{text-decoration:underline;text-underline-offset:3px}
+
+/* ------------------------------------------------- timeline + rail -------- */
+.timelinewrap{display:flex;gap:12px;align-items:flex-start;margin-top:6px}
+.timeline{flex:1;min-width:0}
+.searchhits{margin:10px 0}
+
+.rail{display:flex;flex-direction:column;gap:1px;flex:none;padding-top:14px;
+  position:sticky;top:74px;max-height:calc(100vh - 96px);overflow-y:auto;
+  overscroll-behavior:contain;font-family:var(--mono)}
+.rail .railyr{font:700 10px/1.2 var(--mono);letter-spacing:.1em;color:var(--sub);
+  padding:8px 8px 2px}
+.railbtn{border:0;background:none;color:var(--sub);text-align:left;cursor:pointer;
+  font:500 11px/1.2 var(--mono);letter-spacing:.05em;text-transform:uppercase;
+  padding:3px 8px;border-radius:6px}
+.railbtn:hover{background:var(--accent-soft);color:var(--accent)}
+
+/* month / Today / Yesterday group header, small-caps mono */
+.mgroup{font:600 11px/1.2 var(--mono);font-variant-numeric:tabular-nums;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--sub);
+  padding:18px 2px 4px;border-bottom:1px solid var(--hair);margin-bottom:2px;
+  scroll-margin-top:84px}
+
+/* ---------------------------------------------------------------- row ----- */
+.row{display:flex;align-items:center;gap:11px;min-height:46px;padding:6px 8px;
+  border-bottom:1px solid var(--hair);position:relative;border-radius:8px;
+  transition:background .15s ease}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--inset)}
+
+/* bulk-select checkbox: hidden until row hover, or while any selection exists */
+.row .chk{flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer;
+  opacity:0;transition:opacity .12s ease}
+.row:hover .chk,.row:focus-within .chk,body.has-sel .row .chk{opacity:1}
+.row .chk.spacer{visibility:hidden}
+
+/* category dot: hollow = untagged, accent-filled = work, amber-filled = personal */
+.cat{flex:none;width:11px;height:11px;border-radius:50%;padding:0;cursor:pointer;
+  border:1.5px solid var(--line);background:transparent}
+.cat.work{background:var(--accent);border-color:var(--accent)}
+.cat.personal{background:var(--amber);border-color:var(--amber)}
+.cat.none{opacity:.45}
+.row:hover .cat.none{opacity:.8}
+
+.rbody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.rtitle{font:500 15px/1.3 var(--serif);color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rmeta{font:400 12px/1.35 var(--mono);font-variant-numeric:tabular-nums;color:var(--sub);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rsummary{font:italic 400 13px/1.4 var(--serif);color:var(--sub);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* right slot: one quiet line of state text at rest; buttons appear on
+   hover/focus, overlaid at the right edge so they never reserve blank space.
+   The resting text (marked .yields) steps aside for them. */
+.rslot{flex:none;margin-left:auto;position:relative;display:flex;
+  align-items:center;gap:8px;min-height:30px;
+  font:500 12.5px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--sub)}
+.rstate{white-space:nowrap}
+.ractions{position:absolute;right:0;top:50%;transform:translateY(-50%);
+  display:flex;align-items:center;gap:6px;opacity:0;visibility:hidden;
+  transition:opacity .15s ease}
+.row:hover .ractions,.row:focus-within .ractions{opacity:1;visibility:visible}
+/* only states that HAVE hover actions mark their resting text .yields */
+.row:hover .yields,.row:focus-within .yields{visibility:hidden}
+
+/* review badges */
+.badge{font:500 11.5px/1 var(--mono);font-variant-numeric:tabular-nums;
+  border-radius:99px;padding:3px 9px;white-space:nowrap;cursor:pointer;flex:none}
+.badge.review{color:var(--amber);background:var(--amber-soft)}
+.badge.minor{color:var(--sub);background:var(--inset)}
+
+/* --- per-state row treatments (all seven states) --- */
+.row[data-state="recording"] .rstate{color:var(--rec)}
+.row[data-state="recording"] .capdot{display:inline-block;width:8px;height:8px;
+  border-radius:50%;background:var(--rec);margin-right:6px;animation:pulse 1.3s infinite}
+.row[data-state="waiting"] .rstate{color:var(--sub)}
+.row[data-state="held"]{opacity:.9}
+.row[data-state="held"] .rstate{color:var(--amber)}
+.row[data-state="processing"] .rstate{color:var(--accent)}
+/* processing: a 2px accent hairline along the row's bottom edge */
+.row[data-state="processing"] .progress{position:absolute;left:0;bottom:0;height:2px;
+  background:var(--accent);border-radius:2px;transition:width .5s ease;max-width:100%}
+.row[data-state="needs_name"]{background:var(--accent-soft);border-radius:10px;
+  align-items:center;flex-wrap:wrap;padding:9px 10px}
+.row[data-state="needs_name"]:hover{background:var(--accent-soft)}
+.row[data-state="ready"] .rstate{color:var(--sub)}
+.row[data-state="failed"] .rstate{color:var(--rec)}
+.row[data-state="failed"] .rmeta.err{color:var(--rec);white-space:normal}
+
+/* needs_name inline form: the row IS the form */
+.nameform{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
+.nameform .ntitle{font:600 14px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;
+  width:min(340px,46vw)}
+.nameform input[type=date]{font:inherit;font-size:13px;color:var(--ink);
+  background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 9px;
+  color-scheme:inherit}
+.nameform input:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:1px;border-color:var(--accent)}
+
+/* small icon action buttons inside rows */
+.iact{font:500 12px/1 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:7px;padding:5px 9px;cursor:pointer}
+.iact:hover{background:var(--inset);border-color:var(--sub)}
+.iact.play{width:28px;padding:5px 0;text-align:center}
+
+/* empty states: centered, serif, quiet */
+.empty{text-align:center;font:400 15px/1.5 var(--serif);color:var(--sub);
+  padding:56px 16px}
+
+/* ---------------------------------------- floating surfaces (shadow) ------ */
+.popover{position:absolute;z-index:50;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;box-shadow:var(--shadow);padding:8px}
+.bulkbar{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:45;
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);
+  padding:9px 13px;max-width:min(920px,94vw)}
+
+@keyframes pulse{50%{opacity:.3}}
+
+/* honor reduced-motion: kill pulses, transitions, smooth scroll */
+@media(prefers-reduced-motion:reduce){
+  *{scroll-behavior:auto!important}
+  .pill .recdot,.row[data-state="recording"] .capdot{animation:none}
+  .row,.ractions,.row .chk,.btn,.themedot,.ctl,
+  .row[data-state="processing"] .progress{transition:none}
+}
+
+/* narrow: the header controls wrap rather than force a horizontal scroll */
+@media(max-width:720px){
+  .rail{display:none!important}
+  .wordmark{font-size:20px}
+}
+
+/* ============================================================================
+   Builder B: styling for the interactive surfaces wired in app.js (the Process
+   and per-row popovers, the bulk bar contents, the inline clip player, inline
+   rename, and the full-text search hits). Floating containers themselves
+   (.popover, .bulkbar) are styled above; this styles what goes inside them.
+   ============================================================================ */
+.popover{min-width:240px;max-width:340px}
+
+/* popover menu items, shared by the Process popover and the per-row menu */
+.ppitem{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+  font:500 13.5px/1.2 var(--sans);color:var(--ink);background:none;border:0;
+  border-radius:7px;padding:8px 10px;cursor:pointer}
+.ppitem:hover:not(:disabled){background:var(--inset)}
+.ppitem:disabled{opacity:.4;cursor:default}
+.ppitem.danger{color:var(--rec)}
+.ppitem.danger:hover:not(:disabled){background:var(--rec-soft)}
+.ppitem .ppc{margin-left:auto;font:500 11.5px/1 var(--mono);color:var(--sub);
+  background:var(--inset);border-radius:99px;padding:2px 7px}
+.ppsep{height:1px;background:var(--hair);margin:5px 4px}
+.pphdr{font:600 10.5px/1.2 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+  color:var(--sub);padding:7px 10px 3px}
+
+/* run-option / redo checkbox rows: label above a one-line explanation */
+.ppopt{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;cursor:pointer;
+  border-radius:7px}
+.ppopt:hover{background:var(--inset)}
+.ppopt>input{margin-top:2px;accent-color:var(--accent);flex:none}
+.ppopt-l{display:block;font:500 13px/1.3 var(--sans);color:var(--ink)}
+.ppopt-n{display:block;font:400 11.5px/1.35 var(--sans);color:var(--sub);margin-top:1px}
+
+/* small confirm popover nested in the row menu (Redo, Delete) */
+.ppconfirm{padding:4px 6px}
+.ppctitle{font:600 14px/1.3 var(--serif);color:var(--ink);padding:4px 6px 2px}
+.ppcnote{font:400 12px/1.4 var(--sans);color:var(--sub);padding:2px 6px}
+.ppcnote.warn{color:var(--amber)}
+.ppcrow{display:flex;gap:6px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
+
+/* bulk bar contents (the container is styled above) */
+.bulkbar .bcount{font:600 12.5px/1 var(--mono);color:var(--ink);padding:0 4px;
+  white-space:nowrap}
+
+/* inline clip player, mounted as a sibling under the listening row */
+.clipplayer{display:flex;align-items:center;gap:9px;padding:8px 12px;margin:0 0 2px;
+  background:var(--inset);border-radius:8px}
+.clipplayer .clip-t{font-size:11.5px;color:var(--sub);min-width:34px;text-align:center}
+.clipplayer input[type=range]{flex:1;min-width:0;accent-color:var(--accent);height:4px;cursor:pointer}
+.clipplayer .iact.play{border-color:var(--line)}
+
+/* inline rename field that replaces a row's title */
+.renameinput{font:600 14px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--accent);border-radius:7px;padding:4px 8px;width:min(340px,60vw)}
+
+/* inline error surfaced on a needs_name row when Accept fails (no banner) */
+.nameerr{flex-basis:100%;color:var(--rec);
+  font:400 12px/1.35 var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
+
+/* full-text search hits under the search field */
+.searchhits .hitshdr{font:600 10.5px/1.2 var(--mono);letter-spacing:.09em;
+  text-transform:uppercase;color:var(--sub);padding:8px 2px 4px}
+.searchhits .hit{display:flex;gap:10px;align-items:baseline;padding:7px 8px;
+  border-radius:7px;cursor:pointer;border-bottom:1px solid var(--hair)}
+.searchhits .hit:last-child{border-bottom:0}
+.searchhits .hit:hover{background:var(--inset)}
+.searchhits .hit-t{color:var(--accent);flex:none;min-width:40px;font-size:11.5px}
+.searchhits .hit-w{font:500 12px/1.4 var(--sans);color:var(--ink);flex:none;
+  max-width:22%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.searchhits .hit-x{font:400 12.5px/1.45 var(--sans);color:var(--sub);min-width:0}
+.searchhits .hit-b{font-family:var(--mono);font-size:11px;color:var(--sub);opacity:.7}
+.searchhits mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}
