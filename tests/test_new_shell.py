@@ -52,20 +52,21 @@ def _get(port, path):
     return status, ctype, body
 
 
-def test_ui_new_serves_the_composed_new_shell(running_server):
-    status, ctype, body = _get(running_server, "/?ui=new")
-    assert status == 200
-    assert "text/html" in ctype
-    assert body == _compose(NEW).encode()
-
-
-def test_plain_root_is_byte_identical_to_the_old_composition(running_server):
-    # the routing split must not change a single byte of the old page
-    expected = _compose(STATIC).encode()
-    for path in ("/", "/?ui=old"):
-        status, _ctype, body = _get(running_server, path)
+def test_plain_root_serves_the_new_shell(running_server):
+    # the default flipped 2026-07-12 after the full-inventory sweep
+    expected = _compose(NEW).encode()
+    for path in ("/", "/?ui=new"):
+        status, ctype, body = _get(running_server, path)
         assert status == 200
-        assert body == expected, f"{path} drifted from the old file composition"
+        assert "text/html" in ctype
+        assert body == expected, f"{path} is not the new shell"
+
+
+def test_ui_old_keeps_the_retired_page_byte_identical(running_server):
+    # the safety hatch: the old page stays reachable and unchanged until deleted
+    status, _ctype, body = _get(running_server, "/?ui=old")
+    assert status == 200
+    assert body == _compose(STATIC).encode(), "?ui=old drifted from the old files"
 
 
 def test_new_shell_has_all_seven_state_hooks():
