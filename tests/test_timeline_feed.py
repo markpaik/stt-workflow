@@ -246,6 +246,8 @@ def test_tray_empty_when_nothing_needs_attention(sandbox):
 
 
 def test_tray_unknown_voice_excludes_hidden(sandbox):
+    for b in ("Vendor Demo 01152026", "Board Prep 09102025", "X"):
+        _meeting(b)   # refs must resolve, or the zero-ref policy hides the voice
     (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
         "U007": {"file": "U007.npy", "meetings": ["Vendor Demo 01152026"]},
         "U012": {"file": "U012.npy", "meetings": ["Board Prep 09102025"], "archived": True},
@@ -254,6 +256,44 @@ def test_tray_unknown_voice_excludes_hidden(sandbox):
     voices = [t for t in tray if t["kind"] == "unknown_voice"]
     assert [t["target"] for t in voices] == ["U007"]     # archived + dropped excluded
     assert voices[0]["count"] == 1
+
+
+def test_tray_and_panel_exclude_zero_ref_unknowns(sandbox):
+    """forget_meeting_refs deliberately keeps an unknown at zero refs (the
+    embedding still identifies the voice later), and a ref can also die
+    without a scrub (pre-fix deletes). Neither may nag: a voice with no
+    surviving meeting has nothing to play and nothing to review, so it is
+    hidden from the Speakers panel AND the tray — not deleted."""
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
+        "U011": {"file": "U011.npy", "meetings": []},              # scrubbed empty
+        "U012": {"file": "U012.npy", "meetings": ["Gone Mtg"]}}}))  # dead ref
+    st = srv.gather_state()
+    assert st["unknowns"] == []
+    assert [t for t in st["tray"] if t["kind"] == "unknown_voice"] == []
+    # hidden, NOT reaped: the registry entries survive for future matching
+    assert set(unknowns.load()["speakers"]) == {"U011", "U012"}
+
+
+def test_unknown_count_matches_resolvable_meetings_only(sandbox):
+    """'heard in N meetings' may only count meetings that still exist — live
+    or archived — so the count and what the naming dialog can actually offer
+    can never disagree again (U005/U007/U009: 'heard in 2 meetings', zero
+    playable clips)."""
+    _meeting("Live Mtg 05012026")
+    _meeting("Shelved Mtg 05012026")
+    archive.archive_meeting("Shelved Mtg 05012026")
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
+        "U005": {"file": "U005.npy", "meetings":
+                 ["Live Mtg 05012026", "Deleted Mtg", "Shelved Mtg 05012026"]}}}))
+    st = srv.gather_state()
+    u = next(x for x in st["unknowns"] if x["uid"] == "U005")
+    assert u["meetings"] == ["Live Mtg 05012026", "Shelved Mtg 05012026"]
+    nag = next(t for t in st["tray"] if t["kind"] == "unknown_voice")
+    assert nag["count"] == len(u["meetings"]) == 2
+    # the invariant itself: every meeting the client sees resolves on disk
+    resolvable = set(config.meeting_bases()) | set(config.archived_bases())
+    for x in st["unknowns"]:
+        assert set(x["meetings"]) <= resolvable
 
 
 def test_tray_review_only_counts_substantial(sandbox):
@@ -274,6 +314,7 @@ def test_tray_ranks_stall_failed_review_unknown(sandbox, monkeypatch, tmp_path):
               "at": "2026-07-09T02:41:55"})                           # failed
     _meeting("Flagged 04082026", date="2026-04-08",                   # review
              segments=[{"start": 0.0, "end": 3.0, "text": "a b c d e", "flags": ["x"]}])
+    _meeting("m")   # the unknown's ref must resolve to a real meeting
     (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
         "U007": {"file": "U007.npy", "meetings": ["m"]}}}))           # unknown_voice
     kinds = [t["kind"] for t in srv.gather_state()["tray"]]

@@ -239,6 +239,40 @@ def test_main_has_no_shadowed_module_imports():
     assert not shadowed, f"module names shadowed as locals in main(): {shadowed}"
 
 
+def test_sweep_shells_scrubs_unknown_refs_for_each_removed_folder(sandbox):
+    """The shell sweep is a permanent folder removal, so it must go through the
+    same purge path as the user's Delete: a run that dies after registering
+    unknowns but before the json write leaves the shell's name in 'heard in'
+    lists — sweeping without the scrub left speakers claiming meetings that no
+    longer exist (U005/U007/U009: 'heard in 2 meetings', zero playable clips)."""
+    import json
+
+    from conftest import mfile
+    from stt import config, unknowns
+
+    mfile("Real 05012026", ".json").write_text(json.dumps(
+        {"source_file": "Real 05012026.m4a",
+         "segments": [], "speakers": [], "words": []}))
+    (config.MEETINGS_DIR / "Shell A").mkdir()                       # empty shell
+    (config.MEETINGS_DIR / "Shell B").mkdir()                       # stray-txt shell
+    (config.MEETINGS_DIR / "Shell B" / "Shell B.txt").write_text("x")
+    (config.MEETINGS_DIR / "Audio Kept").mkdir()                    # holds audio: spared
+    (config.MEETINGS_DIR / "Audio Kept" / "Audio Kept.m4a").write_bytes(b"a")
+    unknowns.save({"speakers": {
+        "U005": {"file": "U005.npy", "meetings": ["Shell A", "Real 05012026"]},
+        "U007": {"file": "U007.npy", "meetings": ["Shell A", "Shell B"]},
+        "U009": {"file": "U009.npy", "meetings": ["Audio Kept"]}}})
+
+    assert run_batch._sweep_shells() == 2
+
+    sp = unknowns.load()["speakers"]
+    assert sp["U005"]["meetings"] == ["Real 05012026"]   # dead ref gone, live one kept
+    assert sp["U007"]["meetings"] == []                  # both refs died with their shells
+    assert sp["U009"]["meetings"] == ["Audio Kept"]      # spared folder, ref kept
+    # refs only — the entries and their sample files are never reaped here
+    assert set(sp) == {"U005", "U007", "U009"}
+
+
 def test_warns_when_registry_empty_but_meetings_have_names(sandbox, monkeypatch):
     import json
 

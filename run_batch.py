@@ -90,8 +90,14 @@ def _sweep_shells() -> int:
 
     Safe by construction: this runs at batch start holding the single-instance
     lock, so nothing is mid-write, and a folder with no json is by definition not
-    a meeting. Anything holding AUDIO is left alone — that would be real data."""
-    import shutil as _shutil
+    a meeting. Anything holding AUDIO is left alone — that would be real data.
+
+    Removal goes through archive.purge_meeting_dir, the same path as the user's
+    Delete: a run can die AFTER registering unknowns for a file but BEFORE the
+    json write, so the shell's name may already sit in unknowns' 'heard in'
+    lists — sweeping the folder without the scrub left speakers claiming
+    meetings that no longer exist (U005/U007/U009)."""
+    from stt import archive
     n = 0
     try:
         for p in sorted(config.MEETINGS_DIR.iterdir()):
@@ -101,7 +107,7 @@ def _sweep_shells() -> int:
                 continue
             if any(f.suffix.lower() in config.AUDIO_SUFFIXES for f in p.iterdir()):
                 continue  # holds audio: never ours to delete
-            _shutil.rmtree(p)
+            archive.purge_meeting_dir(p)
             n += 1
     except OSError:
         pass

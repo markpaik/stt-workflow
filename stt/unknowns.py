@@ -77,8 +77,12 @@ def forget_meeting_refs(base: str) -> int:
     longer exists anywhere. Archiving does NOT call this: an archived meeting's
     refs stay put so a restore brings its voice clips straight back (the clip
     endpoints already skip non-live meetings gracefully in the meantime).
-    The unknown itself is kept even at zero refs — its embedding still
-    identifies the voice in future meetings. Returns speakers touched."""
+    The unknown itself is kept even at zero refs — its entry and .npy embedding
+    still identify the voice, so assign() re-links it (same global number) the
+    next time it is heard; the panel simply hides zero-ref unknowns instead of
+    nagging "heard in 0 meetings". Reclaiming the entry and sample file is a
+    deliberate GC step taken with the user, never automatic — mirroring the
+    dropped/archived tombstones above. Returns speakers touched."""
     n = 0
     with lock_registry():
         reg = load()

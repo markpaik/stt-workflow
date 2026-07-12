@@ -678,6 +678,41 @@ def test_voice_clips_lists_each_meeting_and_skips_stale_names(running_server):
 
     st, body = _get(running_server, "/api/voice_clips?speaker=U404")
     assert st == 200 and body["clips"] == []          # unknown uid: empty, not error
+    assert "reason" not in body       # no refs at all is not "sources deleted"
+
+
+def test_voice_clips_says_why_when_every_source_meeting_was_deleted(running_server):
+    """An unknown whose every 'heard in' meeting is gone (not live, not
+    archived) has no audio anywhere: the endpoint must say WHY the list is
+    empty, and the panel must agree by not advertising the voice at all — no
+    'heard in 2 meetings' badge sitting over zero playable clips."""
+    from stt import unknowns
+    unknowns.save({"speakers": {"U005": {
+        "file": "U005.npy", "meetings": ["Deleted Mtg A", "Deleted Mtg B"]}}})
+
+    st, body = _get(running_server, "/api/voice_clips?speaker=U005")
+    assert st == 200
+    assert body["clips"] == [] and body["reason"] == "sources_deleted"
+
+    state = srv.gather_state()   # the panel's count agrees: hidden, i.e. zero
+    assert [u["uid"] for u in state["unknowns"]] == []
+    assert [t for t in state["tray"] if t["kind"] == "unknown_voice"] == []
+
+
+def test_voice_clips_archived_refs_are_not_reported_deleted(running_server):
+    """Archived is NOT deleted — a restore brings playback straight back, so
+    the 'recordings were deleted' reason must not show while a ref still
+    resolves into the archive."""
+    from stt import archive, unknowns
+    _make_meeting("Shelved Mtg")
+    (mfile("Shelved Mtg", ".m4a")).write_bytes(b"audio")
+    assert archive.archive_meeting("Shelved Mtg")["ok"]
+    unknowns.save({"speakers": {"U006": {
+        "file": "U006.npy", "meetings": ["Shelved Mtg"]}}})
+
+    st, body = _get(running_server, "/api/voice_clips?speaker=U006")
+    assert st == 200
+    assert body["clips"] == [] and "reason" not in body
 
 
 def test_snippet_secs_is_clamped_and_never_past_the_turn(running_server, monkeypatch):

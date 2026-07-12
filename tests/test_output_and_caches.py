@@ -160,7 +160,12 @@ def test_dropped_unknown_never_resurrects_on_relabel(sandbox):
     uid2 = unknowns.assign({"S1": w}, {"S1": None}, "Mtg B")["S1"]
     assert uid2 != uid
 
-    # and the panel list never shows the tombstone
+    # and the panel list never shows the tombstone. The panel now also hides
+    # any unknown whose meetings no longer exist on disk, so give uid2's
+    # meeting a real transcript for it to resolve against.
+    from conftest import mfile
+    mfile("Mtg B", ".json").write_text(json.dumps(
+        {"source_file": "Mtg B.m4a", "segments": [], "speakers": [], "words": []}))
     from gui import server as srv
     st = srv.gather_state()
     assert uid not in {u["uid"] for u in st["unknowns"]}
