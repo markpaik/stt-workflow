@@ -70,7 +70,10 @@ function drawPill(s){
     cls='pill accent';
     const n=Object.keys(s.active||{}).length||1;
     const eta=s.overall_eta_sec!=null?` &middot; &#8776;${fmtEta(s.overall_eta_sec)}`:'';
-    html=`transcribing ${n}${eta}`;
+    // runs requested while this one holds the lock wait in the job queue; the
+    // pill carries their count so a queued Redo is never invisible
+    const qj=(s.queued_jobs||[]).length;
+    html=`transcribing ${n}${eta}${qj?` &middot; ${qj} queued`:''}`;
   }else if(s.paused){
     cls='pill amber';
     html=`&#9208; paused${queued?` &middot; ${queued} waiting`:''}`;
@@ -97,6 +100,24 @@ setInterval(()=>{
   const pc=$('#pillClock');if(pc)pc.textContent=clock(rec.elapsed_secs);
   const rc=$('#recRowClock');if(rc)rc.textContent=clock(rec.elapsed_secs);
 },1000);
+
+/* ==================== recorder outcome (success) ==================== *
+ * The last recording SAVED ("Saved X - processing"): good news, so a quiet
+ * sub-styled line right under the header, never an amber tray ask. The server
+ * expires a success note on its own (~20s TTL in stt/status.py), so the line
+ * needs no dismiss and disappears by itself when the poll stops carrying it.
+ * A FAILED note is a decision and renders in the tray instead (drawTray).
+ */
+function drawRecOk(s){
+  const el=$('#recok');if(!el)return;
+  const rn=s.recorder_note;
+  const on=!!(rn&&rn.ok);
+  el.hidden=!on;
+  if(!on){el.dataset.at='';el.textContent='';return;}
+  if(el.dataset.at===rn.at)return;        // unchanged note: nothing to redo
+  el.dataset.at=rn.at;
+  el.textContent='✓ '+rn.text;       // the old strip's copy, verbatim
+}
 
 /* ============================ tray ============================ *
  * Amber "needs you" band. Rare, urgent kinds (recorder stall, failures) get one
@@ -130,7 +151,11 @@ const TRAY_EXPAND_MAX=8;
 function drawTray(s){
   const tray=$('#tray');
   const items=s.tray||[];
-  if(!items.length){tray.hidden=true;tray.dataset.sig='';tray.innerHTML='';return;}
+  // the recorder's last outcome when it FAILED ("captured NO audio..."): a
+  // decision, so it outranks everything, even a live stall. A SUCCESS note is
+  // the quiet #recok line under the header instead (drawRecOk), never in here.
+  const note=(s.recorder_note&&!s.recorder_note.ok)?s.recorder_note:null;
+  if(!items.length&&!note){tray.hidden=true;tray.dataset.sig='';tray.innerHTML='';return;}
   const stalls=items.filter(t=>t.kind==='recorder_stall');
   const fails=items.filter(t=>t.kind==='failed');
   const reviews=items.filter(t=>t.kind==='review');
@@ -138,11 +163,25 @@ function drawTray(s){
   // the expand flags AND the library filter fold into the signature so a poll
   // keeps an open group open and an active line active
   const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count]))
+    +'|'+(note?note.at+'\x1f'+note.text:'')
     +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly;
   if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
   tray.dataset.sig=sig;tray.hidden=false;
 
   let h=`<div class="trayhdr">Needs you</div>`;
+  // the failed recorder note, top-ranked: the note text verbatim, Fix
+  // permissions when it reads like a permission problem (the old strip's
+  // gate), and an x that dismisses it server-side (it persists until then)
+  if(note){
+    const fix=/[Mm]icrophone|audio/.test(note.text)
+      ?_trayVerb('Fix permissions',`trayAct('recorder_note','')`):'';
+    const x=`<button class="btn mini tw-verb" type="button" title="Dismiss"
+      onclick="api('/api/recorder_note',{clear:true}).then(refresh)">&#10005;</button>`;
+    h+=`<div class="trayrow">
+      <span class="tw-title">Recorder</span>
+      <span class="tw-detail">${esc(note.text)}</span>
+      <span class="tw-acts">${fix}${x}</span></div>`;
+  }
   // rare + urgent: one line each, acted on in place
   for(const t of stalls)
     h+=_trayRow(t.title,t.detail,_trayVerb('Fix',`trayAct('recorder_stall','${escJs(t.target)}')`));
@@ -481,7 +520,8 @@ function railJump(i){const el=document.getElementById('grp-'+i);
 // While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
 // live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
-function render(){if(!S)return;drawPill(S);drawTray(S);drawDrawer(S);
+function render(){if(!S)return;drawPill(S);drawRecOk(S);drawTray(S);drawDrawer(S);
+  drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
   if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
   drawTimeline(S);afterRender();}
@@ -610,7 +650,10 @@ function runOpts(){const g=ls=>localStorage.getItem(ls)==='1';
 function toggleProcess(){
   const pop=$('#processPop');
   if(pop.dataset.open){closePop();return;}
-  openPop(pop,$('#processBtn'),()=>fillProcessPop(pop),'#pill,#processBtn');
+  openPop(pop,$('#processBtn'),()=>{
+    pop.dataset.sig=ppSig(S||{});   // baseline for the poll's drawProcessPop
+    fillProcessPop(pop);
+  },'#pill,#processBtn');
   $('#processBtn').setAttribute('aria-expanded','true');
 }
 function fillProcessPop(pop){
@@ -623,6 +666,18 @@ function fillProcessPop(pop){
   h+=`<button class="ppitem" type="button" ${(!qsel||running)?'disabled':''} onclick="ppRunSel()">Process selected${qsel?` <span class="ppc">${qsel}</span>`:''}</button>`;
   h+=`<button class="ppitem" type="button" onclick="ppOther()">Other files&#8230;</button>`;
   if(running)h+=`<button class="ppitem danger" type="button" onclick="ppStop(this)">Stop processing</button>`;
+  // runs requested while another held the lock (redos, hand-picked files):
+  // they wait in the job queue and start on their own; the x cancels one
+  const qjobs=s.queued_jobs||[];
+  if(qjobs.length){
+    h+=`<div class="ppsep"></div><div class="pphdr">Queued runs</div>`;
+    h+=qjobs.map(j=>`<div class="ppqrow">
+      <span class="ppql">&#8635; ${esc(j.label)}</span>
+      <span class="ppqs">&middot; ${running?'starts after the current run':'starting&#8230;'}</span>
+      <button class="ppqx" type="button" title="Cancel this queued run"
+        onclick="ppUnqueue(${Number(j.at)||0})">&#10005;</button>
+    </div>`).join('');
+  }
   h+=`<div class="ppsep"></div>`;
   h+=`<button class="ppitem" type="button" onclick="ppPause(this)">${s.paused?'Resume automatic runs':'Pause automatic runs'}</button>`;
   h+=`<div class="ppsep"></div><div class="pphdr">Run options</div>`;
@@ -651,6 +706,34 @@ function ppPause(btn){
   btn.disabled=true;
   api(S.paused?'/api/resume':'/api/pause',{}).then(()=>{closePop();refresh();});
 }
+// cancel a queued run: optimistic removal (the row and the pill count drop
+// NOW), then the POST; if it could not be cancelled (it already started) the
+// next poll simply brings the truth back
+function ppUnqueue(at){
+  if(S)S.queued_jobs=(S.queued_jobs||[]).filter(j=>j.at!==at);
+  const pop=$('#processPop');
+  if(pop.dataset.open){pop.dataset.sig=ppSig(S||{});fillProcessPop(pop);}
+  if(S)drawPill(S);
+  api('/api/unqueue',{at}).then(refresh);
+}
+// the popover refreshes with the 2s poll while open (the drawer's signature
+// pattern): rebuild only when the state it renders changed, never under a
+// focused control, and never by closing it
+function ppSig(s){
+  const waiting=(s.timeline||[]).filter(r=>r.state==='waiting').length;
+  const qsel=[...SEL].map(rowById).filter(r=>r&&(r.state==='waiting'||r.state==='held')).length;
+  return JSON.stringify([waiting,qsel,!!s.running,!!s.paused,
+    (s.queued_jobs||[]).map(j=>[j.at,j.label])]);
+}
+function drawProcessPop(s){
+  const pop=$('#processPop');
+  if(!pop||!pop.dataset.open)return;
+  const sig=ppSig(s||{});
+  if(pop.dataset.sig===sig)return;
+  if(dFocusGuard(pop))return;   // a focused run-option checkbox blocks the swap
+  pop.dataset.sig=sig;
+  fillProcessPop(pop);
+}
 
 /* ------------------------------------------------------------- tray -------- */
 // which aggregate groups are expanded; folded into drawTray's signature so a
@@ -664,6 +747,23 @@ function flaggedToggle(){flaggedOnly=!flaggedOnly;render();}
 function flaggedClear(){flaggedOnly=false;render();}
 async function trayAct(kind,target){
   const ev=window.event;
+  if(kind==='recorder_note'){
+    // the failed recorder note's Fix permissions: same in-flight label as the
+    // stall item; the outcome lands in the row's own detail text (the note
+    // itself persists server-side until its x dismisses it)
+    const btn=ev&&ev.target&&ev.target.closest?ev.target.closest('.tw-verb'):null;
+    if(btn){btn.disabled=true;btn.textContent='Resetting…';}
+    const r=await api('/api/fix_recorder_permissions',{});
+    const row=btn&&btn.closest('.trayrow'),d=row&&row.querySelector('.tw-detail');
+    if(r.ok){
+      if(btn)btn.textContent='Done ✓';
+      if(d)d.textContent=r.message||'Permissions reset.';
+    }else{
+      if(btn){btn.disabled=false;btn.textContent='Retry';}
+      if(d)d.textContent=r.error||'permission reset failed';
+    }
+    return;
+  }
   if(kind==='recorder_stall'){
     const btn=ev&&ev.target&&ev.target.closest?ev.target.closest('.tw-verb'):null;
     if(btn){btn.disabled=true;btn.textContent='Resetting…';}

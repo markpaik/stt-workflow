@@ -756,6 +756,79 @@ def test_library_empty_state_regains_the_drop_line():
     assert "the drop line returns when the upload endpoint ships" not in design
 
 
+# ---------------------------------------------------------------------------
+# Deploy-sweep fixes (2026-07-12): the recorder outcome note and queued panel
+# runs -- both already carried by /api/state and previously ignored by the
+# shell. Same regex-over-the-files style as every block above.
+# ---------------------------------------------------------------------------
+def test_failed_recorder_note_is_the_top_tray_item():
+    # a FAILED note renders as its own tray kind, ABOVE the stall lines
+    body = NEW_JS[NEW_JS.index("function drawTray"):NEW_JS.index("tray.innerHTML=h")]
+    assert "s.recorder_note&&!s.recorder_note.ok" in body
+    assert body.index('tw-title">Recorder') < body.index("trayAct('recorder_stall'"), \
+        "the recorder note must outrank the stall line"
+    # the note folds into the tray signature so polls neither drop nor thrash it
+    assert re.search(r"note\?note\.at", body)
+    # Fix permissions: same endpoint + in-flight label as the stall item...
+    m = re.search(r"if\(kind==='recorder_note'\)\{(.*?)\n  \}", NEW_JS, re.S)
+    assert m, "trayAct lost its recorder_note branch"
+    assert "'/api/fix_recorder_permissions'" in m.group(1)
+    assert "Resetting…" in m.group(1) and "Retry" in m.group(1)
+    # ...shown behind the old strip's microphone/audio gate
+    assert "/[Mm]icrophone|audio/" in body
+    # the x dismisses with the old page's exact endpoint and payload
+    assert "api('/api/recorder_note',{clear:true}).then(refresh)" in body
+
+
+def test_saved_recorder_note_is_a_quiet_line_not_a_tray_ask():
+    # the success line mounts right under the header, BEFORE the tray
+    assert 'id="recok"' in NEW_PAGE
+    assert NEW_PAGE.index('id="recok"') < NEW_PAGE.index('id="tray"')
+    # rendered only for an OK note, with the old strip's check prefix
+    m = re.search(r"function drawRecOk[\s\S]*?\n\}", NEW_JS)
+    assert m, "drawRecOk missing"
+    assert "rn&&rn.ok" in m.group(0)
+    assert "'✓ '+rn.text" in m.group(0)
+    # sub-styled, never amber; render() draws it each poll so the server-side
+    # TTL (stt/status.py) is what makes it disappear -- no client timer, no x
+    css = re.search(r"\.recok\{[^}]*\}", NEW_CSS)
+    assert css and "var(--sub)" in css.group(0) and "--amber" not in css.group(0)
+    assert "drawRecOk(S)" in NEW_JS
+    assert not re.search(r"setTimeout\([^)]*recorder_note", NEW_JS), \
+        "a success note expires server-side, never by a client timer"
+
+
+def test_queued_runs_render_in_the_popover_with_unqueue():
+    # the Process popover's block: one row per job, both status copies per the
+    # old page's logic (running -> waits; idle -> the kick is imminent)
+    assert "Queued runs" in NEW_JS
+    assert "starts after the current run" in NEW_JS
+    assert "starting&#8230;" in NEW_JS
+    # cancel POSTs the same {at} payload the server's /api/unqueue reads,
+    # after an optimistic removal (the row and the pill count drop pre-poll)
+    assert re.search(r"api\('/api/unqueue',\{at\}\)", NEW_JS)
+    m = re.search(r"function ppUnqueue[\s\S]*?\n\}", NEW_JS)
+    assert m and re.search(r"S\.queued_jobs=\(S\.queued_jobs\|\|\[\]\)\.filter", m.group(0))
+    # the pill carries the queued count while a run is active
+    assert re.search(r"const qj=\(s\.queued_jobs\|\|\[\]\)\.length", NEW_JS)
+    assert "${qj} queued" in NEW_JS
+
+
+def test_process_popover_refreshes_with_the_poll_while_open():
+    # the drawer's signature pattern: render() enters through drawProcessPop,
+    # which rebuilds only on a changed signature, never under a focused field,
+    # and never by closing the popover or moving focus
+    assert "drawProcessPop(S)" in NEW_JS
+    for fn in ("ppSig", "drawProcessPop", "ppUnqueue"):
+        assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing fn: {fn}"
+    m = re.search(r"function drawProcessPop[\s\S]*?\n\}", NEW_JS)
+    assert "dataset.sig===sig" in m.group(0)
+    assert "dFocusGuard(pop)" in m.group(0)
+    # queued jobs fold into the signature so a new job redraws an open popover
+    sig = re.search(r"function ppSig[\s\S]*?\n\}", NEW_JS).group(0)
+    assert "queued_jobs" in sig
+
+
 def test_signal_colorway_tokens_shipped_and_greens_retired():
     # DESIGN.md (2026-07-12): the Signal colorway. Electric indigo accent in
     # both themes; the Newsprint greens and warm grounds are gone. Amber and

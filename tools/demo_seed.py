@@ -25,6 +25,7 @@ import argparse
 import json
 import math
 import os
+import plistlib
 import shutil
 import sys
 from datetime import date, datetime, timedelta
@@ -255,6 +256,20 @@ def write_state(home: Path, built: list, queue_files: list, held: list,
         "STT_PUNCTUATE=1\n")
     (home / "work").mkdir(exist_ok=True)
     (home / "logs").mkdir(exist_ok=True)
+
+    # the launchd agent, SANDBOXED: gui/server.py resolves its AGENT plist under
+    # STT_HOME (and skips launchctl entirely there), so the panel's Automation
+    # section and /api/schedule exercise THIS copy — never the operator's real
+    # ~/Library/LaunchAgents agent. ProgramArguments is inert on purpose: launchd
+    # never sees this file.
+    la = home / "LaunchAgents"
+    la.mkdir(exist_ok=True)
+    (la / "com.stt-workflow.batch.plist").write_bytes(plistlib.dumps({
+        "Label": "com.stt-workflow.batch",
+        "ProgramArguments": ["/usr/bin/true"],
+        "StartCalendarInterval": {"Hour": 2, "Minute": 0},
+        "WatchPaths": [str(home / "source"), str(home / "recordings")],
+        "RunAtLoad": True}))
 
 
 # ------------------------------------------------------------- the content -
@@ -561,7 +576,10 @@ def _launch_instructions(target: Path, port: int) -> str:
         "STT_HOME (config.py) redirects every data path — meetings, watched\n"
         "folders, voiceprints, manifest, status/history, holds, queue — under it;\n"
         "STT_PANEL_PORT (gui/server.py __main__) chooses the port. Code/static\n"
-        "assets still load from this checkout, so the panel runs unchanged.")
+        "assets still load from this checkout, so the panel runs unchanged.\n"
+        "SCHEDULING IS SANDBOXED TOO: the launchd plist resolves to the seeded\n"
+        "LaunchAgents/ copy under STT_HOME and launchctl is NEVER called, so\n"
+        "/api/schedule and /api/automation cannot touch the real agent.")
 
 
 def main(argv=None):
