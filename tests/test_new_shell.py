@@ -99,6 +99,15 @@ def test_old_app_js_gained_the_two_bridge_params():
     assert "get('open')" in js
 
 
+def test_old_naming_dialog_explains_deleted_sources_instead_of_a_dead_player():
+    # /api/voice_clips returns reason:"sources_deleted" when every meeting a
+    # voice was heard in is gone; the old dialog must show the plain sentence,
+    # not fall through to an <audio> element that can never load
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "r.reason==='sources_deleted'" in js
+    assert "No audio available. The source recordings were deleted." in js
+
+
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS syntax gate skipped")
 def test_new_shell_js_parses():
     page = _compose(NEW)
@@ -193,3 +202,152 @@ def test_row_and_queue_actions_hit_the_expected_endpoints():
         assert ep in NEW_JS, f"seam layer never calls {ep}"
     # tray + search bridge to the old page's additive deep links
     assert "'/?review='" in NEW_JS and "'/?who='" in NEW_JS and "'/?open='" in NEW_JS
+
+
+# ---------------------------------------------------------------------------
+# Builder A: THE MEETING PAGE. A hash route #m/<base> renders one scrollable
+# document (header, docked audio, summary, flagged strip, transcript, pinned
+# ask bar) in place of the old Read + Summary + Ask surfaces. These assert the
+# route wiring, the ported reader/ask semantics, and the read endpoints -- with
+# the same regex-over-the-composed-page style as the rest of this file.
+# ---------------------------------------------------------------------------
+def test_meeting_page_is_a_hash_route_with_a_container_and_handler():
+    page = _compose(NEW)
+    # the #m/<base> route, its markup mount, and a live hashchange handler
+    assert "#m/" in page
+    assert 'id="meetingpage"' in page
+    assert "addEventListener('hashchange'" in NEW_JS
+    for fn in ("parseHash", "applyRoute", "enterMeeting", "exitMeeting",
+               "buildMeeting", "maybeBuildPending"):
+        assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing route fn: {fn}"
+    # openMeeting now stays in the shell (sets the hash) instead of navigating away
+    assert re.search(r"function\s+openMeeting[^}]*location\.hash\s*=\s*'#m/'", NEW_JS), \
+        "openMeeting must set the #m/ hash, not navigate to the old page"
+
+
+def test_meeting_page_defines_the_ported_reader_functions():
+    # audio seek + playing-line highlight, and the in-page find (occurrence
+    # count / prev-next / highlight), ported from the old transcript viewer
+    for fn in ("mSeek", "mHighlight", "mPlayPause", "mCycleRate", "mToggleFollow",
+               "mFindRun", "mFindNav", "mFindMark", "mFindShow", "mFindClear"):
+        assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing reader fn: {fn}"
+    # the find field is focusable by slash or Cmd-F, like the old reader
+    assert "metaKey" in NEW_JS and "e.key==='/'" in NEW_JS
+
+
+def test_meeting_page_uses_the_read_endpoints_verbatim():
+    # transcript is fetched (GET, no body) from /api/transcript, as the old reader
+    assert "api('/api/transcript?base='" in NEW_JS
+    # summary generation reuses the old GET /api/suggest call + its persistence
+    assert "api('/api/suggest?base='" in NEW_JS
+    # the audio src is the byte-range /api/audio?base= endpoint
+    assert "'/api/audio?base='" in NEW_JS
+
+
+def test_meeting_page_ask_stays_a_post_with_the_server_contract():
+    # /api/ask is POSTed (api(path, body)) with the base/question/history body,
+    # the same shape the server's /api/ask reads
+    assert re.search(r"api\('/api/ask',\{base,question:q,history:hist\}", NEW_JS)
+    assert "function mAskSend" in NEW_JS
+    # last few successful turns ride along (old askSend semantics)
+    assert "filter(h=>h.a&&!h.err).slice(-3)" in NEW_JS
+
+
+def test_meeting_page_leaves_the_review_stepper_seam_for_builder_b():
+    # the flagged strip renders only; stepping/acting is Builder B's, via this seam
+    assert re.search(r"function\s+reviewStep\s*\(", NEW_JS)
+
+
+# ---------------------------------------------------------------------------
+# Live-review corrections (2026-07-12): type floor, the tray's >8 flagged
+# aggregate filtering the library, ready-row click-to-expand, and Ask
+# reachability (row menu + in-shell search hits).
+# ---------------------------------------------------------------------------
+NEW_CSS = (NEW / "app.css").read_text(encoding="utf-8")
+NEW_PAGE = (NEW / "page.html").read_text(encoding="utf-8")
+
+
+def test_css_type_floor_is_13px():
+    # DESIGN.md (2026-07-12): no type below 13px anywhere in the shell
+    sizes = [float(m) for m in re.findall(
+        r"font(?:-size)?:[^;{}]*?(\d+(?:\.\d+)?)px", NEW_CSS)]
+    assert sizes, "no font sizes found -- the audit regex broke"
+    assert min(sizes) >= 13, f"type floor broken: {min(sizes)}px < 13px"
+
+
+def test_shared_reading_column_is_920():
+    # ONE column cap (920 content + two 24px gutters) shared by body, the
+    # pinned ask bar, and the bulk bar -- no surface keeps a private width
+    assert "--colcap:968px" in NEW_CSS
+    assert NEW_CSS.count("var(--colcap)") >= 3
+    assert "908px" not in NEW_CSS and "max-width:min(920px" not in NEW_CSS
+
+
+def test_flagged_aggregate_filters_the_library_not_the_tray():
+    # >8 flagged meetings: the tray line toggles a library filter (never a
+    # second in-tray list); the chip beside the category filter clears it
+    assert "TRAY_EXPAND_MAX=8" in NEW_JS
+    assert re.search(r"function\s+flaggedToggle\s*\(", NEW_JS)
+    assert re.search(r"function\s+flaggedClear\s*\(", NEW_JS)
+    # ready rows without substantial flags drop out; pinned states are untouched
+    assert re.search(r"flaggedOnly&&r\.state==='ready'&&!\(r\.review_substantial>0\)", NEW_JS)
+    # the chip markup lives beside the #filter select in the header
+    assert 'id="flagchip"' in NEW_PAGE
+    assert "flagged only" in NEW_PAGE
+    # the filter state folds into both signatures so polls preserve it
+    assert NEW_JS.count("flaggedOnly") >= 6
+
+
+def test_ready_row_click_expands_the_summary_in_place():
+    # the expansion: full summary + committed next steps + open-transcript link,
+    # toggled by the row body (controls guarded via closest), keyed by id
+    assert re.search(r"function\s+toggleExpand\s*\(", NEW_JS)
+    assert "const OPEN=new Set()" in NEW_JS
+    assert "Open transcript" in NEW_JS
+    assert "next_steps" in NEW_JS
+    # the click guard: buttons/links/inputs/the review count never toggle
+    assert re.search(r"closest\('button,a,input,select,textarea,label,\.rev'\)", NEW_JS)
+    # open state folds into the row signature so expansions survive polls
+    assert "OPEN.has(r.id)" in NEW_JS
+    # height animates ~180ms, and reduced motion kills the transition
+    assert re.search(r"\.rexp\{[^}]*transition:grid-template-rows \.18s ease", NEW_CSS)
+    assert re.search(r"prefers-reduced-motion[^}]*\{[^{]*\*\{scroll-behavior", NEW_CSS)
+    assert ".rexp," in NEW_CSS  # listed in the reduced-motion transition kill
+
+
+def test_ask_is_reachable_from_the_row_menu_and_search_hits():
+    # the per-row menu gained "Ask a question" -> meeting page, ask input focused
+    assert "Ask a question" in NEW_JS
+    assert re.search(r"function\s+rmAsk\s*\(", NEW_JS)
+    # focus-after-build flag, not a timeout hack
+    assert "pendingOpen" in NEW_JS
+    assert not re.search(r"setTimeout\([^)]*maskq", NEW_JS)
+    # search hits open the in-shell meeting page and seek to the hit's moment
+    assert re.search(r"function\s+openHit\s*\(", NEW_JS)
+    assert re.search(r"openHit\('\$\{escJs\(h\.base\)\}',\$\{Number\(h\.start\)", NEW_JS)
+    # the hit no longer bridges to the old page (the tray fallback still may)
+    assert "onclick=\"location.href='/?open='" not in NEW_JS
+
+
+def test_serif_retired_and_mono_demoted_to_true_data():
+    # DESIGN.md Type (revised 2026-07-12): one neutral sans, hierarchy from
+    # weight and size. No serif anywhere in the composed shell, and the unused
+    # --serif token is gone from the sheet.
+    page = _compose(NEW)
+    assert "ui-serif" not in page and "New York" not in page
+    assert "--serif" not in NEW_CSS
+    # mono survives ONLY as true data: the .mono timer/timestamp utility and
+    # the status pill. Every other rule that names a font family is sans.
+    mono_rules = re.findall(r"([^{}]+)\{[^}]*var\(--mono\)", NEW_CSS)
+    survivors = {r.strip().splitlines()[-1].strip() for r in mono_rules}
+    assert survivors == {".mono", ".pill"}, f"unexpected mono rules: {survivors}"
+    # structural text is sans: row meta, group headers, tray header, right slot
+    # (line-start anchored so `.rslot` hits its own rule, not `.row.open .rslot`)
+    for sel in (".rmeta", ".mgroup", ".rslot", ".mmeta", ".tray .trayhdr"):
+        m = re.search(r"(?m)^" + re.escape(sel) + r"\{[^}]*\}", NEW_CSS)
+        assert m and "var(--sans)" in m.group(0), f"{sel} must be the sans stack"
+    # in the markup, .mono rides only on timestamps/clocks/timers: the ticking
+    # recording clock keeps it; the demoted rate/find-count/ask-note lost it
+    assert 'id="recRowClock" class="mono"' in NEW_JS
+    for demoted in ('"mrate mono"', '"mfindn mono"', '"masknote mono"'):
+        assert demoted not in NEW_JS, f"demoted element still mono: {demoted}"
