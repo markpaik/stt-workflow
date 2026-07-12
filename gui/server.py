@@ -321,6 +321,10 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "processed_at": (d.get("processed_at") or d.get("generated_at")
                                  or _dt.fromtimestamp(
                                      j.stat().st_mtime).isoformat(timespec="seconds")),
+                # the originating filename, so the One Timeline can morph a
+                # queued source row into this meeting's row in place (the source
+                # gained an announced base mid-run) instead of flickering
+                "source_file": d.get("source_file"),
                 "audio": str(audio_p) if audio_p else None}
     except Exception:
         meta = None
@@ -343,6 +347,218 @@ def _recording_state():
             # header-only CAF ~10s in = TCC denial: the panel shows a red strip
             # with the Fix-permissions button WHILE the meeting can still be saved
             "stalled": recorder.capture_stalled(rec)}
+
+
+# ---------- One Timeline: one row per meeting, changing state in place ----------
+#
+# The panel renders every recording/file as a SINGLE row that changes state
+# (recording -> waiting/held -> processing -> needs_name -> ready, or failed) in
+# place, instead of separate Queue / Processing / Recent / naming-inbox cards.
+# `_timeline_tray` folds the structures gather_state has ALREADY built (the
+# queue listing, the meeting metas, the live active-run stages, the unknown
+# registry) into that one feed plus a ranked attention tray — no extra directory
+# scans, and the only new disk read is the mtime-cached results log below.
+
+# newest-poll pinning: a live capture and an in-flight run stay at the top of the
+# feed regardless of their timestamp; everything else sorts purely by `when`.
+_STATE_RANK = {"recording": 3, "processing": 2}
+
+_results_cache = {"key": None, "rows": None}
+
+
+def _results_rows():
+    """The permanent results log parsed to dicts, cached by (path, mtime). The
+    log only grows when a file finishes, so between runs this cache hits on every
+    2s poll — the join never re-reads it just because the panel polled again."""
+    p = status.HISTORY_LOG
+    try:
+        key = (str(p), p.stat().st_mtime)
+    except OSError:
+        return []
+    if _results_cache["key"] == key:
+        return _results_cache["rows"]
+    rows = []
+    try:
+        for ln in p.read_text().splitlines():
+            try:
+                rows.append(json.loads(ln))
+            except json.JSONDecodeError:
+                pass
+    except OSError:
+        rows = []
+    _results_cache["key"], _results_cache["rows"] = key, rows
+    return rows
+
+
+def _failed_sources(st):
+    """{source_file: error_text} for every source whose MOST RECENT result was a
+    failure. Merges the mtime-cached results log with the live status ring
+    (newest wins, matching status.history), so a source that later succeeded —
+    its newest outcome an ok — never lingers as failed. The original stays in the
+    watched folder, so a failed source keeps re-running until it lands or is
+    removed."""
+    rows = list(_results_rows())  # oldest-first on disk
+    seen = {(r.get("name"), r.get("at")) for r in rows}
+    rows += [r for r in st.get("recent", [])
+             if (r.get("name"), r.get("at")) not in seen]
+    latest = {}
+    for r in rows:
+        nm = r.get("name")
+        if nm is None:
+            continue
+        prev = latest.get(nm)
+        if prev is None or (r.get("at") or "") >= (prev.get("at") or ""):
+            latest[nm] = r
+    return {nm: (r.get("summary") or "failed")
+            for nm, r in latest.items() if not r.get("ok")}
+
+
+def _one_line(text, cap=160):
+    """A single-sentence preview of a summary — first sentence, else a hard cap."""
+    t = " ".join((text or "").split())
+    if not t:
+        return ""
+    for end in (". ", "? ", "! "):
+        i = t.find(end)
+        if 0 < i <= cap:
+            return t[:i + 1]
+    return t if len(t) <= cap else t[:cap - 1].rstrip() + "…"
+
+
+def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
+    """(timeline, tray) — the unified per-meeting feed (newest first) and the
+    ranked attention tray, built entirely from gather_state's own locals."""
+    from datetime import datetime as _dt
+    timeline, failed_entries = [], []
+    # sources already owned by another row: never emit a duplicate history-only
+    # failure for a file that is queued, in flight, or already a meeting
+    emitted = set()
+
+    # --- recording: the live capture, always one row, pinned to the top ---
+    if rec:
+        cap = Path(rec.get("caf", "recording")).stem or "recording"
+        timeline.append({
+            "id": f"rec:{cap}", "state": "recording",
+            "title": "Recording", "date": (rec.get("started_at") or "")[:10] or None,
+            "when": rec.get("started_at") or status._now(),
+            "elapsed_secs": rec.get("elapsed_secs", 0),
+            "paused": bool(rec.get("paused")), "stalled": bool(rec.get("stalled"))})
+
+    # --- processing: the in-flight run. Keyed by SOURCE filename; the run has
+    # already announced its resolved (date-stamped) base via set_stage, so the
+    # row's id is that base and source_file lets the client morph the queued
+    # `src:<file>` row into it in place. prev_id spells that flip out. ---
+    for name, e in active_out.items():
+        base = e.get("base")
+        emitted.add(name)
+        timeline.append({
+            "id": base or f"src:{name}", "state": "processing",
+            "source_file": name, "prev_id": f"src:{name}",
+            "title": _display_title(base) if base else name,
+            "date": dates.meeting_date(base or name),
+            "when": e.get("since") or status._now(),
+            "stage": e.get("stage"), "pct": e.get("pct"), "eta": e.get("eta_sec")})
+
+    # --- meetings: needs_name (awaiting a human name/date) or ready. A meeting
+    # being reprocessed shows as its processing row above, not twice. ---
+    active_bases = {e.get("base") for e in active_out.values() if e.get("base")}
+    for meta in meetings:
+        if meta["base"] in active_bases:
+            continue
+        if meta.get("source_file"):
+            emitted.add(meta["source_file"])
+        row = {"source_file": meta.get("source_file"),
+               "title": meta["title"], "date": meta["date"],
+               "when": meta["processed_at"]}
+        if meta["needs_review"]:
+            row.update({"id": meta["base"], "state": "needs_name",
+                        "suggested_title": meta["suggested"],
+                        "suggested_date": meta["date"],
+                        "has_audio": bool(meta["audio"])})
+        else:
+            row.update({"id": meta["base"], "state": "ready",
+                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "category": meta["category"],
+                        "review_substantial": meta["flagged"],
+                        "review_minor": meta["flagged_minor"],
+                        "has_summary": bool(meta["summary"]),
+                        "summary": _one_line(meta["summary"])})
+        timeline.append(row)
+
+    # --- queue sources: waiting / held / failed. A source in flight is already a
+    # processing row above; a processed one is already its meeting. ---
+    failed_map = _failed_sources(st)
+    for f in queue:
+        name = f["name"]
+        if f["processed"] or name in emitted:
+            continue
+        emitted.add(name)
+        row = {"id": f"src:{name}", "source_file": name,
+               "title": name, "date": dates.meeting_date(name),
+               "when": _dt.fromtimestamp(f["mtime"]).isoformat(timespec="seconds"),
+               "size_mb": f["size_mb"], "est_minutes": f.get("est_min")}
+        if f["held"]:
+            row.update({"state": "held", "held": True})
+        elif name in failed_map:
+            row.update({"state": "failed", "error": failed_map[name],
+                        "retry_note": "still in the watched folder — it re-runs on the next batch"})
+            failed_entries.append(row)
+        else:
+            row["state"] = "waiting"
+        timeline.append(row)
+
+    # --- history-only failures: a file that failed and is no longer queued (and
+    # never became a meeting). It stays visible so the failure is not silently
+    # lost the moment the source leaves the folder. ---
+    for name, err in failed_map.items():
+        if name in emitted:
+            continue
+        emitted.add(name)
+        row = {"id": f"src:{name}", "state": "failed", "source_file": name,
+               "title": name, "date": dates.meeting_date(name),
+               "when": _failed_at(st, name) or status._now(),
+               "error": err,
+               "retry_note": "the original is gone — re-add it to the watched folder to retry"}
+        timeline.append(row)
+        failed_entries.append(row)
+
+    timeline.sort(key=lambda r: (_STATE_RANK.get(r["state"], 1), r["when"]),
+                  reverse=True)
+
+    # --- tray: what needs the user, in rank order ---
+    tray = []
+    if rec and rec.get("stalled"):
+        tray.append({"kind": "recorder_stall", "title": "Recording",
+                     "detail": "no audio is being captured — check microphone access",
+                     "target": f"rec:{Path(rec.get('caf', 'recording')).stem or 'recording'}",
+                     "count": 1})
+    for row in failed_entries:
+        tray.append({"kind": "failed", "title": row["title"],
+                     "detail": row["error"], "target": row["id"], "count": 1})
+    for meta in meetings:
+        if meta["base"] not in active_bases and meta["flagged"] and not meta["needs_review"]:
+            tray.append({"kind": "review", "title": meta["title"],
+                         "detail": f"{meta['flagged']} segment"
+                                   f"{'s' if meta['flagged'] != 1 else ''} flagged for review",
+                         "target": meta["base"], "count": meta["flagged"]})
+    for u in unknown_list:
+        if u.get("archived"):  # hidden one-time voices never nag
+            continue
+        n = len(u.get("meetings", []))
+        tray.append({"kind": "unknown_voice", "title": u["display"],
+                     "detail": f"heard in {n} meeting{'s' if n != 1 else ''} — who is this?",
+                     "target": u["uid"], "count": n})
+    return timeline, tray
+
+
+def _failed_at(st, name):
+    """When `name`'s most recent (failed) result landed — for the history-only
+    failure row's sort timestamp."""
+    at = None
+    for r in _results_rows() + list(st.get("recent", [])):
+        if r.get("name") == name and (at is None or (r.get("at") or "") >= at):
+            at = r.get("at")
+    return at
 
 
 def gather_state():
@@ -383,6 +599,7 @@ def gather_state():
                 queue.append({"name": p.name, "size_mb": round(p.stat().st_size / 1e6, 1),
                               "video": p.suffix.lower() in config.VIDEO_EXTS,
                               "processed": done, "est_min": est_min,
+                              "mtime": p.stat().st_mtime,  # timeline sort key
                               "held": p.name in _held, "est_detail": est_detail})
     except Exception:
         pass
@@ -457,6 +674,8 @@ def gather_state():
             if f["name"] in pend_names and f.get("est_min"):
                 pend_secs += f["est_min"] * 60
         overall_eta = round((active_eta_sum + pend_secs) / n_active) if (active_eta_sum or pend_secs) else None
+    rec_state = _recording_state()  # resolved once: reused by the live banner AND the timeline
+    timeline, tray = _timeline_tray(st, queue, meetings, active_out, unknown_list, rec_state)
     return {"running": running,
             "mem_mb": procs["mem_mb"],
             "active": active_out,
@@ -472,9 +691,15 @@ def gather_state():
             # had already stopped. Same source of truth the menu bar uses, with
             # the captured-seconds clock resolved server-side so both readouts
             # agree and neither has to re-derive the paused-span arithmetic.
-            "recording": _recording_state(),
+            "recording": rec_state,
             "recorder_note": status.recorder_note(),  # expires a success on its own
             "queue": queue, "meetings": meetings,
+            # the One Timeline: one row per meeting/file, changing state in place
+            # (recording -> waiting/held -> processing -> needs_name -> ready |
+            # failed), newest first, archived excluded; plus a ranked tray of
+            # what needs the user. Both are strictly additive — every key above
+            # keeps its shape so the current panel keeps working unchanged.
+            "timeline": timeline, "tray": tray,
             "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
