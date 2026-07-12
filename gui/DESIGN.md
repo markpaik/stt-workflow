@@ -151,7 +151,15 @@ The right slot is the state:
               count as plain amber TEXT inside the meta line, no chip
               (forty chip-wearing rows read as a wall of warnings); right
               slot shows state text that yields to hover actions
-              [▶] [Open] [⋯]. Clicking the row body (not its controls)
+              [▶] [Open] [⋯]. The TITLE and the meta's DATE are
+              click-to-edit in place (the old page's quick path, restored
+              2026-07-12): the title becomes a text input, the date a date
+              input; Enter saves (`/api/rename` / `/api/set_date`, the folder
+              re-stamps server-side and the row re-sorts on the next poll),
+              Escape cancels, and hover marks both targets with an edit
+              cursor plus a subtle underline. Neither click expands the row.
+              The meeting page's header title renames inline the same way
+              (it shares the row's rename path). Clicking the row body (not its controls)
               expands it in place: full summary + committed next steps +
               an "Open transcript →" link, collapse on second click,
               multiple rows may stay open, expansion survives polls, height
@@ -163,7 +171,12 @@ The right slot is the state:
               note "original stays in the watched folder"
 
 Hover rule: rows show at most ONE line of quiet state text at rest; buttons
-appear on hover/focus-within only. Checkboxes for bulk selection appear on
+appear on hover/focus-within only. Revealed buttons JOIN the row's flow at
+the right edge (clarified 2026-07-12 after they shipped as an absolute
+overlay that sat on top of long meta lines and summaries): the state text
+yields its space entirely and the row text re-truncates; hover actions must
+never render on top of visible text, in either theme, at any width.
+Checkboxes for bulk selection appear on
 row hover (left edge) and stay visible while any selection exists.
 
 Category dot: hollow = untagged, accent-filled = work, amber-filled =

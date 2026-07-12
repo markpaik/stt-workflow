@@ -319,8 +319,11 @@ def test_ready_row_click_expands_the_summary_in_place():
     assert "const OPEN=new Set()" in NEW_JS
     assert "Open transcript" in NEW_JS
     assert "next_steps" in NEW_JS
-    # the click guard: buttons/links/inputs/the review count never toggle
-    assert re.search(r"closest\('button,a,input,select,textarea,label,\.rev'\)", NEW_JS)
+    # the click guard: buttons/links/inputs/the review count/the click-to-edit
+    # title and date never toggle
+    assert re.search(
+        r"closest\('button,a,input,select,textarea,label,\.rev,\.rname,\.rdate'\)",
+        NEW_JS)
     # open state folds into the row signature so expansions survive polls
     assert "OPEN.has(r.id)" in NEW_JS
     # height animates ~180ms, and reduced motion kills the transition
@@ -828,6 +831,49 @@ def test_process_popover_refreshes_with_the_poll_while_open():
     # queued jobs fold into the signature so a new job redraws an open popover
     sig = re.search(r"function ppSig[\s\S]*?\n\}", NEW_JS).group(0)
     assert "queued_jobs" in sig
+
+
+# ---------------------------------------------------------------------------
+# UI bug fixes (2026-07-12): hover actions must never overlay row text, and
+# the old page's click-to-edit title/date returns on ready rows.
+# ---------------------------------------------------------------------------
+def test_hover_actions_join_the_flow_instead_of_overlaying():
+    # the action cluster is display-gated INTO the row's flow when shown --
+    # never an absolutely positioned overlay that can sit on top of the meta
+    m = re.search(r"(?m)^\.ractions\{[^}]*\}", NEW_CSS, re.S)
+    assert m, ".ractions rule missing"
+    assert "display:none" in m.group(0)
+    assert "position:absolute" not in m.group(0)
+    assert re.search(
+        r"\.row:hover \.ractions,\.row:focus-within \.ractions,"
+        r"\.row\.acting \.ractions\{\s*display:flex", NEW_CSS)
+    # the resting state text fully yields its SPACE (display, not visibility)
+    assert re.search(
+        r"\.row:hover \.yields,\.row:focus-within \.yields,"
+        r"\.row\.acting \.yields\{display:none\}", NEW_CSS)
+    # a row keeps its actions while its ⋯ menu / delete confirm is open (the
+    # pointer is in the popover, so :hover alone would drop them and zero the
+    # open menu's anchor rect); the poll's re-anchor restores the class first
+    assert re.search(r"function\s+rowActing\s*\(", NEW_JS)
+    assert "rowActing(rm.dataset.rowid)" in NEW_JS
+
+
+def test_click_to_edit_title_and_date_on_ready_rows():
+    # the quick path is back: clicking the title / the meta's date edits inline
+    for fn in ("rowTitleEdit", "rowDateEdit"):
+        assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing: {fn}"
+    # payload shapes match the server contract (the old page's inline editors)
+    assert "api('/api/rename',{base:id,new:nm})" in NEW_JS
+    assert re.search(r"api\('/api/set_date',\{base:id,date:d\}\)", NEW_JS)
+    # failures surface inline; native dialogs stay banned shell-wide
+    for native in ("alert(", "confirm(", "prompt("):
+        assert native not in NEW_JS, f"native dialog in the new shell: {native}"
+    # the targets read as editable (edit cursor + subtle underline), per the
+    # old page's .mtitle/.mdate hover treatment translated to Signal tokens
+    assert re.search(r"\.rname,\.rdate\{cursor:text\}", NEW_CSS)
+    assert re.search(r"\.rname:hover,\.rdate:hover\{text-decoration:underline", NEW_CSS)
+    # the meeting page header title renames inline through the same path
+    assert "rowTitleEdit(event,'${escJs(base)}')" in NEW_JS
 
 
 def test_signal_colorway_tokens_shipped_and_greens_retired():

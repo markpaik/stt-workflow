@@ -234,6 +234,16 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .rmeta .rev{color:var(--amber);cursor:pointer}
 .rmeta .rev.minor{color:var(--sub)}
 .rmeta .rev:hover{text-decoration:underline;text-underline-offset:2px}
+/* click-to-edit title and date (old page parity, .mtitle/.mdate translated to
+   Signal): edit cursor plus a subtle underline mark the two targets; the date
+   input replaces the meta's date in place */
+.rname,.rdate{cursor:text}
+.rname:hover,.rdate:hover{text-decoration:underline;
+  text-decoration-color:var(--sub);text-underline-offset:2px}
+.rmeta:has(.dateinput){overflow:visible}
+.dateinput{font:500 13px/1.3 var(--sans);font-variant-numeric:tabular-nums;
+  color:var(--ink);background:var(--card);border:1px solid var(--accent);
+  border-radius:7px;padding:2px 7px;color-scheme:inherit}
 /* summary preview: two full lines, then clip. -webkit-line-clamp with a
    max-height fallback for engines that ignore it. */
 .rsummary{font:400 15px/1.5 var(--sans);color:var(--sub);
@@ -263,21 +273,26 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row.open{align-items:flex-start}
 .row.open .chk,.row.open .cat{margin-top:6px}
 .row.open .rslot{margin-top:1px}
-.row.open .ractions{top:0;transform:none}
 
 /* right slot: one quiet line of state text at rest; buttons appear on
-   hover/focus, overlaid at the right edge so they never reserve blank space.
-   The resting text (marked .yields) steps aside for them. */
-.rslot{flex:none;margin-left:auto;position:relative;display:flex;
+   hover/focus (or while the row's menu is open: .acting) and JOIN THE FLOW at
+   the right edge, so they can never sit on top of row text (DESIGN.md hover
+   rule): the resting text (marked .yields) fully yields its space and the
+   meta simply re-truncates. At rest the actions are display:none, so they
+   still reserve no blank space. */
+.rslot{flex:none;margin-left:auto;display:flex;
   align-items:center;gap:8px;min-height:30px;
   font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;color:var(--sub)}
 .rstate{white-space:nowrap}
-.ractions{position:absolute;right:0;top:50%;transform:translateY(-50%);
-  display:flex;align-items:center;gap:6px;opacity:0;visibility:hidden;
-  transition:opacity .15s ease}
-.row:hover .ractions,.row:focus-within .ractions{opacity:1;visibility:visible}
+.ractions{display:none;align-items:center;gap:6px;opacity:0;
+  transition:opacity .15s ease,display .15s ease allow-discrete}
+.row:hover .ractions,.row:focus-within .ractions,.row.acting .ractions{
+  display:flex;opacity:1}
+@starting-style{
+  .row:hover .ractions,.row:focus-within .ractions,.row.acting .ractions{opacity:0}
+}
 /* only states that HAVE hover actions mark their resting text .yields */
-.row:hover .yields,.row:focus-within .yields{visibility:hidden}
+.row:hover .yields,.row:focus-within .yields,.row.acting .yields{display:none}
 
 /* --- per-state row treatments (all seven states) --- */
 .row[data-state="recording"] .rstate{color:var(--rec)}
@@ -600,6 +615,11 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 /* meeting header: the row's controls, on the page */
 .mhead{position:relative}
 .mhmenu{position:absolute;top:16px;right:2px;font-size:15px}
+/* the page title renames inline (same rmRename as the row): the affordance
+   shows only while it is still text, never once the input is in it */
+.mtitle:not(:has(.renameinput)){cursor:text}
+.mtitle:not(:has(.renameinput)):hover{text-decoration:underline;
+  text-decoration-color:var(--line);text-underline-offset:3px}
 .mmeta .mcat{padding:0;cursor:pointer}
 .mmeta .mcat:hover{border-color:var(--sub)}
 .mmeta .mcat.work:hover{border-color:var(--accent)}
