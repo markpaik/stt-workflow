@@ -629,12 +629,29 @@ def gather_state():
             meetings.append(meta)
     reg = unknowns.load()
     unknown_list = []
+    # "heard in N meetings" may only count meetings that still EXIST — live
+    # (the same membership the clip endpoints gate on) or archived (restorable,
+    # so their refs deliberately survive). Deletes scrub refs at the source,
+    # but refs can predate the scrub, so liveness is re-derived every poll
+    # rather than trusted from the raw arrays: the count and the ▶ playback
+    # can then never disagree.
+    resolvable = set(config.meeting_bases(dst_dir)) | set(config.archived_bases(dst_dir))
     for uid, meta in sorted(reg["speakers"].items()):
         if meta.get("dropped"):
             continue  # tombstoned "not a real speaker" — never surfaces again
+        mts = [m for m in meta.get("meetings", []) if m in resolvable]
+        if not mts:
+            # zero live/archived refs: nothing to play, nothing to name against
+            # — hide it rather than nag "heard in 0 meetings" forever. NOT
+            # deleted: the registry entry and its .npy embedding stay (same
+            # tombstone spirit as dropped/archived), so the voice keeps its
+            # global number and resurfaces on its own the moment assign()
+            # hears it in a new meeting. Reclaiming the entry and sample file
+            # is an explicit GC decision, never a side effect of a poll.
+            continue
         unknown_list.append({"uid": uid, "display": unknowns.display(uid),
                              "archived": bool(meta.get("archived")),
-                             "meetings": meta.get("meetings", [])})
+                             "meetings": mts})
     enrolled = [{"name": n, "samples": meta.get("n_samples", 1),
                  "sources": [s for s in meta.get("sources", []) if s and s != "?"]}
                 for n, meta in sorted(identify.load_registry().items(),
@@ -984,19 +1001,26 @@ class Handler(BaseHTTPRequestHandler):
                 # EACH meeting it was heard in — meeting names come from the
                 # SERVER's registry, never the client, so no base gate needed
                 uid = q.get("speaker", "")
-                meetings = (unknowns.load()["speakers"]
-                            .get(uid, {}).get("meetings", []))[:5]
+                refs = (unknowns.load()["speakers"]
+                        .get(uid, {}).get("meetings", []))
                 clips = []
-                for m in meetings:
-                    if not _known_base(m):
-                        continue  # stale reference (renamed before tracking)
+                for m in [m for m in refs if _known_base(m)][:5]:
                     cs = review.find_voice_clips(uid, m, n=1)
                     if cs:
                         c = cs[0]
                         clips.append({"meeting": m, "start": c["start"],
                                       "dur": round(c["dur"], 1),
                                       "index": c["index"]})
-                self._json({"clips": clips})
+                out = {"clips": clips}
+                if refs and not clips:
+                    archived = set(config.archived_bases())
+                    if not any(_known_base(m) or m in archived for m in refs):
+                        # every reference is DEAD — not live, not archived: the
+                        # meetings this voice was heard in were deleted, so no
+                        # audio exists to cut a clip from. Say WHY the list is
+                        # empty instead of handing the dialog a blank player.
+                        out["reason"] = "sources_deleted"
+                self._json(out)
             elif u.path == "/api/transcript":
                 base = q["base"]
                 if not self._require_base(base):

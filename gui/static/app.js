@@ -1381,7 +1381,9 @@ async function openName(uid,display,meeting){
       <button onclick="openTranscript('${escJs(c.meeting)}',${c.index})" title="Open the transcript at this moment — hear as much as you like, with the conversation around it">Read</button>
     </div>
   </div>`).join('')
-    ||`<audio controls src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`;
+    ||(r.reason==='sources_deleted'
+       ?'<div class="sub">No audio available. The source recordings were deleted.</div>'
+       :`<audio controls src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`);
 }
 function reassignSample(name,index){
   // move a misattributed sample to the right person instead of discarding it

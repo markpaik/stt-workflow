@@ -7,16 +7,37 @@ the list, search, Ask, export, voice clips, relabel --all) excludes it with no
 per-endpoint work. Restore moves it back; nothing inside the folder is touched
 in either direction, so a restored meeting is byte-identical.
 
-Delete is permanent (shutil.rmtree) and is the only operation that scrubs the
-speaker registries' references — an archived meeting keeps its refs so a
+Delete is permanent and goes through purge_meeting_dir — the ONE removal path
+that both rmtree's the folder and scrubs the unknowns registry's references
+(run_batch's shell sweep uses it too). An archived meeting keeps its refs so a
 restore brings voice-clip playback straight back.
 """
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from . import config, manifest
+
+
+def purge_meeting_dir(path: Path):
+    """The one shared exit for PERMANENTLY removing a meeting folder: rmtree
+    plus a scrub of the unknowns registry's references to that base. Every
+    permanent removal — the user's Delete (delete_meeting) AND the batch's
+    interrupted-run shell sweep (run_batch._sweep_shells) — must come through
+    here: a removal path that skips the scrub leaves unknowns advertising
+    'heard in N meetings' against folders that no longer exist, with zero
+    playable clips behind the claim. The scrub is best-effort: the folder is
+    already gone, so a registry hiccup must not turn the delete into an error
+    (the panel re-derives liveness per poll and hides dead refs anyway)."""
+    shutil.rmtree(path)
+    try:
+        from . import unknowns
+        unknowns.forget_meeting_refs(path.name)
+    except Exception as e:
+        print(f"   delete: unknown-speaker references not scrubbed ({e})",
+              file=sys.stderr)
 
 
 def _is_active(base: str) -> bool:
@@ -159,12 +180,9 @@ def delete_meeting(base: str) -> dict:
         pass
 
     with review.lock_meeting(base):
-        shutil.rmtree(target)
-    try:
-        from . import unknowns
-        unknowns.forget_meeting_refs(base)
-    except Exception:
-        pass
+        # lock_meeting -> lock_registry is the established order (summarize's
+        # rename path nests the same way), so the scrub inside is deadlock-free
+        purge_meeting_dir(target)
 
     note = None
     if src_name:
