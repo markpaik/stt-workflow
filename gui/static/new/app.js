@@ -158,7 +158,7 @@ function bodyAndSlot(row){
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
              <button class="iact" type="button" onclick="rowHold('${escJs(row.id)}')" title="Hold">&#10073;&#10073;</button>
              <button class="iact" type="button" onclick="rowProcess('${escJs(row.id)}')">Process</button>
-             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}')" title="Delete">&#10005;</button>`)}
+             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Delete">&#10005;</button>`)}
         </div>`;
     }
 
@@ -171,7 +171,7 @@ function bodyAndSlot(row){
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
              <button class="iact" type="button" onclick="rowRelease('${escJs(row.id)}')">Release</button>
              <button class="iact" type="button" onclick="rowProcess('${escJs(row.id)}')">Process</button>
-             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}')" title="Delete">&#10005;</button>`)}
+             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Delete">&#10005;</button>`)}
         </div>`;
 
     case 'processing':{
@@ -227,7 +227,7 @@ function bodyAndSlot(row){
           <span class="rstate yields">failed</span>
           ${slotActions(
             `<button class="iact" type="button" onclick="rowRetry('${escJs(row.id)}')">Retry</button>
-             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}')" title="Remove">&#10005;</button>`)}
+             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Remove">&#10005;</button>`)}
         </div>`;
 
     default:
@@ -379,12 +379,19 @@ const SELECTABLE=new Set(['ready','waiting','held']);
 let _popClose=null;
 function closePop(){if(_popClose){_popClose();_popClose=null;}}
 function _posPop(el,anchor){
-  const r=anchor.getBoundingClientRect(),w=el.offsetWidth||260;
-  let left=window.scrollX+r.right-w;
-  const minL=window.scrollX+8,maxL=window.scrollX+document.documentElement.clientWidth-w-8;
-  if(left<minL)left=minL; if(left>maxL)left=maxL;
-  el.style.left=Math.max(8,left)+'px';
-  el.style.top=(window.scrollY+r.bottom+6)+'px';
+  const r=anchor.getBoundingClientRect();
+  const vw=document.documentElement.clientWidth,vh=document.documentElement.clientHeight;
+  const w=el.offsetWidth||260,h=el.offsetHeight||0;
+  // horizontal: right-align to the anchor, clamped inside the viewport
+  let left=r.right-w;
+  const maxL=vw-w-8;
+  if(left>maxL)left=maxL; if(left<8)left=8;
+  // vertical: below the anchor by default; if its bottom would fall past the
+  // viewport, flip up and anchor above the row instead (clamped to the top edge)
+  let top=r.bottom+6;
+  if(top+h>vh)top=Math.max(8,r.top-6-h);
+  el.style.left=(window.scrollX+left)+'px';
+  el.style.top=(window.scrollY+top)+'px';
 }
 function openPop(el,anchor,fill,ignoreSel){
   closePop();
@@ -572,13 +579,36 @@ function rowProcess(id){
   const r=rowById(id);if(!r||!r.source_file)return;
   api('/api/run',{files:[r.source_file],...runOpts()}).then(refresh);
 }
-async function rowDelete(id){
+function rowDelete(id,ev){                // two-step confirm in a popover, no browser dialog
+  if(ev)ev.stopPropagation();
   const r=rowById(id);if(!r||!r.source_file)return;
-  if(!confirm(`Delete "${r.source_file}"?\n\nThe audio file is removed and never becomes a meeting. This cannot be undone.`))return;
+  const anchor=(ev&&ev.currentTarget)
+    ||document.querySelector('.row[data-id="'+CSS.escape(id)+'"] .rslot .iact:last-child');
+  const pop=$('#rowmenu');pop.dataset.rowid=id;
+  openPop(pop,anchor,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Delete this recording?</div>
+      <div class="ppcnote">The audio file is removed and never becomes a meeting. It cannot be undone.</div>
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn danger mini" type="button" onclick="rowDeleteGo('${escJs(id)}')">Delete</button>
+      </div></div>`;
+  });
+}
+async function rowDeleteGo(id){
+  const r=rowById(id);if(!r||!r.source_file){closePop();return;}
   if(clipKey===id)stopClip();
   const res=await api('/api/queue_delete',{name:r.source_file,confirm:true});
-  if(!res.ok){alert(res.error||'failed');return;}
-  refresh();
+  const pop=$('#rowmenu');
+  if(!res.ok){                            // failure stays in the popover, never a browser alert
+    if(!pop.hidden)pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Could not delete</div>
+      <div class="ppcnote err">${esc(res.error||'The recording could not be deleted.')}</div>
+      <div class="ppcrow"><button class="btn mini" type="button" onclick="closePop()">Close</button></div>
+    </div>`;
+    return;
+  }
+  closePop();refresh();
 }
 function rowRetry(id){                    // re-run a failed source still in the folder
   const r=rowById(id);if(!r||!r.source_file)return;
@@ -666,7 +696,14 @@ function rmRename(id){                    // inline: the row title becomes an in
     const nm=inp.value.trim();
     if(save&&nm&&nm!==cur){
       const r=await api('/api/rename',{base:id,new:nm});
-      if(!r.ok)alert(r.error||'Rename failed');
+      if(!r.ok){                          // keep the field open, surface the error inline (no alert)
+        done=false;
+        let err=titleEl.querySelector('.nameerr');
+        if(!err){err=document.createElement('div');err.className='nameerr';titleEl.appendChild(err);}
+        err.textContent=r.error||'Rename failed';
+        inp.focus();
+        return;
+      }
     }
     refresh();
   };
@@ -710,9 +747,16 @@ function rmDelete(id){                    // two-step confirm: Archive instead /
 }
 async function rmDeleteGo(id){
   const r=await api('/api/delete_meeting',{base:id,confirm:true});
-  closePop();
-  if(!r.ok){alert(r.error||'failed');return;}
-  refresh();
+  const pop=$('#rowmenu');
+  if(!r.ok){                              // failure stays in the popover, never a browser alert
+    if(!pop.hidden)pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Could not delete</div>
+      <div class="ppcnote err">${esc(r.error||'The meeting could not be deleted.')}</div>
+      <div class="ppcrow"><button class="btn mini" type="button" onclick="closePop()">Close</button></div>
+    </div>`;
+    return;
+  }
+  closePop();refresh();
 }
 
 /* --------------------------------------------------- bulk selection -------- *
@@ -748,11 +792,11 @@ function drawBulkBar(){
     <button class="btn mini" type="button" onclick="bulk('category','work')">Work</button>
     <button class="btn mini" type="button" onclick="bulk('category','personal')">Personal</button>
     <button class="btn mini" type="button" onclick="bulk('category','')">Clear tag</button>
-    <button class="btn mini" type="button" onclick="bulkRename()">Rename&#8230;</button>
-    <button class="btn mini" type="button" onclick="bulkDate()">Set date&#8230;</button>
+    <button class="btn mini" type="button" onclick="bulkRename(this)">Rename&#8230;</button>
+    <button class="btn mini" type="button" onclick="bulkDate(this)">Set date&#8230;</button>
     <button class="btn mini" type="button" onclick="bulk('archive')">Archive</button>
-    <button class="btn mini" type="button" onclick="bulkDropAudio()">Delete audio&#8230;</button>
-    <button class="btn danger mini" type="button" onclick="bulkDelete()">Delete&#8230;</button>
+    <button class="btn mini" type="button" onclick="bulkDropAudio(this)">Delete audio&#8230;</button>
+    <button class="btn danger mini" type="button" onclick="bulkDelete(this)">Delete&#8230;</button>
     <span class="grow"></span>
     <button class="btn mini" type="button" onclick="selAllShown()">Select all shown</button>
     <button class="btn mini" type="button" title="Clear selection" onclick="selClear()">&#10005;</button>`;
@@ -762,27 +806,97 @@ async function bulk(action,value,extra){
   if(!bases.length)return;
   const r=await api('/api/bulk',{bases,action,value,...(extra||{})});
   const fails=(r.results||[]).filter(x=>!x.ok);
-  if(fails.length)alert(`${fails.length} of ${bases.length} could not be done:\n\n`
-    +fails.slice(0,8).map(f=>'- '+f.base+': '+(f.error||'failed')).join('\n'));
-  else if(r.freed_mb)alert(`Done. Freed ${r.freed_mb} MB of audio.`);
+  if(fails.length)
+    bulkResult(`${fails.length} of ${bases.length} could not be done`,
+      fails.slice(0,8).map(f=>esc(f.base)+': '+esc(f.error||'failed')).join('<br>'),true);
+  else if(r.freed_mb)
+    bulkResult('Done',`Freed ${r.freed_mb} MB of audio.`,false);
   SEL.clear();refresh();
 }
-function bulkRename(){
-  const n=prompt(`One name for all ${_selReady().length} selected.\n\nEach keeps its own date in the filename, so recurring meetings stay separate folders.`);
-  if(n&&n.trim())bulk('rename',n.trim());
+// bulk outcome as a popover off the bulk bar (never a browser alert or banner)
+function bulkResult(title,note,isErr){
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  openPop(pop,$('#bulkbar'),()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">${esc(title)}</div>
+      <div class="ppcnote${isErr?' err':''}">${note}</div>
+      <div class="ppcrow"><button class="btn mini" type="button" onclick="closePop()">OK</button></div>
+    </div>`;
+  });
 }
-function bulkDate(){
-  const d=prompt(`Set the date for all ${_selReady().length} selected (YYYY-MM-DD).\n\nThe folder name is re-stamped to match.`);
-  if(d&&d.trim())bulk('date',d.trim());
+function bulkRename(btn){                  // name input in a popover, no prompt()
+  const n=_selReady().length;if(!n)return;
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  openPop(pop,btn,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Rename ${n} selected</div>
+      <div class="ppcnote">One name for all of them. Each keeps its own date in the filename, so recurring meetings stay separate folders.</div>
+      <input class="ppinput" type="text" placeholder="New name" aria-label="New name for all selected">
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="bulkRenameGo()">Rename</button>
+      </div></div>`;
+  });
+  const inp=pop.querySelector('.ppinput');
+  if(inp){inp.focus();inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();bulkRenameGo();}};}
 }
-function bulkDropAudio(){
-  if(!confirm(`Delete the stored AUDIO for ${_selReady().length} meeting(s)? The transcripts are kept.\n\nThis frees most of the space, but it cannot be undone.`))return;
-  bulk('drop_audio',null,{confirm:true});
+function bulkRenameGo(){
+  const inp=$('#rowmenu .ppinput'),nm=inp?inp.value.trim():'';
+  if(!nm)return;
+  closePop();bulk('rename',nm);
 }
-function bulkDelete(){
-  if(!confirm(`Permanently delete ${_selReady().length} meeting(s), including transcript, audio, and caches?\n\nThis cannot be undone. Archive instead if you might want them back.`))return;
-  bulk('delete',null,{confirm:true});
+function bulkDate(btn){                     // date input in a popover, no prompt()
+  const n=_selReady().length;if(!n)return;
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  openPop(pop,btn,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Set the date for ${n} selected</div>
+      <div class="ppcnote">The folder name is re-stamped to match. Each keeps its own name.</div>
+      <input class="ppinput" type="date" aria-label="New date for all selected">
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="bulkDateGo()">Set date</button>
+      </div></div>`;
+  });
+  const inp=pop.querySelector('.ppinput');
+  if(inp){inp.focus();inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();bulkDateGo();}};}
 }
+function bulkDateGo(){
+  const inp=$('#rowmenu .ppinput'),d=inp?inp.value.trim():'';
+  if(!d)return;
+  closePop();bulk('date',d);
+}
+function bulkDropAudio(btn){                // confirm popover, no confirm()
+  const n=_selReady().length;if(!n)return;
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  openPop(pop,btn,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Delete stored audio for ${n} meeting${n>1?'s':''}?</div>
+      <div class="ppcnote">The transcripts are kept. This frees most of the space, but it cannot be undone.</div>
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn danger mini" type="button" onclick="bulkDropAudioGo()">Delete audio</button>
+      </div></div>`;
+  });
+}
+function bulkDropAudioGo(){closePop();bulk('drop_audio',null,{confirm:true});}
+function bulkDelete(btn){                   // two-step confirm popover, no confirm()
+  const n=_selReady().length;if(!n)return;
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  openPop(pop,btn,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Delete ${n} meeting${n>1?'s':''}?</div>
+      <div class="ppcnote">This removes the transcript, audio, and every cache. It cannot be undone.</div>
+      <div class="ppcnote">If you might want ${n>1?'them':'it'} back, Archive instead keeps everything restorable.</div>
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn mini" type="button" onclick="bulkArchiveInstead()">Archive instead</button>
+        <button class="btn danger mini" type="button" onclick="bulkDeleteGo()">Delete forever</button>
+      </div></div>`;
+  });
+}
+function bulkArchiveInstead(){closePop();bulk('archive');}
+function bulkDeleteGo(){closePop();bulk('delete',null,{confirm:true});}
 function selClear(){SEL.clear();applySel();}
 function selAllShown(){
   const ids=[...document.querySelectorAll('#timeline .row[data-state="ready"] .chk')].map(c=>c.closest('.row').dataset.id);
