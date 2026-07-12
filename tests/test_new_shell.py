@@ -289,12 +289,14 @@ def test_css_type_floor_is_13px():
     assert min(sizes) >= 13, f"type floor broken: {min(sizes)}px < 13px"
 
 
-def test_shared_reading_column_is_920():
-    # ONE column cap (920 content + two 24px gutters) shared by body, the
-    # pinned ask bar, and the bulk bar -- no surface keeps a private width
-    assert "--colcap:968px" in NEW_CSS
+def test_column_cap_is_fluid_boardroom_wide():
+    # use-the-space rule (2026-07-12): ONE fluid cap -- min(1360px, 94vw) --
+    # shared by body, the pinned ask bar, and the bulk bar; no surface keeps
+    # a private width, and the fixed 968px reading column is retired
+    assert "--colcap:min(1360px,94vw)" in NEW_CSS
     assert NEW_CSS.count("var(--colcap)") >= 3
-    assert "908px" not in NEW_CSS and "max-width:min(920px" not in NEW_CSS
+    assert "968px" not in NEW_CSS and "908px" not in NEW_CSS
+    assert "max-width:min(920px" not in NEW_CSS
 
 
 def test_flagged_aggregate_filters_the_library_not_the_tray():
@@ -1052,16 +1054,77 @@ def test_stepper_orders_fabricated_out_of_order_flags_by_start_time():
         f"stepper order is not document order: {r.stdout.strip()}"
 
 
-def test_signal_colorway_tokens_shipped_and_greens_retired():
-    # DESIGN.md (2026-07-12): the Signal colorway. Electric indigo accent in
-    # both themes; the Newsprint greens and warm grounds are gone. Amber and
-    # rec run darker than the spec's first draft so text pairs clear 4.5:1.
-    for tok in ("#4F5DE5", "#7B87FF", "#FAFAFC", "#0F1114", "#8F5F10", "#CC3F38"):
-        assert tok in NEW_CSS, f"Signal token missing: {tok}"
-    for old in ("#1E6B50", "#43B28A", "#FBFBF9", "#121416"):
-        assert old not in NEW_CSS, f"retired Newsprint token still present: {old}"
-    # the three sanctioned futurism touches, and only under motion tolerance
-    assert NEW_CSS.count("0 0 0 3px color-mix(in srgb,var(--accent) 20%") == 2
-    assert "box-shadow:0 0 6px color-mix(in srgb,var(--accent) 45%" in NEW_CSS
-    assert "pillbreathe" in NEW_CSS
-    assert ".pill.rec,.row" in NEW_CSS  # pulse killed under reduced motion
+def test_boardroom_tokens_shipped_and_signal_retired():
+    # DESIGN.md (2026-07-12): the Boardroom Wide colorway. Monday violet-blue
+    # accent on a cool gray ground; white cards; states in colored pills.
+    # Status/chip tokens are the COMPUTED-contrast pairs: ok and personal
+    # darkened hue-true from the spec's first draft (3.06:1 and 3.82:1 on
+    # their softs), and accent TEXT gets its own darker token (#6161FF is
+    # 4.21:1 as text on the ground) while #6161FF keeps fills/edges/focus.
+    for tok in ("#6161FF", "#F6F7FB", "#4B4FD9", "#1E7B45", "#E8F6EE",
+                "#2264D1", "#E8EFFC", "#A05E0C", "#FFF1E5", "#8F5F10",
+                "#CC3F38", "#BE3A33", "#131417", "#1B1D23", "#8F94FF"):
+        assert tok in NEW_CSS, f"Boardroom token missing: {tok}"
+    for old in ("#4F5DE5", "#7B87FF", "#FAFAFC", "#0F1114",
+                "#1E6B50", "#43B28A", "#FBFBF9", "#121416"):
+        assert old not in NEW_CSS, f"retired Signal/Newsprint token: {old}"
+    # the Signal glow touches retired with their colorway: no glow shadows,
+    # no breathing pill; the focus ring is the plain accent outline
+    assert "0 0 0 3px color-mix" not in NEW_CSS
+    assert "0 0 6px color-mix" not in NEW_CSS
+    assert "pillbreathe" not in NEW_CSS
+    assert "outline:2px solid var(--accent)" in NEW_CSS
+    # states speak in pills, categories in chips, and the primary button
+    # is pill-shaped under the soft accent shadow
+    for cls in (".spill{", ".spill.ok{", ".spill.busy{", ".spill.rec{",
+                ".catchip{", ".catchip.work{", ".catchip.personal{"):
+        assert cls in NEW_CSS, f"missing Boardroom class: {cls}"
+    assert "0 4px 14px color-mix(in srgb,var(--accent) 30%" in NEW_CSS
+    # rows are floating cards: 14px radius, 10px gaps, hover lift; attention
+    # items wear their colored left edge (amber tray, accent naming row)
+    assert re.search(r"(?m)^\.row\{[^}]*border-radius:14px", NEW_CSS)
+    assert re.search(r"(?m)^\.row\{[^}]*margin:0 0 10px", NEW_CSS)
+    assert ".row:hover{box-shadow:var(--cardsh-hov)}" in NEW_CSS
+    assert re.search(r"(?m)^\.tray\{[^}]*border-left:4px solid var\(--amber\)", NEW_CSS)
+    assert re.search(r'needs_name"\]\{[^}]*border-left:4px solid var\(--accent\)', NEW_CSS)
+
+
+# ---------------------------------------------------------------------------
+# Boardroom Wide (2026-07-12): the vendored UI face. Figtree (OFL) is served
+# by the panel itself from gui/static/new/fonts/ -- never a CDN -- behind a
+# strict basename allowlist.
+# ---------------------------------------------------------------------------
+FONTS = NEW / "fonts"
+
+
+def test_figtree_is_vendored_with_its_license():
+    names = sorted(p.name for p in FONTS.glob("*.woff2"))
+    assert "figtree-latin.woff2" in names, "the latin variable woff2 is missing"
+    assert (FONTS / "OFL.txt").exists(), "OFL.txt must ship alongside the font"
+    for name in names:  # every vendored file is a real woff2
+        assert (FONTS / name).read_bytes()[:4] == b"wOF2", f"{name} is not woff2"
+
+
+def test_font_route_serves_woff2_and_refuses_traversal(running_server):
+    for name in sorted(p.name for p in FONTS.glob("*.woff2")):
+        status, ctype, body = _get(running_server, f"/static/fonts/{name}")
+        assert status == 200
+        assert ctype == "font/woff2"
+        assert body == (FONTS / name).read_bytes()
+    # strict allowlist: traversal names, encoded traversal, and anything not
+    # a vendored woff2 (even the license that IS in the directory) all 404
+    for bad in ("../app.css", "..%2Fapp.css", "%2e%2e/app.css",
+                "OFL.txt", "nope.woff2", ""):
+        status, _ctype, _body = _get(running_server, "/static/fonts/" + bad)
+        assert status == 404, f"font route must refuse {bad!r}"
+
+
+def test_figtree_fontface_and_stack_ride_the_composed_page():
+    page = _compose(NEW)
+    assert "@font-face" in page
+    assert "font-family:'Figtree'" in page
+    assert "font-weight:300 900" in page          # the variable axis, whole
+    assert "font-display:swap" in page
+    assert "/static/fonts/figtree-latin.woff2" in page
+    # Figtree fronts the UI stack; -apple-system stays the fallback
+    assert "--sans:'Figtree',-apple-system" in NEW_CSS

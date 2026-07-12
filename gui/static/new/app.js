@@ -237,25 +237,29 @@ function drawTray(s){
  * pinned to the top, then newest first); by-date grouping preserves that order,
  * by-name re-sorts alphabetically. Read-only: buttons render but are stubs.
  */
+// Boardroom category mark, in the card's right rail: a tagged row wears the
+// colored chip; an untagged row shows the hollow dot. Both cycle
+// untagged -> work -> personal on click (the chip IS the affordance).
 function catDot(row){
   const c=row.category||'none';
-  const t=c==='work'?'Work':c==='personal'?'Personal':'Untagged';
-  return `<button class="cat ${c}" type="button" title="${t} (click to change tag)"
+  if(c==='work'||c==='personal'){
+    const t=c==='work'?'Work':'Personal';
+    return `<button class="catchip ${c}" type="button" title="${t} (click to change tag)"
+      onclick="cycleCat(event,'${escJs(row.id)}')">${t}</button>`;
+  }
+  return `<button class="cat none" type="button" title="Untagged (click to tag Work / Personal)"
     onclick="cycleCat(event,'${escJs(row.id)}')"></button>`;
 }
 // waiting/held rows also carry a checkbox so a run of files can be picked for
-// "Process selected"; only ready rows carry a category dot (queue files have no
-// category yet). Selected state is REAPPLIED after render (applySel), so gutter
-// itself stays a pure function of the row.
+// "Process selected". The category mark lives in the right rail (catDot above),
+// not the gutter. Selected state is REAPPLIED after render (applySel), so
+// gutter itself stays a pure function of the row.
 function gutter(row){
   const selectable=row.state==='ready'||row.state==='waiting'||row.state==='held';
-  const chk=selectable
+  return selectable
     ? `<input class="chk" type="checkbox" aria-label="Select for bulk actions"
         onclick="toggleSel('${escJs(row.id)}',this.checked)">`
     : `<span class="chk spacer" aria-hidden="true"></span>`;
-  const dot=row.state==='ready'?catDot(row)
-    :`<span class="cat spacer" style="visibility:hidden"></span>`;
-  return chk+dot;
 }
 
 // entities: &#9654;=play  &#10073;=heavy bar  &#10005;=x  &#8776;=approx  &#8943;=ellipsis
@@ -270,7 +274,7 @@ function bodyAndSlot(row){
         ?`&#9208; paused <span id="recRowClock" class="mono">${clock(row.elapsed_secs)}</span>`
         :`<span class="capdot"></span>capturing <span id="recRowClock" class="mono">${clock(row.elapsed_secs)}</span>`;
       return `<div class="rbody"><div class="rtitle">Recording now&#8230;</div></div>
-        <div class="rslot"><span class="rstate">${state}</span></div>`;
+        <div class="rslot"><span class="rstate spill rec">${state}</span></div>`;
     }
 
     case 'waiting':{
@@ -279,7 +283,7 @@ function bodyAndSlot(row){
       if(row.est_minutes)bits.push('&#8776;'+row.est_minutes+' min');
       return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div></div>
         <div class="rslot">
-          <span class="rstate yields">${bits.join(' &middot; ')}</span>
+          <span class="rstate spill yields">${bits.join(' &middot; ')||'waiting'}</span>
           ${slotActions(
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
              <button class="iact" type="button" onclick="rowHold('${escJs(row.id)}')" title="Hold">&#10073;&#10073;</button>
@@ -292,7 +296,7 @@ function bodyAndSlot(row){
       return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>
           <div class="rmeta">automatic runs skip this until you release it</div></div>
         <div class="rslot">
-          <span class="rstate yields">&#10073;&#10073; held</span>
+          <span class="rstate spill yields">&#10073;&#10073; held</span>
           ${slotActions(
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
              <button class="iact" type="button" onclick="rowRelease('${escJs(row.id)}')">Release</button>
@@ -304,7 +308,7 @@ function bodyAndSlot(row){
       const pct=row.pct!=null?row.pct:null;
       const eta=row.eta!=null?` &middot; &#8776;${fmtEta(row.eta)} left`:'';
       return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div></div>
-        <div class="rslot"><span class="rstate">${esc(STAGE_NICE[row.stage]||row.stage||'working')}${pct!=null?' '+pct+'%':''}${eta}</span></div>
+        <div class="rslot"><span class="rstate spill busy">${esc(STAGE_NICE[row.stage]||row.stage||'working')}${pct!=null?' '+pct+'%':''}${eta}</span></div>
         ${pct!=null?`<span class="progress" style="width:${pct}%"></span>`:''}`;
     }
 
@@ -326,13 +330,15 @@ function bodyAndSlot(row){
       if(row.date)bits.push(`<span class="rdate" title="Click to change the meeting date" onclick="rowDateEdit(event,'${escJs(row.id)}')">${shortDate(row.date)}</span>`);
       if(row.minutes!=null)bits.push(row.minutes+' min');
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
-      // the review count lives INSIDE the meta line as plain amber TEXT
-      // (no chip); forty chip-wearing rows read as a wall of warnings. Still
+      // Boardroom right rail, beneath the state pill: the category chip (or
+      // the hollow untagged dot) and the review count as plain amber TEXT
+      // (no chip; forty chip-wearing rows read as a wall of warnings). Still
       // click-to-review via the same bridge.
+      const railsub=[catDot(row)];
       if(row.review_substantial)
-        bits.push(`<span class="rev" onclick="openReviewBadge('${escJs(row.id)}')" title="Step through the flagged segments">${row.review_substantial} to check</span>`);
+        railsub.push(`<span class="rev" onclick="openReviewBadge('${escJs(row.id)}')" title="Step through the flagged segments">${row.review_substantial} to check</span>`);
       else if(row.review_minor)
-        bits.push(`<span class="rev minor" onclick="openReviewBadge('${escJs(row.id)}')" title="Minor crumbs to skim">${row.review_minor} minor</span>`);
+        railsub.push(`<span class="rev minor" onclick="openReviewBadge('${escJs(row.id)}')" title="Minor crumbs to skim">${row.review_minor} minor</span>`);
       // click-to-expand peek (replaces the old hover tooltip): the FULL summary
       // and committed next steps come from the already-polled meetings entry
       // (the timeline row only carries a preview); no extra fetch. Rendered
@@ -353,10 +359,12 @@ function bodyAndSlot(row){
           ${exp}
         </div>
         <div class="rslot">
+          <span class="rstate spill ok yields">ready</span>
           ${slotActions(
             `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen without opening">&#9654;</button>
              <button class="iact" type="button" onclick="openMeeting('${escJs(row.id)}')">Open</button>
              <button class="iact" type="button" onclick="rowMenu('${escJs(row.id)}',event)" title="Export, rename, redo">&#8943;</button>`)}
+          <div class="rsub">${railsub.join('')}</div>
         </div>`;
     }
 
@@ -367,7 +375,7 @@ function bodyAndSlot(row){
           <div class="rmeta">original stays in the watched folder</div>
         </div>
         <div class="rslot">
-          <span class="rstate yields">failed</span>
+          <span class="rstate spill rec yields">failed</span>
           ${slotActions(
             `<button class="iact" type="button" onclick="rowRetry('${escJs(row.id)}')">Retry</button>
              <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Remove">&#10005;</button>`)}
@@ -1495,7 +1503,8 @@ function _mHeader(m,base){
   const nfl=(m.flagged||0)+(m.flagged_minor||0);
   const flagged=nfl>0?`<span class="mflagnote">${nfl} flagged</span>`:'';
   // everything a row can do, the page can do: the same ⋯ menu, and the same
-  // cyclable category dot (untagged -> work -> personal), optimistic
+  // category cycle (untagged -> work -> personal), optimistic. Tagged, the
+  // control wears the row chip's label; untagged, it is the hollow dot.
   return `<div class="mhead">
     <a class="mback" href="#" onclick="mBack(event)">&#8592; Meetings</a>
     <button class="iact mhmenu" id="mmenu" type="button" title="Export, copy, rename, redo&#8230;"
@@ -1503,7 +1512,7 @@ function _mHeader(m,base){
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta">${bits.join(' &middot; ')}
       <button class="mcat ${dot}" id="mcatdot" type="button"
-        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)"></button>${strict}${flagged}</div>
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${strict}${flagged}</div>
   </div>`;
 }
 // header dot: same optimistic /api/set_category cycle as the library rows
@@ -1517,6 +1526,7 @@ function mCycleCat(ev){
   const r=rowById(MP.base);if(r)r.category=next;   // the library row agrees on return
   const d=$('#mcatdot');
   if(d){d.className='mcat '+(next||'none');
+    d.textContent=next==='work'?'Work':next==='personal'?'Personal':'';
     d.title=(next==='work'?'Work':next==='personal'?'Personal':'Untagged')+' (click to change tag)';}
   api('/api/set_category',{base:MP.base,category:next}).then(refresh);
 }
@@ -3724,15 +3734,14 @@ function uploadRowHTML(u){
   const err=u.status==='error';
   return `<div class="row upl" data-state="${err?'failed':'waiting'}" data-upkey="${esc(u.key)}">
     <span class="chk spacer" aria-hidden="true"></span>
-    <span class="cat spacer" style="visibility:hidden"></span>
     <div class="rbody"><div class="rtitle">${esc(u.title)}</div>
       ${err?`<div class="rmeta err">${esc(u.error)}</div>`:''}</div>
     <div class="rslot">${err
       ?`<button class="iact" type="button" title="Dismiss"
           onclick="uploadDismiss('${escJs(u.key)}')">&#10005;</button>`
       :u.status==='done'
-        ?`<span class="rstate">queued</span>`
-        :`<span class="rstate"><span class="spin"></span> uploading&#8230;</span>`}
+        ?`<span class="rstate spill">queued</span>`
+        :`<span class="rstate spill"><span class="spin"></span> uploading&#8230;</span>`}
     </div></div>`;
 }
 function uploadDismiss(key){
