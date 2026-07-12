@@ -200,8 +200,11 @@ def test_row_and_queue_actions_hit_the_expected_endpoints():
                "/api/txt", "/api/rename", "/api/edits", "/api/archive_meeting",
                "/api/delete_meeting"):
         assert ep in NEW_JS, f"seam layer never calls {ep}"
-    # tray + search bridge to the old page's additive deep links
-    assert "'/?review='" in NEW_JS and "'/?who='" in NEW_JS and "'/?open='" in NEW_JS
+    # the edit layer removed the LAST per-meeting bridges: review, naming, and
+    # opening all happen in the shell now -- zero deep-link params remain (the
+    # byte-frozen old page keeps its own)
+    for bridge in ("?review=", "?who=", "?open="):
+        assert bridge not in NEW_JS, f"stale old-page bridge in the new shell: {bridge}"
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +256,19 @@ def test_meeting_page_ask_stays_a_post_with_the_server_contract():
     assert "filter(h=>h.a&&!h.err).slice(-3)" in NEW_JS
 
 
-def test_meeting_page_leaves_the_review_stepper_seam_for_builder_b():
-    # the flagged strip renders only; stepping/acting is Builder B's, via this seam
-    assert re.search(r"function\s+reviewStep\s*\(", NEW_JS)
+def test_review_stepper_is_wired_not_a_seam():
+    # the flagged strip's seam is a real controller now: the first click starts
+    # on the first flag, later clicks advance, and the walk happens in place
+    m = re.search(r"function\s+reviewStep\s*\(\)\s*\{([^}]*)\}", NEW_JS)
+    assert m and m.group(1).strip(), "reviewStep is still an empty seam"
+    for fn in ("reviewStart", "reviewGo", "reviewExit", "renderReviewCard",
+               "reviewApply", "reviewAcceptMinor", "reviewUseAlt", "reviewPlay"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing stepper fn: {fn}"
+    # a row's review count / a tray review verb arms the stepper through the
+    # same pendingOpen pattern the ask focus and search-hit seek use
+    assert "pendingOpen={base:id,review:true}" in NEW_JS
+    assert "MP.pendingReview" in NEW_JS
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +364,408 @@ def test_serif_retired_and_mono_demoted_to_true_data():
     assert 'id="recRowClock" class="mono"' in NEW_JS
     for demoted in ('"mrate mono"', '"mfindn mono"', '"masknote mono"'):
         assert demoted not in NEW_JS, f"demoted element still mono: {demoted}"
+
+
+# ---------------------------------------------------------------------------
+# Builder C: THE EDIT LAYER. The inline flag stepper, segment editing
+# everywhere, the voice-naming slide-over, and the removal of the last
+# per-meeting bridges to the old page. Same regex-over-the-files style.
+# ---------------------------------------------------------------------------
+def test_np_keys_step_flags_and_guard_typing():
+    # n/p walk the flagged segments from the page's document keydown handler,
+    # but never while typing in an input/textarea/select (the same guard the
+    # old review dialog used for its arrow keys)
+    assert re.search(r"typing=ae&&.*INPUT\|TEXTAREA\|SELECT", NEW_JS)
+    assert "e.key==='n'" in NEW_JS and "e.key==='p'" in NEW_JS
+    assert re.search(r"!typing&&\(e\.key==='n'\|\|e\.key==='p'\)", NEW_JS), \
+        "n/p must be gated on the typing guard"
+
+
+def test_review_posts_carry_the_original_segment_index():
+    # /api/transcript segments carry the ORIGINAL json index, not the array
+    # position -- every review/edit POST sends that index plus the segment's
+    # start as the server's cross-check. The stepper plumbs it.index from GET
+    # /api/review; the editor plumbs g.index from the segment itself.
+    assert "{base:MP.base,index:it.index,start:it.start,action}" in NEW_JS
+    assert "index:g.index,start:g.start,action:'edit'" in NEW_JS
+    assert "action:'delete',index:g.index,start:g.start" in NEW_JS
+    assert "action:'split',index:g.index,start:g.start" in NEW_JS
+    assert "action:'insert',start,end:start+3" in NEW_JS
+    assert "action:'accept_minor'" in NEW_JS
+    # the array position appears only in DOM ids (mseg<i>), never in a POST body
+    assert not re.search(r"index:\s*i\b", NEW_JS)
+
+
+def test_flag_strip_counts_update_optimistically_and_clear_at_zero():
+    # the strip re-derives its counts from the client's own segments after
+    # every resolving action (accept/save/accept-minor), and disappears at zero
+    assert re.search(r"function\s+mSyncFlagStrip\s*\(", NEW_JS)
+    assert 'id="mflagbar"' in NEW_JS and 'id="mflagminor"' in NEW_JS
+    assert "bar.remove()" in NEW_JS
+    # the client's minor test mirrors the server's review.is_minor exactly
+    assert re.search(r"function\s+mIsMinor\s*\([^)]*\)\{return \(g\.end-g\.start\)<1\.0", NEW_JS)
+    # resolved items leave the stepper's local list before any poll lands
+    assert "MR.items.splice(MR.i,1)" in NEW_JS
+
+
+def test_segment_editing_everywhere_with_house_confirms():
+    # every segment gets the quiet pencil; gaps and the audio bar insert missed
+    # lines; remove/split/re-transcribe live in the same inline card
+    for fn in ("mEdit", "mEditSave", "mSplitUI", "mSplitSave", "mInsertAt",
+               "mInsertSave", "mAddAtPlayhead", "mRetrans", "mDeleteAsk",
+               "mDeleteGo", "mReloadSegs", "mPlaySpan", "mWireNew"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing editor fn: {fn}"
+    assert "add line" in NEW_JS            # the gap affordance copy
+    assert "line at playhead" in NEW_JS    # the audio bar affordance
+    assert "/api/retranscribe" in NEW_JS
+    assert "mlxwhisper:large-v3" in NEW_JS  # the engine choice is real
+    # a structural change (insert/split/delete/merge) reloads the transcript so
+    # fresh ORIGINAL indexes replace the stale ones
+    assert NEW_JS.count("mReloadSegs(") >= 5
+    # confirmations are the house two-step; native dialogs never appear
+    for native in ("alert(", "confirm(", "prompt("):
+        assert native not in NEW_JS, f"native dialog in the new shell: {native}"
+
+
+def test_naming_panel_replaces_the_who_bridge():
+    # the in-shell slide-over: per-meeting voice clips (with the
+    # sources_deleted contract), enrolled-name autocomplete, Save name,
+    # "Not a real speaker", Cancel
+    assert 'id="namepanel"' in NEW_PAGE and 'id="nameveil"' in NEW_PAGE
+    for fn in ("openNamePanel", "openNamePanelByUid", "closeNamePanel",
+               "npSave", "npForget", "pnFilter", "pnRender", "pnPick", "pnKey"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing naming fn: {fn}"
+    assert "'/api/voice_clips?speaker='" in NEW_JS
+    assert re.search(r"api\('/api/name',\{uid:NP\.uid,name:n\}\)", NEW_JS)
+    assert re.search(r"api\('/api/forget',\{uid:NP\.uid\}\)", NEW_JS)
+    # the dead-player case says WHY instead of rendering a player that can't load
+    assert "r.reason==='sources_deleted'" in NEW_JS
+    assert "No audio available. The source recordings were deleted." in NEW_JS
+    # keyboard semantics ported from the old dialog's autocomplete
+    assert "e.key==='ArrowDown'||e.key==='ArrowUp'" in NEW_JS
+    # unknown voices in a meeting's legend open the panel (the U-label path)
+    assert re.search(r"function\s+mUnknownUid\s*\(", NEW_JS)
+    # after a save, the quiet relabel note rides the polled state as the
+    # lowest-priority pill
+    assert "s.relabel_pending" in NEW_JS
+
+
+def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():
+    # everything a row can do, the page can do: the same fillRowMenu feeds both
+    assert re.search(r"function\s+mMenu\s*\(", NEW_JS)
+    assert NEW_JS.count("fillRowMenu(") >= 3   # definition + row + page header
+    # the header dot cycles with the same optimistic /api/set_category as rows
+    assert re.search(r"function\s+mCycleCat\s*\(", NEW_JS)
+    assert NEW_JS.count("api('/api/set_category'") >= 2
+    assert 'id="mcatdot"' in NEW_JS
+    # page-owning actions return to the library when their meeting disappears
+    assert "if(route.view==='meeting'&&route.base===id)location.hash=''" in NEW_JS
+
+
+# ---------------------------------------------------------------------------
+# Builder D: THE DRAWER. The last surface -- one right slide-over holding
+# Settings, Speakers, History, and Archive behind a pinned section nav. After
+# it, the new shell carries ZERO references to the old page. Same
+# regex-over-the-files style as every block above.
+# ---------------------------------------------------------------------------
+def test_drawer_mounts_with_the_four_section_nav():
+    # the slide-over and its veil are in the page; the nav and the four
+    # lazy-rendered sections are built by app.js
+    assert 'id="drawer"' in NEW_PAGE and 'id="drawerveil"' in NEW_PAGE
+    for fn in ("openDrawer", "closeDrawer", "drawerGo", "drawDrawer",
+               "drawerNavSync", "dSettingsDraw", "dSpeakersDraw",
+               "dHistLoad", "dHistRender", "dArchLoad", "dArchRender"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing drawer fn: {fn}"
+    for sec in ("dsec-settings", "dsec-speakers", "dsec-history", "dsec-archive"):
+        assert sec in NEW_JS, f"missing drawer section mount: {sec}"
+    for tab in ("Settings", "Speakers", "History", "Archive"):
+        assert tab in NEW_JS, f"missing drawer nav tab: {tab}"
+    # the Archive tab carries the old page's "Archived · N" count when nonzero
+    assert "archived_count" in NEW_JS
+
+
+def test_gear_opens_the_drawer_and_the_old_page_is_unreferenced():
+    # the gear stops bridging; NOTHING in the new shell names the old page
+    assert re.search(r"\$\('#gear'\)\.onclick=\(\)=>openDrawer\(\)", NEW_JS)
+    for src in (NEW_JS, NEW_PAGE, NEW_CSS):
+        assert "ui=old" not in src, "the new shell still references the old page"
+
+
+def test_drawer_survives_polls_and_closes_the_house_ways():
+    # the 2s poll enters through drawDrawer (called by render), which rebuilds
+    # a section only when its signature changed and never under a focused field
+    assert "drawDrawer(S)" in NEW_JS
+    assert re.search(r"function\s+dFocusGuard\s*\(", NEW_JS)
+    for fn in ("dSettingsSig", "dSpeakersSig"):
+        assert re.search(r"function\s+" + fn + r"\s*\(", NEW_JS), f"missing sig fn: {fn}"
+    assert NEW_JS.count("dataset.sig") >= 8   # tray + timeline + nav + drawer sections
+    # closed by the veil, the x button, and Escape (deferring to the naming
+    # panel and any open popover, which own the key first)
+    assert 'onclick="closeDrawer()"' in NEW_PAGE
+    assert "if(e.defaultPrevented)return" in NEW_JS
+    assert "if(_popClose)return" in NEW_JS
+
+
+def test_master_switch_gates_the_two_indented_triggers():
+    # ONE master switch over the same /api/pause -- /api/resume state the pill
+    # and the Process popover read (dTogMaster reuses ppPause's endpoints)
+    assert "Automatic runs" in NEW_JS
+    assert re.search(r"function\s+dTogMaster[^}]*api\(S\.paused\?'/api/resume':'/api/pause'",
+                     NEW_JS), "the master switch must be the shared pause state"
+    # watch + nightly sit indented beneath it and read visibly inert when off
+    assert "off while automatic runs are paused" in NEW_JS
+    assert "dindent" in NEW_JS and ".dindent.inert" in NEW_CSS
+    # both triggers still POST /api/automation; the time picker is an in-drawer
+    # subview posting /api/schedule (no dialog)
+    assert "api('/api/automation',{watch:!S.schedule.watch})" in NEW_JS
+    assert "api('/api/automation',{nightly:!S.schedule.nightly})" in NEW_JS
+    assert re.search(r"api\('/api/schedule',\{hour:\+\$\('#dsh'\)\.value,minute:\+\$\('#dsm'\)\.value\}\)",
+                     NEW_JS)
+    assert "dialog" not in NEW_PAGE.lower(), "the new shell must not grow a <dialog>"
+
+
+def test_cloud_keys_subview_never_renders_key_values():
+    # mirror of test_server_security's never-echoed contract, client-side: the
+    # server only sends presence booleans, and the drawer's password fields
+    # never carry a value attribute -- so no key can be rendered anywhere
+    m = re.search(r'<input type="password"[^>]*>', NEW_JS)
+    assert m, "cloud-keys subview lost its password fields"
+    assert "value=" not in m.group(0), "a password field must never render a value"
+    # no template interpolation ever feeds cloud_keys state into an input value
+    assert not re.search(r'value="[^"]*cloud_keys', NEW_JS)
+    # presence booleans drive the saved tick and the placeholder only
+    assert "saved: paste to replace" in NEW_JS
+    assert re.search(r"const has=!!\(\(s\.cloud_keys\|\|\{\}\)\[prov\]\)", NEW_JS)
+    # save and clear reuse the exact endpoint; the response's fresh presence
+    # map replaces local state (never the keys themselves)
+    assert "api('/api/cloud_keys',{scribe:" in NEW_JS
+    assert "api('/api/cloud_keys',{clear:[prov]})" in NEW_JS
+    assert "S.cloud_keys=r.set" in NEW_JS
+    # cloud engines are listed in the model picker only when keyed
+    assert re.search(r"filter\(c=>!c\.cloud\|\|\(s\.cloud_keys\|\|\{\}\)\[c\.cloud\]\)", NEW_JS)
+
+
+def test_settings_ports_the_remaining_flyout_rows():
+    # model + assistant pickers, punctuation toggle, update check, calibration
+    # note, and both folder Change... rows -- all the old flyout's endpoints
+    for ep in ("/api/model", "/api/llm_backend", "/api/punctuate",
+               "/api/check_updates", "/api/pick_folder", "/api/mic_speaker",
+               "/api/fix_recorder_permissions"):
+        assert ep in NEW_JS, f"settings section never calls {ep}"
+    # the recorder your-voice picker is an inline enrolled-name select, not the
+    # old page's native prompt (native dialogs are banned shell-wide above)
+    assert 'id="dmicsel"' in NEW_JS
+    assert "All models are current." in NEW_JS
+    assert "Estimates use factory measurements until a few runs complete." in NEW_JS
+
+
+def test_speaker_management_moves_into_the_drawer():
+    for ep in ("/api/rename_speaker", "/api/merge_speakers", "/api/remove_speaker",
+               "/api/remove_sample", "/api/reassign_sample", "/api/hide_unknown",
+               "/api/snippet"):
+        assert ep in NEW_JS, f"speakers section never calls {ep}"
+    # "Who is this?" reuses the EXISTING naming slide-over, never a duplicate:
+    # tray voices + meeting legend + the drawer all call the one opener
+    assert NEW_JS.count("openNamePanelByUid(") >= 4
+    assert NEW_JS.count("function openNamePanel") == 2   # openNamePanel + ...ByUid
+    # hidden unknowns fold behind an "N hidden" expandable with Restore
+    assert "} hidden" in NEW_JS and "Restore" in NEW_JS
+    # the person Remove is the house two-step (armed confirm, then the POST)
+    assert re.search(r"function\s+dRemoveAsk\s*\(", NEW_JS)
+    assert re.search(r"async function\s+dRemoveGo\s*\(", NEW_JS)
+    # snippet playback is exclusive and keyed so rebuilds keep the stop glyph
+    assert re.search(r"function\s+dvPlay\s*\(", NEW_JS) and "dvSync()" in NEW_JS
+    # edits refresh() so the relabel spawned server-side rides the quiet pill
+    assert "Applying names to all transcripts" in NEW_JS
+
+
+def test_history_section_ports_the_flyout_semantics():
+    # day groups newest first, name filter + all/processed/failed select,
+    # failures keep their FULL error text, capped at 400 with a note
+    assert "DHIST_CAP=400" in NEW_JS
+    assert "Showing the first ${DHIST_CAP}" in NEW_JS
+    assert 'id="dhistq"' in NEW_JS and 'id="dhistok"' in NEW_JS
+    assert '<option value="ok">processed</option>' in NEW_JS
+    assert '<option value="fail">failed</option>' in NEW_JS
+    assert "api('/api/history')" in NEW_JS
+    # the failure text renders whole (word-broken, never truncated)
+    assert "dhsum" in NEW_JS and ".dhsum{word-break:break-word" in NEW_CSS
+
+
+def test_archive_section_restores_and_deletes_with_house_confirms():
+    assert "api('/api/archived')" in NEW_JS
+    assert "api('/api/restore_meeting',{base})" in NEW_JS
+    assert "api('/api/delete_meeting',{base,confirm:true})" in NEW_JS
+    assert "Nothing archived." in NEW_JS
+    # delete is a two-step armed inside the drawer (never a native dialog --
+    # banned shell-wide by the editor test above)
+    assert re.search(r"function\s+dArchDelAsk\s*\(", NEW_JS)
+    assert "Delete forever" in NEW_JS
+    # bulk/row Archive actions leave the quiet "archived · view" hint that
+    # opens the drawer's Archive section
+    assert re.search(r"function\s+archHint\s*\(", NEW_JS)
+    assert NEW_JS.count("archHint()") >= 2      # row menu + bulk bar
+    assert "openDrawer('archive')" in NEW_JS
+
+
+# ---------------------------------------------------------------------------
+# Finale: the keyboard layer and drag-and-drop queueing -- the last build pass
+# before the default flips. Same regex-over-the-files style as every block
+# above; the upload extension allowlist is asserted EQUAL client and server.
+# ---------------------------------------------------------------------------
+def _kb_body():
+    a = NEW_JS.index("function kbKey(e){")
+    b = NEW_JS.index("document.addEventListener('keydown',kbKey)")
+    return NEW_JS[a:b]
+
+
+def test_keyboard_layer_is_one_dispatcher_behind_the_typing_guard():
+    # ONE dispatcher, registered ONCE; every new shortcut lives inside it
+    assert NEW_JS.count("addEventListener('keydown',kbKey)") == 1
+    body = _kb_body()
+    # the typing guard: no shortcut fires while any input has focus...
+    assert re.search(r"typing=ae&&\(/\^\(INPUT\|TEXTAREA\|SELECT\)\$/", body)
+    assert "if(typing)return" in body
+    # ...except the search-field Escape, handled BEFORE the guard
+    assert body.index("ae===se") < body.index("if(typing)return")
+    # the handlers: / focuses search, j/k walk, Enter acts, e peeks
+    for frag in ("e.key==='/'", "e.key==='j'||e.key==='k'",
+                 "e.key==='Enter'", "e.key==='e'"):
+        assert frag in body, f"missing shortcut: {frag}"
+
+
+def test_dispatcher_defers_the_meeting_page_keys_to_mkey():
+    body = _kb_body()
+    # on the meeting page the dispatcher handles ONLY the Escape cascade's
+    # last step and returns before any letter key: n/p stepping (and the
+    # page's slash) stay mKey's alone, so nothing double-fires
+    m = re.search(r"if\(route\.view==='meeting'\)\{(.*?)\n  \}", body, re.S)
+    assert m, "the dispatcher lost its meeting-page bow-out"
+    assert "'n'" not in m.group(1) and "'p'" not in m.group(1)
+    assert body.index("route.view==='meeting'") < body.index("e.key==='/'")
+    # back-to-list fires only with the WHOLE cascade idle (popover, naming
+    # panel, drawer, stepper, edit card)
+    for guard in ("_popClose", "NP", "DRAWER.open", "MR&&MR.active", "mcard"):
+        assert guard in m.group(1), f"Escape-to-list must defer to {guard}"
+    assert "location.hash=''" in m.group(1)
+
+
+def test_slash_focuses_search_and_escape_clears_back_to_the_list():
+    body = _kb_body()
+    assert "se.focus()" in body            # '/' hands focus to the search field
+    # Escape IN the field clears it, re-renders, and puts the ring on the list
+    esc = body[body.index("ae===se"):body.index("const typing")]
+    assert "se.value=''" in esc and "render()" in esc and "scheduleSearch()" in esc
+    assert "kbFocusRow(kbRows()[0])" in esc
+
+
+def test_jk_walk_rows_with_a_ring_that_survives_polls():
+    # rows are already tabindex=0 (the ring reuses :focus-visible); group
+    # headers are skipped by construction -- only .row[tabindex] is collected,
+    # so synthetic upload rows (no tabindex) are skipped too
+    assert "querySelectorAll('#timeline .row[tabindex]')" in NEW_JS
+    assert re.search(r"function\s+kbMove\s*\(", NEW_JS)
+    # the focused row scrolls into view through the page's own scroll-behavior
+    # convention (html smooth, auto under reduced motion): no explicit
+    # 'smooth' that would override the reduced-motion kill
+    m = re.search(r"function kbFocusRow.*?\n\}", NEW_JS, re.S)
+    assert m and "scrollIntoView({block:'nearest'})" in m.group(0)
+    # the ring clears the sticky header and the floating bulk bar
+    assert re.search(r"\.row\{scroll-margin-top:84px", NEW_CSS)
+    # a 2s rebuild wipes the DOM: afterRender puts the ring back from the
+    # remembered id, and a real click clears the memory
+    assert re.search(r"function\s+kbRestore\s*\(", NEW_JS)
+    after = NEW_JS[NEW_JS.index("function afterRender"):]
+    assert "kbRestore()" in after[:200]
+    assert "addEventListener('mousedown',()=>{kbLast=null;})" in NEW_JS
+
+
+def test_enter_acts_by_row_state_and_e_peeks():
+    body = _kb_body()
+    assert "if(st==='ready')openMeeting(id)" in body
+    assert "else if(st==='needs_name')acceptMeeting(id)" in body
+    # waiting/held/failed: Enter hands focus to the first revealed action
+    # (focus-within already shows the set)
+    assert ".ractions .iact" in body
+    assert "e.key==='e'&&st==='ready'" in body and "toggleExpand(id)" in body
+    # Enter/e act on the focused ROW itself, never a focused button inside it
+    assert "e.target.matches('#timeline .row[tabindex]')" in body
+
+
+def test_drop_overlay_markup_rides_the_theme_tokens():
+    assert 'id="dropveil"' in NEW_PAGE
+    assert "Drop audio to queue it" in NEW_PAGE
+    # dashed hairline inset on the accent; pointer-events none so the drop
+    # lands on the window handler; tokens carry both themes (no raw colors)
+    m = re.search(r"\.dropveil\{[^}]*\}", NEW_CSS, re.S)
+    assert m
+    assert "dashed var(--accent)" in m.group(0)
+    assert "pointer-events:none" in m.group(0)
+    assert "#" not in m.group(0).replace("color-mix", ""), \
+        "the overlay must use theme tokens, not hardcoded colors"
+    # dragenter/over show it, leave/drop hide it; dragover preventDefaults
+    for ev in ("dragenter", "dragover", "dragleave", "drop"):
+        assert f"addEventListener('{ev}'" in NEW_JS, f"missing window {ev} handler"
+
+
+def test_upload_wiring_posts_the_raw_file_body_sequentially():
+    # POST /api/upload?name=<filename> with the raw File as the body
+    assert "fetch('/api/upload?name='+encodeURIComponent(file.name)" in NEW_JS
+    assert "{method:'POST',body:file}" in NEW_JS
+    # sequential: one awaited upload per file
+    assert "for(const f of audio)await uploadOne(f)" in NEW_JS
+    # the synthetic row is keyed and yields to the REAL waiting row: a done
+    # entry is pruned the moment src:<final name> appears in the polled state
+    # (the same rebuild adds one and drops the other, so no flicker)
+    assert "const UPLOADS=[]" in NEW_JS
+    assert "rowById('src:'+u.name)" in NEW_JS
+    for fn in ("uploadRowHTML", "uploadsPrune", "uploadDismiss", "uploadFiles"):
+        assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
+            f"missing upload fn: {fn}"
+    # uploads fold into the timeline signature so their rows survive rebuilds
+    assert "uploadsSig()" in NEW_JS
+    # an error row shows the server's reason with a dismiss x; non-audio drops
+    # get the inline dismissible note instead
+    assert "esc(u.error)" in NEW_JS
+    assert 'id="dropnote"' in NEW_PAGE
+    assert re.search(r"function\s+dropNote\s*\(", NEW_JS)
+
+
+def test_upload_ext_const_mirrors_the_server_allowlist():
+    # the client's accepted-extension const IS the server's (config.AUDIO_EXTS,
+    # the folder watcher's own list): widening one without the other fails here
+    from stt import config
+    m = re.search(r"const UPLOAD_EXTS=\[([^\]]+)\]", NEW_JS, re.S)
+    assert m, "UPLOAD_EXTS const missing from the new shell"
+    exts = set(re.findall(r"'(\.[a-z0-9]+)'", m.group(1)))
+    assert exts == config.AUDIO_EXTS, \
+        f"client/server allowlists diverge: {sorted(exts ^ config.AUDIO_EXTS)}"
+    # the rejection note names the accepted list from this same const
+    assert "UPLOAD_EXTS.join(', ')" in NEW_JS
+
+
+def test_library_empty_state_regains_the_drop_line():
+    line = "Record a meeting from the menu bar, or drop an audio file here."
+    assert line in NEW_JS
+    # DESIGN.md's empty-state sentence reached its final form with the endpoint
+    design = (Path(srv.__file__).resolve().parent / "DESIGN.md").read_text(encoding="utf-8")
+    assert "or drop an audio file here." in design
+    assert "the drop line returns when the upload endpoint ships" not in design
+
+
+def test_signal_colorway_tokens_shipped_and_greens_retired():
+    # DESIGN.md (2026-07-12): the Signal colorway. Electric indigo accent in
+    # both themes; the Newsprint greens and warm grounds are gone. Amber and
+    # rec run darker than the spec's first draft so text pairs clear 4.5:1.
+    for tok in ("#4F5DE5", "#7B87FF", "#FAFAFC", "#0F1114", "#8F5F10", "#CC3F38"):
+        assert tok in NEW_CSS, f"Signal token missing: {tok}"
+    for old in ("#1E6B50", "#43B28A", "#FBFBF9", "#121416"):
+        assert old not in NEW_CSS, f"retired Newsprint token still present: {old}"
+    # the three sanctioned futurism touches, and only under motion tolerance
+    assert NEW_CSS.count("0 0 0 3px color-mix(in srgb,var(--accent) 20%") == 2
+    assert "box-shadow:0 0 6px color-mix(in srgb,var(--accent) 45%" in NEW_CSS
+    assert "pillbreathe" in NEW_CSS
+    assert ".pill.rec,.row" in NEW_CSS  # pulse killed under reduced motion

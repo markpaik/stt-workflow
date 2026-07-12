@@ -43,9 +43,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
             title="Process new recordings, pick files, pause automatic runs">Process <span class="caret">&#9662;</span></button>
     <!-- theme dot: cycles auto / light / dark, reusing the old panel convention -->
     <button id="themeDot" class="themedot" type="button" title=""></button>
-    <!-- gear bridges to the old panel's settings until the settings drawer ships -->
+    <!-- gear opens the settings drawer (Builder D): Settings · Speakers · History · Archive -->
     <button id="gear" class="btn gear" type="button"
-            title="Settings (opens the current panel)" aria-label="Settings">&#9881;</button>
+            title="Settings, speakers, history, archive" aria-label="Settings">&#9881;</button>
   </div>
 </header>
 
@@ -62,6 +62,10 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
   <!-- quiet full-text search sub-list under the search field (Builder B) -->
   <div id="searchhits" class="searchhits" hidden></div>
+
+  <!-- inline dismissible note for non-audio drops: names the accepted
+       extensions (filled by app.js, dismissed by its x) -->
+  <div id="dropnote" class="dropnote" hidden></div>
 
   <div class="timelinewrap">
     <!-- jump rail: year / month, visible only at 3+ groups with no active search -->
@@ -85,6 +89,26 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <!-- shared popover mount for the per-row menu (Builder B) -->
 <div id="rowmenu" class="popover" hidden></div>
+
+<!-- settings drawer (Builder D, the final surface): one right slide-over with a
+     pinned section nav (Settings · Speakers · History · Archive). Contents are
+     built by app.js; ✕ / veil / Escape close it. Sits UNDER the naming panel so
+     "Who is this?" opens the existing slide-over above it. -->
+<div id="drawerveil" class="dveil" hidden onclick="closeDrawer()"></div>
+<aside id="drawer" class="drawer" hidden aria-label="Settings and management"></aside>
+
+<!-- voice-naming slide-over (edit layer): opened from the tray's voice items
+     and from unknown speakers in a meeting page's legend. Contents are built
+     by app.js; veil click / Escape / Cancel close it. -->
+<div id="nameveil" class="nveil" hidden onclick="closeNamePanel()"></div>
+<aside id="namepanel" class="npanel" hidden aria-label="Name this voice"></aside>
+
+<!-- full-page drop affordance: shown by window dragenter/over while files are
+     dragged, hidden on leave/drop; pointer-events none so the drop lands on
+     the window handler -->
+<div id="dropveil" class="dropveil" hidden aria-hidden="true">
+  <span class="dv-t">Drop audio to queue it</span>
+</div>
 
 <script>
 //@APP_JS@</script></body></html>

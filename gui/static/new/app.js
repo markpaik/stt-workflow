@@ -77,6 +77,11 @@ function drawPill(s){
   }else if(waiting){
     cls='pill';
     html=`${waiting} waiting`;
+  }else if(s.relabel_pending){
+    // the quiet relabel-in-progress note (a voice was just named): sub-colored,
+    // lowest priority, gone on its own when the relabel finishes
+    cls='pill';
+    html='applying names&#8230;';
   }else{show=false;}
   pill.hidden=!show;
   if(show){pill.className=cls;pill.innerHTML=html;}
@@ -113,8 +118,8 @@ function _trayRow(title,detail,verb){
 function _trayAgg(label,verb){
   return `<div class="trayrow"><span class="tw-title agg">${esc(label)}</span>${verb}</div>`;
 }
-function _traySub(title,meta,count,href){
-  return `<div class="traysub" onclick="location.href=${href}" tabindex="0">
+function _traySub(title,meta,count,call){
+  return `<div class="traysub" onclick="${call}" tabindex="0">
     <span class="ts-title">${esc(title)}</span>
     <span class="ts-meta">${meta}</span>
     ${count?`<span class="ts-count">${esc(count)}</span>`:''}</div>`;
@@ -163,7 +168,7 @@ function drawTray(s){
       const r=rowById(t.target);
       const meta=r&&r.date?esc(shortDate(r.date)):'';
       return _traySub(t.title,meta,t.count+' to check',
-        `'/?review='+encodeURIComponent('${escJs(t.target)}')`);
+        `openReviewBadge('${escJs(t.target)}')`);
     }).join('');
   }
 
@@ -182,7 +187,7 @@ function drawTray(s){
     if(trayOpen.voices)h+=voices.map(t=>{
       const n=t.count;
       return _traySub(t.title,'heard in '+n+' meeting'+(n!==1?'s':''),'',
-        `'/?who='+encodeURIComponent('${escJs(t.target)}')`);
+        `openNamePanelByUid('${escJs(t.target)}')`);
     }).join('');
   }
   tray.innerHTML=h;
@@ -382,12 +387,18 @@ function drawTimeline(s){
     return true;
   });
 
+  // synthetic upload rows: prune the ones whose REAL waiting row has landed
+  // (the same rebuild adds one and drops the other, so the swap never
+  // flickers), then pin the survivors above everything
+  uploadsPrune();
+  const upHTML=UPLOADS.map(uploadRowHTML).join('');
+
   // empty states (quiet, centered), rendered inside the timeline
-  if(all.length===0){
-    tl.innerHTML=`<p class="empty">Record a meeting from the menu bar.</p>`;
+  if(all.length===0&&!UPLOADS.length){
+    tl.innerHTML=`<p class="empty">Record a meeting from the menu bar, or drop an audio file here.</p>`;
     $('#rail').hidden=true;tl.dataset.sig='EMPTY';return;
   }
-  if(rows.length===0){
+  if(rows.length===0&&!UPLOADS.length){
     tl.innerHTML=`<p class="empty">No matches.</p>`;
     $('#rail').hidden=true;tl.dataset.sig='NOMATCH:'+cat+':'+q+':'+flaggedOnly;return;
   }
@@ -421,7 +432,8 @@ function drawTimeline(s){
   }
 
   const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
-  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly;
+  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly
+    +'|'+uploadsSig();
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
   // never wipe a half-typed name in a needs_name field; a later unchanged poll
   // (or a blur) lets the rebuild happen. Only INPUT/SELECT focus blocks it, so
@@ -429,7 +441,7 @@ function drawTimeline(s){
   const ae=document.activeElement;
   if(ae&&tl.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName))return;
   tl.dataset.sig=sig;
-  tl.innerHTML=groups.map((g,i)=>
+  tl.innerHTML=upHTML+groups.map((g,i)=>
     (g.pinned?'':`<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`)
     +g.rows.map(rowHTML).join('')).join('');
   drawRail(groups,q.length>0,sort);
@@ -469,7 +481,7 @@ function railJump(i){const el=document.getElementById('grp-'+i);
 // While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
 // live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
-function render(){if(!S)return;drawPill(S);drawTray(S);
+function render(){if(!S)return;drawPill(S);drawTray(S);drawDrawer(S);
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
   if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
   drawTimeline(S);afterRender();}
@@ -510,7 +522,7 @@ $('#timeline').addEventListener('click',e=>{
   toggleExpand(row.dataset.id);
 });
 $('#themeDot').onclick=cycleTheme;
-$('#gear').onclick=()=>{location.href='/?ui=old';};   // bridge until the settings drawer ships
+$('#gear').onclick=()=>openDrawer();   // the settings drawer (Builder D): no old-page bridge remains
 $('#pill').onclick=toggleProcess;
 $('#processBtn').onclick=toggleProcess;
 refresh();
@@ -518,11 +530,10 @@ setInterval(refresh,2000);
 
 /* ============================================================================
    Builder B: interactions. Wires every seam A stubbed, against the EXISTING
-   endpoints only (no server change). The old panel accepts the bridge links used
-   below until the meeting page ships:
-     Open a meeting   ->  /?open=<base>
-     Review a meeting ->  /?review=<base>
-     Name an unknown  ->  /?who=<uid>
+   endpoints only (no server change). The edit layer (Builder C, below) removed
+   the last per-meeting bridges to the old page: opening, reviewing, and voice
+   naming all happen in the shell now (#m route, the inline flag stepper, the
+   naming slide-over). The old page keeps its deep-link params for its own use.
    Re-render safety: selection lives in a Set keyed by row id and is reapplied
    after every rebuild (applySel); the inline clip player is ONE detached element
    re-mounted under its row (mountClip); an open per-row menu is re-anchored or
@@ -669,9 +680,8 @@ async function trayAct(kind,target){
     if(r&&r.source_file)api('/api/run',{files:[r.source_file],...runOpts()}).then(refresh);
     return;
   }
-  if(kind==='review'){location.href='/?review='+encodeURIComponent(target);return;}
-  if(kind==='unknown_voice'){location.href='/?who='+encodeURIComponent(target);return;}
-  location.href='/?open='+encodeURIComponent(target);
+  if(kind==='review'){openReviewBadge(target);return;}
+  if(kind==='unknown_voice')openNamePanelByUid(target);
 }
 
 /* -------------------------------------------------- inline clip player ----- *
@@ -786,8 +796,14 @@ function rowRetry(id){                    // re-run a failed source still in the
 // in-shell route: set the hash and let the hashchange handler open the page
 // (Builder A, at the bottom). No navigation away; back/forward and deep links work.
 function openMeeting(id){location.hash='#m/'+encodeURIComponent(id);}
-// review/who still bridge to the old page until Builder B ports them into the shell
-function openReviewBadge(id){location.href='/?review='+encodeURIComponent(id);}
+// a row's review count / a tray review verb: open the meeting page with the
+// flag stepper active on the first flag (the same pendingOpen pattern as the
+// ask focus and the search-hit seek: a flag the build consumes, never a timeout)
+function openReviewBadge(id){
+  if(route.view==='meeting'&&route.base===id){reviewStart(0);return;}
+  pendingOpen={base:id,review:true};
+  location.hash='#m/'+encodeURIComponent(id);
+}
 function cycleCat(ev,id){                 // untagged -> work -> personal -> untagged
   if(ev)ev.stopPropagation();
   const r=rowById(id);if(!r)return;
@@ -842,10 +858,19 @@ function fillRowMenu(pop,id){
 }
 async function rmExport(id,fmt,btn){
   btn.disabled=true;const t=btn.textContent;btn.textContent='Exporting…';
-  const r=await api('/api/export',{base:id,fmt});
-  btn.disabled=false;btn.textContent=r.ok?'Done ✓':t;
-  if(r.error)btn.textContent=t;
-  if(r.ok)setTimeout(closePop,650);
+  let r;
+  try{r=await api('/api/export',{base:id,fmt});}
+  catch(e){r={error:'Export failed.'};}
+  btn.disabled=false;
+  if(r.ok){btn.textContent='Done ✓';setTimeout(closePop,650);return;}
+  btn.textContent=t;
+  // failure stays in the menu (e.g. pandoc missing for Word), never an alert
+  const pop=$('#rowmenu');
+  if(!pop.hidden)pop.innerHTML=`<div class="ppconfirm">
+    <div class="ppctitle">Could not export</div>
+    <div class="ppcnote err">${esc(r.error||'The export failed.')}</div>
+    <div class="ppcrow"><button class="btn mini" type="button" onclick="closePop()">Close</button></div>
+  </div>`;
 }
 async function rmCopy(id,btn){
   try{
@@ -863,11 +888,17 @@ function rmAsk(id){
   location.hash='#m/'+encodeURIComponent(id);
 }
 function rmReveal(id){api('/api/export',{base:id,fmt:'reveal'});closePop();}
-function rmArchive(id){api('/api/archive_meeting',{base:id}).then(()=>{closePop();refresh();});}
-function rmRename(id){                    // inline: the row title becomes an input
-  closePop();
-  const rowEl=document.querySelector('.row[data-id="'+CSS.escape(id)+'"]');
-  const titleEl=rowEl&&rowEl.querySelector('.rtitle');
+function rmArchive(id){api('/api/archive_meeting',{base:id}).then(()=>{closePop();
+  // archived from its own page: the page is gone, return to the library
+  if(route.view==='meeting'&&route.base===id)location.hash='';
+  archHint();   // the quiet "archived · view" note pointing at the drawer's Archive
+  refresh();});}
+function rmRename(id){                    // inline: the title becomes an input,
+  closePop();                             // on the row OR on the meeting page
+  const onPage=route.view==='meeting'&&route.base===id;
+  const titleEl=onPage
+    ?document.querySelector('#meetingpage .mtitle')
+    :(r=>r&&r.querySelector('.rtitle'))(document.querySelector('.row[data-id="'+CSS.escape(id)+'"]'));
   if(!titleEl)return;
   const cur=(meetingByBase(id)||{}).title||titleEl.textContent||'';
   titleEl.innerHTML=`<input class="renameinput" type="text" value="${esc(cur)}" aria-label="Rename meeting">`;
@@ -886,7 +917,11 @@ function rmRename(id){                    // inline: the row title becomes an in
         inp.focus();
         return;
       }
+      // a rename re-stamps the folder, so the base CHANGES: re-route the open
+      // page to the new base (the hashchange handler rebuilds it there)
+      if(onPage&&r.base&&r.base!==id){location.hash='#m/'+encodeURIComponent(r.base);return;}
     }
+    if(onPage)titleEl.textContent=cur;    // cancelled / unchanged: restore the title
     refresh();
   };
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(true);}else if(e.key==='Escape'){e.preventDefault();finish(false);}};
@@ -938,7 +973,10 @@ async function rmDeleteGo(id){
     </div>`;
     return;
   }
-  closePop();refresh();
+  closePop();
+  // deleted from its own page: the page is gone, return to the library
+  if(route.view==='meeting'&&route.base===id)location.hash='';
+  refresh();
 }
 
 /* --------------------------------------------------- bulk selection -------- *
@@ -993,6 +1031,7 @@ async function bulk(action,value,extra){
       fails.slice(0,8).map(f=>esc(f.base)+': '+esc(f.error||'failed')).join('<br>'),true);
   else if(r.freed_mb)
     bulkResult('Done',`Freed ${r.freed_mb} MB of audio.`,false);
+  if(action==='archive'&&!fails.length)archHint();   // quiet pointer to the drawer's Archive
   SEL.clear();refresh();
 }
 // bulk outcome as a popover off the bulk bar (never a browser alert or banner)
@@ -1006,7 +1045,7 @@ function bulkResult(title,note,isErr){
     </div>`;
   });
 }
-function bulkRename(btn){                  // name input in a popover, no prompt()
+function bulkRename(btn){                  // name input in a popover, never a native prompt
   const n=_selReady().length;if(!n)return;
   const pop=$('#rowmenu');pop.dataset.rowid='';
   openPop(pop,btn,()=>{
@@ -1027,7 +1066,7 @@ function bulkRenameGo(){
   if(!nm)return;
   closePop();bulk('rename',nm);
 }
-function bulkDate(btn){                     // date input in a popover, no prompt()
+function bulkDate(btn){                     // date input in a popover, never a native prompt
   const n=_selReady().length;if(!n)return;
   const pop=$('#rowmenu');pop.dataset.rowid='';
   openPop(pop,btn,()=>{
@@ -1048,7 +1087,7 @@ function bulkDateGo(){
   if(!d)return;
   closePop();bulk('date',d);
 }
-function bulkDropAudio(btn){                // confirm popover, no confirm()
+function bulkDropAudio(btn){                // confirm popover, never a native dialog
   const n=_selReady().length;if(!n)return;
   const pop=$('#rowmenu');pop.dataset.rowid='';
   openPop(pop,btn,()=>{
@@ -1062,7 +1101,7 @@ function bulkDropAudio(btn){                // confirm popover, no confirm()
   });
 }
 function bulkDropAudioGo(){closePop();bulk('drop_audio',null,{confirm:true});}
-function bulkDelete(btn){                   // two-step confirm popover, no confirm()
+function bulkDelete(btn){                   // two-step confirm popover, never a native dialog
   const n=_selReady().length;if(!n)return;
   const pop=$('#rowmenu');pop.dataset.rowid='';
   openPop(pop,btn,()=>{
@@ -1125,6 +1164,7 @@ function scheduleSearch(){
 function afterRender(){
   mountClip();
   applySel();
+  kbRestore();
   const rm=$('#rowmenu');
   if(rm.dataset.open&&rm.dataset.rowid){
     const anchor=document.querySelector('.row[data-id="'+CSS.escape(rm.dataset.rowid)+'"] .rslot .iact:last-child');
@@ -1162,6 +1202,7 @@ function parseHash(){
   return m?{view:'meeting',base:decodeURIComponent(m[1])}:{view:'timeline',base:null};
 }
 function applyRoute(){
+  if(NP)closeNamePanel();          // a route change closes the naming slide-over
   if(route.view==='meeting')enterMeeting(route.base);
   else exitMeeting();
 }
@@ -1194,7 +1235,7 @@ function teardownMeeting(){
   }
   window.removeEventListener('scroll',mOnScroll);
   document.removeEventListener('keydown',mKey);
-  MF=null;MP=null;
+  MF=null;MP=null;MR=null;
 }
 // called by the poll's render() while a meeting is open: finish a deep-link build
 // that was waiting for S, without ever rebuilding an already-built page
@@ -1216,7 +1257,8 @@ async function buildMeeting(base){
   if(MP&&MP.base===base&&MP.built)return;    // poll re-entry: already built
   teardownMeeting();
   MP={base,built:true,audio:null,segs:[],color:{},follow:true,rate:1,
-      hasAudio:!!m.audio,tick:null,autoScroll:false,nowIdx:null};
+      hasAudio:!!m.audio,tick:null,autoScroll:false,nowIdx:null,
+      spkOpts:[],people:[],spanStop:null,pendingReview:false};
 
   page.innerHTML=
     _mHeader(m,base)
@@ -1230,12 +1272,14 @@ async function buildMeeting(base){
   mAskInit(base);
   // a pending deep action lands once, as soon as the page skeleton exists:
   // seek the audio to a search hit's moment (the transcript scroll follows
-  // after the segments load, below) or focus the ask input
+  // after the segments load, below), focus the ask input, or arm the flag
+  // stepper (consumed after the segments arrive, below)
   if(pendingOpen){
     const p=pendingOpen;pendingOpen=null;    // stale-for-another-base also drops here
     if(p.base===base){
       if(p.seek!=null){MP.seekTo=p.seek;if(MP.hasAudio)mSeek(p.seek);}
       if(p.ask){const q=$('#maskq');if(q)q.focus();}
+      if(p.review)MP.pendingReview=true;
     }
   }
   document.removeEventListener('keydown',mKey);
@@ -1248,9 +1292,10 @@ async function buildMeeting(base){
   const body=$('#mtbody');if(!body)return;
   if(d.error){body.innerHTML='<div class="mterr">'+esc(d.error)+'</div>';return;}
   MP.segs=d.segments||[];
+  MP.spkOpts=d.speaker_options||[];
+  MP.people=d.people||[];
   (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
-  body.innerHTML=MP.segs.map(mSegHTML).join('')
-    ||'<div class="mterr">This transcript has no lines yet.</div>';
+  body.innerHTML=mBodyHTML();
   mLegend(d);
   // a search hit's moment: scroll its line into view now that the segments
   // exist (with audio, mSeek above already cued playback; the follow highlight
@@ -1264,6 +1309,8 @@ async function buildMeeting(base){
       el.scrollIntoView({block:'center'});
     }
   }
+  // a review chip / tray verb opened this page: start stepping on the first flag
+  if(MP.pendingReview){MP.pendingReview=false;if(MP.segs.length)reviewStart(0);}
 }
 
 /* --------------------------------------------------------- header block ---- */
@@ -1275,13 +1322,41 @@ function _mHeader(m,base){
   const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
   const dotTitle=dot==='work'?'Work':dot==='personal'?'Personal':'Untagged';
   const strict=m.strict?'<span class="mchip">strict</span>':'';
-  const flagged=m.flagged>0?`<span class="mflagnote">${m.flagged} flagged</span>`:'';
+  const nfl=(m.flagged||0)+(m.flagged_minor||0);
+  const flagged=nfl>0?`<span class="mflagnote">${nfl} flagged</span>`:'';
+  // everything a row can do, the page can do: the same ⋯ menu, and the same
+  // cyclable category dot (untagged -> work -> personal), optimistic
   return `<div class="mhead">
     <a class="mback" href="#" onclick="mBack(event)">&#8592; Meetings</a>
+    <button class="iact mhmenu" id="mmenu" type="button" title="Export, copy, rename, redo&#8230;"
+      aria-label="Meeting actions" onclick="mMenu(event)">&#8943;</button>
     <h1 class="mtitle">${esc(m.title||base)}</h1>
     <div class="mmeta">${bits.join(' &middot; ')}
-      <span class="mcat ${dot}" title="${dotTitle}"></span>${strict}${flagged}</div>
+      <button class="mcat ${dot}" id="mcatdot" type="button"
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)"></button>${strict}${flagged}</div>
   </div>`;
+}
+// header dot: same optimistic /api/set_category cycle as the library rows
+function mCycleCat(ev){
+  if(ev)ev.stopPropagation();
+  if(!MP)return;
+  const m=meetingByBase(MP.base);if(!m)return;
+  const cur=(m.category&&m.category!=='none')?m.category:'';
+  const next={'':'work',work:'personal',personal:''}[cur];
+  m.category=next;
+  const r=rowById(MP.base);if(r)r.category=next;   // the library row agrees on return
+  const d=$('#mcatdot');
+  if(d){d.className='mcat '+(next||'none');
+    d.title=(next==='work'?'Work':next==='personal'?'Personal':'Untagged')+' (click to change tag)';}
+  api('/api/set_category',{base:MP.base,category:next}).then(refresh);
+}
+// the row ⋯ menu, anchored to the page header: same items, same handlers
+function mMenu(ev){
+  if(ev)ev.stopPropagation();
+  if(!MP)return;
+  const anchor=(ev&&ev.currentTarget)||$('#mmenu');
+  const pop=$('#rowmenu');pop.dataset.rowid=MP.base;
+  openPop(pop,anchor,()=>fillRowMenu(pop,MP.base));
 }
 
 /* ---------------------------------------------------- docked audio bar ----- *
@@ -1305,6 +1380,8 @@ function _mAudioBar(){
     <button class="mrate" id="mrate" type="button" onclick="mCycleRate()" title="Playback speed">1&#215;</button>
     <button class="mfollow" id="mfollow" type="button" onclick="mToggleFollow()"
       aria-pressed="true" title="Auto-scroll to the line that is playing">follow</button>
+    <button class="mfollow" id="maddline" type="button" onclick="mAddAtPlayhead()"
+      title="Add a line the pipeline missed, at the audio&#8217;s current position: pause where you heard it, then click">&#65291; line at playhead</button>
   </div>`;
 }
 function mAudioInit(base){
@@ -1322,6 +1399,8 @@ function mAudioInit(base){
 }
 function mAudioTick(){
   const a=MP&&MP.audio;if(!a)return;
+  // span playback (Play clip / Play span): stop just past the segment's end
+  if(MP.spanStop!=null&&a.currentTime>=MP.spanStop){a.pause();MP.spanStop=null;mSyncPP();}
   const seek=$('#mseek'),cur=$('#mcur'),dur=$('#mdur'),eta=$('#meta');
   const d=isFinite(a.duration)?a.duration:0;
   if(seek&&!seek.dataset.drag){seek.max=d||0;seek.value=a.currentTime||0;}
@@ -1338,8 +1417,10 @@ function mBufTick(){
 }
 function mSyncPP(){const b=$('#mpp');if(b)b.innerHTML=(MP&&MP.audio&&!MP.audio.paused)?'&#10073;&#10073;':'&#9654;';}
 function mPlayPause(){const a=MP&&MP.audio;if(!a)return;
+  MP.spanStop=null;                              // manual control ends span playback
   if(a.paused)a.play().catch(()=>{});else a.pause();mSyncPP();}
-function mScrub(v){const a=MP&&MP.audio;if(!a)return;a.currentTime=parseFloat(v)||0;mAudioTick();}
+function mScrub(v){const a=MP&&MP.audio;if(!a)return;
+  MP.spanStop=null;a.currentTime=parseFloat(v)||0;mAudioTick();}
 function mCycleRate(){
   if(!MP||!MP.audio)return;
   MP.rate=MRATES[(MRATES.indexOf(MP.rate)+1)%MRATES.length];
@@ -1350,6 +1431,7 @@ function mCycleRate(){
 // is navigating by transcript, so following the playhead is what they want
 function mSeek(t){
   const a=MP&&MP.audio;if(!a)return;
+  MP.spanStop=null;                              // a line click ends span playback
   MP.follow=true;mFollowUI();
   const go=()=>{a.currentTime=t;a.play().catch(()=>{});mSyncPP();};
   a.readyState>=1?go():a.addEventListener('loadedmetadata',go,{once:true});
@@ -1430,13 +1512,19 @@ async function mGenSummary(){
 }
 
 /* -------------------------------------------------------- flagged strip ---- *
- * Rendering only. Stepping/actions are Builder B's: reviewStep() is the seam. */
+ * The strip is the stepping CONTROLLER: clicking it (or pressing n) walks the
+ * flagged segments in place; a one-click Accept sits beside it when minor
+ * crumbs exist. The stepper itself lives in the edit layer below. */
 function _mFlagged(m){
-  if(!(m.flagged>0))return '';
-  return `<button class="mflagged" type="button" onclick="reviewStep()"
-    title="Step through the flagged lines">&#9888; ${m.flagged} flagged line${m.flagged>1?'s':''}</button>`;
+  const n=(m.flagged||0)+(m.flagged_minor||0);
+  if(!n)return '';
+  return `<div class="mflagbar" id="mflagbar">
+    <button class="mflagged" id="mflagstrip" type="button" onclick="reviewStep()"
+      title="Step through the flagged lines in place (n next, p previous)">&#9888; ${n} flagged line${n>1?'s':''}</button>
+    ${m.flagged_minor?`<button class="btn mini" id="mflagminor" type="button" onclick="reviewAcceptMinor(this)"
+      title="Sub-second crosstalk crumbs (&#8220;like&#8221;, &#8220;so&#8221;&#8230;): accept them all in one click; substantial lines stay">&#10003; Accept ${m.flagged_minor} minor</button>`:''}
+  </div>`;
 }
-function reviewStep(){/* Builder B: step through and act on the flagged segments */}
 
 /* ----------------------------------------------------- transcript + find --- *
  * Time (mono, click to seek), speaker (weight 600 + per-speaker sdot color),
@@ -1460,8 +1548,21 @@ function _mTranscriptShell(){
 }
 function mLegend(d){
   const box=$('#mlegend');if(!box)return;
-  box.innerHTML=(d.speakers||[]).map(w=>
-    `<span class="mlg"><span class="msdot" style="background:${MP.color[w]}"></span>${esc(w)}</span>`).join('');
+  box.innerHTML=(d.speakers||[]).map(w=>{
+    const dot=`<span class="msdot" style="background:${MP.color[w]}"></span>`;
+    const uid=mUnknownUid(w);
+    // an unnamed voice ("Speaker N" with an unknown-registry entry that lists
+    // this meeting): its legend chip opens the naming slide-over
+    return uid
+      ?`<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
+          onclick="openNamePanelByUid('${escJs(uid)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`
+      :`<span class="mlg">${dot}${esc(w)}</span>`;
+  }).join('');
+}
+function mUnknownUid(display){
+  const u=(S&&S.unknowns||[]).find(u=>u.display===display&&!u.archived
+    &&(u.meetings||[]).includes(MP.base));
+  return u?u.uid:null;
 }
 function mSegHTML(g,i){
   const mm=Math.floor(g.start/60),ss=String(Math.floor(g.start%60)).padStart(2,'0');
@@ -1470,9 +1571,24 @@ function mSegHTML(g,i){
   const seek=MP.hasAudio?` onclick="mSeek(${g.start})"`:'';
   return `<div class="mseg${flag?' flagged':''}" id="mseg${i}"${seek}>
     <span class="mtime mono">${mm}:${ss}</span>
-    <span class="mspk"><span class="msdot" style="background:${hue}"></span>${esc(g.who)}${flag?` <span class="mstar" title="Uncertain: ${esc((g.flags||[]).join(', '))}">*</span>`:''}</span>
+    <span class="mspk"><span class="msdot" style="background:${hue}"></span>${esc(g.who)}${flag?` <span class="mstar" title="Uncertain: ${esc((g.flags||[]).join(', '))}">*</span>`:''}${g.edited?' <span class="medited" title="Edited by you">&#9998;</span>':''}</span>
     <span class="mtext">${esc(g.text)}</span>
+    <button class="msegedit" type="button" title="Fix this line (speaker or text)"
+      onclick="mEdit(${i},event)">&#9998;</button>
   </div>`;
+}
+// the gap between two lines: a quiet hover affordance for a voice the pipeline
+// missed entirely (i = the segment ABOVE the gap; -1 = before the first line)
+function mGapHTML(i){
+  return `<div class="mgap" id="mgap${i}" tabindex="0" role="button"
+    aria-label="Add a line here: a voice the pipeline missed"
+    onclick="mInsertAt(${i})"
+    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();mInsertAt(${i})}"
+    title="Add a line here: a voice the pipeline missed">&#65291; add line</div>`;
+}
+function mBodyHTML(){
+  if(!MP.segs.length)return '<div class="mterr">This transcript has no lines yet.</div>';
+  return mGapHTML(-1)+MP.segs.map((g,i)=>mSegHTML(g,i)+mGapHTML(i)).join('');
 }
 function mFindInput(){clearTimeout(mFindT);mFindT=setTimeout(()=>mFindRun(true),200);}
 function mFindKey(e){
@@ -1546,6 +1662,14 @@ function mKey(e){
     e.preventDefault();const f=$('#mfind');if(f){f.focus();f.select();}
   }else if(e.key==='/'&&!typing){
     e.preventDefault();const f=$('#mfind');if(f)f.focus();
+  }else if(!typing&&(e.key==='n'||e.key==='p')){
+    // n/p step the flag review in place; both skip while typing in any input
+    if(MR&&MR.active){e.preventDefault();reviewGo(e.key==='n'?1:-1);}
+    else if(e.key==='n'&&document.getElementById('mflagbar')){e.preventDefault();reviewStep();}
+  }else if(e.key==='Escape'&&!typing&&!NP){
+    // leave the stepper / close an open card (the naming panel owns its Escape)
+    if(MR&&MR.active){e.preventDefault();reviewExit();}
+    else if(document.getElementById('mcard')){e.preventDefault();mCloseCard();}
   }
 }
 
@@ -1621,9 +1745,1604 @@ function mStickyTop(){
   if(hdr&&bar)bar.style.top=hdr.offsetHeight+'px';
 }
 
+/* ============================================================================
+   Builder C: THE EDIT LAYER. One inline card serves both repair flows: the
+   flag STEPPER (the amber strip walks the flagged segments in place: reason,
+   play clip, second-engine alternative, editable text + speaker, Accept as-is /
+   Save / Skip) and the everywhere EDITOR (the quiet pencil on any segment:
+   speaker/text, remove, split, re-transcribe with an engine choice, play span).
+   Gaps and the audio bar insert missed lines. All of it POSTs the EXISTING
+   /api/review shapes with the segment's ORIGINAL json index (g.index /
+   it.index) plus its start as the server's cross-check; the array position i
+   appears only in DOM ids. Plus the voice-naming slide-over that retired the
+   old page's who-is-this bridge. Confirmations are the house two-step, never
+   a native dialog.
+   ============================================================================ */
+
+const ENGINES=[['parakeet','Parakeet &middot; fast'],
+  ['mlxwhisper:large-v3','Whisper v3 &middot; thorough'],
+  ['mlxwhisper:turbo','Whisper turbo']];
+let MR=null;    // flag stepper state: {items,i,active} (speaker options ride on MP)
+
+/* ------------------------------------------------------- the inline card --- *
+ * ONE card at a time, mounted as a SIBLING after its segment (the row stays in
+ * the document, so find/highlight code keeps working); the segment is marked
+ * .editing (editor) or .mrev (stepper emphasis). The poll never rebuilds the
+ * open meeting page, so the card survives every 2s refresh by construction. */
+function mCardEl(html,afterEl,cls){
+  mCloseCard();
+  const d=document.createElement('div');
+  d.id='mcard';d.className='mcard'+(cls?' '+cls:'');
+  d.innerHTML=html;
+  afterEl.insertAdjacentElement('afterend',d);
+  return d;
+}
+function mCloseCard(){
+  const d=document.getElementById('mcard');
+  if(d)d.remove();
+  document.querySelectorAll('.mseg.editing').forEach(e=>e.classList.remove('editing'));
+  document.querySelectorAll('.mseg.mrev').forEach(e=>e.classList.remove('mrev'));
+}
+function mCardErr(msg){
+  const e=document.getElementById('mcerr');
+  if(!e)return;
+  e.hidden=!msg;e.textContent=msg||'';
+}
+
+/* speaker picker: this meeting's speakers, every enrolled person, then
+ * "New person" (ported from the old page's spkOptions) */
+function spkOptions(speakers,people,sel){
+  const seen=new Set(speakers.map(s=>s.display));
+  let h=speakers.map(s=>`<option value="${esc(s.id)}" ${s.id===sel?'selected':''}>${esc(s.display)}</option>`).join('');
+  const others=(people||[]).filter(p=>!seen.has(p));
+  if(others.length)h+=`<optgroup label="Someone else">${others.map(p=>`<option value="name:${esc(p)}">${esc(p)}</option>`).join('')}</optgroup>`;
+  return h+`<option value="__new__">&#65291; New person&#8230;</option>`;
+}
+function mSpkSelect(id,sel){
+  return `<select id="${id}" class="mcsel" title="Who actually said this?">${spkOptions(MP.spkOpts,MP.people,sel)}</select>`;
+}
+// "+ New person": an inline input in place of the old page's native prompt.
+// Enter (or blur with text) commits; Escape or an empty blur restores the
+// previous selection, exactly like cancelling the old prompt did.
+function mWireNew(sel){
+  if(!sel)return;
+  sel.addEventListener('focus',()=>{if(sel.value!=='__new__')sel._prev=sel.value;});
+  sel.addEventListener('change',()=>{
+    if(sel.value!=='__new__'){sel._prev=sel.value;return;}
+    let inp=sel.parentElement.querySelector('.mnewspk');
+    if(inp){inp.focus();return;}
+    inp=document.createElement('input');
+    inp.className='mnewspk';inp.type='text';
+    inp.placeholder='Who said this?';
+    inp.setAttribute('aria-label','New person name');
+    sel.insertAdjacentElement('afterend',inp);
+    const cancel=()=>{inp.remove();if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0;};
+    const commit=()=>{
+      const nm=inp.value.trim();
+      if(!nm){cancel();return;}
+      const o=document.createElement('option');o.value='name:'+nm;o.textContent=nm;
+      sel.insertBefore(o,sel.lastElementChild);sel.value='name:'+nm;sel._prev=sel.value;
+      inp.remove();
+    };
+    inp.onkeydown=e=>{
+      if(e.key==='Enter'){e.preventDefault();commit();}
+      else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();cancel();}
+    };
+    inp.onblur=commit;
+    inp.focus();
+  });
+}
+
+/* span playback: seek a little before the span, stop a little after (the
+ * mAudioTick guard owns the stop). Manual control anywhere clears it. */
+function mPlaySpan(start,end){
+  const a=MP&&MP.audio;if(!a)return;
+  MP.spanStop=end+0.7;
+  const go=()=>{a.currentTime=Math.max(0,start-0.7);a.play().catch(()=>{});mSyncPP();};
+  a.readyState>=1?go():a.addEventListener('loadedmetadata',go,{once:true});
+}
+function mPlaySpanBtn(i,ev){if(ev)ev.stopPropagation();const g=MP.segs[i];if(g)mPlaySpan(g.start,g.end);}
+
+/* keep the strip, its Accept-minor button, and the header note honest after
+ * every flag-resolving action, from the client's own segment state. The strip
+ * disappears at zero. mIsMinor mirrors the server's review.is_minor. */
+function mIsMinor(g){return (g.end-g.start)<1.0&&g.text.split(/\s+/).filter(Boolean).length<=3;}
+function mSyncFlagStrip(){
+  if(!MP)return;
+  const flagged=MP.segs.filter(g=>g.flags&&g.flags.length);
+  const minors=flagged.filter(mIsMinor).length,n=flagged.length;
+  const bar=document.getElementById('mflagbar');
+  if(bar){
+    if(!n)bar.remove();
+    else{
+      const s=document.getElementById('mflagstrip');
+      if(s)s.innerHTML=`&#9888; ${n} flagged line${n>1?'s':''}`;
+      const mb=document.getElementById('mflagminor');
+      if(mb){if(!minors)mb.remove();else mb.innerHTML=`&#10003; Accept ${minors} minor`;}
+    }
+  }
+  const note=document.querySelector('#meetingpage .mflagnote');
+  if(note){if(!n)note.remove();else note.textContent=n+' flagged';}
+}
+
+// refresh ONE rebuilt row in place (text/speaker/flag changed locally)
+function mRefreshSeg(i){
+  const el=document.getElementById('mseg'+i);
+  if(!el)return;
+  el.outerHTML=mSegHTML(MP.segs[i],i);
+  if(MF)mFindRun(false);          // re-mark find hits on the rebuilt row
+}
+
+/* re-fetch the transcript after a STRUCTURAL change (insert / split / delete /
+ * a merge folding neighbors into one turn): the server re-issues segments with
+ * fresh ORIGINAL indexes, the legend and colors rebuild, and the optional
+ * target (an original index from the response) scrolls into view. */
+async function mReloadSegs(target){
+  if(!MP)return;
+  const base=MP.base;
+  let d;
+  try{d=await api('/api/transcript?base='+encodeURIComponent(base));}
+  catch(e){d={error:'The transcript could not be reloaded.'};}
+  if(route.view!=='meeting'||route.base!==base)return;
+  const body=$('#mtbody');if(!body)return;
+  if(d.error){body.innerHTML='<div class="mterr">'+esc(d.error)+'</div>';return;}
+  mCloseCard();
+  MF=null;{const f=$('#mfind');if(f)f.value='';}mFindCount();
+  MP.segs=d.segments||[];
+  MP.spkOpts=d.speaker_options||[];
+  MP.people=d.people||[];
+  MP.color={};(d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
+  MP.nowIdx=null;
+  body.innerHTML=mBodyHTML();
+  mLegend(d);
+  mSyncFlagStrip();
+  if(target!=null){
+    const p=MP.segs.findIndex(g=>g.index===target);
+    const el=p>=0?document.getElementById('mseg'+p):null;
+    if(el){
+      el.scrollIntoView({block:'center'});
+      el.classList.add('mrev');
+      setTimeout(()=>el.classList.remove('mrev'),1200);
+    }
+  }
+  refresh();
+}
+
+/* ------------------------------------------------------- the flag stepper -- */
+// the strip is the controller: the first click starts on the first flag,
+// later clicks (and n/p) step through the rest
+function reviewStep(){if(MR&&MR.active)reviewGo(1);else reviewStart(0);}
+async function reviewStart(at){
+  if(!MP||!MP.built)return;
+  const base=MP.base;
+  let d;
+  try{d=await api('/api/review?base='+encodeURIComponent(base));}
+  catch(e){d={error:'The review list could not be loaded.'};}
+  if(route.view!=='meeting'||route.base!==base)return;
+  if(d.error)return;
+  if(!d.items||!d.items.length){MR=null;mSyncFlagStrip();refresh();return;}
+  MR={items:d.items,i:Math.min(at||0,d.items.length-1),active:true};
+  // the review list's speaker options are fresher than the page load's copy
+  if(d.speakers&&d.speakers.length)MP.spkOpts=d.speakers;
+  if(d.people)MP.people=d.people;
+  renderReviewCard();
+}
+function reviewGo(d){
+  if(!MR||!MR.active)return;
+  const j=MR.i+d;
+  if(j<0)return;
+  if(j>=MR.items.length){reviewExit();return;}   // stepped past the last: done
+  MR.i=j;renderReviewCard();
+}
+function reviewExit(){MR=null;mCloseCard();mSyncFlagStrip();}
+// the array position of a review item's segment: matched by ORIGINAL index,
+// with start-time proximity as the fallback (same spirit as the server's own
+// _locate_segment cross-check)
+function _revPos(it){
+  let p=MP.segs.findIndex(g=>g.index===it.index);
+  if(p<0)p=MP.segs.findIndex(g=>Math.abs(g.start-it.start)<0.25);
+  return p;
+}
+function renderReviewCard(){
+  const it=MR.items[MR.i];
+  const p=_revPos(it);
+  const el=p>=0?document.getElementById('mseg'+p):null;
+  if(!el){reviewExit();return;}    // transcript changed underneath: bow out quietly
+  mCloseCard();
+  el.classList.add('mrev');
+  const alts=(it.alt||[]).map((a,k)=>`<div class="mcalt">Second engine heard
+      &#8220;<b>${esc(a.theirs||'(nothing)')}</b>&#8221; where this says
+      &#8220;${esc(a.ours||'(nothing)')}&#8221;
+      <button class="iact" type="button" onclick="reviewUseAlt(${k})"
+        title="Swap the second engine&#8217;s version into the text below">Use it</button></div>`).join('');
+  const card=mCardEl(`
+    <div class="mcrow mchead">
+      <span class="mcflag">&#9888; ${esc(it.flags.join(', '))}${it.minor?' &middot; minor':''}</span>
+      <span class="mcpos">${MR.i+1} of ${MR.items.length}</span>
+    </div>
+    ${alts}
+    <div class="mcrow">
+      ${mSpkSelect('mcspk',it.speaker)}
+      <textarea id="mctext" class="mctext" aria-label="Corrected text">${esc(it.text)}</textarea>
+    </div>
+    <div class="mcrow mcbtns">
+      ${MP.hasAudio?`<button class="iact" type="button" onclick="reviewPlay()" title="Play just this stretch of the recording">&#9654; Play clip</button>`:''}
+      <span class="grow"></span>
+      <button class="btn mini" type="button" onclick="reviewGo(1)" title="Leave it flagged and look at the next one">Skip</button>
+      <button class="btn mini" type="button" onclick="reviewApply('accept')" title="The speaker and text are right: clear the flag">Accept as-is</button>
+      <button class="btn primary mini" type="button" onclick="reviewApply('edit')" title="Save the corrected speaker/text back to the transcript files">Save changes</button>
+    </div>
+    <div id="mcerr" class="mcerr" hidden></div>`,el,'mrevcard');
+  mWireNew(card.querySelector('#mcspk'));
+  el.scrollIntoView({block:'center'});
+  reviewPlay();
+  mSyncFlagStrip();
+}
+function reviewUseAlt(k){
+  const a=MR.items[MR.i].alt[k],ta=$('#mctext');
+  if(!a||!ta)return;
+  // "ours" is normalized tokens: match them loosely against the display text
+  const pat=a.ours.trim().split(/\s+/).map(t=>t.replace(/[.*+?^$()|[\]\\{}]/g,'\\$&')).join("[^A-Za-z0-9']+");
+  const re=pat?new RegExp(pat,'i'):null;
+  if(re&&re.test(ta.value))ta.value=ta.value.replace(re,a.theirs);
+  else ta.value=(ta.value+' '+a.theirs).trim();
+}
+function reviewPlay(){
+  const it=MR&&MR.items[MR.i];
+  if(it&&MP&&MP.hasAudio)mPlaySpan(it.start,it.end);
+}
+async function reviewApply(action){
+  const it=MR.items[MR.i];
+  // the item carries the segment's ORIGINAL json index; start is the server's
+  // cross-check in case the file changed since the list was fetched
+  const body={base:MP.base,index:it.index,start:it.start,action};
+  if(action==='edit'){
+    const v=$('#mcspk').value;
+    if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
+    body.text=$('#mctext').value;body.speaker=v;
+  }
+  const r=await api('/api/review',body);
+  if(!r.ok){mCardErr(r.error||'Save failed');return;}
+  if(r.merged){
+    // the reassignment folded neighbors into one turn: every later index in
+    // this pre-fetched list may be stale. Reload, then refetch the list.
+    await mReloadSegs(r.index);
+    reviewStart(0);
+    return;
+  }
+  if(action==='edit'&&(body.speaker||'').startsWith('name:')){
+    await mReloadSegs();             // a new person joined: fresh legend/colors
+  }else{
+    const p=_revPos(it);
+    if(p>=0){
+      const g=MP.segs[p];
+      if(action==='edit'){
+        g.text=body.text;g.edited=true;
+        const sp=MP.spkOpts.find(s=>s.id===body.speaker);
+        if(sp){g.who=sp.display;g.speaker=sp.id;}
+      }
+      g.flags=[];
+      mRefreshSeg(p);
+    }
+  }
+  MR.items.splice(MR.i,1);           // resolved: counts update optimistically
+  if(!MR.items.length){reviewExit();refresh();return;}
+  if(MR.i>=MR.items.length)MR.i=MR.items.length-1;
+  renderReviewCard();
+}
+// one click on the strip accepts every sub-second crumb; substantial items stay
+async function reviewAcceptMinor(btn){
+  if(!MP)return;
+  if(btn){btn.disabled=true;btn.innerHTML='Accepting&#8230;';}
+  const r=await api('/api/review',{base:MP.base,action:'accept_minor'});
+  if(!r.ok){
+    if(btn){btn.disabled=false;btn.textContent='Retry';btn.title=r.error||'Could not accept the minor lines.';}
+    return;
+  }
+  MP.segs.forEach((g,p)=>{           // clear the amber wash on each crumb locally
+    if(g.flags&&g.flags.length&&mIsMinor(g)){g.flags=[];mRefreshSeg(p);}
+  });
+  if(MR&&MR.active){
+    const cur=MR.items[MR.i];
+    MR.items=MR.items.filter(x=>!x.minor);
+    if(!MR.items.length)reviewExit();
+    else{
+      let ni=MR.items.indexOf(cur);
+      if(ni<0)ni=Math.min(MR.i,MR.items.length-1);
+      MR.i=ni;renderReviewCard();
+    }
+  }
+  mSyncFlagStrip();
+  refresh();
+}
+
+/* ----------------------------------------------------- the edit card ------- */
+function mEdit(i,ev){
+  if(ev)ev.stopPropagation();
+  if(MR&&MR.active)reviewExit();     // one repair mode at a time
+  const g=MP.segs[i],el=document.getElementById('mseg'+i);
+  if(!g||!el)return;
+  const defEng=(S&&S.model==='parakeet')?'mlxwhisper:large-v3':'parakeet';
+  const card=mCardEl(`
+    <div class="mcrow mchead">
+      ${mSpkSelect('mcspk',g.speaker)}
+      <select id="mceng" class="mcsel" title="Which engine listens again; a different one from the original gives an independent second opinion">
+        ${ENGINES.map(([v,l])=>`<option value="${v}" ${v===defEng?'selected':''}>${l}</option>`).join('')}
+      </select>
+      <button class="iact" type="button" onclick="mRetrans(${i},event)"
+        title="Listen to this span again with the chosen engine and propose corrected text">&#8635; Re-transcribe</button>
+      <span id="mcrx" class="mcnote"></span>
+    </div>
+    <textarea id="mctext" class="mctext" aria-label="Corrected text">${esc(g.text)}</textarea>
+    <div class="mcrow mcbtns">
+      <button class="iact" type="button" onclick="mDeleteAsk(${i},event)"
+        title="Remove this line entirely (echo, noise heard as speech)">Remove line</button>
+      <button class="iact" type="button" onclick="mSplitUI(${i},event)"
+        title="Split this line in two: click inside the text where the second voice starts, then press this">&#9986; Split line</button>
+      <span class="grow"></span>
+      ${MP.hasAudio?`<button class="iact" type="button" onclick="mPlaySpanBtn(${i},event)">&#9654; Play span</button>`:''}
+      <button class="btn mini" type="button" onclick="mCloseCard()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="mEditSave(${i},event)">Save</button>
+    </div>
+    <div id="mcerr" class="mcerr" hidden></div>`,el);
+  el.classList.add('editing');
+  mWireNew(card.querySelector('#mcspk'));
+}
+async function mEditSave(i,ev){
+  if(ev)ev.stopPropagation();
+  const g=MP.segs[i],spk=$('#mcspk')?$('#mcspk').value:null;
+  if(spk==='__new__'){mCardErr('Pick or name the speaker first.');return;}
+  const text=$('#mctext')?$('#mctext').value:g.text;
+  // the segment's ORIGINAL json index rides along, never the array position
+  const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,action:'edit',text,speaker:spk});
+  if(!r.ok){mCardErr(r.error||'Save failed');return;}
+  if(r.merged){mReloadSegs(r.index);return;}     // neighbors folded into one turn
+  if(spk&&spk.startsWith('name:')){mReloadSegs(g.index);return;}  // fresh legend/colors
+  const sp=MP.spkOpts.find(s=>s.id===spk);
+  g.text=text;g.flags=[];g.edited=true;
+  if(sp){g.who=sp.display;g.speaker=sp.id;}
+  mCloseCard();
+  mRefreshSeg(i);
+  mSyncFlagStrip();
+}
+// two-step removal, inside the card (house style: never a native dialog)
+function mDeleteAsk(i,ev){
+  if(ev)ev.stopPropagation();
+  const e=document.getElementById('mcerr');
+  if(!e)return;
+  e.hidden=false;
+  e.innerHTML=`<span>Remove this line from the transcript? Its audio stays; only the text line goes.</span>
+    <button class="btn mini" type="button" onclick="mCardErr('')">Keep it</button>
+    <button class="btn danger mini" type="button" onclick="mDeleteGo(${i})">Remove line</button>`;
+}
+async function mDeleteGo(i){
+  const g=MP.segs[i];
+  const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start});
+  if(!r.ok){mCardErr(r.error||'Could not remove the line.');return;}
+  mReloadSegs();
+}
+// split: the card morphs into two speaker/text halves, cut at the caret
+function mSplitUI(i,ev){
+  if(ev)ev.stopPropagation();
+  const ta=$('#mctext'),pos=ta?(ta.selectionStart||0):0,full=ta?ta.value:'';
+  const a=full.slice(0,pos).trim(),b=full.slice(pos).trim();
+  if(!a||!b){mCardErr('Click inside the text where the split should happen (some words before the cursor, some after), then press Split again.');return;}
+  const g=MP.segs[i],card=document.getElementById('mcard');
+  if(!card)return;
+  card.innerHTML=`
+    <div class="mcnote">Splitting this line in two: set each half&#8217;s speaker. If a half matches its neighbor&#8217;s speaker, they join into one turn automatically.</div>
+    <div class="mcrow">${mSpkSelect('mcsa',g.speaker)}<textarea id="mcta1" class="mctext" aria-label="First half">${esc(a)}</textarea></div>
+    <div class="mcrow">${mSpkSelect('mcsb',g.speaker)}<textarea id="mcta2" class="mctext" aria-label="Second half">${esc(b)}</textarea></div>
+    <div class="mcrow mcbtns"><span class="grow"></span>
+      <button class="btn mini" type="button" onclick="mCloseCard()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="mSplitSave(${i})">Split</button></div>
+    <div id="mcerr" class="mcerr" hidden></div>`;
+  mWireNew($('#mcsa'));mWireNew($('#mcsb'));
+  $('#mcsb').focus();
+}
+async function mSplitSave(i){
+  const g=MP.segs[i],sa=$('#mcsa').value,sb=$('#mcsb').value;
+  if(sa==='__new__'||sb==='__new__'){mCardErr('Pick or name both speakers first.');return;}
+  const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,
+    text_a:$('#mcta1').value,text_b:$('#mcta2').value,speaker_a:sa,speaker_b:sb});
+  if(!r.ok){mCardErr(r.error||'Split failed');return;}
+  mReloadSegs(r.index);
+}
+// second listen over just this span; failure surfaces inline, never a crash.
+// The estimate comes from THIS machine's own past re-transcriptions
+// (localStorage median per engine), exactly like the old reader.
+async function mRetrans(i,ev){
+  if(ev)ev.stopPropagation();
+  const g=MP.segs[i],eng=$('#mceng')?$('#mceng').value:'parakeet';
+  const hist=JSON.parse(localStorage.getItem('stt_retrans_secs')||'{}');
+  const past=(hist[eng]||[]).slice().sort((a,b)=>a-b);
+  const estTxt=past.length?` (~${Math.round(past[Math.floor(past.length/2)])}s on this Mac)`:'';
+  const rx=$('#mcrx');
+  if(rx)rx.innerHTML='<span class="spin"></span> listening again&#8230;'+esc(estTxt);
+  const t0=Date.now();
+  let r;
+  try{r=await api('/api/retranscribe',{base:MP.base,start:g.start,end:g.end,engine:eng});}
+  catch(e){r={error:'re-transcription failed'};}
+  hist[eng]=((hist[eng]||[]).concat((Date.now()-t0)/1000)).slice(-5);
+  localStorage.setItem('stt_retrans_secs',JSON.stringify(hist));
+  const rx2=$('#mcrx');if(!rx2)return;             // the card closed while waiting
+  if(r.error){rx2.textContent='failed: '+r.error;return;}
+  const ta=$('#mctext');if(ta)ta.value=r.text;
+  rx2.textContent='proposed by '+(r.engine||'second engine')+': edit if needed, then Save';
+}
+
+/* ------------------------------------------------- inserting missed lines -- */
+function mFmtT(t){const m=Math.floor(t/60),s=Math.floor(t%60);return m+':'+String(s).padStart(2,'0');}
+function mParseT(v){
+  const p=String(v).trim().split(':').map(Number);
+  if(!p.length||p.some(isNaN))return null;
+  return p.reverse().reduce((acc,x,k)=>acc+x*Math.pow(60,k),0);
+}
+function mInsertAt(i,at){            // i = the gap's index (-1 before the first line)
+  if(MR&&MR.active)reviewExit();
+  const g=MP.segs[i];                // undefined for i=-1
+  const start=at!=null?at:(g?g.end:0);
+  const gap=document.getElementById('mgap'+i);
+  if(!gap)return;
+  const card=mCardEl(`
+    <div class="mcrow mchead">
+      ${mSpkSelect('mcnspk',null)}
+      <label class="mcnote">at <input id="mcnat" class="mcat-t" value="${mFmtT(start)}" aria-label="Time the line starts (m:ss)"></label>
+      ${MP.hasAudio?`<button class="iact" type="button" onclick="mListenAt()" title="Play from just before this time">&#9654; Listen here</button>`:''}
+      <span class="mcnote">(tip: pause the audio where you heard it; the audio bar&#8217;s &#65291; button fills this in)</span>
+    </div>
+    <textarea id="mcntext" class="mctext" placeholder="What they said" aria-label="What they said"></textarea>
+    <div class="mcrow mcbtns"><span class="grow"></span>
+      <button class="btn mini" type="button" onclick="mCloseCard()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="mInsertSave()">Add</button></div>
+    <div id="mcerr" class="mcerr" hidden></div>`,gap);
+  mWireNew(card.querySelector('#mcnspk'));
+  $('#mcntext').focus();
+}
+function mListenAt(){
+  const t=mParseT($('#mcnat')?$('#mcnat').value:'');
+  if(t!=null)mSeek(Math.max(0,t-2));
+}
+async function mInsertSave(){
+  const spk=$('#mcnspk').value,text=$('#mcntext').value,start=mParseT($('#mcnat').value);
+  if(spk==='__new__'){mCardErr('Pick or name the speaker first.');return;}
+  if(start==null){mCardErr('Time should look like 12:34.');return;}
+  if(!text.trim()){mCardErr('Type what they said.');return;}
+  const r=await api('/api/review',{base:MP.base,action:'insert',start,end:start+3,speaker:spk,text});
+  if(!r.ok){mCardErr(r.error||'Could not add the line.');return;}
+  mReloadSegs(r.index);
+}
+// the audio bar's affordance: insert at the playhead's moment
+function mAddAtPlayhead(){
+  if(!MP)return;
+  const a=MP.audio,t=a?a.currentTime:0;
+  const after=MP.segs.findIndex(g=>g.start>t);      // first line past the playhead
+  const i=after<0?MP.segs.length-1:after-1;         // its gap (-1 = before line one)
+  const el=document.getElementById('mgap'+i);
+  if(el)el.scrollIntoView({block:'center'});
+  mInsertAt(i,t);
+}
+
+/* ------------------------------------------------- voice-naming panel ------ *
+ * A right slide-over (paper ground, hairline edge, soft shadow) replacing the
+ * old page's who-is-this dialog bridge. Ported: /api/voice_clips (incl the
+ * reason:"sources_deleted" contract), per-meeting snippet players, the
+ * enrolled-name autocomplete (ArrowUp/Down/Enter; Escape closes the dropdown
+ * only), Save name -> /api/name, "Not a real speaker" -> /api/forget. After a
+ * save the panel closes and the quiet relabel note rides the polled state
+ * (relabel_pending) as the lowest-priority pill. */
+let NP=null;    // {uid} while the panel is open
+function openNamePanelByUid(uid){
+  const u=(S&&S.unknowns||[]).find(x=>x.uid===uid);
+  openNamePanel(uid,u?u.display:uid);
+}
+async function openNamePanel(uid,display){
+  const panel=$('#namepanel'),veil=$('#nameveil');
+  if(!panel||!veil)return;
+  NP={uid};
+  veil.hidden=false;panel.hidden=false;
+  panel.innerHTML=`
+    <div class="nphead">
+      <h2 class="nptitle">Who is ${esc(display)}?</h2>
+      <button class="iact" type="button" title="Close" onclick="closeNamePanel()">&#10005;</button>
+    </div>
+    <p class="npnote">Listen to this voice: the clip is their longest turn in each meeting
+      they were heard in. Typing an <b>existing</b> name merges this voice into that person.
+      Every past and future meeting relabels automatically.</p>
+    <div id="npclips" class="npclips"><span class="spin"></span></div>
+    <div class="npfield">
+      <input type="text" id="npname" placeholder="Person&#8217;s name" autocomplete="off" spellcheck="false"
+        aria-label="This voice belongs to"
+        oninput="pnFilter()" onfocus="pnFilter()" onblur="setTimeout(pnClose,150)" onkeydown="pnKey(event)">
+      <div id="npdd" class="npdd" hidden></div>
+    </div>
+    <div class="npbtns">
+      <button class="btn danger mini" type="button" onclick="npForget()"
+        title="A false detection (music, crosstalk, an echo): remove this voice entirely">Not a real speaker</button>
+      <span class="grow"></span>
+      <button class="btn mini" type="button" onclick="closeNamePanel()">Cancel</button>
+      <button class="btn primary mini" id="npsave" type="button" onclick="npSave()">Save name</button>
+    </div>
+    <div id="nperr" class="mcerr" hidden></div>`;
+  $('#npname').focus();
+  let r;
+  try{r=await api('/api/voice_clips?speaker='+encodeURIComponent(uid));}
+  catch(e){r={clips:[]};}
+  const box=$('#npclips');
+  if(!box||!NP||NP.uid!==uid)return;   // closed, or reopened for another voice
+  const clips=r.clips||[];
+  box.innerHTML=clips.map(c=>{
+    const m=Math.floor(c.start/60),s=String(Math.floor(c.start%60)).padStart(2,'0');
+    return `<div class="npclip">
+      <div class="npclip-m" title="${esc(c.meeting)}">${esc(c.meeting)}</div>
+      <div class="npclip-sub">their longest turn &middot; at <span class="mono">${m}:${s}</span> &middot; ${Math.round(c.dur)}s
+        <a class="npopen" href="#m/${encodeURIComponent(c.meeting)}"
+          onclick="npOpenAt('${escJs(c.meeting)}',${Number(c.start)||0});return false;"
+          title="Open the transcript at this moment, with the conversation around it">Open at this moment &#8594;</a></div>
+      <audio controls preload="none"
+        onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
+        src="/api/snippet?meeting=${encodeURIComponent(c.meeting)}&speaker=${encodeURIComponent(uid)}&secs=45"></audio>
+    </div>`;}).join('')
+    ||(r.reason==='sources_deleted'
+       ?'<div class="npnote muted">No audio available. The source recordings were deleted.</div>'
+       :`<audio controls
+           onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
+           src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`);
+}
+function npOpenAt(meeting,t){closeNamePanel();openHit(meeting,t);}
+function closeNamePanel(){
+  NP=null;
+  const panel=$('#namepanel'),veil=$('#nameveil');
+  if(!panel)return;
+  panel.querySelectorAll('audio').forEach(a=>{try{a.pause();}catch(e){}});
+  panel.hidden=true;panel.innerHTML='';
+  if(veil)veil.hidden=true;
+}
+async function npSave(){
+  if(!NP)return;
+  const n=($('#npname')?$('#npname').value:'').trim();
+  const err=$('#nperr');
+  if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
+  const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
+  const r=await api('/api/name',{uid:NP.uid,name:n});
+  if(!r.ok){
+    if(btn){btn.disabled=false;btn.textContent='Save name';}
+    if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
+    return;
+  }
+  closeNamePanel();refresh();   // the quiet relabel note rides the next poll
+}
+async function npForget(){
+  if(!NP)return;
+  const r=await api('/api/forget',{uid:NP.uid});
+  if(!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=r.error||'Could not remove this voice.';}return;}
+  closeNamePanel();refresh();
+}
+// Escape closes the panel (the autocomplete's own Escape stops propagation
+// while its dropdown is open, so that closes first)
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&NP){e.preventDefault();closeNamePanel();}
+});
+
+/* enrolled-name autocomplete, ported: ranked whole-name prefix > any word's
+ * prefix > substring; ArrowUp/Down cycle; Enter picks (or saves when the
+ * dropdown is closed); Escape closes only the dropdown. */
+let PN={items:[],cur:-1};
+function pnFilter(){
+  const f=$('#npname');if(!f)return;
+  const q=(f.value||'').trim().toLowerCase();
+  const names=(S&&S.enrolled||[]).map(e=>e.name).sort((a,b)=>a.localeCompare(b));
+  let items=q?names.filter(n=>n.toLowerCase().includes(q)):names;
+  if(q){
+    const rank=n=>{const l=n.toLowerCase();
+      return l.startsWith(q)?0:(l.split(/\s+/).some(w=>w.startsWith(q))?1:2);};
+    items=items.slice().sort((a,b)=>rank(a)-rank(b)||a.localeCompare(b));
+  }
+  PN={items,cur:items.length&&q?0:-1};
+  pnRender();
+}
+function pnRender(){
+  const dd=$('#npdd');if(!dd)return;
+  const q=($('#npname').value||'').trim();
+  const rx=q?new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i'):null;
+  dd.innerHTML=PN.items.map((n,i)=>
+    `<div class="pnitem${i===PN.cur?' cur':''}" onmousedown="event.preventDefault();pnPick(${i})">${
+      rx?esc(n).replace(rx,m=>'<mark>'+m+'</mark>'):esc(n)}</div>`).join('');
+  dd.hidden=!PN.items.length;
+  const c=dd.querySelector('.pnitem.cur');if(c)c.scrollIntoView({block:'nearest'});
+}
+function pnPick(i){const f=$('#npname');if(!f)return;f.value=PN.items[i];pnClose();f.focus();}
+function pnClose(){const dd=$('#npdd');if(dd)dd.hidden=true;PN.cur=-1;}
+function pnKey(e){
+  const dd=$('#npdd'),open=dd&&!dd.hidden;
+  if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+    e.preventDefault();
+    if(!open){pnFilter();return;}
+    if(!PN.items.length)return;
+    PN.cur=(PN.cur+(e.key==='ArrowDown'?1:-1)+PN.items.length)%PN.items.length;
+    pnRender();
+  }else if(e.key==='Enter'){
+    e.preventDefault();
+    if(open&&PN.cur>=0)pnPick(PN.cur);
+    else npSave();
+  }else if(e.key==='Escape'&&open){
+    e.preventDefault();e.stopPropagation();pnClose();
+  }
+}
+
 /* --------------------------------------------------------- route wiring ---- */
 window.addEventListener('hashchange',()=>{route=parseHash();applyRoute();});
 window.addEventListener('resize',()=>{if(route.view==='meeting')mStickyTop();});
 route=parseHash();
 applyRoute();   // deep link (#m/<base>) opens here; if S is not ready yet, render()
                 // finishes the build via maybeBuildPending once the first poll lands
+
+/* ============================================================================
+   Builder D: THE DRAWER. The last surface: one right slide-over (gear opens,
+   x / veil / Escape close) with a pinned section nav -- Settings, Speakers,
+   History, Archive. Settings and Speakers render from the polled S behind a
+   change signature plus a focused-input guard, so the 2s poll never closes the
+   drawer, resets its scroll, or wipes a half-typed field. History and Archive
+   fetch their own endpoints on entry and after their own actions. Every
+   mutation reuses an EXISTING endpoint; confirmations are the house two-step,
+   never a native dialog. This retires the gear's bridge to the old page.
+   ============================================================================ */
+
+const DRAWER={open:false,section:'settings',
+  sub:null,          // settings subview: null | 'schedule' | 'cloudkeys'
+  spkOpen:null,      // the ONE expanded enrolled person (name), or null
+  reassign:null,     // {name,idx} while a sample's inline reassign select is up
+  showHidden:false,  // the unknowns' "N hidden" expansion
+  dconfirm:null,     // armed two-step confirm key ('ck:prov'|'rmspk:name'|'renmerge:name'|'adel:base')
+  renameTo:null,     // the typed rename target while its merge confirm is armed
+  spkErr:'',         // last speaker-action error, rendered in the section
+  updNote:'',updBusy:false,   // the model-update check's client-side note
+  hist:null,archived:null};   // fetched lists (results / items)
+
+function openDrawer(section){
+  const d=$('#drawer'),v=$('#drawerveil');
+  if(!d||!v)return;
+  if(!d.dataset.built){
+    d.dataset.built='1';
+    d.innerHTML=`<div class="dhead">
+        <nav class="dnav" id="dnav" aria-label="Drawer sections"></nav>
+        <button class="iact" type="button" title="Close" aria-label="Close" onclick="closeDrawer()">&#10005;</button>
+      </div>
+      <div class="dbody" id="dbody">
+        <section id="dsec-settings" hidden aria-label="Settings"></section>
+        <section id="dsec-speakers" hidden aria-label="Speakers"></section>
+        <section id="dsec-history" hidden aria-label="Processing history"></section>
+        <section id="dsec-archive" hidden aria-label="Archived meetings"></section>
+      </div>`;
+  }
+  DRAWER.open=true;v.hidden=false;d.hidden=false;
+  drawerGo(section||DRAWER.section||'settings');
+}
+function closeDrawer(){
+  if(!DRAWER.open)return;
+  DRAWER.open=false;
+  dvStop();
+  const d=$('#drawer'),v=$('#drawerveil');
+  if(d)d.hidden=true;
+  if(v)v.hidden=true;
+}
+// a route change (opening a meeting from the naming panel, back/forward)
+// closes the drawer, exactly like the naming slide-over
+window.addEventListener('hashchange',()=>{if(DRAWER.open)closeDrawer();});
+// Escape closes the drawer -- unless the naming panel just consumed the key
+// (its handler runs first and preventDefaults) or a popover is open (its own
+// Escape closes it; that listener registered later, so ours checks first)
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape'||!DRAWER.open)return;
+  if(e.defaultPrevented)return;
+  if(_popClose)return;
+  e.preventDefault();closeDrawer();
+});
+
+function drawerGo(sec){
+  DRAWER.section=sec;
+  drawerNavSync(S||{});
+  ['settings','speakers','history','archive'].forEach(k=>{
+    const el=document.getElementById('dsec-'+k);
+    if(el)el.hidden=(k!==sec);
+  });
+  if(sec==='settings')dSettingsDraw(S||{});
+  else if(sec==='speakers')dSpeakersDraw(S||{});
+  else if(sec==='history')dHistLoad();     // (re)fetches; the filter values persist
+  else if(sec==='archive')dArchLoad();
+}
+// the poll's entry point: cheap when closed; only live sections rebuild, and
+// only when their signature changed (History/Archive own their own fetches)
+function drawDrawer(s){
+  if(!DRAWER.open)return;
+  drawerNavSync(s);
+  dSettingsDraw(s);
+  dSpeakersDraw(s);
+}
+function drawerNavSync(s){
+  const nav=$('#dnav');if(!nav)return;
+  const n=(s&&s.archived_count)||0;   // the old page's "Archived · N" lives on the tab
+  const sig=DRAWER.section+'|'+n;
+  if(nav.dataset.sig===sig)return;
+  nav.dataset.sig=sig;
+  const tabs=[['settings','Settings'],['speakers','Speakers'],['history','History'],
+    ['archive','Archive'+(n?' &middot; '+n:'')]];
+  nav.innerHTML=tabs.map(([k,l])=>
+    `<button class="dtab${DRAWER.section===k?' on':''}" type="button" onclick="drawerGo('${k}')">${l}</button>`).join('');
+}
+// never rebuild under the user's cursor: a focused field inside the section
+// blocks the rebuild; an unchanged later poll (or a blur) lets it land
+function dFocusGuard(el){
+  const ae=document.activeElement;
+  return !!(ae&&el.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName));
+}
+// inline error line: shows r.error when a call failed, hides again on success
+function dErr(id,r){
+  const e=document.getElementById(id);if(!e)return;
+  if(r&&r.ok===false){e.hidden=false;e.textContent=r.error||'failed';}
+  else e.hidden=true;
+}
+
+/* ------------------------------------------------------------ settings ----- *
+ * Order per DESIGN.md: Automation (ONE master switch over the two indented
+ * triggers), Transcription (model + cloud keys subview), Summaries and Ask,
+ * Recorder (your-voice picker + the stall fix), Housekeeping. */
+function _drow(name,sub,ctrl){
+  return `<div class="drow"><div class="grow"><div class="dname">${name}</div>
+    ${sub?`<div class="dsub">${sub}</div>`:''}</div>${ctrl||''}</div>`;
+}
+function _dtog(on,call,dis,label){
+  return `<button class="dtog${on?' on':''}" type="button" role="switch"
+    aria-checked="${on?'true':'false'}" aria-label="${label}"
+    ${dis?'disabled':''} onclick="${call}"></button>`;
+}
+function dSettingsSig(s){
+  const sc=s.schedule||{};
+  return JSON.stringify([s.paused,sc.watch,sc.nightly,sc.hour,sc.minute,sc.installed,
+    s.model,(s.asr_choices||[]).map(c=>c.id).join(','),s.cloud_keys,
+    s.llm_backend,s.llm_backends,s.punctuate,s.mic_speaker,
+    (s.enrolled||[]).map(e=>e.name).join(','),
+    !!(s.recording&&s.recording.stalled),s.rates,s.paths,
+    DRAWER.sub,DRAWER.updNote,DRAWER.updBusy,DRAWER.dconfirm]);
+}
+function dSettingsDraw(s){
+  const el=document.getElementById('dsec-settings');
+  if(!el||el.hidden)return;
+  const sig=dSettingsSig(s);
+  if(el.dataset.sig===sig)return;
+  if(dFocusGuard(el))return;
+  el.dataset.sig=sig;
+  el.innerHTML=DRAWER.sub==='schedule'?dScheduleHTML(s)
+    :DRAWER.sub==='cloudkeys'?dCloudKeysHTML(s)
+    :dSettingsHTML(s);
+}
+function dSettingsForce(){
+  const el=document.getElementById('dsec-settings');
+  if(el)el.dataset.sig='';
+  dSettingsDraw(S||{});
+}
+function dSub(v){DRAWER.sub=v;DRAWER.dconfirm=null;dSettingsForce();}
+
+function dSettingsHTML(s){
+  const sc=s.schedule||{};
+  const masterOn=!s.paused;
+  const timeTxt=(sc.nightly&&sc.hour!=null)
+    ?new Date(2000,0,1,sc.hour,sc.minute||0).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+  let h=`<div class="dgroup">Automation</div>`;
+  // the master switch IS /api/pause -- the same state the pill and the Process
+  // popover read, so a switch never reads On while doing nothing
+  h+=_drow('Automatic runs',
+    'The master switch over the folder watch, the nightly run, and login catch-up. Manual runs always work.',
+    _dtog(masterOn,'dTogMaster(this)',false,'Automatic runs'));
+  const watchSub=!sc.installed?'Not installed. Run ./setup.sh install-agent.'
+    :sc.watch?'New recordings process within moments of landing (while the Mac is awake).'
+    :'Off. New files wait for the nightly run or a manual click.';
+  const nightSub=!sc.installed?'Not installed. Run ./setup.sh install-agent.'
+    :sc.nightly?`${esc(timeTxt)} each night. If the Mac is asleep then, the run happens at the next wake.`
+    :'Off. Turn on to process everything new at a set time.';
+  h+=`<div class="dindent${masterOn?'':' inert'}">
+    ${masterOn?'':'<div class="dinert-note">off while automatic runs are paused</div>'}
+    ${_drow('Folder watch',watchSub,_dtog(!!sc.watch,'dTogWatch(this)',!sc.installed||!masterOn,'Folder watch'))}
+    ${_drow('Nightly run',nightSub,
+      (sc.nightly?`<button class="btn mini" type="button" ${(!sc.installed||!masterOn)?'disabled':''} onclick="dSub('schedule')">Change&#8230;</button>`:'')
+      +_dtog(!!sc.nightly,'dTogNightly(this)',!sc.installed||!masterOn,'Nightly run'))}
+  </div>
+  <div id="dautoerr" class="derr" hidden></div>`;
+
+  h+=`<div class="dgroup">Transcription</div>`;
+  // cloud engines appear only when their provider key is set, exactly like old
+  const pickable=(s.asr_choices||[]).filter(c=>!c.cloud||(s.cloud_keys||{})[c.cloud]);
+  const modelNote=((s.asr_choices||[]).find(c=>c.id===s.model)||{}).note||'';
+  h+=_drow('Model',esc(modelNote),
+    `<select id="dmodelsel" class="dsel" onchange="dSetModel(this)" aria-label="Transcription model">${
+      pickable.map(c=>`<option value="${esc(c.id)}" ${c.id===s.model?'selected':''}>${esc(c.label)}</option>`).join('')}</select>`);
+  const nk=['scribe','openai','voxtral'].filter(p=>(s.cloud_keys||{})[p]).length;
+  h+=_drow('Cloud transcription',
+    nk?`${nk} provider key${nk>1?'s':''} set. Cloud engines appear in the model picker.`
+      :'Optional: bring your own API key (ElevenLabs &middot; OpenAI &middot; Mistral).',
+    `<button class="btn mini" type="button" onclick="dSub('cloudkeys')">Cloud keys&#8230;</button>`);
+  h+=`<div id="dmodelerr" class="derr" hidden></div>`;
+
+  h+=`<div class="dgroup">Summaries and Ask</div>`;
+  const LB={local:'Local Qwen3-8B',anthropic:'Claude Haiku &middot; cloud',openai:'OpenAI GPT &middot; cloud'};
+  const av=s.llm_backends||{};
+  const llmNote=s.llm_backend==='local'
+    ?(av.local?'Runs on this Mac. Transcripts never leave it.'
+              :'Local model not installed. Pick a cloud assistant or install .venv-llm.')
+    :'Cloud assistant: transcript text uploads for summaries and Ask. Strict recordings always stay local.';
+  h+=_drow('Assistant',llmNote,
+    `<select id="dllmsel" class="dsel" onchange="dSetLlm(this)" aria-label="Summaries and Ask assistant">${
+      Object.keys(LB).map(b=>`<option value="${b}" ${b===s.llm_backend?'selected':''} ${av[b]?'':'disabled'}>${LB[b]}${av[b]?'':' (no key)'}</option>`).join('')}</select>`);
+  h+=`<div id="dllmerr" class="derr" hidden></div>`;
+
+  h+=`<div class="dgroup">Recorder</div>`;
+  // the your-voice picker is an inline enrolled-name select (the old page used
+  // a native prompt; the house rule bans those)
+  const names=(s.enrolled||[]).map(e=>e.name);
+  if(s.mic_speaker&&!names.includes(s.mic_speaker))names.unshift(s.mic_speaker);
+  const micNote=s.mic_speaker
+    ?`Recorded calls separate ${esc(s.mic_speaker)} (you) from the others. Enroll ${esc(s.mic_speaker)} as a speaker for this to take effect.`
+    :'Your name on recorded calls, so the recorder separates you from the others. You must be enrolled as a speaker too.';
+  h+=_drow('Your voice',micNote,
+    `<select id="dmicsel" class="dsel" onchange="dSetMic(this)" aria-label="Your name on recorded meetings">
+      <option value="">off</option>${
+      names.map(n=>`<option value="${esc(n)}" ${n===s.mic_speaker?'selected':''}>${esc(n)}</option>`).join('')}</select>`);
+  if(s.recording&&s.recording.stalled)
+    h+=`<div class="dstall"><b>Not capturing audio.</b> macOS is not delivering the
+      microphone / system sound (a recorder rebuild resets its permissions).
+      <button class="btn mini" type="button" onclick="dFixPerms(this)">Fix permissions</button>
+      <span id="dfixnote" class="derr" hidden></span></div>`;
+
+  h+=`<div class="dgroup">Housekeeping</div>`;
+  h+=_drow('Punctuation cleanup','Restore punctuation &amp; casing (never changes words).',
+    _dtog(!!s.punctuate,'dTogPunct(this)',false,'Punctuation cleanup'));
+  h+=_drow('Model updates',esc(DRAWER.updNote||'Check HuggingFace for newer versions.'),
+    `<button class="btn mini" type="button" ${DRAWER.updBusy?'disabled':''} onclick="dCheckUpdates()">${DRAWER.updBusy?'Checking&#8230;':'Check'}</button>`);
+  h+=_drow('Speed calibration',
+    (s.rates&&s.rates.runs)
+      ?`Measured from ${s.rates.runs} run${s.rates.runs>1?'s':''}: ${esc(s.rates.text)} realtime. Estimates improve automatically.`
+      :'Estimates use factory measurements until a few runs complete.','');
+  const home=p=>esc((p||'').replace(/^\/Users\/[^/]+/,'~'));
+  h+=_drow('Watched folder',home(s.paths&&s.paths.source),
+    `<button class="btn mini" type="button" onclick="dPickFolder('source',this)">Change&#8230;</button>`);
+  h+=_drow('Transcripts folder',home(s.paths&&s.paths.dest),
+    `<button class="btn mini" type="button" onclick="dPickFolder('dest',this)">Change&#8230;</button>`);
+  return h;
+}
+function dTogMaster(btn){if(!S)return;btn.disabled=true;
+  api(S.paused?'/api/resume':'/api/pause',{}).then(refresh);}
+function dTogWatch(btn){if(!S)return;btn.disabled=true;
+  api('/api/automation',{watch:!S.schedule.watch}).then(r=>{dErr('dautoerr',r);refresh();});}
+function dTogNightly(btn){if(!S)return;btn.disabled=true;
+  api('/api/automation',{nightly:!S.schedule.nightly}).then(r=>{dErr('dautoerr',r);refresh();});}
+// the three select setters clear the section signature after their refresh:
+// a rejected (or externally reverted) choice must not leave the control
+// showing a value the state never took. The focus guard still defers the
+// repaint while the user is ON the control; the next poll then re-syncs it.
+function dSetModel(sel){
+  api('/api/model',{model:sel.value}).then(async r=>{dErr('dmodelerr',r);await refresh();dSettingsForce();});}
+function dSetLlm(sel){
+  api('/api/llm_backend',{backend:sel.value}).then(async r=>{dErr('dllmerr',r);await refresh();dSettingsForce();});}
+function dSetMic(sel){
+  api('/api/mic_speaker',{name:sel.value}).then(async()=>{await refresh();dSettingsForce();});}
+async function dFixPerms(btn){
+  btn.disabled=true;btn.textContent='Resetting…';
+  const r=await api('/api/fix_recorder_permissions',{});
+  if(!r.ok){
+    btn.disabled=false;btn.textContent='Fix permissions';
+    const n=$('#dfixnote');if(n){n.hidden=false;n.textContent=r.error||'permission reset failed';}
+  }
+  refresh();
+}
+function dTogPunct(btn){if(!S)return;btn.disabled=true;
+  api('/api/punctuate',{on:!S.punctuate}).then(refresh);}
+async function dCheckUpdates(){
+  DRAWER.updBusy=true;dSettingsForce();
+  let r;
+  try{r=await api('/api/check_updates');}
+  catch(e){r={error:'the update check failed'};}
+  const ups=(r.models||[]).filter(m=>m.update_available);
+  DRAWER.updNote=r.error?('Check failed: '+r.error)
+    :(ups.length?'Updates available: '+ups.map(u=>u.label).join(', '):'All models are current.');
+  DRAWER.updBusy=false;
+  dSettingsForce();
+}
+// a native FOLDER picker via the server is fine: it is the OS's picker, not a
+// browser dialog (same /api/pick_folder as the old page)
+async function dPickFolder(which,btn){
+  btn.disabled=true;
+  const prompt=which==='source'?'Choose the folder to watch for new recordings'
+    :'Choose where transcripts are stored';
+  await api('/api/pick_folder',{which,prompt});
+  await refresh();
+  dSettingsForce();
+}
+
+/* nightly time picker: an in-drawer subview, not a dialog */
+function dScheduleHTML(s){
+  const sc=s.schedule||{},hh=sc.hour??2,mm=sc.minute??0;
+  return `<button class="dback" type="button" onclick="dSub(null)">&#8592; Settings</button>
+  <h3 class="dtitle">Nightly run time</h3>
+  <p class="dnote">Everything new processes at this time each night. If the Mac is
+    asleep at that moment, the run happens automatically at the next wake. (The
+    folder watch is a separate switch: it picks files up the moment they land.)</p>
+  <div class="dtimegrid">
+    <select id="dsh" class="dsel" aria-label="Hour">${[...Array(24).keys()].map(i=>
+      `<option value="${i}" ${i===hh?'selected':''}>${(i%12)||12} ${i<12?'AM':'PM'}</option>`).join('')}</select>
+    <b>:</b>
+    <select id="dsm" class="dsel" aria-label="Minute">${[0,15,30,45].map(i=>
+      `<option value="${i}" ${i===mm?'selected':''}>${String(i).padStart(2,'0')}</option>`).join('')}</select>
+  </div>
+  <p class="dnote">Best between 1 and 5 AM, plugged in. Overnight runs need AC power.</p>
+  <div class="dbtns">
+    <button class="btn mini" type="button" onclick="dSub(null)">Cancel</button>
+    <button class="btn primary mini" type="button" onclick="dSchedSave(this)">Save</button>
+  </div>
+  <div id="dschederr" class="derr" hidden></div>`;
+}
+async function dSchedSave(btn){
+  btn.disabled=true;
+  const r=await api('/api/schedule',{hour:+$('#dsh').value,minute:+$('#dsm').value});
+  if(r&&r.ok===false){btn.disabled=false;dErr('dschederr',r);return;}
+  DRAWER.sub=null;
+  await refresh();
+  dSettingsForce();
+}
+
+/* cloud keys: an in-drawer subview. Password fields render EMPTY every time --
+ * the server only ever sends presence booleans (cloud_keys[prov] is true/false)
+ * and this view never writes any state into an input's value, so a key is never
+ * echoed anywhere after Save. */
+const CK_PROVIDERS=[
+  ['scribe','ElevenLabs Scribe','elevenlabs.io &#8594; Profile &#8594; API keys'],
+  ['openai','OpenAI','platform.openai.com &#8594; API keys &middot; also used by the OpenAI assistant below'],
+  ['voxtral','Mistral Voxtral','console.mistral.ai &#8594; API keys']];
+function _ckRow(s,prov,label,hint){
+  const has=!!((s.cloud_keys||{})[prov]);   // presence boolean, never the key
+  const arm=DRAWER.dconfirm==='ck:'+prov;
+  return `<div class="dckrow">
+    <span class="dcklabel">${label}</span>
+    <div class="grow">
+      <div class="dckline">
+        <input type="password" id="dck_${prov}" class="dinput" autocomplete="off"
+          spellcheck="false" placeholder="${has?'saved: paste to replace':'paste API key'}"
+          aria-label="${label} API key">
+        <span class="dcktick" title="${has?'A key is saved':''}">${has?'&#10003;':''}</span>
+        ${has?`<button class="btn mini" type="button" title="Remove the saved ${label} key from this Mac"
+          onclick="dCkClearAsk('${prov}')">Clear</button>`:''}
+      </div>
+      ${arm?`<div class="dckconfirm">Remove the saved ${label} key? Cloud transcription
+          with this provider stops working until a new key is pasted.
+        <button class="btn mini" type="button" onclick="dConfirmClear()">Keep</button>
+        <button class="btn danger mini" type="button" onclick="dCkClearGo('${prov}')">Clear it</button></div>`:''}
+      <div class="dsub">${hint}</div>
+    </div></div>`;
+}
+function dCloudKeysHTML(s){
+  const ck=s.cloud_keys||{};
+  return `<button class="dback" type="button" onclick="dSub(null)">&#8592; Settings</button>
+  <h3 class="dtitle">Cloud transcription keys</h3>
+  <p class="dnote">Optional: transcribe with a cloud engine instead of the local
+    models. Only the audio is uploaded; speaker identification and voiceprints
+    stay on this Mac. <b>Strict-mode recordings never upload</b>, whatever engine
+    is selected. Keys are stored in stt.env on this machine and never shown again.</p>
+  ${CK_PROVIDERS.map(([p,l,hint])=>_ckRow(s,p,l,hint)).join('')}
+  <h3 class="dtitle">Assistant (summaries &amp; Ask)</h3>
+  <p class="dnote">The assistant drafts summaries and answers Ask questions. The
+    local model needs no key. Choosing a cloud assistant in Settings sends
+    transcript text to that provider for these features only; <b>strict-mode
+    recordings always use the local model</b>.</p>
+  ${_ckRow(s,'anthropic','Anthropic (Claude)','console.anthropic.com &#8594; API keys')}
+  <div class="dckrow"><span class="dcklabel">OpenAI (GPT)</span>
+    <div class="grow dsub">uses the OpenAI key from the transcription section above
+      &middot; ${ck.openai?'&#10003; key saved':'no key yet'}</div></div>
+  <div class="dbtns">
+    <button class="btn mini" type="button" onclick="dSub(null)">Cancel</button>
+    <button class="btn primary mini" type="button" onclick="dCkSave(this)">Save</button>
+  </div>
+  <div id="dckerr" class="derr" hidden></div>`;
+}
+async function dCkSave(btn){
+  btn.disabled=true;
+  const val=p=>{const i=document.getElementById('dck_'+p);return i?i.value:'';};
+  const r=await api('/api/cloud_keys',{scribe:val('scribe'),openai:val('openai'),
+    voxtral:val('voxtral'),anthropic:val('anthropic')});
+  if(!r.ok){btn.disabled=false;dErr('dckerr',r);return;}
+  if(S)S.cloud_keys=r.set;   // fresh presence booleans: ticks flip, fields clear
+  DRAWER.dconfirm=null;
+  dSettingsForce();          // re-render the subview from state (stays open)
+  refresh();
+}
+function dCkClearAsk(prov){DRAWER.dconfirm='ck:'+prov;dSettingsForce();}
+async function dCkClearGo(prov){
+  const r=await api('/api/cloud_keys',{clear:[prov]});
+  if(!r.ok){dErr('dckerr',r);return;}
+  if(S)S.cloud_keys=r.set;
+  DRAWER.dconfirm=null;
+  dSettingsForce();
+  refresh();
+}
+// clears whichever two-step confirm is armed and repaints its section
+function dConfirmClear(){
+  DRAWER.dconfirm=null;DRAWER.renameTo=null;
+  dSettingsForce();dSpeakersForce();dArchRender();
+}
+
+/* ------------------------------------------------------------ speakers ----- *
+ * Enrolled people (snippet play, expandable per-sample rows with play /
+ * reassign / remove, inline rename, merge, two-step remove) and unknown voices
+ * ("Who is this?" reuses the EXISTING naming slide-over; hide / "N hidden" /
+ * restore). Every edit spawns a relabel server-side; refresh() lets the quiet
+ * relabel pill ride the next poll, same as the old card. */
+function dSpeakersSig(s){
+  return JSON.stringify([
+    (s.enrolled||[]).map(e=>[e.name,e.samples,(e.sources||[]).join('|')]),
+    (s.unknowns||[]).map(u=>[u.uid,u.display,!!u.archived,(u.meetings||[]).length]),
+    s.max_samples,!!s.relabel_pending,
+    DRAWER.spkOpen,DRAWER.showHidden,DRAWER.dconfirm,DRAWER.spkErr,
+    DRAWER.reassign&&(DRAWER.reassign.name+':'+DRAWER.reassign.idx)]);
+}
+function dSpeakersDraw(s){
+  const el=document.getElementById('dsec-speakers');
+  if(!el||el.hidden)return;
+  const sig=dSpeakersSig(s);
+  if(el.dataset.sig===sig)return;
+  if(dFocusGuard(el))return;
+  el.dataset.sig=sig;
+  el.innerHTML=dSpeakersHTML(s);
+  dvSync();   // the rebuild redrew the play buttons; restore the stop glyph
+}
+function dSpeakersForce(){
+  const el=document.getElementById('dsec-speakers');
+  if(el)el.dataset.sig='';
+  dSpeakersDraw(S||{});
+}
+function dSpeakersHTML(s){
+  const cap=s.max_samples||5;
+  let h='';
+  if(s.relabel_pending)
+    h+=`<div class="dnote drelnote">Applying names to all transcripts&#8230; (moments)</div>`;
+  if(DRAWER.spkErr)h+=`<div class="derr">${esc(DRAWER.spkErr)}</div>`;
+  h+=`<div class="dgroup">People</div>`;
+  const enr=s.enrolled||[];
+  h+=enr.map(e=>{
+    const open=DRAWER.spkOpen===e.name;
+    const srcs=e.sources||[];
+    const from=srcs.length?' &middot; from '+esc(srcs[srcs.length-1])
+      +(srcs.length>1?' +'+(srcs.length-1):''):'';
+    return `<div class="drow">
+      <button class="iact play dplay" type="button" data-k="p:${esc(e.name)}"
+        data-speaker="${esc(e.name)}" data-meeting=""
+        onclick="dvPlay(this)" title="Play a short sample of this voice">&#9654;</button>
+      <div class="grow"><div class="dname">${esc(e.name)}</div>
+        <div class="dsub" title="${esc(srcs.join(', '))}">${e.samples} voice sample${e.samples>1?'s':''}${from}</div></div>
+      <button class="iact" type="button" title="Samples, rename, merge, remove"
+        aria-expanded="${open?'true':'false'}"
+        onclick="dSpkToggle('${escJs(e.name)}')">${open?'&#9652;':'&#9662;'}</button>
+    </div>${open?dSpkPanel(s,e,cap):''}`;
+  }).join('')||`<div class="dempty">No one enrolled yet.</div>`;
+
+  h+=`<div class="dgroup">Unknown voices</div>`;
+  const vis=(s.unknowns||[]).filter(u=>!u.archived);
+  const hid=(s.unknowns||[]).filter(u=>u.archived);
+  h+=vis.map(u=>{
+    const n=(u.meetings||[]).length;
+    return `<div class="drow">
+      <button class="iact play dplay" type="button" data-k="u:${esc(u.uid)}"
+        data-speaker="${esc(u.uid)}" data-meeting="${esc((u.meetings||[])[0]||'')}"
+        onclick="dvPlay(this)" title="Play a short sample of this voice">&#9654;</button>
+      <div class="grow"><div class="dname">${esc(u.display)}</div>
+        <div class="dsub">heard in ${n} meeting${n!==1?'s':''}</div></div>
+      <button class="btn primary mini" type="button"
+        onclick="openNamePanelByUid('${escJs(u.uid)}')">Who is this?</button>
+      <button class="iact" type="button"
+        title="One-time voice (focus group): keep it matchable but out of the way; restore any time"
+        onclick="dHideUnknown('${escJs(u.uid)}',true)">Hide</button>
+    </div>`;
+  }).join('')||`<div class="dempty">No unidentified voices right now.</div>`;
+  if(hid.length){
+    h+=`<div class="drow dhiddenhdr"><button class="dlink" type="button"
+      onclick="dToggleHidden()">${DRAWER.showHidden?'&#9662;':'&#9656;'} ${hid.length} hidden</button></div>`;
+    if(DRAWER.showHidden)h+=hid.map(u=>{
+      const n=(u.meetings||[]).length;
+      return `<div class="drow dhid">
+        <button class="iact play dplay" type="button" data-k="u:${esc(u.uid)}"
+          data-speaker="${esc(u.uid)}" data-meeting="${esc((u.meetings||[])[0]||'')}"
+          onclick="dvPlay(this)" title="Play a short sample of this voice">&#9654;</button>
+        <div class="grow"><div class="dname">${esc(u.display)}</div>
+          <div class="dsub">hidden &middot; heard in ${n} meeting${n!==1?'s':''}</div></div>
+        <button class="iact" type="button" onclick="dHideUnknown('${escJs(u.uid)}',false)">Restore</button>
+      </div>`;
+    }).join('');
+  }
+  return h;
+}
+// the expandable management panel under ONE enrolled person at a time
+function dSpkPanel(s,e,cap){
+  const n=e.samples,srcs=e.sources||[];
+  const others=(s.enrolled||[]).map(x=>x.name).filter(x=>x!==e.name);
+  const ra=(DRAWER.reassign&&DRAWER.reassign.name===e.name)?DRAWER.reassign.idx:null;
+  const rows=Array.from({length:n},(_,i)=>{
+    // sources align to the newest samples when the list is shorter than n
+    const src=srcs.length===n?srcs[i]:(srcs[srcs.length-n+i]||null);
+    return `<div class="dsamp">
+      ${src?`<button class="iact play dplay" type="button" data-k="s:${esc(e.name)}#${i}"
+          data-speaker="${esc(e.name)}" data-meeting="${esc(src)}"
+          onclick="dvPlay(this)" title="Play this sample">&#9654;</button>`
+        :`<span class="dsamp-b" title="Source unknown (enrolled before tracking)"></span>`}
+      <div class="grow dsub">Sample ${i+1} &middot; ${src?esc(src):'source unknown'}</div>
+      ${others.length?`<button class="iact" type="button"
+        title="Reassign: this sample is really someone else&#8217;s voice; move it to the right person instead of deleting it"
+        onclick="dReassignAsk('${escJs(e.name)}',${i})">&#8594;</button>`:''}
+      ${n>1?`<button class="iact" type="button"
+        title="Remove this sample (e.g. a bad recording); the person keeps their other samples"
+        onclick="dRemoveSample('${escJs(e.name)}',${i})">&#10005;</button>`:''}
+      ${ra===i?`<div class="dinline">really
+          <select class="dsel dreasel" aria-label="Move this sample to">${
+            others.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>
+        <button class="btn primary mini" type="button" onclick="dReassignGo('${escJs(e.name)}',${i},this)">Move</button>
+        <button class="btn mini" type="button" onclick="dReassignCancel()">Cancel</button></div>`:''}
+    </div>`;
+  }).join('');
+  const clashArm=DRAWER.dconfirm==='renmerge:'+e.name;
+  const rmArm=DRAWER.dconfirm==='rmspk:'+e.name;
+  return `<div class="dpanel">
+    <div class="dsub dpanel-h">Voice samples (${n} of ${cap})</div>
+    <div class="dsub dpanel-n">A profile keeps up to ${cap} samples. A varied set,
+      from different meetings, rooms, and mics, identifies this person more
+      reliably than several clips from one recording.</div>
+    ${rows}
+    <div class="dsamp">
+      <div class="grow dsub"><b>Rename</b>: fix the name everywhere</div>
+      <input type="text" class="dinput drn" value="${esc(e.name)}" aria-label="New name for ${esc(e.name)}">
+      <button class="iact" type="button" onclick="dRenameSpeaker('${escJs(e.name)}',this)">Apply</button>
+    </div>
+    ${clashArm?`<div class="dckconfirm">${esc(DRAWER.renameTo||'')} is already a saved
+        person. Renaming &#8220;${esc(e.name)}&#8221; to ${esc(DRAWER.renameTo||'')} MERGES
+        their voice samples into one profile.
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="dRenameGo('${escJs(e.name)}')">Merge profiles</button></div>`:''}
+    <div class="dsamp">
+      <div class="grow dsub"><b>Merge into&#8230;</b>: this voice is really the same person as</div>
+      <select class="dsel dmg" aria-label="Merge ${esc(e.name)} into" ${others.length?'':'disabled'}>${
+        others.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>
+      <button class="iact" type="button" ${others.length?'':'disabled'}
+        onclick="dMergeSpeaker('${escJs(e.name)}',this)">Merge</button>
+    </div>
+    <div class="dsamp">
+      <div class="grow dsub"><b>Remove</b>: un-enroll; their lines revert to Speaker N</div>
+      <button class="btn danger mini" type="button" onclick="dRemoveAsk('${escJs(e.name)}')">Remove&#8230;</button>
+    </div>
+    ${rmArm?`<div class="dckconfirm">Remove ${esc(e.name)}? Their lines revert to
+        Speaker N in every transcript, and their voice samples are deleted.
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn danger mini" type="button" onclick="dRemoveGo('${escJs(e.name)}')">Remove</button></div>`:''}
+  </div>`;
+}
+function dSpkToggle(name){
+  DRAWER.spkOpen=DRAWER.spkOpen===name?null:name;
+  DRAWER.reassign=null;DRAWER.dconfirm=null;DRAWER.renameTo=null;DRAWER.spkErr='';
+  dSpeakersForce();
+}
+function dToggleHidden(){DRAWER.showHidden=!DRAWER.showHidden;dSpeakersForce();}
+function dSpkFail(r){DRAWER.spkErr=(r&&r.error)||'failed';dSpeakersForce();}
+function dHideUnknown(uid,hide){
+  api('/api/hide_unknown',{uid,hide}).then(r=>{
+    if(!r.ok){dSpkFail(r);return;}
+    DRAWER.spkErr='';refresh();
+  });
+}
+function dRemoveSample(name,idx){
+  api('/api/remove_sample',{name,index:idx}).then(r=>{
+    if(!r.ok){dSpkFail(r);return;}
+    DRAWER.spkErr='';refresh();
+  });
+}
+function dReassignAsk(name,idx){DRAWER.reassign={name,idx};DRAWER.spkErr='';dSpeakersForce();}
+function dReassignCancel(){DRAWER.reassign=null;dSpeakersForce();}
+function dReassignGo(name,idx,btn){
+  const sel=btn.closest('.dinline').querySelector('.dreasel');
+  const to=sel?sel.value:'';
+  if(!to||to===name)return;
+  api('/api/reassign_sample',{name,index:idx,to}).then(r=>{
+    if(!r.ok){dSpkFail(r);return;}
+    DRAWER.reassign=null;DRAWER.spkErr='';
+    dSpeakersForce();refresh();
+  });
+}
+function dRenameSpeaker(old,btn){
+  const panel=btn.closest('.dpanel');
+  const inp=panel&&panel.querySelector('.drn');
+  const n=inp?inp.value.trim():'';
+  if(!n||n===old)return;
+  // renaming onto an existing person silently merges their voiceprints: say so
+  const clash=(S&&S.enrolled||[]).find(e=>e.name.toLowerCase()===n.toLowerCase()&&e.name!==old);
+  if(clash){DRAWER.renameTo=n;DRAWER.dconfirm='renmerge:'+old;dSpeakersForce();return;}
+  dRenameGo(old,n);
+}
+async function dRenameGo(old,n){
+  n=n||DRAWER.renameTo;
+  DRAWER.dconfirm=null;DRAWER.renameTo=null;
+  if(!n)return;
+  const r=await api('/api/rename_speaker',{name:old,new:n});
+  if(!r.ok){dSpkFail(r);return;}
+  if(DRAWER.spkOpen===old)DRAWER.spkOpen=n;   // the panel follows the new name
+  DRAWER.spkErr='';
+  dSpeakersForce();refresh();
+}
+function dMergeSpeaker(name,btn){
+  const sel=btn.closest('.dsamp').querySelector('.dmg');
+  const dst=sel?sel.value:'';
+  if(!dst||dst===name)return;
+  api('/api/merge_speakers',{src:'name:'+name,dst:'name:'+dst}).then(r=>{
+    if(!r.ok){dSpkFail(r);return;}
+    DRAWER.spkOpen=dst;DRAWER.spkErr='';   // the samples moved: show the survivor
+    dSpeakersForce();refresh();
+  });
+}
+function dRemoveAsk(name){DRAWER.dconfirm='rmspk:'+name;dSpeakersForce();}
+async function dRemoveGo(name){
+  DRAWER.dconfirm=null;
+  const r=await api('/api/remove_speaker',{name});
+  if(!r.ok){dSpkFail(r);return;}
+  if(DRAWER.spkOpen===name)DRAWER.spkOpen=null;
+  DRAWER.spkErr='';
+  dSpeakersForce();refresh();
+}
+
+/* voice snippet playback: EXCLUSIVE (one clip anywhere), tracked by a data key
+ * rather than the DOM node so the stop glyph survives every rebuild -- the
+ * same discipline as the old card's playVoice */
+let dvAudio=null,dvKey=null;
+function dvSync(){
+  const playing=dvAudio&&!dvAudio.paused;
+  document.querySelectorAll('.dplay').forEach(b=>{
+    b.innerHTML=(playing&&b.dataset.k===dvKey)?'&#9724;':'&#9654;';
+  });
+}
+function dvStop(){
+  if(dvAudio)dvAudio.pause();
+  dvAudio=null;dvKey=null;dvSync();
+}
+function dvPlay(btn){
+  const k=btn.dataset.k;
+  if(dvKey===k&&dvAudio&&!dvAudio.paused){dvStop();return;}   // toggle off
+  if(dvAudio)dvAudio.pause();
+  stopClip();
+  document.querySelectorAll('audio').forEach(a=>a.pause());   // exclusive playback
+  const spk=btn.dataset.speaker,mtg=btn.dataset.meeting||'';
+  dvKey=k;btn.innerHTML='&#8230;';
+  dvAudio=new Audio('/api/snippet?speaker='+encodeURIComponent(spk)
+    +(mtg?'&meeting='+encodeURIComponent(mtg):''));
+  dvAudio.onplaying=dvSync;
+  dvAudio.onended=dvAudio.onerror=()=>{if(dvKey===k)dvStop();};
+  dvAudio.play().catch(()=>{if(dvKey===k)dvStop();});
+}
+
+/* ------------------------------------------------------------- history ----- *
+ * The permanent processing log (same /api/history): day groups newest first,
+ * name filter + all/processed/failed select, failures keep their FULL error
+ * text, capped at 400 rows with a note. The skeleton (and the filter values in
+ * it) persists across visits; each entry re-fetches the list. */
+const DHIST_CAP=400;
+function dHistLoad(){
+  const el=document.getElementById('dsec-history');
+  if(!el)return;
+  if(!el.dataset.built){
+    el.dataset.built='1';
+    el.innerHTML=`<p class="dnote">Every file this pipeline has processed, newest
+      first. Failures keep their full error text.</p>
+    <div class="dhfilter">
+      <input type="text" id="dhistq" class="dinput" placeholder="Filter by name&#8230;"
+        autocomplete="off" spellcheck="false" oninput="dHistRender()"
+        aria-label="Filter history by name">
+      <select id="dhistok" class="dsel" onchange="dHistRender()"
+        title="Show everything, or only one outcome" aria-label="Filter history by outcome">
+        <option value="">all</option><option value="ok">processed</option><option value="fail">failed</option>
+      </select>
+    </div>
+    <div class="dsub" id="dhistcount"></div>
+    <div id="dhistlist"><div class="dloading"><span class="spin"></span></div></div>`;
+  }
+  api('/api/history').then(r=>{DRAWER.hist=r.results||[];dHistRender();});
+}
+function dHistRender(){
+  if(DRAWER.hist===null)return;
+  const box=document.getElementById('dhistlist');if(!box)return;
+  const q=(($('#dhistq')||{}).value||'').trim().toLowerCase();
+  const f=(($('#dhistok')||{}).value)||'';
+  const rows=DRAWER.hist.filter(r=>
+    (!q||(r.name||'').toLowerCase().includes(q))&&(!f||(f==='ok')===!!r.ok));
+  const nOk=rows.filter(r=>r.ok).length;
+  const cnt=document.getElementById('dhistcount');
+  if(cnt)cnt.textContent=rows.length
+    ?`${rows.length} result${rows.length===1?'':'s'} · ${nOk} processed · ${rows.length-nOk} failed`:'';
+  let day='';
+  box.innerHTML=rows.slice(0,DHIST_CAP).map(r=>{
+    const d=(r.at||'').slice(0,10);
+    const hdr=d!==day?`<div class="dgroup">${d
+      ?esc(new Date(d+'T12:00:00').toLocaleDateString([],{weekday:'short',month:'long',day:'numeric',year:'numeric'}))
+      :'Undated'}</div>`:'';
+    day=d;
+    return hdr+`<div class="drow">
+      <span class="dchip ${r.ok?'ok':'bad'}">${r.ok?'&#10003;':'failed'}</span>
+      <div class="grow"><div class="dname">${esc((r.name||'').replace(/\.[^.]+$/,''))}</div>
+        ${r.summary?`<div class="dsub dhsum">${esc(r.summary)}</div>`:''}</div>
+      <span class="dsub mono dhat">${esc((r.at||'').slice(11,16))}</span></div>`;
+  }).join('')
+  +(rows.length>DHIST_CAP?`<div class="dnote">Showing the first ${DHIST_CAP}.
+      Narrow the filter to see older results.</div>`:'')
+  ||'<div class="dempty">No matching results.</div>';
+}
+
+/* ------------------------------------------------------------- archive ----- *
+ * Archived meetings (same /api/archived): per-row Restore and a two-step
+ * in-drawer Delete. Restore puts the meeting straight back into the library
+ * (the next poll shows its row); the nav tab count rides archived_count. */
+function dArchLoad(){
+  const el=document.getElementById('dsec-archive');
+  if(!el)return;
+  if(!el.dataset.built){
+    el.dataset.built='1';
+    el.innerHTML=`<p class="dnote">Set aside: out of the list, search, and Ask.
+      Restore brings one back exactly as it was.</p>
+    <div id="darchlist"><div class="dloading"><span class="spin"></span></div></div>
+    <div id="darcherr" class="derr" hidden></div>`;
+  }
+  api('/api/archived').then(r=>{DRAWER.archived=r.items||[];dArchRender();});
+}
+function dArchRender(){
+  const box=document.getElementById('darchlist');
+  if(!box||DRAWER.archived===null)return;
+  box.innerHTML=DRAWER.archived.map(it=>{
+    const day=it.date?new Date(it.date+'T12:00:00')
+      .toLocaleDateString([],{year:'numeric',month:'short',day:'numeric'}):'';
+    const arm=DRAWER.dconfirm==='adel:'+it.base;
+    return `<div class="drow">
+      <div class="grow"><div class="dname">${esc(it.title||it.base)}</div>
+        <div class="dsub">${esc(day)}${it.minutes?' &middot; '+it.minutes+' min':''}${
+          it.category?' &middot; '+(it.category==='work'?'Work':'Personal'):''}</div></div>
+      <button class="iact" type="button" title="Bring it back into the library exactly as it was"
+        onclick="dRestore('${escJs(it.base)}',this)">Restore</button>
+      <button class="btn danger mini" type="button" onclick="dArchDelAsk('${escJs(it.base)}')">Delete&#8230;</button>
+    </div>${arm?`<div class="dckconfirm">Delete &#8220;${esc(it.title||it.base)}&#8221;?
+        This permanently removes the transcript, the stored audio, and every cache.
+        It cannot be undone.
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn danger mini" type="button" onclick="dArchDelGo('${escJs(it.base)}',this)">Delete forever</button></div>`:''}`;
+  }).join('')||'<div class="dempty">Nothing archived.</div>';
+}
+async function dRestore(base,btn){
+  btn.disabled=true;
+  const r=await api('/api/restore_meeting',{base});
+  if(!r.ok){btn.disabled=false;dErr('darcherr',r);return;}
+  dErr('darcherr',{ok:true});
+  dArchLoad();refresh();
+}
+function dArchDelAsk(base){DRAWER.dconfirm='adel:'+base;dArchRender();}
+async function dArchDelGo(base,btn){
+  btn.disabled=true;
+  const r=await api('/api/delete_meeting',{base,confirm:true});
+  if(!r.ok){btn.disabled=false;dErr('darcherr',r);return;}
+  DRAWER.dconfirm=null;
+  dErr('darcherr',{ok:true});
+  dArchLoad();refresh();
+}
+
+/* the quiet "archived · view" hint an Archive action leaves behind: small,
+ * bottom-center, gone on its own; "view" opens the drawer's Archive section */
+let _archHintT=null;
+function archHint(){
+  let el=document.getElementById('archhint');
+  if(!el){
+    el=document.createElement('div');
+    el.id='archhint';el.className='archhint';
+    document.body.appendChild(el);
+  }
+  el.innerHTML=`archived &middot; <button class="dlink" type="button"
+    onclick="openDrawer('archive')">view</button>`;
+  el.hidden=false;
+  clearTimeout(_archHintT);
+  _archHintT=setTimeout(()=>{el.hidden=true;},6000);
+}
+
+/* ============================================================================
+   Finale: THE KEYBOARD LAYER and DRAG-AND-DROP QUEUEING. The last build pass
+   before the default flips. One keydown dispatcher (kbKey) owns every new
+   shortcut behind the typing guard; the meeting page's own mKey keeps n/p,
+   its slash, and Cmd-F, so the dispatcher bows out of everything but Escape
+   there. Dropping audio anywhere uploads it through POST /api/upload and a
+   synthetic timeline row holds the spot until the REAL waiting row lands.
+   No hint overlay anywhere: the layer stays invisible.
+   ============================================================================ */
+
+/* ------------------------------------------------------- keyboard layer ---- *
+ * j/k walk a visible focus ring down/up the timeline rows (the rows are
+ * already tabindex=0 and :focus-visible styled; group headers are divs, so
+ * they are skipped by construction). Enter acts by row state, e peeks a ready
+ * row, / focuses search, Escape in search clears it back to the list, and
+ * Escape on the meeting page (with nothing else open) returns to the list.
+ * html{scroll-behavior:smooth} owns the scroll feel and the reduced-motion
+ * block flips it to auto, so plain scrollIntoView honors both. */
+let kbLast=null;             // the row id that last held the ring
+function kbRows(){return [...document.querySelectorAll('#timeline .row[tabindex]')];}
+function kbFocusRow(el){
+  if(!el)return;
+  el.focus({preventScroll:true});
+  kbLast=el.dataset.id||null;
+  el.scrollIntoView({block:'nearest'});
+}
+// a 2s rebuild wipes the DOM (and the ring with it): put the ring back on the
+// remembered row when focus fell to <body>. A real click clears the memory,
+// so the ring never fights the mouse.
+function kbRestore(){
+  if(!kbLast||route.view!=='timeline')return;
+  if(document.activeElement&&document.activeElement!==document.body)return;
+  const el=document.querySelector('#timeline .row[data-id="'+CSS.escape(kbLast)+'"]');
+  if(el)el.focus({preventScroll:true});
+}
+document.addEventListener('mousedown',()=>{kbLast=null;});
+function kbMove(d){
+  const rows=kbRows();if(!rows.length)return;
+  const ae=document.activeElement;
+  let i=rows.indexOf(ae&&ae.closest?ae.closest('#timeline .row[tabindex]'):null);
+  if(i<0&&kbLast)i=rows.findIndex(r=>r.dataset.id===kbLast);
+  if(i<0){
+    // nothing holds the ring yet: land on the first row in view, so j
+    // mid-page never yanks the list back to the top
+    const top=($('.hdr')||{}).offsetHeight||64;
+    i=rows.findIndex(r=>r.getBoundingClientRect().bottom>top);
+    kbFocusRow(rows[i<0?0:i]);return;
+  }
+  kbFocusRow(rows[Math.max(0,Math.min(rows.length-1,i+d))]);
+}
+function kbKey(e){
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  const ae=document.activeElement,se=$('#search');
+  // the ONE typing exception: Escape in the search field clears it and puts
+  // the ring back on the list
+  if(e.key==='Escape'&&ae===se){
+    e.preventDefault();
+    se.value='';render();scheduleSearch();se.blur();
+    if(route.view==='timeline')kbFocusRow(kbRows()[0]);
+    return;
+  }
+  const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
+  if(typing)return;   // no shortcut fires while any input has focus
+  if(route.view==='meeting'){
+    // mKey owns the page's keys (n/p stepping, slash, find): only the Escape
+    // cascade's LAST step lives here -- nothing else open means back to the list
+    if(e.key==='Escape'&&!e.defaultPrevented&&!_popClose&&!NP&&!DRAWER.open
+       &&!(MR&&MR.active)&&!document.getElementById('mcard')){
+      e.preventDefault();location.hash='';
+    }
+    return;
+  }
+  if(e.key==='/'){e.preventDefault();se.focus();return;}
+  if(e.key==='j'||e.key==='k'){e.preventDefault();kbMove(e.key==='j'?1:-1);return;}
+  // Enter / e act on the focused row itself, never on a focused button in it
+  const row=(e.target instanceof Element&&e.target.matches('#timeline .row[tabindex]'))
+    ?e.target:null;
+  if(!row)return;
+  const id=row.dataset.id,st=row.dataset.state;
+  if(e.key==='Enter'){
+    e.preventDefault();
+    if(st==='ready')openMeeting(id);
+    else if(st==='needs_name')acceptMeeting(id);
+    else{
+      // waiting / held / failed: focus-within already reveals the hover
+      // actions, so Enter just hands focus to the first one
+      const b=row.querySelector('.ractions .iact');if(b)b.focus();
+    }
+  }else if(e.key==='e'&&st==='ready'){
+    e.preventDefault();toggleExpand(id);
+  }
+}
+document.addEventListener('keydown',kbKey);
+
+/* ------------------------------------------------ drag-and-drop queueing --- *
+ * Window-level dragenter/over shows the full-page drop affordance; drop
+ * uploads each audio file SEQUENTIALLY via fetch with the raw File body
+ * (fetch exposes no clean upload progress over HTTP/1.1, so the synthetic
+ * row carries a spinner, not a percentage). Non-audio files get the inline
+ * dismissible note naming the accepted extensions. */
+// mirror of the server's allowlist (config.AUDIO_EXTS -- the SAME set the
+// folder watcher accepts, so anything droppable is anything watchable);
+// test-enforced to match the server exactly
+const UPLOAD_EXTS=['.aac','.aiff','.avi','.caf','.flac','.m4a','.m4b','.m4v',
+  '.mkv','.mov','.mp3','.mp4','.ogg','.opus','.wav','.webm','.wma'];
+function _uploadExtOk(name){
+  const i=name.lastIndexOf('.');
+  return i>0&&UPLOAD_EXTS.includes(name.slice(i).toLowerCase());
+}
+
+/* synthetic timeline rows: one per upload, keyed, pinned above the pinned
+ * cluster. In flight it reads like a waiting row; done, it holds the spot
+ * (title already the server's FINAL name) until the next poll's real
+ * src:<name> row replaces it in the same rebuild; failed, it shows the
+ * server's reason with a dismiss x. */
+const UPLOADS=[];
+function uploadsSig(){return JSON.stringify(UPLOADS.map(u=>[u.key,u.status,u.error,u.name]));}
+function uploadsPrune(){
+  for(let i=UPLOADS.length;i--;){
+    const u=UPLOADS[i];
+    if(u.status==='done'&&rowById('src:'+u.name))UPLOADS.splice(i,1);
+  }
+}
+function uploadRowHTML(u){
+  const err=u.status==='error';
+  return `<div class="row upl" data-state="${err?'failed':'waiting'}" data-upkey="${esc(u.key)}">
+    <span class="chk spacer" aria-hidden="true"></span>
+    <span class="cat spacer" style="visibility:hidden"></span>
+    <div class="rbody"><div class="rtitle">${esc(u.title)}</div>
+      ${err?`<div class="rmeta err">${esc(u.error)}</div>`:''}</div>
+    <div class="rslot">${err
+      ?`<button class="iact" type="button" title="Dismiss"
+          onclick="uploadDismiss('${escJs(u.key)}')">&#10005;</button>`
+      :u.status==='done'
+        ?`<span class="rstate">queued</span>`
+        :`<span class="rstate"><span class="spin"></span> uploading&#8230;</span>`}
+    </div></div>`;
+}
+function uploadDismiss(key){
+  const i=UPLOADS.findIndex(u=>u.key===key);
+  if(i>=0)UPLOADS.splice(i,1);
+  render();
+}
+
+let _upSeq=0;
+async function uploadOne(file){
+  const u={key:'up'+(++_upSeq),title:file.name,status:'uploading'};
+  UPLOADS.push(u);render();
+  let r;
+  try{
+    const res=await fetch('/api/upload?name='+encodeURIComponent(file.name),
+      {method:'POST',body:file});
+    r=await res.json();
+  }catch(e){r={error:'upload failed: connection lost'};}
+  if(r&&r.ok){
+    u.status='done';u.name=r.name;u.title=r.name;   // the final (uniquified) name
+    refresh();                                       // the next state has the real row
+  }else{
+    u.status='error';u.error=(r&&r.error)||'upload failed';
+    render();
+  }
+}
+async function uploadFiles(files){
+  const audio=files.filter(f=>_uploadExtOk(f.name));
+  const other=files.filter(f=>!_uploadExtOk(f.name));
+  if(other.length)
+    dropNote(`Not audio: ${other.map(f=>f.name).join(', ')}. `
+      +`Accepted: ${UPLOAD_EXTS.join(', ')}.`);
+  for(const f of audio)await uploadOne(f);   // sequential, one row at a time
+}
+function dropNote(msg){
+  const n=$('#dropnote');if(!n)return;
+  n.hidden=false;
+  n.innerHTML=`<span class="grow">${esc(msg)}</span>
+    <button class="iact" type="button" title="Dismiss" onclick="dropNoteClose()">&#10005;</button>`;
+}
+function dropNoteClose(){const n=$('#dropnote');if(n){n.hidden=true;n.innerHTML='';}}
+
+/* the full-page affordance: dragenter/leave nest, so a counter decides
+ * visibility; dragover must preventDefault or the drop never fires */
+let _dragDepth=0;
+function _dragFiles(e){
+  return !!(e.dataTransfer&&[...(e.dataTransfer.types||[])].includes('Files'));
+}
+window.addEventListener('dragenter',e=>{
+  if(!_dragFiles(e))return;
+  e.preventDefault();
+  _dragDepth++;$('#dropveil').hidden=false;
+});
+window.addEventListener('dragover',e=>{if(_dragFiles(e))e.preventDefault();});
+window.addEventListener('dragleave',e=>{
+  if(!_dragFiles(e))return;
+  if(--_dragDepth<=0){_dragDepth=0;$('#dropveil').hidden=true;}
+});
+window.addEventListener('drop',e=>{
+  if(!_dragFiles(e))return;
+  e.preventDefault();
+  _dragDepth=0;$('#dropveil').hidden=true;
+  uploadFiles([...e.dataTransfer.files]);
+});

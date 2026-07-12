@@ -40,26 +40,40 @@ is mono, nothing is serif. System faces only; nothing downloads. (If a true
 Inter ever becomes wanted, vendor the OFL woff2 into gui/static/ as a local
 asset; never a CDN.)
 
-Color, light theme:
+Color: the "Signal" colorway (revised 2026-07-12 on Mark's request for a
+modern/futuristic feel; direction follows the Linear/Vercel/Raycast language —
+cool neutrals + one electric accent — NOT neon sci-fi). Warm paper retired;
+the green accent retired; attention gold and record red stay semantic.
 
-    --paper  #FBFBF9   page ground
+Light theme (cool porcelain):
+
+    --paper  #FAFAFC   page ground
     --card   #FFFFFF   rows, popovers
-    --ink    #1A1C1F   text
-    --sub    #5D6167   secondary text
-    --hair   #E8E6E0   hairline rules
-    --line   #D9D6CE   control borders
-    --inset  #F4F3EF   hover, wells
-    --accent #1E6B50   the ONE interactive green (buttons, links, progress)
-    --accent-soft #E4EFEA
-    --amber  #9A5B10   attention (tray, review counts)  soft #F7EEDF
-    --rec    #C43C35   record light ONLY                soft #F7E4E2
+    --ink    #16181D   text
+    --sub    #5F6470   secondary text
+    --hair   #E7E8EC   hairline rules
+    --line   #D6D8DF   control borders
+    --inset  #F2F3F6   hover, wells
+    --accent #4F5DE5   the ONE interactive electric indigo
+    --accent-ink #FFFFFF   --accent-soft #EBEDFC
+    --amber  #8F5F10   attention (tray, review counts)  soft #F7F0DF
+    --rec    #CC3F38   record light ONLY                soft #FBE7E5
 
-Color, dark theme:
+Dark theme (blue graphite, the showcase):
 
-    --paper #121416  --card #1A1D20  --ink #E9E7E2  --sub #9BA0A6
-    --hair  #2A2E32  --line #383D42  --inset #212528
-    --accent #43B28A (text on accent #0E1512)  --accent-soft #1D2E27
-    --amber #D79A4E  soft #2B2216     --rec #E06058  soft #331D1B
+    --paper #0F1114  --card #16181D  --ink #E9EAEE  --sub #9AA0AB
+    --hair  #23262C  --line #333741  --inset #1C1F24
+    --accent #7B87FF (text on accent #0D0F2A)  --accent-soft #1E2140
+    --amber #E0A94F  soft #2B2415     --rec #F0605A  soft #34191B
+
+Futurism is three touches, no more: a soft accent glow on focus rings and
+primary buttons (`0 0 0 3px` accent at ~20%), the same glow on the processing
+progress hairline, and a subtle opacity pulse on the recording pill (killed
+under reduced motion). No gradients on surfaces; paper stays flat. All text
+token pairs must clear 4.5:1 contrast in both themes, verified
+programmatically, not by eye. (Shipped amber and rec run darker than this
+section's first draft for exactly that reason: #9A6A1A and #D7443E measured
+4.15:1 and 4.22:1 on the light ground.)
 
 Theme plumbing: same pre-paint snippet and `stt_theme` localStorage key as the
 old page, plus `prefers-color-scheme` default. Red appears nowhere except the
@@ -176,7 +190,7 @@ work / personal) and sort (by month / by name) sit left of the search field,
 borderless until hover.
 
 Empty states, in sub text, centered: library empty → "Record a meeting from
-the menu bar." (the drop line returns when the upload endpoint ships); search empty → "No matches.";
+the menu bar, or drop an audio file here."; search empty → "No matches.";
 tray absent entirely when empty.
 
 ## The drawer

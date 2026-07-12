@@ -1,48 +1,50 @@
 /* ============================================================================
-   Newsprint: the panel redesign's token sheet and shell styling.
-   Light + dark via prefers-color-scheme AND :root[data-theme=...] overrides,
-   exactly like the old page. Read gui/DESIGN.md; this implements it.
+   Signal: the panel's token sheet and shell styling. Cool porcelain light,
+   blue-graphite dark, one electric indigo accent. Light + dark via
+   prefers-color-scheme AND :root[data-theme=...] overrides, exactly like the
+   old page. Read gui/DESIGN.md; this implements it. Amber and rec run darker
+   than the spec's first draft so every text pairing clears 4.5:1.
    ============================================================================ */
 
 :root{
-  --paper:#FBFBF9; --card:#FFFFFF; --ink:#1A1C1F; --sub:#5D6167;
-  --hair:#E8E6E0; --line:#D9D6CE; --inset:#F4F3EF;
-  --accent:#1E6B50; --acc-ink:#FFFFFF; --accent-soft:#E4EFEA;
-  --amber:#9A5B10; --amber-soft:#F7EEDF;
-  --rec:#C43C35; --rec-soft:#F7E4E2;
+  --paper:#FAFAFC; --card:#FFFFFF; --ink:#16181D; --sub:#5F6470;
+  --hair:#E7E8EC; --line:#D6D8DF; --inset:#F2F3F6;
+  --accent:#4F5DE5; --acc-ink:#FFFFFF; --accent-soft:#EBEDFC;
+  --amber:#8F5F10; --amber-soft:#F7F0DF;
+  --rec:#CC3F38; --rec-soft:#FBE7E5;
   --sans:-apple-system,system-ui,"SF Pro Text","Segoe UI",sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --shadow:0 1px 2px rgba(20,22,26,.08), 0 10px 34px rgba(20,22,26,.14);
+  --shadow:0 1px 2px rgba(15,17,26,.08), 0 10px 34px rgba(15,17,26,.14);
   /* ONE shared reading column (content width + the two 24px gutters). The
      timeline wrap AND the meeting page both live inside body, so they share it;
      the pinned ask bar matches it explicitly. Revised 2026-07-12: 860 -> 920. */
   --colcap:968px;
 }
 @media(prefers-color-scheme:dark){:root{
-  --paper:#121416; --card:#1A1D20; --ink:#E9E7E2; --sub:#9BA0A6;
-  --hair:#2A2E32; --line:#383D42; --inset:#212528;
-  --accent:#43B28A; --acc-ink:#0E1512; --accent-soft:#1D2E27;
-  --amber:#D79A4E; --amber-soft:#2B2216;
-  --rec:#E06058; --rec-soft:#331D1B;
+  --paper:#0F1114; --card:#16181D; --ink:#E9EAEE; --sub:#9AA0AB;
+  --hair:#23262C; --line:#333741; --inset:#1C1F24;
+  --accent:#7B87FF; --acc-ink:#0D0F2A; --accent-soft:#1E2140;
+  --amber:#E0A94F; --amber-soft:#2B2415;
+  --rec:#F0605A; --rec-soft:#34191B;
   --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.5);
 }}
 /* manual override (theme dot) must win over the OS preference BOTH ways */
 :root[data-theme=dark]{
-  --paper:#121416; --card:#1A1D20; --ink:#E9E7E2; --sub:#9BA0A6;
-  --hair:#2A2E32; --line:#383D42; --inset:#212528;
-  --accent:#43B28A; --acc-ink:#0E1512; --accent-soft:#1D2E27;
-  --amber:#D79A4E; --amber-soft:#2B2216;
-  --rec:#E06058; --rec-soft:#331D1B;
+  --paper:#0F1114; --card:#16181D; --ink:#E9EAEE; --sub:#9AA0AB;
+  --hair:#23262C; --line:#333741; --inset:#1C1F24;
+  --accent:#7B87FF; --acc-ink:#0D0F2A; --accent-soft:#1E2140;
+  --amber:#E0A94F; --amber-soft:#2B2415;
+  --rec:#F0605A; --rec-soft:#34191B;
   --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 34px rgba(0,0,0,.5);
   color-scheme:dark;
 }
 :root[data-theme=light]{
-  --paper:#FBFBF9; --card:#FFFFFF; --ink:#1A1C1F; --sub:#5D6167;
-  --hair:#E8E6E0; --line:#D9D6CE; --inset:#F4F3EF;
-  --accent:#1E6B50; --acc-ink:#FFFFFF; --accent-soft:#E4EFEA;
-  --amber:#9A5B10; --amber-soft:#F7EEDF;
-  --rec:#C43C35; --rec-soft:#F7E4E2;
-  --shadow:0 1px 2px rgba(20,22,26,.08), 0 10px 34px rgba(20,22,26,.14);
+  --paper:#FAFAFC; --card:#FFFFFF; --ink:#16181D; --sub:#5F6470;
+  --hair:#E7E8EC; --line:#D6D8DF; --inset:#F2F3F6;
+  --accent:#4F5DE5; --acc-ink:#FFFFFF; --accent-soft:#EBEDFC;
+  --amber:#8F5F10; --amber-soft:#F7F0DF;
+  --rec:#CC3F38; --rec-soft:#FBE7E5;
+  --shadow:0 1px 2px rgba(15,17,26,.08), 0 10px 34px rgba(15,17,26,.14);
   color-scheme:light;
 }
 
@@ -76,7 +78,10 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   border:1px solid var(--hair);border-radius:99px;padding:5px 11px;cursor:pointer;
   display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
 .pill:hover{border-color:var(--line)}
-.pill.rec{color:var(--rec);background:var(--rec-soft);border-color:transparent}
+/* the recording pill breathes, gently (touch 3 of 3; killed under reduced motion) */
+.pill.rec{color:var(--rec);background:var(--rec-soft);border-color:transparent;
+  animation:pillbreathe 2.4s ease-in-out infinite}
+@keyframes pillbreathe{50%{opacity:.72}}
 .pill.accent{color:var(--accent);background:var(--accent-soft);border-color:transparent}
 .pill.amber{color:var(--amber);background:var(--amber-soft);border-color:transparent}
 .pill .recdot{width:8px;height:8px;border-radius:50%;background:var(--rec);
@@ -110,7 +115,8 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .btn.process:hover{background:var(--accent-soft);border-color:var(--accent)}
 .btn.process .caret{font-size:13px;opacity:.8}
 .btn.gear{width:34px;height:34px;padding:0;justify-content:center;font-size:15px}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);font-weight:600}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);font-weight:600;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent)}
 .btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000);
   border-color:color-mix(in srgb,var(--accent) 88%,#000)}
 .btn.danger{background:transparent;color:var(--rec);
@@ -126,10 +132,11 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   transition:border-color .16s ease,color .16s ease}
 .themedot:hover{border-color:var(--sub);color:var(--ink)}
 
-/* keyboard focus: visible everywhere */
+/* keyboard focus: visible everywhere, with the Signal glow (touch 1 of 3) */
 :where(button,select,input,.row,.trayrow,.railbtn):focus-visible{
   outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
-  outline-offset:2px}
+  outline-offset:2px;
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent)}
 
 /* --------------------------------------------------------------- tray ----- */
 .tray{margin:14px 0 6px;background:var(--amber-soft);
@@ -272,9 +279,11 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row[data-state="held"]{opacity:.9}
 .row[data-state="held"] .rstate{color:var(--amber)}
 .row[data-state="processing"] .rstate{color:var(--accent)}
-/* processing: a 2px accent hairline along the row's bottom edge */
+/* processing: a 2px accent hairline along the row's bottom edge, with the
+   Signal glow (touch 2 of 3) */
 .row[data-state="processing"] .progress{position:absolute;left:0;bottom:0;height:2px;
-  background:var(--accent);border-radius:2px;transition:width .5s ease;max-width:100%}
+  background:var(--accent);border-radius:2px;transition:width .5s ease;max-width:100%;
+  box-shadow:0 0 6px color-mix(in srgb,var(--accent) 45%,transparent)}
 .row[data-state="needs_name"]{background:var(--accent-soft);border-radius:10px;
   align-items:center;flex-wrap:wrap;padding:9px 10px}
 .row[data-state="needs_name"]:hover{background:var(--accent-soft)}
@@ -316,7 +325,7 @@ body{font:15px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 /* honor reduced-motion: kill pulses, transitions, smooth scroll */
 @media(prefers-reduced-motion:reduce){
   *{scroll-behavior:auto!important}
-  .pill .recdot,.row[data-state="recording"] .capdot{animation:none}
+  .pill .recdot,.pill.rec,.row[data-state="recording"] .capdot{animation:none}
   .row,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
   .row[data-state="processing"] .progress{transition:none}
 }
@@ -563,3 +572,281 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
   .spin{animation:none}
   .mseg{transition:none}
 }
+
+/* ============================================================================
+   Builder C: THE EDIT LAYER. The inline repair card (flag stepper + segment
+   editor), the gap and playhead insert affordances, the meeting header's menu
+   and cyclable dot, and the voice-naming slide-over.
+   ============================================================================ */
+
+/* meeting header: the row's controls, on the page */
+.mhead{position:relative}
+.mhmenu{position:absolute;top:16px;right:2px;font-size:15px}
+.mmeta .mcat{padding:0;cursor:pointer}
+.mmeta .mcat:hover{border-color:var(--sub)}
+.mmeta .mcat.work:hover{border-color:var(--accent)}
+.mmeta .mcat.personal:hover{border-color:var(--amber)}
+
+/* flagged strip: the stepping controller plus the one-click minor accept */
+.mflagbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 2px 0}
+.mflagbar .mflagged{margin:0}
+
+/* the quiet pencil on every segment; the row keeps its grid, the button floats */
+.mseg{position:relative}
+.msegedit{position:absolute;top:5px;right:6px;opacity:0;visibility:hidden;
+  font:500 13px/1 var(--sans);color:var(--sub);background:var(--card);
+  border:1px solid var(--line);border-radius:7px;padding:4px 8px;cursor:pointer;
+  transition:opacity .15s ease}
+.mseg:hover .msegedit,.mseg:focus-within .msegedit{opacity:1;visibility:visible}
+.msegedit:hover{color:var(--ink);border-color:var(--sub)}
+.mseg.editing{opacity:.55}
+/* stepper emphasis: the focused flagged line reads amber, over .mnow if both */
+.mseg.mrev{background:var(--amber-soft);box-shadow:inset 3px 0 0 var(--amber)}
+.mspk .medited{color:var(--sub);font-weight:400}
+
+/* gap affordance: zero-height at rest (negative margins overlay the borders),
+   revealed on hover/focus so the transcript never reads as a ladder of slots */
+.mgap{position:relative;z-index:2;height:16px;margin:-8px 0;display:flex;
+  align-items:center;justify-content:center;font:500 13px/1 var(--sans);
+  color:var(--accent);border-radius:6px;cursor:pointer;opacity:0;
+  transition:opacity .15s ease;user-select:none}
+.mgap:hover,.mgap:focus-visible{opacity:1;background:var(--accent-soft)}
+
+/* the inline card (review + edit + insert share it) */
+.mcard{margin:6px 0 10px;padding:12px 14px;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+.mcard.mrevcard{border-color:color-mix(in srgb,var(--amber) 45%,var(--line))}
+.mcrow{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-top:8px}
+.mcrow:first-child{margin-top:0}
+.mchead{align-items:center}
+.mcflag{font:600 13.5px/1.3 var(--sans);color:var(--amber)}
+.mcpos{margin-left:auto;font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;
+  color:var(--sub);white-space:nowrap}
+.mcsel{font:500 13.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-width:100%}
+.mctext{flex:1 1 260px;min-width:0;min-height:60px;width:100%;resize:vertical;
+  font:400 15px/1.5 var(--sans);color:var(--ink);background:var(--paper);
+  border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.mctext:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:1px;border-color:var(--accent)}
+.mcrow .mctext{width:auto}
+.mcalt{margin-top:8px;font:400 13.5px/1.5 var(--sans);color:var(--sub)}
+.mcalt b{color:var(--ink)}
+.mcnote{font:400 13px/1.4 var(--sans);color:var(--sub);display:inline-flex;
+  align-items:center;gap:6px}
+.mcbtns{align-items:center}
+.mcerr{margin-top:8px;font:400 13px/1.45 var(--sans);color:var(--rec);
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mnewspk{font:500 13.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--accent);border-radius:8px;padding:6px 8px;width:170px}
+.mcat-t{width:58px;text-align:center;font:500 13.5px/1.2 var(--sans);
+  font-variant-numeric:tabular-nums;color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+
+/* voice-naming slide-over: paper ground, hairline edge, soft shadow */
+.nveil{position:fixed;inset:0;z-index:60;background:rgba(12,14,16,.32)}
+.npanel{position:fixed;top:0;right:0;bottom:0;z-index:61;width:min(440px,94vw);
+  background:var(--paper);border-left:1px solid var(--hair);box-shadow:var(--shadow);
+  padding:18px 20px 24px;overflow-y:auto;overscroll-behavior:contain;
+  animation:npin .18s ease}
+@keyframes npin{from{transform:translateX(24px);opacity:.6}}
+.nphead{display:flex;align-items:center;gap:10px;justify-content:space-between}
+.nptitle{font:600 20px/1.25 var(--sans);letter-spacing:-.01em;color:var(--ink)}
+.npnote{margin-top:10px;font:400 13.5px/1.55 var(--sans);color:var(--sub)}
+.npnote.muted{padding:8px 0}
+.npclips{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.npclip{border:1px solid var(--hair);border-radius:10px;padding:10px 12px;
+  background:var(--card)}
+.npclip-m{font:600 14.5px/1.35 var(--sans);color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.npclip-sub{margin-top:2px;font:400 13px/1.45 var(--sans);
+  font-variant-numeric:tabular-nums;color:var(--sub)}
+.npclip audio,.npclips>audio{width:100%;height:32px;margin-top:8px}
+.npopen{margin-left:6px;font:500 13px/1 var(--sans);color:var(--accent);
+  text-decoration:none;white-space:nowrap}
+.npopen:hover{text-decoration:underline;text-underline-offset:2px}
+.npfield{position:relative;margin-top:14px}
+.npfield input{width:100%;font:400 15px/1.3 var(--sans);color:var(--ink);
+  background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 12px}
+.npfield input:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:1px;border-color:var(--accent)}
+.npdd{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:5;
+  max-height:180px;overflow-y:auto;background:var(--card);
+  border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:4px}
+.pnitem{font:400 14px/1.4 var(--sans);color:var(--ink);padding:7px 9px;
+  border-radius:6px;cursor:pointer}
+.pnitem:hover,.pnitem.cur{background:var(--inset)}
+.pnitem mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}
+.npbtns{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
+
+/* the unknown-voice legend chip: same quiet chip, plus the "?" invitation */
+button.mlg{background:none;border:1px solid var(--line);border-radius:99px;
+  padding:4px 10px;cursor:pointer}
+button.mlg:hover{border-color:var(--amber);color:var(--amber)}
+.mlg .mlgq{color:var(--amber);font-weight:700;margin-left:2px}
+
+/* reduced motion: the slide-over appears in place, cards do not transition */
+@media(prefers-reduced-motion:reduce){
+  .npanel{animation:none}
+  .msegedit,.mgap{transition:none}
+}
+
+/* ============================================================================
+   Builder D: THE DRAWER. One right slide-over (paper ground, hairline left
+   edge, soft shadow) holding Settings, Speakers, History, and Archive behind a
+   pinned section nav. Below the naming panel (z 60/61) so "Who is this?" opens
+   the existing slide-over above it; above popovers and the bulk bar.
+   ============================================================================ */
+.dveil{position:fixed;inset:0;z-index:56;background:rgba(12,14,16,.32)}
+.drawer{position:fixed;top:0;right:0;bottom:0;z-index:57;width:min(560px,94vw);
+  background:var(--paper);border-left:1px solid var(--hair);box-shadow:var(--shadow);
+  display:flex;flex-direction:column;animation:npin .18s ease}
+
+/* pinned section nav */
+.dhead{display:flex;align-items:center;gap:8px;flex:none;
+  padding:14px 18px 10px;border-bottom:1px solid var(--hair)}
+.dnav{display:flex;gap:4px;flex:1;min-width:0;flex-wrap:wrap}
+.dtab{font:600 13.5px/1 var(--sans);font-variant-numeric:tabular-nums;
+  color:var(--sub);background:none;border:1px solid transparent;
+  border-radius:8px;padding:8px 11px;cursor:pointer;white-space:nowrap}
+.dtab:hover{color:var(--ink);background:var(--inset)}
+.dtab.on{color:var(--accent);background:var(--accent-soft)}
+
+/* the one scroll container: polls rebuild sections in place, never this */
+.dbody{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;
+  padding:2px 18px 32px}
+
+/* section scaffolding (rows mirror the timeline's quiet hairline rhythm) */
+.dgroup{font:600 13px/1.2 var(--sans);letter-spacing:.06em;text-transform:uppercase;
+  color:var(--sub);padding:8px 2px 5px;border-bottom:1px solid var(--hair);
+  margin:22px 0 2px}
+.dbody section>.dgroup:first-child{margin-top:12px}
+.drow{display:flex;align-items:center;gap:10px;padding:12px 2px;
+  border-bottom:1px solid var(--hair);flex-wrap:wrap}
+.dname{font:600 15px/1.35 var(--sans);color:var(--ink)}
+.dsub{font:400 13px/1.45 var(--sans);font-variant-numeric:tabular-nums;
+  color:var(--sub);margin-top:1px}
+.dnote{font:400 13.5px/1.5 var(--sans);color:var(--sub);margin:12px 2px 2px}
+.dempty{font:400 13.5px/1.5 var(--sans);color:var(--sub);padding:14px 2px}
+.derr{font:400 13px/1.45 var(--sans);color:var(--rec);margin:8px 2px 0}
+.dtitle{font:600 18.5px/1.3 var(--sans);letter-spacing:-.01em;color:var(--ink);
+  margin-top:14px}
+.dback{font:500 13.5px/1 var(--sans);color:var(--accent);background:none;border:0;
+  padding:12px 0 0;cursor:pointer}
+.dback:hover{text-decoration:underline;text-underline-offset:2px}
+.dbtns{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
+.dloading{padding:16px 2px;color:var(--sub)}
+
+/* selects and text inputs inside the drawer */
+.dsel{font:500 13.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-width:230px}
+.dinput{font:400 13.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+.dinput:focus,.dsel:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);
+  outline-offset:1px;border-color:var(--accent)}
+
+/* toggle switch: never reads On while doing nothing (the master gates the subs) */
+.dtog{position:relative;flex:none;width:40px;height:24px;border-radius:99px;
+  cursor:pointer;background:var(--inset);border:1px solid var(--line);padding:0;
+  transition:background .16s ease,border-color .16s ease}
+.dtog::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;
+  border-radius:50%;background:var(--card);border:1px solid var(--line);
+  transition:left .16s ease}
+.dtog.on{background:var(--accent);border-color:var(--accent)}
+.dtog.on::after{left:17px;border-color:transparent}
+.dtog:disabled{opacity:.45;cursor:default}
+
+/* the two automation sub-toggles, indented beneath the master switch and
+   visibly inert while automatic runs are paused */
+.dindent{margin-left:12px;padding-left:14px;border-left:2px solid var(--hair)}
+.dindent.inert{opacity:.55}
+.dinert-note{font:500 13px/1.4 var(--sans);color:var(--amber);padding:10px 2px 0}
+
+/* nightly time picker subview */
+.dtimegrid{display:flex;align-items:center;gap:8px;margin-top:12px}
+
+/* cloud-keys subview rows: label · password input · saved tick · Clear */
+.dckrow{display:flex;gap:10px;align-items:flex-start;margin-top:12px}
+.dcklabel{font:400 13px/1.4 var(--sans);color:var(--sub);width:118px;flex:none;
+  padding-top:8px}
+.dckline{display:flex;gap:8px;align-items:center}
+.dckline .dinput{flex:1;min-width:0}
+.dcktick{width:16px;flex:none;text-align:center;color:var(--accent);font-size:13px}
+/* the house two-step confirm, inline in the drawer (never a native dialog) */
+.dckconfirm{font:400 13px/1.5 var(--sans);color:var(--ink);background:var(--inset);
+  border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin:8px 0 2px;
+  display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* recorder stall strip (mirrors the tray's urgency, scoped to the drawer) */
+.dstall{font:400 13.5px/1.5 var(--sans);color:var(--ink);background:var(--rec-soft);
+  border:1px solid color-mix(in srgb,var(--rec) 35%,var(--hair));border-radius:8px;
+  padding:10px 12px;margin:10px 0 2px;display:flex;gap:8px;align-items:center;
+  flex-wrap:wrap}
+
+/* speakers: per-sample rows + the expandable management panel */
+.dpanel{background:var(--inset);border-radius:10px;padding:10px 12px;margin:4px 0 10px}
+.dpanel-h{font-weight:600;color:var(--ink)}
+.dpanel-n{margin:2px 0 6px}
+.dsamp{display:flex;align-items:center;gap:8px;padding:7px 0;flex-wrap:wrap;
+  border-top:1px solid var(--hair)}
+.dsamp:first-of-type{border-top:0}
+.dsamp-b{width:28px;flex:none}
+.dinline{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  padding:6px 0 2px}
+.drelnote{color:var(--amber)}
+.dlink{font:500 13.5px/1.3 var(--sans);color:var(--accent);background:none;border:0;
+  padding:0;cursor:pointer}
+.dlink:hover{text-decoration:underline;text-underline-offset:2px}
+.drow.dhid{opacity:.6}
+
+/* history rows */
+.dhfilter{display:flex;gap:8px;margin:12px 0 6px}
+.dhfilter .dinput{flex:1}
+.dchip{font:500 13px/1 var(--sans);border-radius:99px;padding:4px 9px;flex:none}
+.dchip.ok{color:var(--accent);background:var(--accent-soft)}
+.dchip.bad{color:var(--rec);background:var(--rec-soft)}
+.dhsum{word-break:break-word;white-space:normal}
+.dhat{flex:none}
+
+/* the quiet "archived · view" hint after an Archive action: small, low, gone
+   on its own; the link opens the drawer's Archive section */
+.archhint{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:46;
+  font:500 13px/1 var(--sans);color:var(--sub);background:var(--card);
+  border:1px solid var(--line);border-radius:99px;padding:9px 14px;
+  box-shadow:var(--shadow);display:flex;gap:6px;align-items:center}
+.archhint .dlink{font-size:13px}
+
+/* reduced motion: the drawer appears in place, switches do not slide */
+@media(prefers-reduced-motion:reduce){
+  .drawer{animation:none}
+  .dtog,.dtog::after{transition:none}
+}
+
+/* ============================================================================
+   Finale: the keyboard layer and drag-and-drop queueing.
+   ============================================================================ */
+/* the j/k focus ring must clear the sticky header (same clearance the month
+   headers use) and the floating bulk bar */
+.row{scroll-margin-top:84px;scroll-margin-bottom:24px}
+
+/* full-page drop affordance: a dashed hairline inset on the accent, over a
+   faint accent wash; the tokens carry both themes. pointer-events none so the
+   drop itself lands on the window handler underneath. */
+.dropveil{position:fixed;inset:10px;z-index:80;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;
+  border:1.5px dashed var(--accent);border-radius:14px;
+  background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.dropveil .dv-t{font:600 16px/1.2 var(--sans);letter-spacing:-.01em;
+  color:var(--accent);background:var(--card);border:1px solid var(--accent-soft);
+  border-radius:99px;padding:11px 20px;box-shadow:var(--shadow)}
+
+/* inline non-audio rejection note: quiet, dismissible, above the timeline */
+.dropnote{display:flex;align-items:center;gap:10px;margin:10px 0 2px;
+  font:400 13.5px/1.45 var(--sans);color:var(--sub);
+  background:var(--inset);border:1px solid var(--hair);border-radius:10px;
+  padding:9px 12px}
+.dropnote .grow{min-width:0;word-break:break-word}
+
+/* synthetic upload row: state-styled like waiting; the spinner is the
+   progress (fetch exposes none), the error variant reuses the failed tones */
+.row.upl .rstate .spin{margin-right:6px;vertical-align:-2px}
