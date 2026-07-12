@@ -1437,7 +1437,8 @@ async function buildMeeting(base){
     +_mTranscriptShell()
     +_mAsk(base);
 
-  if(m.audio){mAudioInit(base);mStickyTop();}
+  if(m.audio)mAudioInit(base);
+  mStickyTop();
   mAskInit(base);
   // a pending deep action lands once, as soon as the page skeleton exists:
   // seek the audio to a search hit's moment (the transcript scroll follows
@@ -1827,7 +1828,13 @@ function mFindClear(){
 function mKey(e){
   if(route.view!=='meeting')return;
   const ae=document.activeElement,typing=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
-  if((e.metaKey||e.ctrlKey)&&(e.key==='f'||e.key==='F')){
+  if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&document.getElementById('mcard')){
+    // Cmd/Ctrl+Enter saves the open card from anywhere inside it, textarea
+    // included (plain Enter there stays a newline); the card's one primary
+    // button IS its save/commit, whichever card is up
+    e.preventDefault();
+    const b=document.querySelector('#mcard .btn.primary');if(b)b.click();
+  }else if((e.metaKey||e.ctrlKey)&&(e.key==='f'||e.key==='F')){
     e.preventDefault();const f=$('#mfind');if(f){f.focus();f.select();}
   }else if(e.key==='/'&&!typing){
     e.preventDefault();const f=$('#mfind');if(f)f.focus();
@@ -1835,8 +1842,21 @@ function mKey(e){
     // n/p step the flag review in place; both skip while typing in any input
     if(MR&&MR.active){e.preventDefault();reviewGo(e.key==='n'?1:-1);}
     else if(e.key==='n'&&document.getElementById('mflagbar')){e.preventDefault();reviewStep();}
-  }else if(e.key==='Escape'&&!typing&&!NP){
-    // leave the stepper / close an open card (the naming panel owns its Escape)
+  }else if(!typing&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&MR&&MR.active&&!_popClose&&!NP
+           &&(e.key==='Enter'||e.key==='a'||e.key==='u')){
+    // the stepping fast path: Enter or a = accept-and-advance, u = swap in the
+    // second engine's version when this flag carries one. A focused button
+    // keeps its own Enter (the two-step confirms stay keyboard-reachable),
+    // and an open popover owns all three keys.
+    if(e.key==='Enter'&&ae&&ae.tagName==='BUTTON')return;
+    if(e.key==='u'){
+      const it=MR.hold?null:MR.items[MR.i];
+      if(!(it&&it.alt&&it.alt.length))return;
+      e.preventDefault();reviewUseAltGo();
+    }else{e.preventDefault();reviewApply('accept');}
+  }else if(e.key==='Escape'&&!typing&&!NP&&!_popClose){
+    // leave the stepper / close an open card (the naming panel and any open
+    // popover own their Escape first)
     if(MR&&MR.active){e.preventDefault();reviewExit();}
     else if(document.getElementById('mcard')){e.preventDefault();mCloseCard();}
   }
@@ -1910,8 +1930,12 @@ async function mAskSend(){
   mAskRender(base);
 }
 function mStickyTop(){
-  const hdr=$('.hdr'),bar=$('#maudio');
-  if(hdr&&bar)bar.style.top=hdr.offsetHeight+'px';
+  // the audio bar docks under the shell header; the review bar (while flag
+  // stepping) docks under the audio bar, or under the header when audioless
+  const hdr=$('.hdr'),bar=$('#maudio'),rb=document.getElementById('mrevbar');
+  const top=hdr?hdr.offsetHeight:56;
+  if(bar)bar.style.top=top+'px';
+  if(rb)rb.style.top=(top+(bar?bar.offsetHeight+6:6))+'px';
 }
 
 /* ============================================================================
@@ -1931,7 +1955,11 @@ function mStickyTop(){
 const ENGINES=[['parakeet','Parakeet &middot; fast'],
   ['mlxwhisper:large-v3','Whisper v3 &middot; thorough'],
   ['mlxwhisper:turbo','Whisper turbo']];
-let MR=null;    // flag stepper state: {items,i,active} (speaker options ride on MP)
+let MR=null;    // flag stepper state: {items,i,active,busy,hold,at} (speaker
+                // options ride on MP). busy: one review POST in flight.
+                // hold: the position is HELD on a spot the card just resolved,
+                // with MR.i already naming the NEXT unresolved item.
+                // at: {index,start} identity of the spot the card sits on.
 
 /* ------------------------------------------------------- the inline card --- *
  * ONE card at a time, mounted as a SIBLING after its segment (the row stays in
@@ -2045,10 +2073,17 @@ function mRefreshSeg(i){
 /* re-fetch the transcript after a STRUCTURAL change (insert / split / delete /
  * a merge folding neighbors into one turn): the server re-issues segments with
  * fresh ORIGINAL indexes, the legend and colors rebuild, and the optional
- * target (an original index from the response) scrolls into view. */
+ * target (an original index from the response) scrolls into view. While flag
+ * stepping is active the reload must not lose the reviewer's place: the scroll
+ * position is restored, the review list is refetched (its snapshot indexes
+ * shifted with the structure), and the stepping position re-anchors to the
+ * nearest surviving spot by START TIME, held (never auto-advanced). */
 async function mReloadSegs(target){
   if(!MP)return;
   const base=MP.base;
+  const stepping=!!(MR&&MR.active);
+  const anchor=stepping&&MR.at?MR.at.start:null;
+  const y=window.scrollY;
   let d;
   try{d=await api('/api/transcript?base='+encodeURIComponent(base));}
   catch(e){d={error:'The transcript could not be reloaded.'};}
@@ -2065,6 +2100,35 @@ async function mReloadSegs(target){
   body.innerHTML=mBodyHTML();
   mLegend(d);
   mSyncFlagStrip();
+  if(stepping){
+    let rv;
+    try{rv=await api('/api/review?base='+encodeURIComponent(base));}
+    catch(e){rv=null;}
+    if(route.view!=='meeting'||route.base!==base)return;
+    if(!MR||!MR.active){refresh();return;}         // exited while refetching
+    if(!rv||rv.error||!rv.items||!rv.items.length)reviewExit();
+    else{
+      if(rv.speakers&&rv.speakers.length)MP.spkOpts=rv.speakers;
+      if(rv.people)MP.people=rv.people;
+      const items=_revOrder(rv.items);
+      // held position: MR.i re-aims at the next unresolved flag AT or BELOW
+      // the anchor in document order; past the last it wraps to the earliest
+      const a=anchor!=null?anchor:items[0].start;
+      let bi=items.findIndex(x=>x.start>=a-0.25);
+      if(bi<0)bi=0;
+      MR.items=items;MR.i=bi;MR.hold=true;
+      // keep the held spot readable: re-mark the nearest surviving segment
+      if(anchor!=null){
+        const p=MP.segs.findIndex(g=>Math.abs(g.start-anchor)<0.25);
+        const el=p>=0?document.getElementById('mseg'+p):null;
+        if(el)el.classList.add('mrev');
+      }
+      reviewBarSync();
+    }
+    _instantScroll(y);                             // the reader stays put
+    refresh();
+    return;
+  }
   if(target!=null){
     const p=MP.segs.findIndex(g=>g.index===target);
     const el=p>=0?document.getElementById('mseg'+p):null;
@@ -2077,10 +2141,22 @@ async function mReloadSegs(target){
   refresh();
 }
 
-/* ------------------------------------------------------- the flag stepper -- */
+/* ------------------------------------------------------- the flag stepper -- *
+ * Stepping is a CONVEYOR, the card is a WORKSPACE. While stepping, a compact
+ * verdict bar docks under the sticky audio bar (under the shell header when
+ * the meeting has no audio) so its controls NEVER move while the transcript
+ * scrolls beneath. Bar actions are verdicts and ADVANCE (Accept, Use alt,
+ * Skip, the arrows, Enter/a/u); card actions are work at a spot the reviewer
+ * chose and HOLD POSITION (Save, split, remove, insert). */
 // the strip is the controller: the first click starts on the first flag,
 // later clicks (and n/p) step through the rest
 function reviewStep(){if(MR&&MR.active)reviewGo(1);else reviewStart(0);}
+/* the server fronts substantial flags (its list groups by weight); the walk
+ * must read the TRANSCRIPT top to bottom, so the list re-sorts to document
+ * order -- start time, original index as the tiebreak -- at fetch and reload */
+function _revOrder(items){
+  return (items||[]).slice().sort((a,b)=>(a.start-b.start)||(a.index-b.index));
+}
 async function reviewStart(at){
   if(!MP||!MP.built)return;
   const base=MP.base;
@@ -2090,20 +2166,83 @@ async function reviewStart(at){
   if(route.view!=='meeting'||route.base!==base)return;
   if(d.error)return;
   if(!d.items||!d.items.length){MR=null;mSyncFlagStrip();refresh();return;}
-  MR={items:d.items,i:Math.min(at||0,d.items.length-1),active:true};
+  MR={items:_revOrder(d.items),i:Math.min(at||0,d.items.length-1),active:true,
+      busy:false,hold:false,at:null};       // i=0 is the FIRST flag on the page
   // the review list's speaker options are fresher than the page load's copy
   if(d.speakers&&d.speakers.length)MP.spkOpts=d.speakers;
   if(d.people)MP.people=d.people;
+  reviewBarMount();
   renderReviewCard();
 }
 function reviewGo(d){
-  if(!MR||!MR.active)return;
-  const j=MR.i+d;
-  if(j<0)return;
-  if(j>=MR.items.length){reviewExit();return;}   // stepped past the last: done
-  MR.i=j;renderReviewCard();
+  if(!MR||!MR.active||MR.busy)return;   // a verdict in flight owns MR.i
+  if(!MR.items.length){reviewExit();return;}     // everything resolved: done
+  if(MR.hold){
+    // the position was held on a resolved spot: MR.i already names the next
+    // unresolved item, so forward just lands there; back takes the one before
+    MR.hold=false;
+    MR.i=d<0?(MR.i-1+MR.items.length)%MR.items.length:MR.i%MR.items.length;
+  }else MR.i=(MR.i+d+MR.items.length)%MR.items.length;   // wraps at both ends
+  renderReviewCard();
 }
-function reviewExit(){MR=null;mCloseCard();mSyncFlagStrip();}
+function reviewExit(){MR=null;reviewBarUnmount();mCloseCard();mSyncFlagStrip();}
+
+/* ------------------------------------------------- the sticky verdict bar -- */
+function _mRevBar(){
+  return `<div class="mrevbar" id="mrevbar" role="toolbar" aria-label="Step through the flagged lines">
+    <span class="mrbcount" id="mrbcount"></span>
+    <button class="iact" type="button" onclick="reviewGo(-1)" title="Previous flag (p)">&#8249;</button>
+    <button class="iact" type="button" onclick="reviewGo(1)" title="Next flag (n)">&#8250;</button>
+    ${MP.hasAudio?`<button class="iact" type="button" onclick="reviewPlay()"
+      title="Play this flag&#8217;s stretch of the recording">&#9654; Play</button>`:''}
+    <button class="btn primary mini" id="mrbaccept" type="button" onclick="reviewApply('accept')"
+      title="This line is accurate: clear the flag and go to the next (Enter or a)">&#10003; Accept</button>
+    <button class="btn mini" id="mrbalt" type="button" onclick="reviewUseAltGo()"
+      title="Swap in the second engine&#8217;s version and go to the next (u)">Use alt</button>
+    <button class="btn mini" type="button" onclick="reviewGo(1)"
+      title="Leave it flagged and look at the next one (n)">Skip</button>
+    <button class="iact mrbdone" type="button" onclick="reviewExit()"
+      title="Stop stepping; unresolved lines stay flagged (Escape)">&#10005; done</button>
+    <span class="grow"></span>
+    <button class="btn mini" id="mrbminor" type="button" onclick="reviewAcceptMinor(this)"
+      title="Sub-second crosstalk crumbs (&#8220;like&#8221;, &#8220;so&#8221;&#8230;): accept them all in one click; substantial lines stay"></button>
+    <button class="btn mini" id="mrball" type="button" onclick="reviewAcceptAllAsk(this)"
+      title="Accept every remaining flagged line exactly as transcribed"></button>
+  </div>`;
+}
+function reviewBarMount(){
+  if(document.getElementById('mrevbar'))return;
+  const anchor=document.getElementById('maudio')
+    ||document.querySelector('#meetingpage .mhead');
+  if(!anchor)return;
+  anchor.insertAdjacentHTML('afterend',_mRevBar());
+  const strip=document.getElementById('mflagbar');
+  if(strip)strip.hidden=true;                    // the bar replaces the strip
+  mStickyTop();
+  reviewBarSync();
+}
+function reviewBarUnmount(){
+  const b=document.getElementById('mrevbar');if(b)b.remove();
+  const strip=document.getElementById('mflagbar');
+  if(strip)strip.hidden=false;                   // the strip returns on exit
+}
+/* the bar re-derives everything visible from MR after every step/resolution:
+ * position counter, alt availability, the minor and accept-all counts */
+function reviewBarSync(){
+  if(!MR||!document.getElementById('mrevbar'))return;
+  const n=MR.items.length,it=MR.hold?null:MR.items[MR.i];
+  const c=document.getElementById('mrbcount');
+  if(c)c.innerHTML=MR.hold
+    ?`&#10003; saved &middot; ${n} left`
+    :`&#9888; ${MR.i+1} of ${n}`;
+  const alt=document.getElementById('mrbalt');
+  if(alt)alt.disabled=!(it&&it.alt&&it.alt.length);
+  const minors=MR.items.filter(x=>x.minor).length;
+  const mb=document.getElementById('mrbminor');
+  if(mb){mb.hidden=!minors;if(minors)mb.innerHTML=`&#10003; Accept ${minors} minor`;}
+  const all=document.getElementById('mrball');
+  if(all){all.hidden=!n;if(n)all.innerHTML=`Accept all ${n} remaining&#8230;`;}
+}
 // the array position of a review item's segment: matched by ORIGINAL index,
 // with start-time proximity as the fallback (same spirit as the server's own
 // _locate_segment cross-check)
@@ -2112,13 +2251,17 @@ function _revPos(it){
   if(p<0)p=MP.segs.findIndex(g=>Math.abs(g.start-it.start)<0.25);
   return p;
 }
+/* the inline card: the WORKSPACE for real edits at the flagged segment. The
+ * verdict controls (prev/next, accept, skip, play) live in the bar above; the
+ * card keeps the flag reason, the alt preview, speaker+text editing, and Save.
+ * Save holds position (reviewSave); only the bar or its keys move on. */
 function renderReviewCard(){
   const it=MR.items[MR.i];
   const p=_revPos(it);
   const el=p>=0?document.getElementById('mseg'+p):null;
   if(!el){reviewExit();return;}    // transcript changed underneath: bow out quietly
-  mCloseCard();
-  el.classList.add('mrev');
+  MR.hold=false;
+  MR.at={index:it.index,start:it.start};
   const alts=(it.alt||[]).map((a,k)=>`<div class="mcalt">Second engine heard
       &#8220;<b>${esc(a.theirs||'(nothing)')}</b>&#8221; where this says
       &#8220;${esc(a.ours||'(nothing)')}&#8221;
@@ -2127,7 +2270,6 @@ function renderReviewCard(){
   const card=mCardEl(`
     <div class="mcrow mchead">
       <span class="mcflag">&#9888; ${esc(it.flags.join(', '))}${it.minor?' &middot; minor':''}</span>
-      <span class="mcpos">${MR.i+1} of ${MR.items.length}</span>
     </div>
     ${alts}
     <div class="mcrow">
@@ -2135,17 +2277,17 @@ function renderReviewCard(){
       <textarea id="mctext" class="mctext" aria-label="Corrected text">${esc(it.text)}</textarea>
     </div>
     <div class="mcrow mcbtns">
-      ${MP.hasAudio?`<button class="iact" type="button" onclick="reviewPlay()" title="Play just this stretch of the recording">&#9654; Play clip</button>`:''}
       <span class="grow"></span>
-      <button class="btn mini" type="button" onclick="reviewGo(1)" title="Leave it flagged and look at the next one">Skip</button>
-      <button class="btn mini" type="button" onclick="reviewApply('accept')" title="The speaker and text are right: clear the flag">Accept as-is</button>
-      <button class="btn primary mini" type="button" onclick="reviewApply('edit')" title="Save the corrected speaker/text back to the transcript files">Save changes</button>
+      <button class="btn primary mini" type="button" onclick="reviewSave()"
+        title="Save the corrected speaker/text and stay here (&#8984;Enter); step on with the bar">Save changes</button>
     </div>
     <div id="mcerr" class="mcerr" hidden></div>`,el,'mrevcard');
+  el.classList.add('mrev');   // AFTER mCardEl: its mCloseCard clears the marks
   mWireNew(card.querySelector('#mcspk'));
   el.scrollIntoView({block:'center'});
   reviewPlay();
   mSyncFlagStrip();
+  reviewBarSync();
 }
 function reviewUseAlt(k){
   const a=MR.items[MR.i].alt[k],ta=$('#mctext');
@@ -2160,8 +2302,14 @@ function reviewPlay(){
   const it=MR&&MR.items[MR.i];
   if(it&&MP&&MP.hasAudio)mPlaySpan(it.start,it.end);
 }
+/* a BAR verdict on the current flag: resolves it and ADVANCES to the next
+ * unresolved one (wrapping past the end). Card work goes through reviewSave
+ * below, which holds position instead. */
 async function reviewApply(action){
+  if(!MR||!MR.active||MR.busy)return;
+  if(MR.hold){reviewGo(1);return;}   // the held spot is already resolved: move on
   const it=MR.items[MR.i];
+  if(!it)return;
   // the item carries the segment's ORIGINAL json index; start is the server's
   // cross-check in case the file changed since the list was fetched
   const body={base:MP.base,index:it.index,start:it.start,action};
@@ -2170,34 +2318,144 @@ async function reviewApply(action){
     if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
     body.text=$('#mctext').value;body.speaker=v;
   }
-  const r=await api('/api/review',body);
+  MR.busy=true;
+  let r;
+  try{r=await api('/api/review',body);}
+  catch(e){r={error:'Save failed'};}
+  if(MR)MR.busy=false;
+  if(!MP||route.view!=='meeting')return;   // navigated away while saving
   if(!r.ok){mCardErr(r.error||'Save failed');return;}
   if(r.merged){
-    // the reassignment folded neighbors into one turn: every later index in
-    // this pre-fetched list may be stale. Reload, then refetch the list.
+    // the reassignment folded neighbors into one turn: every index in this
+    // pre-fetched list may be stale. mReloadSegs refetches the list and
+    // re-anchors the stepping position in place.
     await mReloadSegs(r.index);
-    reviewStart(0);
     return;
   }
   if(action==='edit'&&(body.speaker||'').startsWith('name:')){
     await mReloadSegs();             // a new person joined: fresh legend/colors
-  }else{
-    const p=_revPos(it);
-    if(p>=0){
-      const g=MP.segs[p];
-      if(action==='edit'){
-        g.text=body.text;g.edited=true;
-        const sp=MP.spkOpts.find(s=>s.id===body.speaker);
-        if(sp){g.who=sp.display;g.speaker=sp.id;}
-      }
-      g.flags=[];
-      mRefreshSeg(p);
-    }
+    return;                          // (stepping re-anchored inside)
   }
+  const p=_revPos(it);
+  if(p>=0){
+    const g=MP.segs[p];
+    if(action==='edit'){
+      g.text=body.text;g.edited=true;
+      const sp=MP.spkOpts.find(s=>s.id===body.speaker);
+      if(sp){g.who=sp.display;g.speaker=sp.id;}
+    }
+    g.flags=[];
+    mRefreshSeg(p);
+  }
+  if(!MR||!MR.active){mSyncFlagStrip();refresh();return;}  // exited mid-save:
+                                                           // counts stay honest
   MR.items.splice(MR.i,1);           // resolved: counts update optimistically
   if(!MR.items.length){reviewExit();refresh();return;}
-  if(MR.i>=MR.items.length)MR.i=MR.items.length-1;
+  if(MR.i>=MR.items.length)MR.i=0;   // the next unresolved is the first: wrap
   renderReviewCard();
+}
+/* Save from the card: the card is a workspace, so the position HOLDS. The
+ * card stays open at this segment, updated in place; the counter, strip, and
+ * tray still drop optimistically when the save resolves the flag; stepping
+ * moves on only from the bar (or Enter/n) afterwards. */
+async function reviewSave(){
+  if(!MR||!MR.active||MR.busy)return;
+  const at=MR.at;if(!at)return;
+  const v=$('#mcspk')?$('#mcspk').value:null;
+  if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
+  const body={base:MP.base,index:at.index,start:at.start,action:'edit',
+    text:$('#mctext')?$('#mctext').value:'',speaker:v};
+  MR.busy=true;
+  let r;
+  try{r=await api('/api/review',body);}
+  catch(e){r={error:'Save failed'};}
+  if(MR)MR.busy=false;
+  if(!MP||route.view!=='meeting')return;   // navigated away while saving
+  if(!r.ok){mCardErr(r.error||'Save failed');return;}
+  if(r.merged){await mReloadSegs(r.index);return;}   // position re-anchored inside
+  if((v||'').startsWith('name:')){await mReloadSegs(at.index);return;}
+  const p=_revPos(at);
+  if(p>=0){
+    const g=MP.segs[p];
+    g.text=body.text;g.edited=true;g.flags=[];
+    const sp=MP.spkOpts.find(s=>s.id===v);
+    if(sp){g.who=sp.display;g.speaker=sp.id;}
+    mRefreshSeg(p);
+    const el=document.getElementById('mseg'+p);
+    if(el)el.classList.add('mrev');                  // still the held spot
+  }
+  if(!MR||!MR.active){mSyncFlagStrip();refresh();return;}  // exited mid-save
+  // resolve the item WITHOUT moving: MR.i comes to name the next unresolved
+  const k=MR.items.findIndex(x=>x.index===at.index);
+  if(k>=0){
+    MR.items.splice(k,1);
+    if(MR.i>k)MR.i--;
+    else if(MR.i===k){MR.hold=true;if(MR.i>=MR.items.length)MR.i=0;}
+  }
+  const f=document.querySelector('#mcard .mcflag');
+  if(f)f.innerHTML='&#10003; saved &middot; edit on, or step ahead with the bar';
+  document.querySelectorAll('#mcard .mcalt').forEach(x=>x.remove());
+  mSyncFlagStrip();reviewBarSync();refresh();
+}
+/* the bar's one-click alternative: swap the second engine's text into the
+ * card and save it -- a verdict, so it advances like Accept */
+function reviewUseAltGo(){
+  if(!MR||!MR.active||MR.busy||MR.hold)return;
+  const it=MR.items[MR.i];
+  if(!it||!it.alt||!it.alt.length||!$('#mctext'))return;
+  it.alt.forEach((_,k)=>reviewUseAlt(k));
+  reviewApply('edit');
+}
+/* accept-all: the FAR-end escape hatch behind the house two-step (never a
+ * native dialog). Accepts every remaining flag as-is, one existing accept
+ * POST per item, with the bar's counts dropping as each one lands. */
+function reviewAcceptAllAsk(btn){
+  if(!MR||!MR.active||MR.busy||!MR.items.length)return;
+  const n=MR.items.length;
+  const pop=$('#rowmenu');
+  openPop(pop,btn,()=>{
+    pop.innerHTML=`<div class="ppconfirm">
+      <div class="ppctitle">Accept all ${n} remaining flag${n>1?'s':''}?</div>
+      <div class="ppcnote">Every remaining flagged line is kept exactly as transcribed,
+        wrong words and uncertain speakers included, and its flag is cleared.
+        Lines you have not listened to are trusted as-is. Any line can still be
+        edited later with its pencil.</div>
+      <div class="ppcrow">
+        <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="reviewAcceptAllGo(this)">Accept all ${n}</button>
+      </div></div>`;
+  });
+}
+async function reviewAcceptAllGo(btn){
+  if(!MR||!MR.active||MR.busy)return;
+  if(btn){btn.disabled=true;btn.innerHTML='Accepting&#8230;';}
+  MR.busy=true;
+  const base=MP.base;
+  for(const it of MR.items.slice()){
+    let r;
+    try{r=await api('/api/review',{base,index:it.index,start:it.start,action:'accept'});}
+    catch(e){r={error:'The server did not answer.'};}
+    if(route.view!=='meeting'||route.base!==base||!MR||!MR.active)return;
+    if(!r.ok){
+      MR.busy=false;
+      const pop=$('#rowmenu');
+      if(pop&&!pop.hidden)pop.innerHTML=`<div class="ppconfirm">
+        <div class="ppctitle">Could not accept every flag</div>
+        <div class="ppcnote err">${esc(r.error||'A line failed to accept.')} The rest stay flagged.</div>
+        <div class="ppcrow"><button class="btn mini" type="button" onclick="closePop()">Close</button></div></div>`;
+      mSyncFlagStrip();reviewBarSync();refresh();
+      return;
+    }
+    const p=_revPos(it);
+    if(p>=0){MP.segs[p].flags=[];mRefreshSeg(p);}
+    const k=MR.items.indexOf(it);
+    if(k>=0){MR.items.splice(k,1);if(MR.i>k)MR.i--;}
+    reviewBarSync();                 // the count drops as each accept lands
+  }
+  MR.busy=false;
+  closePop();
+  reviewExit();
+  refresh();
 }
 // one click on the strip accepts every sub-second crumb; substantial items stay
 async function reviewAcceptMinor(btn){
@@ -2212,13 +2470,22 @@ async function reviewAcceptMinor(btn){
     if(g.flags&&g.flags.length&&mIsMinor(g)){g.flags=[];mRefreshSeg(p);}
   });
   if(MR&&MR.active){
-    const cur=MR.items[MR.i];
+    const cur=MR.hold?null:MR.items[MR.i];
     MR.items=MR.items.filter(x=>!x.minor);
-    if(!MR.items.length)reviewExit();
-    else{
-      let ni=MR.items.indexOf(cur);
-      if(ni<0)ni=Math.min(MR.i,MR.items.length-1);
-      MR.i=ni;renderReviewCard();
+    if(!MR.items.length&&!MR.hold)reviewExit();
+    else if(cur&&!cur.minor){
+      // the spot we are on survives: NEVER rebuild its card (it may hold an
+      // edit in progress); only the counts move
+      MR.i=MR.items.indexOf(cur);
+      reviewBarSync();
+    }else if(cur){
+      // the spot we were on was itself a crumb and just got accepted
+      MR.i=Math.min(MR.i,MR.items.length-1);
+      renderReviewCard();
+    }else{
+      // held position: stay put, re-aim MR.i at a surviving item
+      MR.i=Math.max(0,Math.min(MR.i,MR.items.length-1));
+      reviewBarSync();
     }
   }
   mSyncFlagStrip();
@@ -2228,7 +2495,9 @@ async function reviewAcceptMinor(btn){
 /* ----------------------------------------------------- the edit card ------- */
 function mEdit(i,ev){
   if(ev)ev.stopPropagation();
-  if(MR&&MR.active)reviewExit();     // one repair mode at a time
+  // ONE card at a time (mCardEl swaps any open review card out), but stepping
+  // stays armed: the editor is workspace at a spot the user chose, and the
+  // bar still owns moving on
   const g=MP.segs[i],el=document.getElementById('mseg'+i);
   if(!g||!el)return;
   const defEng=(S&&S.model==='parakeet')?'mlxwhisper:large-v3':'parakeet';
@@ -2272,6 +2541,19 @@ async function mEditSave(i,ev){
   if(sp){g.who=sp.display;g.speaker=sp.id;}
   mCloseCard();
   mRefreshSeg(i);
+  if(MR&&MR.active){
+    // editing resolved this line's flag server-side: drop it from the walk
+    // WITHOUT moving (card work holds position; the bar moves on)
+    const k=MR.items.findIndex(x=>x.index===g.index);
+    if(k>=0){
+      MR.items.splice(k,1);
+      if(MR.i>k)MR.i--;
+      else if(MR.i===k){MR.hold=true;if(MR.i>=MR.items.length)MR.i=0;}
+    }
+    const el=document.getElementById('mseg'+i);
+    if(el&&MR.at&&Math.abs(MR.at.start-g.start)<0.25)el.classList.add('mrev');
+    reviewBarSync();
+  }
   mSyncFlagStrip();
 }
 // two-step removal, inside the card (house style: never a native dialog)
@@ -2348,7 +2630,7 @@ function mParseT(v){
   return p.reverse().reduce((acc,x,k)=>acc+x*Math.pow(60,k),0);
 }
 function mInsertAt(i,at){            // i = the gap's index (-1 before the first line)
-  if(MR&&MR.active)reviewExit();
+  // stepping survives an insert: the position re-anchors after the reload
   const g=MP.segs[i];                // undefined for i=-1
   const start=at!=null?at:(g?g.end:0);
   const gap=document.getElementById('mgap'+i);
