@@ -168,3 +168,52 @@ def test_one_time_speakers_flag_survives_relabel(sandbox):
     _seed_meeting("Normal Mtg")
     assert relabel.relabel_one("Normal Mtg")
     assert len(unknowns.load()["speakers"]) == 2  # control: normal path registers
+
+
+def test_naming_queued_during_a_pass_survives_it_and_both_names_land(sandbox, monkeypatch):
+    """Two rapid namings: the first spawns relabel pass A; the second lands
+    while A is still running, so its own relabel hits A's lock and queues the
+    follow-up flag. A must consume only the flag present when it STARTED —
+    it used to clear the flag at exit, silently cancelling the promised
+    follow-up, and the second name never applied to any transcript. The
+    kicked follow-up pass then lands the second name."""
+    import sys as _sys
+
+    import relabel
+    from stt import identify
+
+    _seed_meeting("Mtg")
+    rng = np.random.default_rng(3)                      # _seed_meeting's vectors
+    va, vb = rng.normal(size=256), rng.normal(size=256)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    identify.enroll("Alice", va, source="Mtg")          # naming #1 -> pass A spawns
+
+    real_one = relabel.relabel_one
+    flag = config.PROJECT_DIR / relabel.PENDING_FLAG_NAME
+
+    def mid_pass(base, **kw):
+        ok = real_one(base, **kw)
+        # naming #2 lands while pass A is still running: its spawned relabel
+        # fails A's lock and queues the follow-up
+        identify.enroll("Bob", vb, source="Mtg")
+        flag.write_text("all")
+        return ok
+
+    monkeypatch.setattr(relabel, "relabel_one", mid_pass)
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "--all"])
+    assert relabel.main() == 0
+
+    assert flag.exists()                                # the queued follow-up SURVIVED pass A
+    names = {s["name"] for s in
+             json.loads(mfile("Mtg", ".json").read_text())["speakers"]}
+    assert "Alice" in names                             # name #1 landed in pass A
+    assert "Bob" not in names                           # name #2 correctly still pending
+
+    # the follow-up pass the panel kicks once the lock frees
+    monkeypatch.setattr(relabel, "relabel_one", real_one)
+    assert relabel.main() == 0
+    assert not flag.exists()                            # consumed by the pass that covers it
+    names = {s["name"] for s in
+             json.loads(mfile("Mtg", ".json").read_text())["speakers"]}
+    assert {"Alice", "Bob"} <= names

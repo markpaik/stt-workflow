@@ -663,10 +663,14 @@ def main():
     pending = config.PROJECT_DIR / "relabel_pending.flag"
     if pending.exists():
         print("Applying speaker names given during the run (queued relabel)…", flush=True)
+        # consume BEFORE the pass (same reason as relabel.main): a naming that
+        # lands while relabel_all runs re-queues the flag, and it must survive
+        # this sweep for the panel's kick to honor it — unlinking afterwards
+        # would silently cancel the follow-up.
+        pending.unlink(missing_ok=True)
         try:
             import relabel as _relabel
             _relabel.relabel_all()
-            pending.unlink(missing_ok=True)
         except Exception as e:
             print(f"   queued relabel failed: {e}", file=sys.stderr)
 

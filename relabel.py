@@ -180,6 +180,14 @@ def main():
         return 0
 
     if args.all:
+        # consume the queued flag NOW, not at exit: this pass reads voiceprints
+        # fresh per meeting, so it covers every naming made up to this instant.
+        # A flag written DURING the pass (a naming landed mid-run, its own
+        # relabel hit our lock and queued) must SURVIVE it — clearing the flag
+        # at exit silently cancelled the promised follow-up, and names given
+        # mid-pass never applied. (A single-meeting relabel must not consume
+        # a queued relabel-all either way, hence inside `if args.all`.)
+        (config.PROJECT_DIR / PENDING_FLAG_NAME).unlink(missing_ok=True)
         bases = all_bases()
     else:
         bases = args.meetings
@@ -192,8 +200,6 @@ def main():
             relabel_one(base, strict=args.strict or None, allowed_names=allowed)
         except Exception as e:
             print(f"  FAILED {base}: {e}", file=sys.stderr)
-    if args.all:  # a single-meeting relabel must NOT clear a queued relabel-all
-        (config.PROJECT_DIR / PENDING_FLAG_NAME).unlink(missing_ok=True)
     return 0
 
 

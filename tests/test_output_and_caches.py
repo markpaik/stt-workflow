@@ -348,6 +348,44 @@ def test_promoted_split_voice_does_not_resurrect_as_new_unknown(sandbox):
     assert out["SC"].startswith("U")
 
 
+def test_stranger_resembling_enrolled_person_re_mints_after_hard_delete(sandbox):
+    """A cluster whose unknown entry was HARD-DELETED (registry GC) must be
+    re-registered by the next relabel. The enrolled-voice mint gate used to
+    fire on mere resemblance (>= MATCH_MIN): a DISTINCT stranger scoring ~0.65
+    against somebody enrolled was suppressed forever — no registry entry,
+    nothing in the panel to raise, an unresolvable raw label in the transcript
+    (the third-voice-never-raised bug). Only a genuine split fragment of the
+    enrolled voice (>= SPLIT_SIM) stays suppressed."""
+    from stt import identify
+
+    rng = np.random.default_rng(11)
+    u = rng.normal(size=256)
+    u /= np.linalg.norm(u)
+    w1 = rng.normal(size=256)
+    w1 -= (w1 @ u) * u
+    w1 /= np.linalg.norm(w1)
+    w2 = rng.normal(size=256)
+    w2 -= (w2 @ u) * u + (w2 @ w1) * w1
+    w2 /= np.linalg.norm(w2)
+    identify.enroll("Brenda", u, source="Hearing")
+
+    # a stranger RESEMBLING Brenda (0.65: >= MATCH_MIN, below SPLIT_SIM) whose
+    # own unknown entry no longer exists (GC'd): must mint fresh, not orphan
+    stranger = 0.65 * u + np.sqrt(1 - 0.65 ** 2) * w1
+    out = unknowns.assign({"S1": u, "S2": stranger},
+                          {"S1": "Brenda", "S2": None}, "Hearing")
+    assert out.get("S2", "").startswith("U")            # nameable again
+    assert unknowns.load()["speakers"][out["S2"]]["meetings"] == ["Hearing"]
+
+    # a genuine split FRAGMENT of Brenda's own voice still never mints
+    frag = 0.9 * u + np.sqrt(1 - 0.9 ** 2) * w2
+    out2 = unknowns.assign({"S1": u, "S2": stranger, "S3": frag},
+                           {"S1": "Brenda", "S2": None, "S3": None}, "Hearing")
+    assert out2["S2"] == out["S2"]                      # stranger keeps their number
+    assert "S3" not in out2                             # fragment suppressed
+    assert set(unknowns.load()["speakers"]) == {out["S2"]}  # nothing else minted
+
+
 def test_diarcache_channel_extras_roundtrip_and_backcompat(sandbox):
     p = sandbox / "m.diar.npz"
     turns = [{"start": 0.0, "end": 2.0, "cluster": "SPEAKER_00"}]

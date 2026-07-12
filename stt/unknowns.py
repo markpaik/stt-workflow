@@ -112,6 +112,30 @@ def display(uid: str) -> str:
         return str(uid)
 
 
+def _enrolled_fragment(v, enrolled: dict, cluster_names: dict, cent_emb: dict) -> bool:
+    """Is this unnamed cluster really an ENROLLED person's voice (a split
+    fragment), rather than a distinct stranger who merely resembles one?
+    True when it scores at split-fragment level (SPLIT_SIM) against a person's
+    enrolled samples, or when it resembles (>= MATCH_MIN) a person who is
+    already named to a split-similar cluster in this same meeting."""
+    for name, s in enrolled.items():
+        if s is None:
+            continue
+        sc = score_against(v, s)
+        if sc >= SPLIT_SIM:
+            return True  # effectively the same voice as the enrolled samples
+        if sc < MATCH_MIN:
+            continue
+        for lbl, nm in cluster_names.items():
+            if nm != name or lbl not in cent_emb:
+                continue
+            c = np.asarray(cent_emb[lbl], float)
+            if (np.isfinite(c).all() and np.linalg.norm(c)
+                    and cosine(v, c) >= SPLIT_SIM):
+                return True  # their named cluster here is this voice's twin
+    return False
+
+
 def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
     """For each UNNAMED cluster with a usable centroid, return {label: global_uid},
     matching returning unknowns and registering new ones."""
@@ -160,17 +184,24 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                     # recognizing this voice)
                     continue
             else:
-                # never mint a NEW unknown for a voice that strongly matches an
-                # ENROLLED person. Naming an unknown moves its samples into the
-                # enrolled profile verbatim and deletes the unknown entry — but
-                # a meeting where the diarizer SPLIT that person into two
-                # clusters can name only one of them (open-set one-name-per-
-                # meeting rule), so the loser cluster matched nothing here and
-                # resurrected as a fresh "Speaker 1" seconds after the naming.
-                # A voice this close to an enrolled person is not a stranger
-                # worth tracking; it keeps its transcript-local label.
-                if any(score_against(v, s) >= MATCH_MIN
-                       for s in enrolled.values() if s is not None):
+                # never mint a NEW unknown for a voice that IS an enrolled
+                # person. Naming an unknown moves its samples into the enrolled
+                # profile verbatim and deletes the unknown entry — but a meeting
+                # where the diarizer SPLIT that person into two clusters can
+                # name only one of them (open-set one-name-per-meeting rule),
+                # so the loser cluster matched nothing here and resurrected as
+                # a fresh "Speaker 1" seconds after the naming. That gate used
+                # to fire on mere RESEMBLANCE (>= MATCH_MIN), which orphaned
+                # real strangers: once their unknown entry is gone (hard-
+                # deleted in a registry GC), a distinct voice scoring 0.6
+                # against somebody enrolled could never register again — no
+                # registry entry, nothing in the panel to name, the cluster's
+                # raw label unresolvable forever. Suppress only a genuine
+                # same-voice match: split-fragment-level similarity (SPLIT_SIM,
+                # the same "one person over-segmented" bar used above), to the
+                # enrolled samples themselves or to a cluster in THIS meeting
+                # that already carries that person's name.
+                if _enrolled_fragment(v, enrolled, cluster_names, cent_emb):
                     continue
                 # lowest free number: after unknowns get named, new voices start
                 # back at Speaker 1 instead of counting up forever
