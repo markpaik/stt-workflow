@@ -266,6 +266,61 @@ def _queue_file(name):
     return None
 
 
+_UPLOAD_MAX = 2 * 1024 ** 3  # 2 GB — refuse anything larger outright
+# serialize uniquify->replace: two concurrent uploads of the same name on
+# separate server threads must not both pick the same free target
+_upload_lock = threading.Lock()
+
+
+def _upload_name(raw) -> str | None:
+    """The filename an uploaded file may land as, or None to refuse.
+
+    Uploads are the one place a client-supplied name BECOMES a file on disk,
+    so it goes through the same character rules as every name the app mints
+    (summarize._sanitize_name, mirroring recorder.final_name): only the last
+    path component is kept, path/wildcard/control chars are dropped, and
+    leading dots are stripped — no traversal, no dotfile (the watcher must
+    keep skipping in-progress captures), no '..'. The extension allowlist is
+    AUDIO_EXTS — the SAME set the folder watcher picks up, so anything
+    droppable is anything watchable — checked case-insensitively and
+    normalized to lower."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    from stt import summarize
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1]  # basename, either separator
+    ext = Path(name).suffix.lower()
+    if ext not in config.AUDIO_EXTS:
+        return None
+    stem = summarize._sanitize_name(name[:-len(ext)])
+    if not stem:
+        return None
+    return stem + ext
+
+
+def _upload_target(dest: Path, name: str) -> Path:
+    """Where an upload called `name` may land: the house ' (N)' uniquify
+    (recorder._uniquify's rule). Never overwrite a file in EITHER watched
+    folder (a basename shared across them collides on one meeting folder and
+    one manifest key — run_batch would skip one), and never mint a stem that
+    collides with an existing or archived meeting (registries reference
+    meetings by name; a redo goes through the explicit Redo path, not a
+    filename collision)."""
+    stem, ext = os.path.splitext(name)
+
+    def taken(s):
+        return ((dest / f"{s}{ext}").exists()
+                or (config.recordings_dir() / f"{s}{ext}").exists()
+                or config.meeting_dir(s).exists()
+                or (config.archive_dir() / s).exists())
+
+    if not taken(stem):
+        return dest / name
+    i = 2
+    while taken(f"{stem} ({i})"):
+        i += 1
+    return dest / f"{stem} ({i}){ext}"
+
+
 def _display_title(base: str) -> str:
     """The folder name minus its trailing date stamp, so 'Weekly Check-in 07102026'
     shows as 'Weekly Check-in' (the date is shown separately). The date lives in
@@ -921,6 +976,59 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(chunk)
 
+    def _upload(self, q):
+        """POST /api/upload?name=<filename> — land one audio file in the primary
+        watched folder (source_dir), where the folder watcher/queue picks it up
+        like any other drop-in (held/pause semantics unchanged: with automation
+        off it simply shows as waiting). The raw request body IS the file — this
+        server has no multipart parser — and the filename travels as the `name`
+        query param. The body streams in chunks to a dot-prefixed .part tmp in
+        the SAME directory and is os.replace'd into its final name, so the
+        watcher (which skips dotfiles and never matches .part) cannot see a
+        partial file, and a broken upload leaves nothing behind."""
+        final = _upload_name(q.get("name"))
+        if final is None:
+            self._json({"error": "filename must end in one of: "
+                                 + ", ".join(sorted(config.AUDIO_EXTS))}, 400)
+            return
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self._json({"error": "Content-Length required"}, 400)
+            return
+        if n <= 0:
+            self._json({"error": "empty upload"}, 400)
+            return
+        if n > _UPLOAD_MAX:
+            self._json({"error": "file too large (2 GB max)"}, 413)
+            return
+        import tempfile
+        dest = config.source_dir()
+        dest.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".upload-", suffix=".part", dir=str(dest))
+        tmp = Path(tmp)
+        try:
+            remaining = n
+            with os.fdopen(fd, "wb") as out:
+                while remaining:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:  # client vanished mid-body
+                        tmp.unlink(missing_ok=True)
+                        try:  # the connection is likely already gone
+                            self._json({"error": "connection closed mid-upload"}, 400)
+                        except OSError:
+                            pass
+                        return
+                    out.write(chunk)
+                    remaining -= len(chunk)
+            with _upload_lock:
+                target = _upload_target(dest, final)
+                os.replace(tmp, target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        self._json({"ok": True, "name": target.name})
+
     def _require_base(self, base) -> bool:
         """Validate `base` against real meeting basenames; on failure, send the
         400 and tell the caller to stop. Every handler that turns a client-
@@ -1101,6 +1209,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
+            if u.path == "/api/upload":
+                # raw-body upload — must branch BEFORE _body(), which would
+                # buffer the whole file and try to parse it as JSON
+                self._upload(dict(urllib.parse.parse_qsl(u.query)))
+                return
             b = self._body()
             if u.path == "/api/run":
                 # every run goes through the job queue: it starts immediately
