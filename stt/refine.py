@@ -157,18 +157,34 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                     if "short_low_confidence" not in out[i]["flags"]:
                         out[i]["flags"].append("short_low_confidence")
                         flagged += 1
-    # any short turn that was neither smoothed nor already marked stays visible but
-    # flagged: its attribution rests on thin evidence regardless of neighbors
-    for i, t in enumerate(turns):
-        if (t["end"] - t["start"]) < short_dur and out[i]["attribution"] != "smoothed" \
-                and not out[i]["flags"]:
-            out[i]["flags"].append("short_low_confidence")
-            flagged += 1
+    # STRICT only: any short turn that was neither smoothed nor already marked
+    # stays visible but flagged — its attribution rests on thin evidence, and in
+    # a sensitive recording that is a human's call. In normal mode the
+    # evidence-gated branch above (voice actually contradicts the label) already
+    # flagged the real problems; flagging every remaining short turn wholesale
+    # buried them in confident diarizer calls (measured on the 41-meeting library).
+    if strict:
+        for i, t in enumerate(turns):
+            if (t["end"] - t["start"]) < short_dur and out[i]["attribution"] != "smoothed" \
+                    and not out[i]["flags"]:
+                out[i]["flags"].append("short_low_confidence")
+                flagged += 1
 
     # mid-length turns (short_dur..min_reliable_dur) attributed to a NAMED speaker:
     # verify the voice against that person; a clear mismatch is flagged, not hidden.
-    # Correct short-turn matches score ~0.5+; the "But."-style misattributions ~0.1.
+    # A LOW OWN-SCORE ALONE IS NOT A MISMATCH at these lengths: the score is a
+    # duration artifact — the median correctly-attributed mid-band turn on the
+    # real 41-meeting library scored 0.32, under the old flat 0.40 gate, so the
+    # bare threshold flagged the expected case. Normal mode (closed roster: every
+    # cluster named) demands a COMPARATIVE signal — some OTHER enrolled voice
+    # scores >= REFINE_MISMATCH_OTHER_MIN and beats the owner by
+    # >= REFINE_MISMATCH_MARGIN, as the true "But."-style misattributions do
+    # (owner ~0.1, real speaker clearly ahead). Strict mode, and any meeting with
+    # an UNNAMED cluster (open roster: the low score may simply be the un-enrolled
+    # person speaking, whom no voiceprint can out-score), keep the old
+    # unconditional flag on own-score < REFINE_MISMATCH_OWN_MAX.
     if voiceprints:
+        open_roster = any(not nm for nm in cluster_names.values())
         for i, t in enumerate(turns):
             dur = t["end"] - t["start"]
             spk = out[i]["speaker"]
@@ -177,9 +193,17 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                     and _usable(turn_embeddings[i])):
                 own_sc = score_against(turn_embeddings[i], voiceprints[spk])
                 out[i]["id_score"] = round(own_sc, 3)
-                if own_sc < 0.40:
-                    out[i]["flags"].append("id_mismatch")
-                    flagged += 1
+                if own_sc >= config.REFINE_MISMATCH_OWN_MAX:
+                    continue
+                if not (strict or open_roster):
+                    other_sc = max((score_against(turn_embeddings[i], vp)
+                                    for nm, vp in voiceprints.items() if nm != spk),
+                                   default=-1.0)
+                    if not (other_sc >= config.REFINE_MISMATCH_OTHER_MIN
+                            and (other_sc - own_sc) >= config.REFINE_MISMATCH_MARGIN):
+                        continue
+                out[i]["flags"].append("id_mismatch")
+                flagged += 1
 
     # uncertainty/provenance as TIME SPANS, so downstream can flag exactly the
     # affected words instead of whole merged turns

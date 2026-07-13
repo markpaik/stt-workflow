@@ -318,8 +318,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
 
         report("writing", 0.2)
         spans = (diar["refine_stats"].get("spans", []) if diar else []) + loop_spans
-        segments, labeled_words = merge.assign_and_group(words, turns, names,
-                                                         overlaps=overlaps, spans=spans)
+        segments, labeled_words = merge.assign_and_group(
+            words, turns, names, overlaps=overlaps, spans=spans,
+            overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
         if config.PUNCTUATE:
             punctuate.restore_segments(segments)
         speakers = output.build_speakers(labels, names)
