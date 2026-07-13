@@ -62,10 +62,14 @@ def _word_flags(word, overlaps, spans):
     return sorted(flags)
 
 
-def assign_and_group(words, turns, names, overlaps=None, spans=None):
+def assign_and_group(words, turns, names, overlaps=None, spans=None,
+                     overlap_min_sec=0.0):
     """words: [{start,end,word}]; turns: [{start,end,speaker}]; names:
     {key: {"name","score"}}; overlaps: [(start,end)] multi-speaker regions;
-    spans: [{"start","end","flag"}] uncertainty/provenance from refinement.
+    spans: [{"start","end","flag"}] uncertainty/provenance from refinement;
+    overlap_min_sec: a SEGMENT gets the "overlap" review flag only when the
+    crosstalk inside it sums to at least this long (words keep their flags
+    regardless). 0.0 = any crosstalk flags, the strict-mode behavior.
 
     Returns (segments, labeled_words):
       segments: [{start,end,speaker,name,text,attribution,flags,overlap}]
@@ -97,6 +101,15 @@ def assign_and_group(words, turns, names, overlaps=None, spans=None):
         # a flag marks the segment only when it covers >= half its words
         seg_flags = sorted(f for f, c in flag_counts.items() if c >= max(1, n) / 2)
         cur["flags"] = [f for f in seg_flags if f in FRAGILE_FLAGS or f.startswith("possible:")]
+        if overlap_min_sec > 0 and "overlap" in cur["flags"]:
+            # sub-floor crosstalk (a backchannel brushing a turn boundary) keeps
+            # its word-level provenance but must not demand review of the whole
+            # segment — drop the flag HERE so cur["overlap"] below derives from
+            # the final flag list and the two can never disagree
+            inside = sum(max(0.0, min(e, cur["end"]) - max(s, cur["start"]))
+                         for s, e in overlaps)
+            if inside < overlap_min_sec:
+                cur["flags"].remove("overlap")
         cur["attribution"] = ("smoothed" if "smoothed" in seg_flags else
                               "reassigned" if "reassigned" in seg_flags else "diarized")
         cur["overlap"] = "overlap" in cur["flags"]

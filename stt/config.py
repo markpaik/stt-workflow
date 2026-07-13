@@ -87,6 +87,22 @@ REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"
 # Turns shorter than this are *candidates* for smoothing into neighbours — but only
 # with evidence (unusable/contrary embedding) and never for bare yes/no answers.
 REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.3"))
+# Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
+# score at these lengths is a DURATION artifact, not evidence — across the real
+# 41-meeting library the MEDIAN correctly-attributed mid-band turn scored 0.32,
+# under the old flat 0.40 gate, so "own score is low" is the expected case. A
+# mismatch flag in normal mode therefore needs a COMPARATIVE signal: some OTHER
+# enrolled voice must score >= OTHER_MIN and beat the owner by >= MARGIN.
+# Own-score < OWN_MAX remains the precondition; strict mode and meetings with an
+# unnamed cluster (open roster) keep the old unconditional flag.
+REFINE_MISMATCH_OWN_MAX = float(os.environ.get("STT_REFINE_MISMATCH_OWN_MAX", "0.40"))
+REFINE_MISMATCH_OTHER_MIN = float(os.environ.get("STT_REFINE_MISMATCH_OTHER_MIN", "0.50"))
+REFINE_MISMATCH_MARGIN = float(os.environ.get("STT_REFINE_MISMATCH_MARGIN", "0.15"))
+# A segment earns the "overlap" review flag only when the crosstalk inside it
+# SUMS to at least this long — sub-second brushes (backchannels, breaths) keep
+# their word-level provenance but don't demand human review of the whole turn.
+# Strict-mode callers pass 0.0 (any crosstalk at all flags, as before).
+OVERLAP_FLAG_MIN_SEC = float(os.environ.get("STT_OVERLAP_FLAG_MIN_SEC", "1.0"))
 # Words that are never smoothed away into a neighbouring speaker: one-word answers
 # carry meaning ("yes" in a confidential conversation), even when the voice evidence is thin.
 PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agreed",

@@ -92,9 +92,10 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                 overlaps = overlaps + extra_ov
 
         labels = sorted(names.keys())
-        segments, labeled_words = merge.assign_and_group(words, turns, names,
-                                                         overlaps=overlaps,
-                                                         spans=stats.get("spans", []) + loop_spans)
+        segments, labeled_words = merge.assign_and_group(
+            words, turns, names, overlaps=overlaps,
+            spans=stats.get("spans", []) + loop_spans,
+            overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
         if config.PUNCTUATE:
             punctuate.restore_segments(segments)
         # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)

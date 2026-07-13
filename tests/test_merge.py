@@ -67,6 +67,34 @@ def test_minority_flag_does_not_mark_long_segment():
     assert not segs[0]["overlap"]  # ...but 1 of 5 words < half -> segment unmarked
 
 
+def test_crosstalk_under_floor_keeps_word_flags_but_not_segment():
+    """0.9s of summed crosstalk inside the segment, under the 1.0s floor: the
+    words keep their overlap provenance, the SEGMENT no longer demands review."""
+    words = [_w(5.0, 5.4, "a"), _w(5.4, 5.8, "b"), _w(6.0, 7.0, "c")]
+    segs, labeled = merge.assign_and_group(words, TURNS, NAMES,
+                                           overlaps=[(5.0, 5.9)], overlap_min_sec=1.0)
+    assert len(segs) == 1
+    assert "overlap" in labeled[0]["flags"] and "overlap" in labeled[1]["flags"]
+    assert "overlap" not in segs[0]["flags"]
+    assert not segs[0]["overlap"]  # derived AFTER the drop: never disagrees
+
+
+def test_crosstalk_over_floor_still_flags_segment():
+    words = [_w(5.0, 5.4, "a"), _w(5.4, 5.8, "b"), _w(6.0, 7.0, "c")]
+    segs, _ = merge.assign_and_group(words, TURNS, NAMES,
+                                     overlaps=[(5.0, 6.1)], overlap_min_sec=1.0)
+    assert len(segs) == 1
+    assert "overlap" in segs[0]["flags"] and segs[0]["overlap"]  # 1.1s >= 1.0s
+
+
+def test_crosstalk_floor_zero_is_the_old_behavior():
+    """overlap_min_sec=0.0 — the default, and what strict-mode callers pass:
+    the same 0.9s brush still flags the segment exactly as before."""
+    words = [_w(5.0, 5.4, "a"), _w(5.4, 5.8, "b"), _w(6.0, 7.0, "c")]
+    segs, _ = merge.assign_and_group(words, TURNS, NAMES, overlaps=[(5.0, 5.9)])
+    assert "overlap" in segs[0]["flags"] and segs[0]["overlap"]
+
+
 def test_punctuation_spacing_cleaned():
     words = [_w(0, 1, "Hello"), _w(1, 2, ","), _w(2, 3, "world")]
     segs, _ = merge.assign_and_group(words, TURNS, NAMES)
