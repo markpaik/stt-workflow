@@ -284,6 +284,171 @@ def test_midband_rescue_never_in_strict(sandbox):
     assert stats["reassigned"] == 0 and stats["spans"] == []
 
 
+# --- junk-fragment repair (exp2-cluster-repair, 07/2026) ----------------------
+# A turn stranded in an UNNAMED cluster may inherit the name of a NAMED cluster
+# in the SAME meeting when its own embedding matches that cluster's centroid
+# (same room, same mic — a far stronger reference than a cross-meeting
+# voiceprint for echo/system-audio fragments): cosine >= 0.45 with >= 0.10
+# margin over the runner-up NAMED centroid, corroborated by the enrolled
+# roster ranking that same person first. Attendee-anchored by construction —
+# the reference is a cluster the open-set naming already accepted, so a
+# person absent from the meeting can never be introduced by this step.
+
+def _junk_case(cent_own, cent_other, vps=None, strict=False, named=True):
+    """A 0.4s fragment in unnamed cluster CJ (too short for the mid-band
+    rescue, unsmoothable: its neighbours differ); named clusters CA (Alice)
+    and CB (Bob) have centroids scoring cent_own/cent_other against the
+    fragment's embedding [1, 0]."""
+    def _cent(c):
+        return np.array([c, np.sqrt(1.0 - c * c)])
+    turns = [{"start": 0.0, "end": 20.0, "cluster": "CA"},
+             {"start": 21.0, "end": 21.4, "cluster": "CJ"},
+             {"start": 23.0, "end": 43.0, "cluster": "CB"}]
+    cluster_names = {"CA": "Alice" if named else None,
+                     "CB": "Bob" if named else None, "CJ": None}
+    vps = vps or {"Alice": _vp(0.40), "Bob": _vp(0.10)}
+    cents = {"CA": _cent(cent_own), "CB": _cent(cent_other)}
+    return refine.refine_turns(turns, [None, TURN_EMB, None], cluster_names,
+                               voiceprints=vps, cluster_centroids=cents,
+                               strict=strict)
+
+
+def test_junk_fragment_inherits_named_cluster_on_agreeing_evidence(sandbox):
+    """cos 0.50 vs Alice's centroid, margin 0.40 over Bob's, and Alice is
+    roster rank-1 on the fragment's own embedding — the Mark C. Weekly echo
+    fragment shape (55/55 library candidates had all three signals agree)."""
+    merged, stats = _junk_case(0.50, 0.10)
+    # the repaired fragment merges into Alice's adjacent turn
+    assert [m["speaker"] for m in merged] == ["Alice", "Bob"]
+    assert merged[0]["end"] == 21.4
+    assert stats["reassigned"] == 1
+
+
+def test_junk_fragment_below_floor_stays_unnamed(sandbox):
+    """cos 0.35 vs the named centroid: below the 0.40 floor (the observed
+    noise-fragment ceiling), no inheritance."""
+    merged, stats = _junk_case(0.35, 0.10)
+    assert merged[1]["speaker"] == "CJ"
+    assert stats["reassigned"] == 0
+
+
+def test_junk_fragment_needs_margin_between_named_centroids(sandbox):
+    """Two named centroids nearly tied (0.50 vs 0.45): a coin flip between
+    attendees is not identity — no move."""
+    merged, stats = _junk_case(0.50, 0.45)
+    assert merged[1]["speaker"] == "CJ"
+    assert stats["reassigned"] == 0
+
+
+def test_junk_fragment_requires_roster_corroboration(sandbox):
+    """Centroid evidence picks Alice but the enrolled roster ranks Bob first
+    on the fragment's own embedding: the two references disagree — no move."""
+    merged, stats = _junk_case(0.50, 0.10,
+                               vps={"Alice": _vp(0.30), "Bob": _vp(0.60)})
+    assert merged[1]["speaker"] == "CJ"
+    assert stats["reassigned"] == 0
+
+
+def test_junk_fragment_never_moves_in_strict(sandbox):
+    """Strict output is byte-identical: the would-fire case does nothing."""
+    merged, stats = _junk_case(0.50, 0.10, strict=True)
+    assert merged[1]["speaker"] == "CJ"
+    assert stats["reassigned"] == 0
+
+
+def test_junk_repair_noop_without_named_clusters(sandbox):
+    """A meeting of strangers (no cluster cleared open-set naming) has no
+    reference to inherit from — the step cannot run, let alone invent."""
+    merged, stats = _junk_case(0.90, 0.10, named=False)
+    assert merged[1]["speaker"] == "CJ"
+    assert stats["reassigned"] == 0
+
+
+# --- absorption-split gate (exp2-cluster-repair, 07/2026) ----------------------
+# Pure change-point logic for splitting a long diarized turn whose sub-window
+# embeddings reveal a speaker change: the split lands only where the two
+# halves rank DIFFERENT enrolled speakers, each with a real margin, and the
+# halves' mean embeddings have cosine <= dip_max. Single-voice turns never
+# split (their halves always rank the same person).
+
+def _unit(deg):
+    r = np.radians(deg)
+    return np.array([np.cos(r), np.sin(r)])
+
+
+def _spans(n, start=0.0, win=1.2, hop=0.3):
+    return [(round(start + i * hop, 3), round(start + i * hop + win, 3))
+            for i in range(n)]
+
+
+def test_split_gate_cuts_between_two_voices(sandbox):
+    """Four windows of Alice then four of Bob (orthogonal embeddings): the
+    proposed cut lands between windows 4 and 5 and reports both names."""
+    embs = [_unit(0)] * 4 + [_unit(90)] * 4
+    got = refine.propose_split(embs, _spans(8),
+                               {"Alice": _vp(1.0), "Bob": np.array([[0.0, 1.0]])},
+                               dip_max=0.65, half_margin=0.10)
+    assert got is not None
+    cut, left_name, right_name = got
+    assert left_name == "Alice" and right_name == "Bob"
+    # cut = midpoint of window 3's end and window 4's start (windows overlap)
+    assert _spans(8)[4][0] <= cut <= _spans(8)[3][1]
+
+
+def test_split_gate_refuses_single_voice(sandbox):
+    """All windows the same voice: whatever the dip, both halves rank Alice
+    first — no cut (this is what kept the all-correct synth meeting intact)."""
+    embs = [_unit(0)] * 3 + [_unit(30)] * 3   # same voice, drifting delivery
+    got = refine.propose_split(embs, _spans(6),
+                               {"Alice": _vp(1.0), "Bob": np.array([[0.0, 1.0]])},
+                               dip_max=0.90, half_margin=0.10)
+    assert got is None
+
+
+def test_split_gate_respects_dip_ceiling(sandbox):
+    """Halves rank different people but their means stay similar (cos above
+    dip_max): the acoustic change-point evidence is missing — no cut."""
+    embs = [_unit(0)] * 4 + [_unit(40)] * 4   # cos(means) ~ 0.77
+    vps = {"Alice": _vp(1.0), "Bob": np.array([[np.cos(np.radians(40)),
+                                                np.sin(np.radians(40))]])}
+    got = refine.propose_split(embs, _spans(8), vps,
+                               dip_max=0.65, half_margin=0.10)
+    assert got is None
+
+
+def test_split_gate_needs_margin_on_both_halves(sandbox):
+    """The right half's rank-1 margin is a coin flip between Bob and Carol:
+    no cut on ambiguous identity."""
+    bob = np.array([[0.0, 1.0]])
+    carol = np.array([[np.cos(np.radians(80)), np.sin(np.radians(80))]])
+    embs = [_unit(0)] * 4 + [_unit(85)] * 4   # right lands between Bob/Carol
+    got = refine.propose_split(embs, _spans(8),
+                               {"Alice": _vp(1.0), "Bob": bob, "Carol": carol},
+                               dip_max=0.65, half_margin=0.10)
+    assert got is None
+
+
+def test_split_gate_needs_enough_windows(sandbox):
+    embs = [_unit(0), _unit(90), _unit(90)]
+    got = refine.propose_split(embs, _spans(3),
+                               {"Alice": _vp(1.0), "Bob": np.array([[0.0, 1.0]])},
+                               dip_max=0.65, half_margin=0.10)
+    assert got is None
+
+
+def test_split_never_runs_in_strict_or_without_voiceprints(sandbox):
+    """The diarize-level splitter refuses before touching audio when strict
+    (byte-identical contract) or when no identity evidence exists — the pipe
+    argument is never dereferenced, which this test proves by passing None."""
+    from stt import diarize
+    turns = [{"start": 0.0, "end": 30.0, "cluster": "SPEAKER_00"}]
+    vps = {"Alice": _vp(1.0)}
+    assert diarize._split_absorbed_turns(None, None, turns, vps, strict=True) \
+        == (turns, 0)
+    assert diarize._split_absorbed_turns(None, None, turns, {}, strict=False) \
+        == (turns, 0)
+
+
 # --- short-turn catch-all: strict-mode-only -----------------------------------
 
 def test_unsandwiched_short_turn_not_flagged_in_normal_mode(sandbox):

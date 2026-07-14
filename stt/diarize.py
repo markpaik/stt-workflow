@@ -135,6 +135,72 @@ def _embed_turns(pipe, wav_path, turns, overlaps, progress=None):
     return out, failures
 
 
+def _split_absorbed_turns(pipe, wav_path, raw_turns, voiceprints, strict):
+    """Absorption splitting (exp2-cluster-repair): pyannote's exclusive
+    diarization can return one long turn spanning SEVERAL speakers it
+    clustered together — a boundary that was never cut, which no cache-side
+    relabel can repair. With the audio and embedder in hand, probe every turn
+    >= SPLIT_MIN_DUR with sliding sub-windows and cut where refine's
+    change-point gate finds two halves that rank different enrolled speakers
+    with real margins (recursively, for 3+-speaker spans). Split turns keep
+    their cluster; per-turn re-embedding and identity attribution downstream
+    treat them like any other turn, and they land in the .diar.npz cache so
+    relabel/eval replay them without re-diarizing.
+
+    Identity evidence IS the gate, so meetings with no enrolled voiceprints
+    never split; strict mode never speculates (byte-identical). Returns
+    (turns, n_cuts)."""
+    if strict or not voiceprints or config.SPLIT_DIP_MAX <= 0:
+        return raw_turns, 0
+    import soundfile as sf
+    import torch
+
+    data, sr = sf.read(str(wav_path))
+    wav = torch.tensor(np.asarray(data), dtype=torch.float32)
+    emb = pipe._embedding
+    min_samples = int(0.1 * sr)
+
+    def embed_windows(spans):
+        out = []
+        for s, e in spans:
+            seg = wav[int(s * sr):int(e * sr)]
+            if seg.shape[-1] < min_samples:
+                out.append(None)
+                continue
+            try:
+                out.append(np.asarray(emb(seg.reshape(1, 1, -1))).reshape(-1))
+            except Exception:
+                out.append(None)
+        return out
+
+    def pieces(start, end, depth):
+        if depth >= config.SPLIT_MAX_DEPTH or (end - start) < config.SPLIT_MIN_DUR:
+            return [(start, end)]
+        spans, t = [], start
+        while t + config.SPLIT_WIN <= end + 1e-9:
+            spans.append((t, t + config.SPLIT_WIN))
+            t += config.SPLIT_HOP
+        got = refine.propose_split(embed_windows(spans), spans, voiceprints)
+        if got is None:
+            return [(start, end)]
+        cut = got[0]
+        return pieces(start, cut, depth + 1) + pieces(cut, end, depth + 1)
+
+    out, cuts = [], 0
+    for t in raw_turns:
+        if (t["end"] - t["start"]) < config.SPLIT_MIN_DUR:
+            out.append(t)
+            continue
+        ps = pieces(t["start"], t["end"], 0)
+        if len(ps) == 1:
+            out.append(t)
+            continue
+        cuts += len(ps) - 1
+        out.extend({"start": round(s, 3), "end": round(e, 3),
+                    "cluster": t["cluster"]} for s, e in ps)
+    return out, cuts
+
+
 def embed_spans(wav_path, spans, min_dur=0.5):
     """Embed each (start, end) span of `wav_path` with the SAME pyannote
     embedder used for diarization, so the vectors are directly comparable to
@@ -211,6 +277,12 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
                      if vps else {k: None for k in cent_emb})
     cluster_names = refine.resolve_split_clusters(cluster_names, cent_emb, vps)
 
+    # absorption splitting runs BEFORE per-turn embedding so the pieces get
+    # the same overlap-aware embeddings (and cache entries) as every other turn
+    strict_resolved = config.STRICT if strict is None else strict
+    raw_turns, n_cuts = _split_absorbed_turns(
+        pipe, wav_path, raw_turns, vps if do_refine else {}, strict_resolved)
+
     turn_embeddings, emb_failures = _embed_turns(pipe, wav_path, raw_turns, overlaps,
                                                  progress=progress)
     if raw_turns and emb_failures / len(raw_turns) > 0.3:
@@ -221,6 +293,7 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
         raw_turns, turn_embeddings, cluster_names, vps if do_refine else {},
         cluster_centroids=cent_emb, words=words, strict=strict)
     stats["overlap_spans"] = len(overlaps)
+    stats["turns_split"] = n_cuts
 
     return {"turns": turns, "names": names, "labels": sorted(names.keys()),
             "embeddings": cent_emb, "raw_turns": raw_turns,
