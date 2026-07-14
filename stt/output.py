@@ -23,13 +23,17 @@ def _atomic_write(path, text: str):
 
 
 def speaker_display(label, name=None) -> str:
-    """Human-readable speaker name for the .txt (real name, else 'Speaker N')."""
+    """Human-readable speaker name (real name, else a transcript-LOCAL
+    'Voice N'). 'Voice' — not 'Speaker' — on purpose: the global unknown
+    registry owns the 'Speaker N' namespace (stable across meetings, openable
+    in the naming panel), and a local fallback label sharing it made a
+    meeting's throwaway 'Speaker 2' impersonate the registry's Speaker 2."""
     if name:
         return name
     if label is None:
-        return "Speaker ?"
+        return "Voice ?"
     try:
-        return f"Speaker {int(str(label).split('_')[-1]) + 1}"
+        return f"Voice {int(str(label).split('_')[-1]) + 1}"
     except ValueError:
         return str(label)
 

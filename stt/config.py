@@ -86,7 +86,19 @@ REFINE_ID_MARGIN = float(os.environ.get("STT_REFINE_ID_MARGIN", "0.15"))
 REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"))
 # Turns shorter than this are *candidates* for smoothing into neighbours — but only
 # with evidence (unusable/contrary embedding) and never for bare yes/no answers.
-REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.3"))
+# Widened 0.3 -> 0.6 (07/2026 audit): the 0.3–0.6s band sits squarely in the
+# anti-signal zone where per-turn embeddings mislead; extending the
+# evidence-gated sandwich there produced 637 evidence-backed label changes on
+# the real library. Flips stay evidence-gated — unconditional inheritance was
+# measured and REJECTED.
+REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.6"))
+# A protected one-word answer ("yeah", "okay", …) sandwiched in another
+# speaker's context may re-attribute ONLY when the context speaker beats the
+# assigned one by MORE than this margin on the turn's own embedding — strong,
+# turn-local evidence, not context inheritance (audit: releases 45 of 538
+# protected blocks on the real library).
+REFINE_PROTECTED_OVERRIDE_MARGIN = float(
+    os.environ.get("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", "0.15"))
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
 # 41-meeting library the MEDIAN correctly-attributed mid-band turn scored 0.32,
@@ -107,6 +119,22 @@ OVERLAP_FLAG_MIN_SEC = float(os.environ.get("STT_OVERLAP_FLAG_MIN_SEC", "1.0"))
 # carry meaning ("yes" in a confidential conversation), even when the voice evidence is thin.
 PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agreed",
                    "true", "false", "sure", "okay", "ok", "uh-huh", "mm-hmm"}
+
+# --- Unknown-speaker registry: minting quality floor (07/2026 audit) ---
+# A NEW global unknown ("Speaker N") requires real evidence: at least this much
+# total talk AND this many reliable turns (>= REFINE_MIN_RELIABLE_DUR each) in
+# the cluster. Noise floors and split-off junk stay transcript-local instead of
+# becoming nameable registry entries. Matching an EXISTING unknown is never
+# restricted — a returning stranger heard briefly still keeps their number.
+# The same floor gates enrolling a cluster as a named person.
+UNKNOWN_MIN_TALK_SECS = float(os.environ.get("STT_UNKNOWN_MIN_TALK_SECS", "30"))
+UNKNOWN_MIN_RELIABLE_TURNS = int(os.environ.get("STT_UNKNOWN_MIN_RELIABLE_TURNS", "10"))
+
+# Adding a NEW sample to a person's EXISTING voiceprint stack: below this
+# cosine against their own stack (or matching some other profile better than
+# their own) the enrollment is suspect — the API/CLI demand an explicit
+# confirm instead of silently poisoning the profile.
+ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
 
 # STRICT mode (confidential conversations): no smoothing, no open-set
 # reassignment — fragile attributions are flagged for human review instead of guessed.

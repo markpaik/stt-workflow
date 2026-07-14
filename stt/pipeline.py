@@ -306,8 +306,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                 channel_stats["n_mic_turns"] = sum(
                     1 for t in turns if t["speaker"] == channels.MIC_ID)
             if track_unknowns:
-                # stable global numbering for unknown voices across meetings
-                uid_map = unknowns.assign(diar["embeddings"], diar["cluster_names"], base)
+                # stable global numbering for unknown voices across meetings;
+                # per-cluster talk stats let assign() refuse to mint a NEW
+                # unknown for a below-floor junk cluster
+                uid_map = unknowns.assign(diar["embeddings"], diar["cluster_names"], base,
+                                          stats=unknowns.talk_stats(diar["raw_turns"]))
                 for label, uid in uid_map.items():
                     if label in names and not names[label].get("name"):
                         names[label]["global_id"] = uid

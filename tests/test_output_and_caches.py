@@ -34,9 +34,14 @@ def test_txt_no_legend_when_all_clean(sandbox):
 
 
 def test_speaker_display_states():
+    """Transcript-LOCAL unnamed clusters render as 'Voice N' — a namespace
+    deliberately disjoint from the global unknowns' 'Speaker N', so a local
+    fallback label can never impersonate (or collide with) a stable global
+    number in the panel."""
     assert output.speaker_display("SPEAKER_00", "Mark") == "Mark"
-    assert output.speaker_display("SPEAKER_02", None) == "Speaker 3"
-    assert output.speaker_display(None, None) == "Speaker ?"
+    assert output.speaker_display("SPEAKER_02", None) == "Voice 3"
+    assert output.speaker_display(None, None) == "Voice ?"
+    assert unknowns.display("U007") == "Speaker 7"  # the global space, unchanged
 
 
 def test_json_roundtrip_and_real_scores(sandbox):

@@ -60,7 +60,8 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
             raw_turns, turn_embeddings, cluster_names, vps if config.REFINE else {},
             cluster_centroids=cent_emb, words=words, strict=strict)
         if not data.get("one_time_speakers"):
-            uid_map = unknowns.assign(cent_emb, cluster_names, base)
+            uid_map = unknowns.assign(cent_emb, cluster_names, base,
+                                      stats=unknowns.talk_stats(raw_turns))
             for label, uid in uid_map.items():
                 if label in names and not names[label].get("name"):
                     names[label]["global_id"] = uid
@@ -147,12 +148,23 @@ def all_bases():
 
 def relabel_all():
     """Relabel every cached meeting. Caller must already hold the batch lock
-    (run_batch calls this at the end of a run to apply names given mid-run)."""
-    for base in all_bases():
+    (run_batch calls this at the end of a run to apply names given mid-run).
+
+    Takes the RELABEL lock too (blocking): without it, run_batch's end-of-run
+    pass interleaved with a GUI-spawned `relabel --all` holding the lock —
+    two passes re-running unknowns.assign over the same meetings at once,
+    doubling the registry churn. Waiting is correct: by the time this
+    returns, every naming made up to this instant has been applied."""
+    with open(config.PROJECT_DIR / "relabel.lock", "w") as lockfd:
+        fcntl.flock(lockfd, fcntl.LOCK_EX)
         try:
-            relabel_one(base)
-        except Exception as e:
-            print(f"  FAILED {base}: {e}", file=sys.stderr)
+            for base in all_bases():
+                try:
+                    relabel_one(base)
+                except Exception as e:
+                    print(f"  FAILED {base}: {e}", file=sys.stderr)
+        finally:
+            fcntl.flock(lockfd, fcntl.LOCK_UN)
 
 
 def main():

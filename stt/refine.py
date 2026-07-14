@@ -87,7 +87,7 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
     out = [{"start": t["start"], "end": t["end"], "speaker": base_key(t["cluster"]),
             "attribution": "diarized", "id_score": None, "flags": []}
            for t in turns]
-    reassigned = smoothed = flagged = 0
+    reassigned = smoothed = flagged = protected_overridden = 0
 
     # 1. identity reassignment on reliable-length turns (open-set aware)
     if voiceprints:
@@ -130,10 +130,29 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                          (left if right is None else (right if left is None else None))
                 if target is None or out[i]["speaker"] == target:
                     continue
-                # never smooth a meaningful one-word answer
+                # a meaningful one-word answer is protected — it may move ONLY
+                # on strong, turn-local voice evidence: the context speaker
+                # must beat the assigned one by MORE than the override margin
+                # on the turn's OWN embedding. Context alone (the sandwich)
+                # never re-attributes a protected answer, and an unusable
+                # embedding is not evidence (unconditional inheritance was
+                # measured on the real library and rejected).
                 toks = _words_in(t, words)
                 if toks and all(tok in config.PROTECTED_WORDS for tok in toks):
-                    if "protected_answer" not in out[i]["flags"]:
+                    e = turn_embeddings[i]
+                    own_ref = _ref_vector(out[i]["speaker"], voiceprints, cluster_centroids)
+                    tgt_ref = _ref_vector(target, voiceprints, cluster_centroids)
+                    if (_usable(e) and own_ref is not None and tgt_ref is not None
+                            and (score_against(e, tgt_ref) - score_against(e, own_ref))
+                            > config.REFINE_PROTECTED_OVERRIDE_MARGIN):
+                        if "protected_answer" in out[i]["flags"]:  # pass-1 leftover
+                            out[i]["flags"].remove("protected_answer")
+                            flagged -= 1
+                        out[i]["speaker"] = target
+                        out[i]["attribution"] = "smoothed"
+                        smoothed += 1
+                        protected_overridden += 1
+                    elif "protected_answer" not in out[i]["flags"]:
                         out[i]["flags"].append("protected_answer")
                         flagged += 1
                     continue
@@ -184,7 +203,16 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
     # person speaking, whom no voiceprint can out-score), keep the old
     # unconditional flag on own-score < REFINE_MISMATCH_OWN_MAX.
     if voiceprints:
-        open_roster = any(not nm for nm in cluster_names.values())
+        # open roster = an un-enrolled ATTENDEE may be present. An unnamed
+        # cluster carrying almost no talk is junk (a noise floor the diarizer
+        # split off), not an attendee — counting it flipped whole meetings to
+        # the unconditional flag and buried the real mismatches. Strict mode
+        # below keeps unconditional semantics regardless.
+        talk = {}
+        for t in turns:
+            talk[t["cluster"]] = talk.get(t["cluster"], 0.0) + (t["end"] - t["start"])
+        open_roster = any(not nm and talk.get(c, 0.0) >= config.UNKNOWN_MIN_TALK_SECS
+                          for c, nm in cluster_names.items())
         for i, t in enumerate(turns):
             dur = t["end"] - t["start"]
             spk = out[i]["speaker"]
@@ -216,6 +244,7 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
 
     merged = merge_adjacent(out)
     return merged, {"reassigned": reassigned, "smoothed": smoothed, "flagged": flagged,
+                    "protected_overridden": protected_overridden,
                     "strict": strict, "turns_in": n, "turns_out": len(merged),
                     "spans": spans}
 

@@ -411,8 +411,11 @@ def test_naming_panel_replaces_the_who_bridge():
         assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
             f"missing naming fn: {fn}"
     assert "'/api/voice_clips?speaker='" in NEW_JS
-    assert re.search(r"api\('/api/name',\{uid:NP\.uid,name:n\}\)", NEW_JS)
+    assert re.search(r"api\('/api/name',\{uid:NP\.uid,name:n,confirm:!!force\}\)", NEW_JS)
     assert re.search(r"api\('/api/forget',\{uid:NP\.uid\}\)", NEW_JS)
+    # the enrollment quality gate answers with a warning: the panel renders
+    # the house two-step confirm (numbers shown), never a native dialog
+    assert 'id="npconfirm"' in NEW_JS and "npSave(true)" in NEW_JS
     # the dead-player case says WHY instead of rendering a player that can't load
     assert "r.reason==='sources_deleted'" in NEW_JS
     assert "No audio available. The source recordings were deleted." in NEW_JS

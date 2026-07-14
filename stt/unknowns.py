@@ -104,12 +104,54 @@ def _samples(reg, uid):
     return arr.reshape(1, -1) if arr.ndim == 1 else arr
 
 
+def samples_of(uid: str):
+    """This unknown's stored sample stack (n, dim), or None — the public read
+    the enrollment quality gate uses before promote() folds these rows into
+    an enrolled person's profile."""
+    reg = load()
+    if uid not in reg["speakers"]:
+        return None
+    return _samples(reg, uid)
+
+
 def display(uid: str) -> str:
     """'U007' -> 'Speaker 7' (the stable global number)."""
     try:
         return f"Speaker {int(uid[1:])}"
     except (ValueError, TypeError):
         return str(uid)
+
+
+def talk_stats(raw_turns) -> dict:
+    """Per-cluster talk evidence, from the diarizer's raw turns:
+    {label: {"talk_secs": total speech, "reliable_turns": turns long enough
+    (>= REFINE_MIN_RELIABLE_DUR) to carry a usable voice embedding}}.
+    Both call sites of assign() (pipeline and relabel) pass this so the
+    minting floor below can tell a person from a noise floor."""
+    out = {}
+    for t in raw_turns:
+        dur = t["end"] - t["start"]
+        st = out.setdefault(t["cluster"], {"talk_secs": 0.0, "reliable_turns": 0})
+        st["talk_secs"] += dur
+        if dur >= config.REFINE_MIN_RELIABLE_DUR:
+            st["reliable_turns"] += 1
+    return out
+
+
+def floor_violation(st) -> str:
+    """Plain-language refusal when a cluster is below the evidence floor a
+    voice needs before it can identify anyone — used both by assign()'s
+    minting gate and by the enrollment endpoints. None when the floor is met
+    or when st is None (caller had no turn data: stay permissive)."""
+    if st is None:
+        return None
+    if st["talk_secs"] < config.UNKNOWN_MIN_TALK_SECS:
+        return (f"This voice has only {st['talk_secs']:.0f}s of speech, "
+                "too little to identify anyone reliably.")
+    if st["reliable_turns"] < config.UNKNOWN_MIN_RELIABLE_TURNS:
+        return (f"This voice has only {st['reliable_turns']} clear turn(s) of "
+                "speech, too little to identify anyone reliably.")
+    return None
 
 
 def _enrolled_fragment(v, enrolled: dict, cluster_names: dict, cent_emb: dict) -> bool:
@@ -136,9 +178,14 @@ def _enrolled_fragment(v, enrolled: dict, cluster_names: dict, cent_emb: dict) -
     return False
 
 
-def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
+def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None) -> dict:
     """For each UNNAMED cluster with a usable centroid, return {label: global_uid},
-    matching returning unknowns and registering new ones."""
+    matching returning unknowns and registering new ones.
+
+    `stats` (optional): per-cluster talk evidence from talk_stats(). When
+    given, a cluster below the minting floor (UNKNOWN_MIN_TALK_SECS /
+    UNKNOWN_MIN_RELIABLE_TURNS) never registers a NEW unknown — noise floors
+    are not people. Matching an EXISTING unknown stays unrestricted."""
     with lock_registry():
         reg = load()
         out = {}
@@ -158,7 +205,15 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
             scored.sort(reverse=True)
             best, uid = scored[0] if scored else (-1.0, None)
             second = scored[1][0] if len(scored) > 1 else -1.0
-            matched = uid is not None and best >= MATCH_MIN and (best - second) >= MATCH_MARGIN
+            # duplicate guard: at split-fragment similarity the cluster IS the
+            # best entry's voice — the margin rule exists to separate DISTINCT
+            # strangers, and demanding a margin between two copies of the same
+            # voice minted identical twins unboundedly on every relabel (the
+            # twins scored 1.000 each, margin 0.000, so each pass registered
+            # yet another copy).
+            matched = uid is not None and (
+                best >= SPLIT_SIM
+                or (best >= MATCH_MIN and (best - second) >= MATCH_MARGIN))
             if matched and uid in claimed and cosine(v, claimed[uid]) < SPLIT_SIM:
                 # a different cluster in THIS meeting already took this unknown, and
                 # the two centroids are not close — these are two distinct strangers,
@@ -202,6 +257,13 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str) -> dict:
                 # enrolled samples themselves or to a cluster in THIS meeting
                 # that already carries that person's name.
                 if _enrolled_fragment(v, enrolled, cluster_names, cent_emb):
+                    continue
+                # minting quality floor: a NEW unknown needs enough talk to
+                # ever be named (played, recognized, enrolled). A cluster the
+                # caller measured below the floor stays transcript-local (a
+                # centroid with NO turns at all is definitionally junk).
+                if stats is not None and floor_violation(
+                        stats.get(label, {"talk_secs": 0.0, "reliable_turns": 0})):
                     continue
                 # lowest free number: after unknowns get named, new voices start
                 # back at Speaker 1 instead of counting up forever

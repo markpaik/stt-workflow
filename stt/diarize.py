@@ -241,7 +241,8 @@ def build_attribution(raw_turns, turn_embeddings, cluster_names, voiceprints,
                  "speaker": cluster_names.get(t["cluster"]) or t["cluster"]}
                 for t in raw_turns]
         turns = refine.merge_adjacent(base)
-        stats = {"reassigned": 0, "smoothed": 0, "flagged": 0, "strict": bool(strict),
+        stats = {"reassigned": 0, "smoothed": 0, "flagged": 0,
+                 "protected_overridden": 0, "strict": bool(strict),
                  "turns_in": len(raw_turns), "turns_out": len(turns), "spans": []}
     names = refine.names_from_speakers([t["speaker"] for t in turns], cluster_names,
                                        voiceprints or {}, turns=turns)
