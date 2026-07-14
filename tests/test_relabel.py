@@ -148,15 +148,19 @@ def test_relabel_recovers_mic_attribution_after_late_enrollment(sandbox, monkeyp
     assert mark_segs and "mine" in " ".join(s["text"] for s in mark_segs)
 
 
-def test_one_time_speakers_flag_survives_relabel(sandbox):
+def test_one_time_speakers_flag_survives_relabel(sandbox, monkeypatch):
     """A meeting processed with 'one-time speakers' must NEVER register its
     unnamed voices globally — including on every later relabel, which
     otherwise re-runs unknown assignment and would quietly re-register the
-    focus group. A normal meeting on the same relabel path still registers."""
+    focus group. A normal meeting on the same relabel path still registers.
+    (The minting floor is lowered here: this test is about the one-time flag,
+    and the seed meeting's clusters are deliberately tiny.)"""
     import relabel
 
     from stt import unknowns
 
+    monkeypatch.setattr(config, "UNKNOWN_MIN_TALK_SECS", 0.0)
+    monkeypatch.setattr(config, "UNKNOWN_MIN_RELIABLE_TURNS", 0)
     _seed_meeting("Focus Group")
     d = json.loads(mfile("Focus Group", ".json").read_text())
     d["one_time_speakers"] = True  # as stamped by pipeline --one-time-speakers
@@ -168,6 +172,92 @@ def test_one_time_speakers_flag_survives_relabel(sandbox):
     _seed_meeting("Normal Mtg")
     assert relabel.relabel_one("Normal Mtg")
     assert len(unknowns.load()["speakers"]) == 2  # control: normal path registers
+
+
+def test_known_voice_attributed_end_to_end_from_cache(sandbox, monkeypatch):
+    """End-to-end known-voice attribution: an enrolled person's cluster comes
+    out of a relabel NAMED (real match score, txt header, segments), while a
+    thin stranger cluster keeps a transcript-LOCAL 'Voice N' — disjoint from
+    the global unknowns' 'Speaker N' space — and mints nothing."""
+    import relabel
+    from stt import identify, unknowns
+
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    base = "Known Voice Mtg"
+    rng = np.random.default_rng(17)
+    alice = rng.normal(size=256)
+    alice /= np.linalg.norm(alice)
+    stranger = rng.normal(size=256)
+    stranger -= (stranger @ alice) * alice
+    stranger /= np.linalg.norm(stranger)
+
+    words = ([{"start": 3.0 * i + 0.2, "end": 3.0 * i + 0.6, "word": f"w{i}"}
+              for i in range(12)]
+             + [{"start": 40.0, "end": 40.4, "word": "hm"}])
+    data = {"source_file": f"{base}.m4a", "duration_sec": 45.0, "strict": False,
+            "speakers": [], "segments": [], "words": words}
+    mfile(base, ".json").write_text(json.dumps(data))
+    mfile(base, ".txt").write_text("stub")
+    # Alice: 12 reliable turns, 36s; the stranger: one 2s turn (under the floor)
+    raw_turns = ([{"start": 3.0 * i, "end": 3.0 * i + 3.0, "cluster": "SPEAKER_00"}
+                  for i in range(12)]
+                 + [{"start": 39.0, "end": 41.0, "cluster": "SPEAKER_01"}])
+    tembs = [alice] * 12 + [None]
+    diarcache.save(mfile(base, ".diar.npz"), raw_turns, tembs,
+                   {"SPEAKER_00": alice, "SPEAKER_01": stranger})
+
+    identify.enroll("Alice Chen", alice, source="Elsewhere")
+    assert relabel.relabel_one(base) is True
+
+    after = json.loads(mfile(base, ".json").read_text())
+    by_id = {s["id"]: s for s in after["speakers"]}
+    assert by_id["Alice Chen"]["name"] == "Alice Chen"
+    # the thin stranger: transcript-local display, no global registration
+    assert by_id["SPEAKER_01"]["name"] is None
+    assert by_id["SPEAKER_01"]["global_id"] is None
+    assert by_id["SPEAKER_01"]["display"] == "Voice 2"
+    assert unknowns.load()["speakers"] == {}
+    txt = mfile(base, ".txt").read_text()
+    assert "identified: Alice Chen" in txt
+    assert "Alice Chen:" in txt and "Voice 2:" in txt
+    assert "Speaker 2" not in txt      # the global-unknown namespace stays clear
+
+
+def test_relabel_all_takes_the_relabel_lock(sandbox, monkeypatch):
+    """run_batch's end-of-run relabel_all() used to interleave with a
+    GUI-spawned `relabel --all` (which holds relabel.lock), doubling assign
+    churn. relabel_all must now wait for the lock before touching anything."""
+    import fcntl
+    import threading
+    import time
+
+    import relabel
+
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    _seed_meeting("Mtg")
+    touched = []
+    real_one = relabel.relabel_one
+
+    def tracking_one(base, **kw):
+        touched.append(base)
+        return real_one(base, **kw)
+
+    monkeypatch.setattr(relabel, "relabel_one", tracking_one)
+
+    holder = open(config.PROJECT_DIR / "relabel.lock", "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)         # a GUI pass is mid-flight
+    done = threading.Event()
+
+    t = threading.Thread(target=lambda: (relabel.relabel_all(), done.set()))
+    t.start()
+    time.sleep(0.4)
+    assert not done.is_set(), "relabel_all ran while another relabel held the lock"
+    assert touched == []
+
+    fcntl.flock(holder, fcntl.LOCK_UN)         # the GUI pass finishes
+    t.join(timeout=5)
+    assert done.is_set()
+    assert touched == ["Mtg"]
 
 
 def test_naming_queued_during_a_pass_survives_it_and_both_names_land(sandbox, monkeypatch):

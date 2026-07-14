@@ -11,7 +11,7 @@ Runtimes / libraries: `parakeet-mlx` (Apache-2.0), `pyannote.audio` (MIT), MLX, 
 The control panel's UI typeface is **Figtree** by Erik Kennedy
 (https://github.com/erikdkennedy/figtree), licensed under the **SIL Open Font
 License 1.1**. The variable-font woff2 files are vendored in
-`gui/static/new/fonts/` with the license text (`OFL.txt`) alongside, and the
+`gui/static/fonts/` with the license text (`OFL.txt`) alongside, and the
 panel serves them itself (`GET /static/fonts/...`), never from a CDN.
 
 If transcripts or derived outputs are redistributed outside DPSCD, keep this

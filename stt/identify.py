@@ -173,6 +173,46 @@ def score_against(vec, samples) -> float:
     return max((cosine(vec, s) for s in samples), default=-1.0)
 
 
+def loo_scores(samples) -> list:
+    """Leave-one-out: each sample's best cosine against the REST of its own
+    stack. A wrong-voice enrollment sits far below its stackmates here — the
+    honest way to locate a bad sample without guessing at indexes. A single
+    sample scores -1.0 (nothing to compare against)."""
+    arr = np.asarray(samples, dtype=float)
+    arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
+    out = []
+    for i in range(arr.shape[0]):
+        rest = [arr[j] for j in range(arr.shape[0]) if j != i]
+        out.append(round(score_against(arr[i], rest), 3))
+    return out
+
+
+def sample_check(name, vector):
+    """Should this new sample join `name`'s EXISTING stack? None = clean (or
+    the person is new, so there is no stack to disagree with). Otherwise
+    {"own", "cross", "cross_name"}: the candidate scores below
+    ENROLL_STACK_MIN against the person's own samples, or matches some OTHER
+    profile better than its target — the classic wrong-cluster enrollment
+    that poisons a profile and misattributes every later meeting."""
+    prints = load_voiceprints()
+    own = prints.get(name)
+    if own is None:
+        return None
+    v = _l2(np.asarray(vector, dtype=float))
+    own_sc = score_against(v, own)
+    cross_name, cross_sc = None, -1.0
+    for nm, s in prints.items():
+        if nm == name:
+            continue
+        sc = score_against(v, s)
+        if sc > cross_sc:
+            cross_sc, cross_name = sc, nm
+    if own_sc < config.ENROLL_STACK_MIN or (cross_name is not None and cross_sc > own_sc):
+        return {"own": round(own_sc, 3), "cross": round(cross_sc, 3),
+                "cross_name": cross_name}
+    return None
+
+
 def _log_calibration(event: dict):
     try:
         event["at"] = datetime.now().isoformat(timespec="seconds")

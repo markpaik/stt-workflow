@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stt import config, identify
+from stt import config, identify, unknowns
 
 
 def _meeting_embeddings(base: str) -> dict:
@@ -43,6 +43,10 @@ def main():
     ap.add_argument("--audio", help="single-speaker audio clip to enroll from")
     ap.add_argument("--name", help="person's name to store")
     ap.add_argument("--replace", action="store_true", help="overwrite instead of averaging")
+    ap.add_argument("--confirm", action="store_true",
+                    help="enroll even when the sample looks like the wrong "
+                         "person (low cosine to their existing samples, or a "
+                         "better match to somebody else)")
     ap.add_argument("--list", action="store_true", help="list enrolled voiceprints")
     args = ap.parse_args()
 
@@ -70,6 +74,17 @@ def main():
         if args.speaker not in embs:
             raise SystemExit(f"{args.speaker} not found. Available: " + ", ".join(sorted(embs)))
         vec = embs[args.speaker]
+        # quality floor (same bar as /api/name): a cluster with seconds of
+        # speech can't identify anyone — measured from the relabel cache when
+        # one exists (it always does for diarized meetings)
+        dpath = config.meeting_file(args.from_meeting, ".diar.npz")
+        if dpath.exists():
+            from stt import diarcache
+            raw_turns = diarcache.load(dpath)[0]
+            veto = unknowns.floor_violation(
+                unknowns.talk_stats(raw_turns).get(args.speaker))
+            if veto:
+                raise SystemExit(f"{args.speaker} in '{args.from_meeting}': {veto}")
     elif args.audio:
         from stt import audio as A, diarize
         config.WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -91,6 +106,19 @@ def main():
         vec = embs[max(embs, key=lambda l: talk.get(l, 0.0))]
     else:
         raise SystemExit("Provide --from-meeting (+--speaker) or --audio")
+
+    # a suspect sample joining an EXISTING stack needs an explicit --confirm:
+    # a low cosine to the person's own samples (or a better match to somebody
+    # else entirely) is how a wrong-cluster enrollment poisons a profile
+    if not (args.replace or args.confirm):
+        w = identify.sample_check(args.name, vec)
+        if w:
+            msg = (f"This sample scores {w['own']:.2f} against {args.name}'s "
+                   f"existing samples")
+            if w["cross_name"] is not None and w["cross"] > w["own"]:
+                msg += f" and {w['cross']:.2f} against {w['cross_name']}"
+            raise SystemExit(msg + " — it may be the wrong person. "
+                                   "Re-run with --confirm to enroll anyway.")
 
     source = args.from_meeting or (Path(args.audio).stem if args.audio else None)
     path = identify.enroll(args.name, vec, replace=args.replace, source=source)

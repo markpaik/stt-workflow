@@ -423,6 +423,79 @@ def test_rename_person_crash_after_copy_leaves_old_state_valid(sandbox, monkeypa
     assert identify.load_voiceprints()["New"].shape[0] == 2
 
 
+def test_loo_scores_expose_a_wrong_voice_sample():
+    """The LOO regression fixture: three samples of one voice score >0.85
+    against their stackmates; a wrong-voice sample buried in the stack scores
+    near zero — leave-one-out is the honest way to find a bad enrollment."""
+    rng = np.random.default_rng(21)
+    u = rng.normal(size=256)
+    u /= np.linalg.norm(u)
+    w = rng.normal(size=256)
+    w -= (w @ u) * u
+    w /= np.linalg.norm(w)                     # the intruder: orthogonal voice
+
+    def near(_):
+        r = rng.normal(size=256)
+        r = 0.2 * r / np.linalg.norm(r)   # a small perturbation, not 256-dim noise
+        v = u + r
+        return v / np.linalg.norm(v)
+
+    stack = np.vstack([near(1), near(2), w, near(3)])
+    loo = identify.loo_scores(stack)
+    assert loo[2] < 0.2, f"intruder not exposed: {loo}"
+    assert all(s > 0.85 for i, s in enumerate(loo) if i != 2), loo
+    assert int(np.argmin(loo)) == 2
+
+
+def test_loo_scores_degenerate_stacks():
+    v = _vec(1) / np.linalg.norm(_vec(1))
+    assert identify.loo_scores(v.reshape(1, -1)) == [-1.0]  # nothing to compare
+
+
+# ---------- sample_check: the enrollment quality gate ----------
+
+def _ortho_pair(seed=31):
+    rng = np.random.default_rng(seed)
+    u = rng.normal(size=256)
+    u /= np.linalg.norm(u)
+    w = rng.normal(size=256)
+    w -= (w @ u) * u
+    w /= np.linalg.norm(w)
+    return u, w
+
+
+def test_sample_check_warns_on_a_low_own_stack_cosine(sandbox):
+    """A candidate scoring < 0.45 against the person's existing samples is
+    probably not their voice — surface the number, demand a confirm."""
+    u, w = _ortho_pair()
+    identify.enroll("Katie", u, source="M1")
+    cand = 0.30 * u + np.sqrt(1 - 0.30 ** 2) * w
+    warn = identify.sample_check("Katie", cand)
+    assert warn is not None
+    assert abs(warn["own"] - 0.30) < 0.01
+
+
+def test_sample_check_warns_when_another_profile_fits_better(sandbox):
+    """The same-meeting-wrong-cluster enrollment: the candidate clears the
+    absolute bar against its target but matches somebody ELSE better."""
+    u, w = _ortho_pair()
+    identify.enroll("Katie", u, source="M1")
+    identify.enroll("Mark", w, source="M1")
+    cand = 0.50 * u + np.sqrt(1 - 0.50 ** 2) * w   # Katie 0.50, Mark 0.866
+    warn = identify.sample_check("Katie", cand)
+    assert warn is not None and warn["cross_name"] == "Mark"
+    assert warn["cross"] > warn["own"]
+
+
+def test_sample_check_clean_sample_and_new_person_pass(sandbox):
+    u, w = _ortho_pair()
+    identify.enroll("Katie", u, source="M1")
+    good = 0.90 * u + np.sqrt(1 - 0.90 ** 2) * w
+    assert identify.sample_check("Katie", good) is None
+    # a brand-new person has no stack to disagree with
+    assert identify.sample_check("Somebody New", w) is None
+
+
 def test_cosine_dimension_mismatch_is_safe_not_a_crash():
     """A voiceprint saved under a different embedding size (e.g. after a
     model/backend change) must score as 'no match', not crash — and crucially

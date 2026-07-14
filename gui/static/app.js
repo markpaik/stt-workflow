@@ -2724,6 +2724,7 @@ async function openNamePanel(uid,display){
       <button class="btn mini" type="button" onclick="closeNamePanel()">Cancel</button>
       <button class="btn primary mini" id="npsave" type="button" onclick="npSave()">Save name</button>
     </div>
+    <div id="npconfirm" class="dckconfirm" hidden></div>
     <div id="nperr" class="mcerr" hidden></div>`;
   $('#npname').focus();
   let r;
@@ -2759,15 +2760,27 @@ function closeNamePanel(){
   panel.hidden=true;panel.innerHTML='';
   if(veil)veil.hidden=true;
 }
-async function npSave(){
+async function npSave(force){
   if(!NP)return;
   const n=($('#npname')?$('#npname').value:'').trim();
-  const err=$('#nperr');
+  const err=$('#nperr'),warn=$('#npconfirm');
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
   const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
-  const r=await api('/api/name',{uid:NP.uid,name:n});
+  const r=await api('/api/name',{uid:NP.uid,name:n,confirm:!!force});
   if(!r.ok){
     if(btn){btn.disabled=false;btn.textContent='Save name';}
+    if(r.warn&&warn){
+      // the enrollment quality gate: the house two-step confirm, numbers shown
+      if(err)err.hidden=true;
+      warn.hidden=false;
+      warn.innerHTML=`This voice matches ${esc(n)}&#8217;s saved samples at only
+        <b>${(+r.own).toFixed(2)}</b>${r.cross_name&&+r.cross>+r.own
+          ?` &mdash; and matches ${esc(r.cross_name)} better (<b>${(+r.cross).toFixed(2)}</b>)`:''}.
+        It may be the wrong person.
+        <button class="btn mini" type="button" onclick="$('#npconfirm').hidden=true">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="npSave(true)">Save anyway</button>`;
+      return;
+    }
     if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
     return;
   }

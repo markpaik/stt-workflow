@@ -1310,14 +1310,56 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/name":
                 name = b["name"].strip()
                 assert name
+                confirm = bool(b.get("confirm"))
+
+                def _warn_payload(w):
+                    # additive: ok stays boolean, error stays the inline text
+                    # old clients render; `warn` powers the two-step confirm
+                    msg = (f"This voice matches {name}'s saved samples at only "
+                           f"{w['own']:.2f}")
+                    if w["cross_name"] is not None and w["cross"] > w["own"]:
+                        msg += (f" — and matches {w['cross_name']} better "
+                                f"({w['cross']:.2f})")
+                    msg += ". It may be the wrong person. Confirm to save anyway."
+                    return {"ok": False, "warn": "suspect_sample",
+                            "need_confirm": True, "error": msg, **w}
                 if b.get("uid"):
+                    if not confirm:
+                        # naming an unknown as an EXISTING person appends the
+                        # unknown's samples to that stack — same quality bar
+                        # as any other enrollment
+                        s = unknowns.samples_of(b["uid"])
+                        warns = [w for w in
+                                 (identify.sample_check(name, row)
+                                  for row in (s if s is not None else []))
+                                 if w]
+                        if warns:
+                            self._json(_warn_payload(min(warns, key=lambda w: w["own"])))
+                            return
                     ok = unknowns.promote(b["uid"], name)
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
                     from stt import diarcache
-                    _, _, cent_emb, _ = diarcache.load(
+                    raw_turns, _, cent_emb, _ = diarcache.load(
                         config.meeting_file(b["meeting"], ".diar.npz"))
+                    if b["speaker"] not in cent_emb:
+                        self._json({"ok": False,
+                                    "error": "That speaker has no voice embedding "
+                                             "in this meeting."})
+                        return
+                    # quality floor: a cluster with seconds of speech cannot
+                    # identify anyone — refuse outright (no confirm override)
+                    veto = unknowns.floor_violation(
+                        unknowns.talk_stats(raw_turns).get(b["speaker"]))
+                    if veto:
+                        self._json({"ok": False, "error": veto})
+                        return
+                    if not confirm:
+                        w = identify.sample_check(name, cent_emb[b["speaker"]])
+                        if w:
+                            self._json(_warn_payload(w))
+                            return
                     identify.enroll(name, cent_emb[b["speaker"]], source=b["meeting"])
                     ok = True
                 if ok:

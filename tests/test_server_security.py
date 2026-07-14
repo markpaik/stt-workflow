@@ -186,6 +186,77 @@ def test_name_endpoint_rejects_an_unknown_meeting_base(running_server):
     assert status == 400
 
 
+def _make_meeting_with_cache(base, cluster_turns, cent_emb):
+    """A meeting plus the .diar.npz relabel cache: cluster_turns is
+    {label: [(start, end), ...]}, cent_emb {label: vector}."""
+    import numpy as np
+
+    from stt import diarcache
+    _make_meeting(base)
+    raw = sorted(({"start": s, "end": e, "cluster": lbl}
+                  for lbl, spans in cluster_turns.items() for s, e in spans),
+                 key=lambda t: t["start"])
+    diarcache.save(mfile(base, ".diar.npz"), raw, [None] * len(raw),
+                   {k: np.asarray(v, float) for k, v in cent_emb.items()})
+
+
+def test_name_endpoint_refuses_enrolling_a_thin_cluster(running_server):
+    """The enrollment quality gate: a cluster with seconds of speech cannot
+    identify anyone — the endpoint refuses with the plain-language error the
+    naming panel shows inline, and the registry stays untouched."""
+    import numpy as np
+
+    from stt import identify
+    v = np.random.default_rng(41).normal(size=256)
+    _make_meeting_with_cache("Thin Mtg",
+                             {"SPEAKER_00": [(0.0, 2.0), (5.0, 7.0), (9.0, 11.0)]},
+                             {"SPEAKER_00": v})
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Thin Mtg", "speaker": "SPEAKER_00",
+                          "name": "Somebody New"})
+    assert status == 200 and body["ok"] is False
+    assert "too little to identify anyone reliably" in body["error"]
+    assert "Somebody New" not in identify.load_registry()
+
+
+def test_name_endpoint_requires_confirm_for_a_suspect_sample(running_server, monkeypatch):
+    """The same-meeting-different-cluster gate: enrolling meeting M's OTHER
+    cluster onto a person whose stack came from M is almost always the wrong
+    voice. First call returns a warning with the scores; an explicit
+    confirm=true second call proceeds (the API stays additive)."""
+    import numpy as np
+
+    from stt import identify
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(cmd))
+    rng = np.random.default_rng(43)
+    priya = rng.normal(size=256)
+    priya /= np.linalg.norm(priya)
+    other = rng.normal(size=256)
+    other -= (other @ priya) * priya
+    other /= np.linalg.norm(other)
+    spans = [(i * 4.0, i * 4.0 + 3.0) for i in range(12)]      # over the floor
+    _make_meeting_with_cache("Pair Mtg",
+                             {"SPEAKER_00": spans,
+                              "SPEAKER_01": [(s + 60, e + 60) for s, e in spans]},
+                             {"SPEAKER_00": priya, "SPEAKER_01": other})
+    identify.enroll("Priya Shah", priya, source="Pair Mtg")
+
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Pair Mtg", "speaker": "SPEAKER_01",
+                          "name": "Priya Shah"})
+    assert status == 200 and body["ok"] is False and body.get("warn")
+    assert "own" in body and body["own"] < 0.45
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 1  # untouched
+
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Pair Mtg", "speaker": "SPEAKER_01",
+                          "name": "Priya Shah", "confirm": True})
+    assert status == 200 and body["ok"] is True
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
+    assert spawned, "a confirmed enrollment must still spawn the relabel"
+
+
 def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
     """G2: every speaker-registry mutation is a POST, so the centralized origin
     gate refuses a cross-site request before the handler runs. Spot-check the
