@@ -8,7 +8,11 @@ enrolled voiceprints we can do better, carefully:
      Open-set guard: moving a turn away from an ANONYMOUS cluster (possibly an
      unknown visitor) requires a higher absolute score (id_min_openset) than
      correcting a turn inside an already-named cluster.
-  2. Evidence-gated smoothing — tiny sandwiched fragments are re-attributed to the
+  2. Mid-band open-set rescue — a 0.6-1.5s turn stranded in an UNNAMED cluster
+     moves to the enrolled speaker its own embedding ranks first (clear margin),
+     over a floor that relaxes only when that speaker also owns an adjacent
+     turn. Named-cluster turns in this band are flagged, never moved.
+  3. Evidence-gated smoothing — tiny sandwiched fragments are re-attributed to the
      surrounding speaker ONLY when the fragment's own embedding is unusable or
      actually favors the neighbour. Bare answers ("yes", "no", ...) are never
      smoothed: a one-word reply in a confidential conversation means something, and attributing it
@@ -116,7 +120,44 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                 out[i]["attribution"] = "reassigned"
                 reassigned += 1
 
-    # 2. evidence-gated smoothing of tiny sandwiched fragments
+    # 2. mid-band open-set rescue (short_dur..min_reliable_dur). Turns here
+    # used to keep the diarizer's label unconditionally; the 07/2026 eval
+    # showed every fixable miss in the band is a turn STRANDED IN AN UNNAMED
+    # cluster (the diarizer's leftover blob or split-off junk) whose own
+    # embedding ranks the true enrolled speaker first with a clear margin.
+    # Rank-1 + margin alone needs the open-set bar; when the candidate also
+    # owns an ADJACENT turn, adjacency corroborates and a lower floor
+    # suffices. Named-cluster turns are never touched (measured: zero fixable
+    # cases; flipping them regressed human corrections — experiments.md run D)
+    # and strict mode never runs this (fragile calls stay a human's call).
+    if voiceprints and not strict:
+        prev = [o["speaker"] for o in out]  # post-step-1 labels: a rescue
+        for i, t in enumerate(turns):       # may not anchor on another rescue
+            dur = t["end"] - t["start"]
+            if not (short_dur <= dur < min_reliable_dur):
+                continue
+            if out[i]["speaker"] in voiceprints:  # named cluster: id_mismatch
+                continue                          # flagging governs, below
+            e = turn_embeddings[i]
+            if not _usable(e):
+                continue
+            scored = sorted(((score_against(e, voiceprints[nm]), nm)
+                             for nm in voiceprints), reverse=True)
+            bs, best = scored[0]
+            ss = scored[1][0] if len(scored) > 1 else -1.0
+            if (bs - ss) < config.REFINE_MIDBAND_RESCUE_MARGIN:
+                continue
+            neighbour = best in ((prev[i - 1] if i > 0 else None),
+                                 (prev[i + 1] if i < n - 1 else None))
+            floor = (config.REFINE_MIDBAND_NEIGHBOR_MIN if neighbour
+                     else config.REFINE_MIDBAND_RESCUE_MIN)
+            if bs >= floor:
+                out[i]["speaker"] = best
+                out[i]["attribution"] = "reassigned"
+                out[i]["id_score"] = round(bs, 3)
+                reassigned += 1
+
+    # 3. evidence-gated smoothing of tiny sandwiched fragments
     if not strict:
         for _ in range(2):
             for i, t in enumerate(turns):

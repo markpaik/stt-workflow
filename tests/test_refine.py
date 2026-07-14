@@ -196,6 +196,94 @@ def test_other_voice_without_margin_does_not_flag(sandbox):
     assert not any(s["flag"] == "id_mismatch" for s in stats["spans"])
 
 
+# --- mid-band open-set rescue (exp1-band-gap, 07/2026) ------------------------
+# A 0.6-1.5s turn stranded in an UNNAMED cluster may move to the enrolled
+# speaker its own embedding ranks first with a >= 0.10 margin: floor 0.70
+# anywhere, floor 0.35 when that speaker owns an adjacent turn. Named-cluster
+# turns are never moved (the swept named->named variants regressed real human
+# corrections), and strict mode never runs the gate.
+
+def _stranded_case(alice, bob, strict=False, named_owner=None):
+    """One 1.0s mid-band turn; its cluster is unnamed unless named_owner is
+    given. Alice/Bob voiceprints score alice/bob against the turn's embedding."""
+    turns = [{"start": 0.0, "end": 1.0, "cluster": "C1"}]
+    return refine.refine_turns(
+        turns, [TURN_EMB], {"C1": named_owner},
+        voiceprints={"Alice": _vp(alice), "Bob": _vp(bob)}, strict=strict)
+
+
+def test_midband_stranded_turn_rescued_on_strong_evidence(sandbox):
+    """No neighbour anchor: rank-1 at 0.72 with margin 0.32 clears the
+    open-set floor — the turn moves, with auditable provenance (this is the
+    synth trail_trip/trivia_night blob rescue, bs 0.727/0.709)."""
+    merged, stats = _stranded_case(0.72, 0.40)
+    assert merged[0]["speaker"] == "Alice"
+    assert stats["reassigned"] == 1
+    assert any(s["flag"] == "reassigned" for s in stats["spans"])
+
+
+def test_midband_rescue_blocked_below_openset_floor_without_neighbour(sandbox):
+    """0.60 is a solid score — but an open-set claim about an unnamed cluster
+    with no corroborating neighbour keeps the reliable-band bar (0.70). The
+    swept roster-wide low floors (0.35-0.45) admitted flips to people with no
+    cluster in the meeting and were rejected."""
+    merged, stats = _stranded_case(0.60, 0.20)
+    assert merged[0]["speaker"] == "C1"
+    assert stats["reassigned"] == 0
+    assert not any(s["flag"] == "reassigned" for s in stats["spans"])
+
+
+def test_midband_rescue_needs_margin_not_just_score(sandbox):
+    """Rank-1 at 0.72 but the runner-up at 0.65: a 0.07 margin is a coin flip
+    between enrolled voices (the two-Marks junk turns), not identity."""
+    merged, stats = _stranded_case(0.72, 0.65)
+    assert merged[0]["speaker"] == "C1"
+    assert stats["reassigned"] == 0
+
+
+def test_midband_neighbour_anchor_lowers_the_floor(sandbox):
+    """The rank-1 speaker also owns the adjacent turn: adjacency + rank-1 +
+    margin agree, so 0.40 suffices (the human-verified rescues on the real
+    library scored 0.511 and 0.375)."""
+    turns = [{"start": 0.0, "end": 5.0, "cluster": "C0"},   # Alice, adjacent
+             {"start": 5.0, "end": 6.0, "cluster": "C1"}]   # stranded mid-band
+    merged, stats = refine.refine_turns(
+        turns, [None, TURN_EMB], {"C0": "Alice", "C1": None},
+        voiceprints={"Alice": _vp(0.40), "Bob": _vp(0.20)}, strict=False)
+    assert len(merged) == 1 and merged[0]["speaker"] == "Alice"
+    assert stats["reassigned"] == 1
+
+
+def test_midband_low_score_not_rescued_without_neighbour_anchor(sandbox):
+    """Same 0.40 evidence with the anchor absent (neighbour is someone else):
+    below the open-set floor, the turn stays the diarizer's."""
+    turns = [{"start": 0.0, "end": 5.0, "cluster": "C2"},   # Bob, not rank-1
+             {"start": 5.0, "end": 6.0, "cluster": "C1"}]
+    merged, stats = refine.refine_turns(
+        turns, [None, TURN_EMB], {"C2": "Bob", "C1": None},
+        voiceprints={"Alice": _vp(0.40), "Bob": _vp(0.20)}, strict=False)
+    assert merged[-1]["speaker"] == "C1"
+    assert stats["reassigned"] == 0
+
+
+def test_midband_named_cluster_never_rescued(sandbox):
+    """A NAMED mid-band turn keeps its owner even when a rival is ahead on
+    the turn's own embedding — 0.437 vs 0.329 is the real-library case
+    (Brenda vs Briana) where flipping contradicted the human correction.
+    Verification (id_mismatch flagging) governs named turns, not rescue."""
+    merged, stats = _stranded_case(0.437, 0.329, named_owner="Bob")
+    assert merged[0]["speaker"] == "Bob"
+    assert stats["reassigned"] == 0
+
+
+def test_midband_rescue_never_in_strict(sandbox):
+    """Strict output is byte-identical: the would-fire strong-evidence case
+    neither moves nor gains flags."""
+    merged, stats = _stranded_case(0.72, 0.40, strict=True)
+    assert merged[0]["speaker"] == "C1"
+    assert stats["reassigned"] == 0 and stats["spans"] == []
+
+
 # --- short-turn catch-all: strict-mode-only -----------------------------------
 
 def test_unsandwiched_short_turn_not_flagged_in_normal_mode(sandbox):

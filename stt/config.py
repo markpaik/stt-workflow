@@ -99,6 +99,25 @@ REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.6"))
 # protected blocks on the real library).
 REFINE_PROTECTED_OVERRIDE_MARGIN = float(
     os.environ.get("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", "0.15"))
+# Mid-band open-set rescue (exp1-band-gap, 07/2026 eval): a 0.6-1.5s turn
+# stranded in an UNNAMED cluster is reassigned to an enrolled speaker who is
+# roster rank-1 on the turn's OWN embedding by >= RESCUE_MARGIN over the
+# runner-up AND clears a floor: RESCUE_MIN anywhere (the same open-set bar the
+# reliable-band reassignment uses), or NEIGHBOR_MIN when that speaker also
+# owns an ADJACENT turn — adjacency + rank-1 + margin are three agreeing
+# signals, so weaker voice evidence suffices (the two human-verified rescues
+# on the real library scored 0.511 and 0.375). Named-cluster turns are NEVER
+# reassigned in this band: the eval found zero fixable named->named cases and
+# the swept variants that allowed them regressed real human corrections
+# (correct mid-band own-scores have median ~0.32-0.37, so a rival clearing a
+# low bar is noise, not identity — see qa/eval/experiments.md, run D).
+REFINE_MIDBAND_RESCUE_MIN = float(
+    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MIN", "0.70"))
+REFINE_MIDBAND_RESCUE_MARGIN = float(
+    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MARGIN", "0.10"))
+REFINE_MIDBAND_NEIGHBOR_MIN = float(
+    os.environ.get("STT_REFINE_MIDBAND_NEIGHBOR_MIN", "0.35"))
+
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
 # 41-meeting library the MEDIAN correctly-attributed mid-band turn scored 0.32,
