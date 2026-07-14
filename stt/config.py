@@ -118,6 +118,33 @@ REFINE_MIDBAND_RESCUE_MARGIN = float(
 REFINE_MIDBAND_NEIGHBOR_MIN = float(
     os.environ.get("STT_REFINE_MIDBAND_NEIGHBOR_MIN", "0.35"))
 
+# Junk-fragment repair (exp2-cluster-repair, 07/2026 eval): the diarizer
+# scatters echo/system-audio fragments of the REAL attendees into small
+# unnamed clusters (Mark C. Weekly holds 206 such turns; their CLUSTER
+# centroids are cross-voice mixtures, so cluster-level merging measures dead —
+# max centroid-vs-named cosine 0.33). Per-TURN evidence works: a still-unnamed
+# turn whose own embedding matches a NAMED cluster's centroid in the SAME
+# meeting (same room/mic — echo fragments score 0.5-0.8 here vs 0.4-0.75
+# against cross-meeting voiceprints) inherits that name when the cosine clears
+# JUNK_REPAIR_MIN with JUNK_REPAIR_MARGIN over the runner-up named centroid
+# AND the enrolled roster ranks the same person first on the turn's own
+# embedding. Attendee-anchored by construction (the reference cluster already
+# cleared open-set naming — nobody absent from the meeting can be introduced),
+# and the two independent references must agree. Swept 07/2026
+# (qa/eval/experiments.md exp2): floor 0.50 fixes nothing; 0.45 fixes 2 human
+# corrections; 0.40 fixes 4 with zero row-level breaks, and its full library
+# blast radius is 70 fragments across 7 meetings, every one roster-corroborated
+# (70/70) — unlike the rejected roster-wide low floors of exp1, this gate
+# cannot name anyone without a named cluster in the room. Margin 0.10 vs 0.15
+# scored identically; 0.10 matches the mid-band rescue margin. Observed noise
+# fragments (the Weekly Anthropic junk cluster) top out ~0.35 vs named
+# centroids, so 0.40 keeps clearance. Set the floor above 1.0 to disable.
+# Strict mode never runs this step.
+REFINE_JUNK_REPAIR_MIN = float(
+    os.environ.get("STT_REFINE_JUNK_REPAIR_MIN", "0.40"))
+REFINE_JUNK_REPAIR_MARGIN = float(
+    os.environ.get("STT_REFINE_JUNK_REPAIR_MARGIN", "0.10"))
+
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
 # 41-meeting library the MEDIAN correctly-attributed mid-band turn scored 0.32,
@@ -154,6 +181,34 @@ UNKNOWN_MIN_RELIABLE_TURNS = int(os.environ.get("STT_UNKNOWN_MIN_RELIABLE_TURNS"
 # their own) the enrollment is suspect — the API/CLI demand an explicit
 # confirm instead of silently poisoning the profile.
 ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
+
+# --- Absorption splitting (exp2-cluster-repair, 07/2026 eval) ---
+# pyannote's exclusive diarization can hand back one long "turn" spanning
+# several speakers it clustered together (the 4-voice synth conversation keeps
+# 12-18s turns holding three people; the diarizer never cut a boundary, so no
+# cache-side relabel can fix them). At DIARIZE time — audio and embedder in
+# hand — each turn >= SPLIT_MIN_DUR is probed with sliding sub-windows
+# (SPLIT_WIN long, every SPLIT_HOP); a cut lands only where BOTH halves'
+# mean embeddings rank DIFFERENT enrolled speakers, each by a real margin
+# (SPLIT_HALF_MARGIN), and the halves' cosine dips to <= SPLIT_DIP_MAX;
+# recursion up to SPLIT_MAX_DEPTH handles 3+-speaker spans. Measured on the
+# synth corpus (qa/eval/experiments.md exp2): single-voice turns NEVER pass
+# the different-names gate (their dip floor is 0.52 and both halves always
+# rank the same person — zero false splits on the all-correct conversation),
+# while multi-voice turns cut within ~0.2s of scripted truth: synth 72.2 ->
+# 84.1%, the 4-speaker conversation 42.4 -> 90.9%, frame DER-like 26.5 ->
+# 12.8%, 18 row fixes and 0 breaks. Dip 0.60 lost two of those fixes; margin
+# 0.15 scored the same as 0.10. Split turns land in the .diar.npz cache, so
+# relabel and the eval replay them without re-diarizing (existing caches are
+# untouched until a meeting is reprocessed). Dip <= 0 disables. Strict mode
+# and meetings with no enrolled voiceprints never split (identity evidence IS
+# the gate).
+SPLIT_DIP_MAX = float(os.environ.get("STT_SPLIT_DIP_MAX", "0.65"))
+SPLIT_HALF_MARGIN = float(os.environ.get("STT_SPLIT_HALF_MARGIN", "0.10"))
+SPLIT_MIN_DUR = float(os.environ.get("STT_SPLIT_MIN_DUR", "2.4"))
+SPLIT_WIN = float(os.environ.get("STT_SPLIT_WIN", "1.2"))
+SPLIT_HOP = float(os.environ.get("STT_SPLIT_HOP", "0.3"))
+SPLIT_MAX_DEPTH = int(os.environ.get("STT_SPLIT_MAX_DEPTH", "3"))
 
 # STRICT mode (confidential conversations): no smoothing, no open-set
 # reassignment — fragile attributions are flagged for human review instead of guessed.

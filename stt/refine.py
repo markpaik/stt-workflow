@@ -17,6 +17,13 @@ enrolled voiceprints we can do better, carefully:
      actually favors the neighbour. Bare answers ("yes", "no", ...) are never
      smoothed: a one-word reply in a confidential conversation means something, and attributing it
      to the questioner is worse than leaving a fragment.
+  4. Junk-fragment repair — a turn still stranded in an unnamed cluster inherits
+     a NAMED same-meeting cluster's name when its own embedding matches that
+     cluster's centroid (floor + margin) AND the enrolled roster agrees.
+     Attendee-anchored: the reference cluster already cleared open-set naming.
+
+This module also owns the pure change-point gate for absorption splitting
+(propose_split); the audio-side orchestration lives in diarize.
 
 STRICT mode (sensitive recordings): no smoothing, no open-set reassignment —
 fragile turns keep the diarizer's label and are flagged for human review.
@@ -217,6 +224,53 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                     if "short_low_confidence" not in out[i]["flags"]:
                         out[i]["flags"].append("short_low_confidence")
                         flagged += 1
+    # 4. junk-fragment repair: the diarizer scatters echo/system-audio
+    # fragments of REAL attendees into small unnamed clusters whose own
+    # centroids are cross-voice mixtures (cluster-level merging measured dead:
+    # max junk-centroid-vs-named-centroid cosine 0.33 on the worst meeting).
+    # Per turn, the same-meeting NAMED centroid is a strong reference — same
+    # room, same mic — so a still-unnamed turn inherits a named cluster's
+    # name when its own embedding clears REFINE_JUNK_REPAIR_MIN against that
+    # centroid with REFINE_JUNK_REPAIR_MARGIN over the runner-up NAMED
+    # centroid AND the enrolled roster ranks the same person first (two
+    # independent references must agree; 55/55 candidates on the 44-meeting
+    # library did). Attendee-anchored by construction: the reference cluster
+    # already cleared open-set naming, so nobody absent from the meeting can
+    # be introduced here. Runs after smoothing so the evidence-gated sandwich
+    # keeps first claim on tiny fragments; never in strict.
+    if voiceprints and not strict:
+        # name -> that person's named-cluster centroids in THIS meeting
+        # (resolve_split_clusters can name two clusters the same person;
+        # score against the closest one, like score_against does for samples)
+        cent_by_name = {}
+        for c, nm in cluster_names.items():
+            cv = cluster_centroids.get(c)
+            if nm and cv is not None:
+                cent_by_name.setdefault(nm, []).append(cv)
+        for i, t in enumerate(turns):
+            if not cent_by_name:
+                break
+            if out[i]["speaker"] in voiceprints:
+                continue
+            e = turn_embeddings[i]
+            if not _usable(e):
+                continue
+            scored = sorted(((max(cosine(e, cv) for cv in cvs), nm)
+                             for nm, cvs in cent_by_name.items()), reverse=True)
+            bs, best = scored[0]
+            ss = scored[1][0] if len(scored) > 1 else -1.0
+            if bs < config.REFINE_JUNK_REPAIR_MIN or \
+                    (bs - ss) < config.REFINE_JUNK_REPAIR_MARGIN:
+                continue
+            vp_best = max((score_against(e, voiceprints[nm]), nm)
+                          for nm in voiceprints)
+            if vp_best[1] != best:
+                continue
+            out[i]["speaker"] = best
+            out[i]["attribution"] = "reassigned"
+            out[i]["id_score"] = round(bs, 3)  # the centroid evidence
+            reassigned += 1
+
     # STRICT only: any short turn that was neither smoothed nor already marked
     # stays visible but flagged — its attribution rests on thin evidence, and in
     # a sensitive recording that is a human's call. In normal mode the
@@ -288,6 +342,51 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
                     "protected_overridden": protected_overridden,
                     "strict": strict, "turns_in": n, "turns_out": len(merged),
                     "spans": spans}
+
+
+def propose_split(window_embs, window_spans, voiceprints, dip_max=None,
+                  half_margin=None):
+    """Change-point gate for absorption splitting (exp2-cluster-repair): given
+    sub-window embeddings of ONE long diarized turn, find the best cut where
+    the two halves' mean embeddings (a) rank DIFFERENT enrolled speakers, each
+    by >= half_margin over the roster runner-up, and (b) have cosine <=
+    dip_max. Returns (cut_time, left_name, right_name) or None. Pure — the
+    audio/embedder orchestration lives in diarize._split_absorbed_turns.
+
+    Measured on the synth corpus: single-voice turns NEVER pass (their halves
+    always rank the same person and their dip floor is 0.52), while true
+    multi-speaker turns cut within ~0.2s of scripted truth."""
+    dip_max = config.SPLIT_DIP_MAX if dip_max is None else dip_max
+    half_margin = config.SPLIT_HALF_MARGIN if half_margin is None else half_margin
+    if not voiceprints or dip_max <= 0:
+        return None
+    usable = [(np.asarray(e, float) / np.linalg.norm(np.asarray(e, float)), sp)
+              for e, sp in zip(window_embs, window_spans) if _usable(e)]
+    if len(usable) < 4:
+        return None
+    embs = np.stack([u[0] for u in usable])
+    spans = [u[1] for u in usable]
+
+    def rank1(vec):
+        scored = sorted(((score_against(vec, s), nm)
+                         for nm, s in voiceprints.items()), reverse=True)
+        second = scored[1][0] if len(scored) > 1 else -1.0
+        return scored[0][1], scored[0][0] - second
+
+    best = None
+    for k in range(2, len(embs) - 1):   # >= 2 windows on each side
+        left, right = embs[:k].mean(axis=0), embs[k:].mean(axis=0)
+        dip = cosine(left, right)
+        if dip > dip_max:
+            continue
+        left_name, lmarg = rank1(left)
+        right_name, rmarg = rank1(right)
+        if left_name == right_name or lmarg < half_margin or rmarg < half_margin:
+            continue
+        cut = (spans[k - 1][1] + spans[k][0]) / 2
+        if best is None or dip < best[0]:
+            best = (dip, cut, left_name, right_name)
+    return None if best is None else (best[1], best[2], best[3])
 
 
 def resolve_split_clusters(cluster_names, cent_emb, voiceprints, threshold=0.75):
