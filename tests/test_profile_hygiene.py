@@ -229,6 +229,41 @@ def test_assign_floor_refuses_to_mint_a_thin_cluster(sandbox):
     assert out["S0"].startswith("U")
 
 
+def test_assign_floor_pools_split_fragments_of_one_person(sandbox):
+    """The floor measures the PERSON, not the fragment. The diarizer split one
+    participant (79s of real speech) into three clusters, each alone below the
+    floor — so a real person became permanently unnameable 'Voice N' scraps.
+    Fragments at split-twin similarity pool their evidence: the group passes,
+    the first fragment mints, and the twins attach to the SAME Speaker N."""
+    u = _unit(21)
+    frags = {f"S{i}": _at_cosine(u, 0.90, seed=30 + i) for i in range(3)}
+    # pairwise ~0.81 (>= SPLIT_SIM), each fragment alone under BOTH bars
+    assert all(_cos(frags["S0"], frags[k]) >= unknowns.SPLIT_SIM for k in frags)
+    stats = {k: {"talk_secs": 15.0, "reliable_turns": 4} for k in frags}
+    # a genuinely thin LONE stranger rides along and must still be refused
+    frags["S9"] = _unit(77)
+    stats["S9"] = dict(THIN_STATS)
+    names = {k: None for k in frags}
+
+    out = unknowns.assign(frags, names, "Mtg A", stats=stats)
+    assert "S9" not in out                       # the lone noise floor stays local
+    assert {out.get("S0"), out.get("S1"), out.get("S2")} == {out["S0"]}  # ONE uid
+    assert out["S0"].startswith("U")
+
+
+def test_assign_floor_does_not_pool_distinct_thin_strangers(sandbox):
+    """Two UNRELATED thin voices (below split-twin similarity) never combine
+    their evidence — pooling is for one over-segmented person, not a loophole
+    that lets two noise floors vouch for each other."""
+    a, b = _unit(41), _unit(42)
+    assert _cos(a, b) < unknowns.SPLIT_SIM
+    out = unknowns.assign({"S0": a, "S1": b}, {"S0": None, "S1": None}, "Mtg A",
+                          stats={"S0": {"talk_secs": 20.0, "reliable_turns": 6},
+                                 "S1": {"talk_secs": 20.0, "reliable_turns": 6}})
+    assert out == {}
+    assert unknowns.load()["speakers"] == {}
+
+
 def test_assign_floor_never_blocks_matching_an_existing_unknown(sandbox):
     """Matching an EXISTING unknown stays unrestricted: a returning stranger
     heard only briefly today still keeps their stable global number."""

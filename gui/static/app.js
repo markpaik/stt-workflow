@@ -1728,19 +1728,34 @@ function _mTranscriptShell(){
 }
 function mLegend(d){
   const box=$('#mlegend');if(!box)return;
+  const opt={};(d.speaker_options||[]).forEach(o=>{opt[o.display]=o;});
   box.innerHTML=(d.speakers||[]).map(w=>{
     const dot=`<span class="msdot" style="background:${MP.color[w]}"></span>`;
     const uid=mUnknownUid(w);
     // an unnamed voice ("Speaker N" with an unknown-registry entry that lists
     // this meeting): its legend chip opens the naming slide-over
-    return uid
-      ?`<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
-          onclick="openNamePanelByUid('${escJs(uid)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`
-      :`<span class="mlg">${dot}${esc(w)}</span>`;
+    if(uid)return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
+          onclick="openNamePanelByUid('${escJs(uid)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
+    // an unnamed voice with NO registry entry: a 'Voice N' the minting floor
+    // kept transcript-local, or a voice suppressed by a 'not a real speaker'
+    // tombstone. Every unnamed voice on the page stays nameable: the chip
+    // names it straight from THIS meeting's audio (/api/name meeting mode),
+    // which the tombstone does not gate. Without this, three different
+    // suppression layers all rendered as identical dead text and the only
+    // sign of a real person was an unnameable label.
+    const o=opt[w];
+    if(o&&!o.named&&o.id!==w)
+      return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
+          onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
+    return `<span class="mlg">${dot}${esc(w)}</span>`;
   }).join('');
 }
 function mUnknownUid(display){
-  const u=(S&&S.unknowns||[]).find(u=>u.display===display&&!u.archived
+  // hidden (archived) unknowns keep their "Who is this?" chip: hiding was meant
+  // to stop the drawer/tray NAGGING about a one-time voice, not to strip the
+  // naming affordance out of every transcript the voice appears in. Filtering
+  // them here left unnamed speakers on the page with no way to review them.
+  const u=(S&&S.unknowns||[]).find(u=>u.display===display
     &&(u.meetings||[]).includes(MP.base));
   return u?u.uid:null;
 }
@@ -2692,24 +2707,34 @@ function mAddAtPlayhead(){
  * only), Save name -> /api/name, "Not a real speaker" -> /api/forget. After a
  * save the panel closes and the quiet relabel note rides the polled state
  * (relabel_pending) as the lowest-priority pill. */
-let NP=null;    // {uid} while the panel is open
+let NP=null;    // {uid} or {meeting, speaker} while the panel is open
 function openNamePanelByUid(uid){
   const u=(S&&S.unknowns||[]).find(x=>x.uid===uid);
   openNamePanel(uid,u?u.display:uid);
 }
-async function openNamePanel(uid,display){
+// naming a voice the registry does NOT track (kept transcript-local by the
+// minting floor, or suppressed by a "not a real speaker" tombstone): the same
+// panel, but the save enrolls straight from this meeting's cluster embedding
+function openNamePanelByCluster(meeting,speaker,display){
+  openNamePanel(null,display,{meeting,speaker});
+}
+async function openNamePanel(uid,display,cluster){
   const panel=$('#namepanel'),veil=$('#nameveil');
   if(!panel||!veil)return;
-  NP={uid};
+  NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker}:{uid};
   veil.hidden=false;panel.hidden=false;
   panel.innerHTML=`
     <div class="nphead">
       <h2 class="nptitle">Who is ${esc(display)}?</h2>
       <button class="iact" type="button" title="Close" onclick="closeNamePanel()">&#10005;</button>
     </div>
-    <p class="npnote">Listen to this voice: the clip is their longest turn in each meeting
+    <p class="npnote">${cluster
+      ?`Listen to this voice: the clip is their longest turn in this meeting.
+      Typing an <b>existing</b> name merges this voice into that person.
+      Every past and future meeting relabels automatically.`
+      :`Listen to this voice: the clip is their longest turn in each meeting
       they were heard in. Typing an <b>existing</b> name merges this voice into that person.
-      Every past and future meeting relabels automatically.</p>
+      Every past and future meeting relabels automatically.`}</p>
     <div id="npclips" class="npclips"><span class="spin"></span></div>
     <div class="npfield">
       <input type="text" id="npname" placeholder="Person&#8217;s name" autocomplete="off" spellcheck="false"
@@ -2718,8 +2743,8 @@ async function openNamePanel(uid,display){
       <div id="npdd" class="npdd" hidden></div>
     </div>
     <div class="npbtns">
-      <button class="btn danger mini" type="button" onclick="npForget()"
-        title="A false detection (music, crosstalk, an echo): remove this voice entirely">Not a real speaker</button>
+      ${cluster?'':`<button class="btn danger mini" type="button" onclick="npForget()"
+        title="A false detection (music, crosstalk, an echo): remove this voice entirely">Not a real speaker</button>`}
       <span class="grow"></span>
       <button class="btn mini" type="button" onclick="closeNamePanel()">Cancel</button>
       <button class="btn primary mini" id="npsave" type="button" onclick="npSave()">Save name</button>
@@ -2727,6 +2752,14 @@ async function openNamePanel(uid,display){
     <div id="npconfirm" class="dckconfirm" hidden></div>
     <div id="nperr" class="mcerr" hidden></div>`;
   $('#npname').focus();
+  if(cluster){
+    // one clip, cut from THIS meeting's cluster (no registry entry to walk)
+    const box0=$('#npclips');
+    if(box0)box0.innerHTML=`<audio controls
+      onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
+      src="/api/snippet?meeting=${encodeURIComponent(cluster.meeting)}&speaker=${encodeURIComponent(cluster.speaker)}&secs=45"></audio>`;
+    return;
+  }
   let r;
   try{r=await api('/api/voice_clips?speaker='+encodeURIComponent(uid));}
   catch(e){r={clips:[]};}
@@ -2766,7 +2799,9 @@ async function npSave(force){
   const err=$('#nperr'),warn=$('#npconfirm');
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
   const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
-  const r=await api('/api/name',{uid:NP.uid,name:n,confirm:!!force});
+  const r=await api('/api/name',NP.uid
+    ?{uid:NP.uid,name:n,confirm:!!force}
+    :{meeting:NP.meeting,speaker:NP.speaker,name:n,confirm:!!force});
   if(!r.ok){
     if(btn){btn.disabled=false;btn.textContent='Save name';}
     if(r.warn&&warn){

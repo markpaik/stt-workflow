@@ -1162,7 +1162,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"base": base, "strict": d.get("strict", False),
                             "duration_sec": d.get("duration_sec", 0),
                             "speakers": [s["display"] for s in d.get("speakers", [])],
-                            "speaker_options": [{"id": s["id"], "display": s["display"]}
+                            "speaker_options": [{"id": s["id"], "display": s["display"],
+                                                 "named": bool(s.get("name"))}
                                                 for s in d.get("speakers", [])],
                             "people": sorted(identify.load_registry().keys()),
                             "segments": segs})
@@ -1349,9 +1350,18 @@ class Handler(BaseHTTPRequestHandler):
                                              "in this meeting."})
                         return
                     # quality floor: a cluster with seconds of speech cannot
-                    # identify anyone — refuse outright (no confirm override)
-                    veto = unknowns.floor_violation(
-                        unknowns.talk_stats(raw_turns).get(b["speaker"]))
+                    # identify anyone — refuse outright (no confirm override).
+                    # Pooled across the cluster's same-meeting split twins,
+                    # exactly like assign()'s minting gate: a person the
+                    # diarizer split three ways must not be refused because
+                    # each fragment alone looks like a noise floor.
+                    mj = json.loads(
+                        config.meeting_file(b["meeting"], ".json").read_text())
+                    unnamed = [s["id"] for s in mj.get("speakers", [])
+                               if not s.get("name")]
+                    veto = unknowns.floor_violation(unknowns.pooled_stats(
+                        b["speaker"], cent_emb,
+                        unknowns.talk_stats(raw_turns), unnamed))
                     if veto:
                         self._json({"ok": False, "error": veto})
                         return

@@ -138,6 +138,40 @@ def talk_stats(raw_turns) -> dict:
     return out
 
 
+def pooled_stats(label, cent_emb, stats, unnamed_labels):
+    """The floor evidence for `label`, POOLED across its same-meeting split
+    twins — unnamed clusters whose centroids sit at SPLIT_SIM to it.
+
+    The floor used to measure each fragment alone, but the diarizer's
+    over-splitting divides one person's talk BEFORE the floor can measure it:
+    a participant with 79s of speech across three fragments read as three
+    noise floors, and a real person became permanently unnameable 'Voice N'
+    scraps (no registry entry, no naming affordance anywhere). A voice's
+    evidence is the union of its fragments; once the first fragment of a
+    passing group mints, the existing SPLIT_SIM matching attaches its twins
+    to the same Speaker N."""
+    if stats is None:
+        return None
+    # ALWAYS seed with the cluster's own evidence — never rely on the caller
+    # listing the label among unnamed_labels. A caller with no roster to offer
+    # (an older meeting json without a speakers list) must degrade to the
+    # single-cluster floor, not to a zero that vetoes every voice.
+    own = stats.get(label, {"talk_secs": 0.0, "reliable_turns": 0})
+    total = {"talk_secs": own["talk_secs"], "reliable_turns": own["reliable_turns"]}
+    v = np.asarray(cent_emb.get(label), float)
+    for other in unnamed_labels:
+        st = stats.get(other)
+        if other == label or st is None or other not in cent_emb:
+            continue
+        w = np.asarray(cent_emb[other], float)
+        if (not np.isfinite(w).all() or not np.linalg.norm(w)
+                or cosine(v, w) < SPLIT_SIM):
+            continue
+        total["talk_secs"] += st["talk_secs"]
+        total["reliable_turns"] += st["reliable_turns"]
+    return total
+
+
 def floor_violation(st) -> str:
     """Plain-language refusal when a cluster is below the evidence floor a
     voice needs before it can identify anyone — used both by assign()'s
@@ -262,8 +296,12 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 # ever be named (played, recognized, enrolled). A cluster the
                 # caller measured below the floor stays transcript-local (a
                 # centroid with NO turns at all is definitionally junk).
-                if stats is not None and floor_violation(
-                        stats.get(label, {"talk_secs": 0.0, "reliable_turns": 0})):
+                # Measured over the cluster's split-twin GROUP, not the lone
+                # fragment — over-splitting must not starve a real person
+                # below the floor one piece at a time.
+                if stats is not None and floor_violation(pooled_stats(
+                        label, cent_emb, stats,
+                        [l for l in cent_emb if not cluster_names.get(l)])):
                     continue
                 # lowest free number: after unknowns get named, new voices start
                 # back at Speaker 1 instead of counting up forever

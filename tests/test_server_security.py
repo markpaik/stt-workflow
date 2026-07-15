@@ -219,6 +219,43 @@ def test_name_endpoint_refuses_enrolling_a_thin_cluster(running_server):
     assert "Somebody New" not in identify.load_registry()
 
 
+def test_name_endpoint_pools_split_fragments_for_the_floor(running_server, monkeypatch):
+    """The enrollment floor measures the PERSON, not the fragment. A voice the
+    diarizer split three ways (each piece alone under the floor, the group well
+    over it) must be enrollable from the transcript — before this, a real
+    participant with 79s of speech was refused as 'too little to identify'."""
+    import numpy as np
+
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    rng = np.random.default_rng(7)
+    u = rng.normal(size=256)
+    u /= np.linalg.norm(u)
+
+    def twin(seed):     # cosine 0.9 to u -> pairwise ~0.81, over SPLIT_SIM
+        r = rng.normal(size=256)
+        r -= (r @ u) * u
+        r /= np.linalg.norm(r)
+        return 0.9 * u + np.sqrt(1 - 0.81) * r
+
+    # each fragment: 5 turns x 3s = 15s talk, 5 reliable — alone under BOTH bars
+    turns = {f"SPEAKER_0{i}": [(j * 4.0 + i * 100, j * 4.0 + 3.0 + i * 100)
+                               for j in range(5)] for i in range(3)}
+    cents = {f"SPEAKER_0{i}": twin(50 + i) for i in range(3)}
+    _make_meeting_with_cache("Split Mtg", turns, cents)
+    # the roster the endpoint pools across: all three unnamed
+    mj = json.loads(mfile("Split Mtg", ".json").read_text())
+    mj["speakers"] = [{"id": k, "name": None, "display": f"Voice {i+1}"}
+                      for i, k in enumerate(sorted(cents))]
+    mfile("Split Mtg", ".json").write_text(json.dumps(mj))
+
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Split Mtg", "speaker": "SPEAKER_01",
+                          "name": "Jordan Lee"})
+    assert status == 200 and body["ok"], body       # pooled 45s/15 turns: enrolled
+    assert "Jordan Lee" in identify.load_registry()
+
+
 def test_name_endpoint_requires_confirm_for_a_suspect_sample(running_server, monkeypatch):
     """The same-meeting-different-cluster gate: enrolling meeting M's OTHER
     cluster onto a person whose stack came from M is almost always the wrong
