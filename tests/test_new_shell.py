@@ -411,7 +411,14 @@ def test_naming_panel_replaces_the_who_bridge():
         assert re.search(r"(?:async )?function\s+" + fn + r"\s*\(", NEW_JS), \
             f"missing naming fn: {fn}"
     assert "'/api/voice_clips?speaker='" in NEW_JS
-    assert re.search(r"api\('/api/name',\{uid:NP\.uid,name:n,confirm:!!force\}\)", NEW_JS)
+    # the save posts to /api/name in BOTH panel modes: by registry uid, and by
+    # this-meeting cluster (the path that names a voice the registry does not
+    # track — sub-floor 'Voice N' scraps and tombstone-suppressed voices)
+    assert re.search(r"\{uid:NP\.uid,name:n,confirm:!!force\}", NEW_JS)
+    assert re.search(r"\{meeting:NP\.meeting,speaker:NP\.speaker,name:n,confirm:!!force\}", NEW_JS)
+    assert re.search(r"function\s+openNamePanelByCluster\s*\(", NEW_JS)
+    # the meeting legend offers the cluster chip for unnamed, un-tracked voices
+    assert "openNamePanelByCluster(" in NEW_JS and NEW_JS.count("openNamePanelByCluster(") >= 2
     assert re.search(r"api\('/api/forget',\{uid:NP\.uid\}\)", NEW_JS)
     # the enrollment quality gate answers with a warning: the panel renders
     # the house two-step confirm (numbers shown), never a native dialog
@@ -542,7 +549,8 @@ def test_speaker_management_moves_into_the_drawer():
     # "Who is this?" reuses the EXISTING naming slide-over, never a duplicate:
     # tray voices + meeting legend + the drawer all call the one opener
     assert NEW_JS.count("openNamePanelByUid(") >= 4
-    assert NEW_JS.count("function openNamePanel") == 2   # openNamePanel + ...ByUid
+    # openNamePanel + ...ByUid + ...ByCluster (the untracked-voice path)
+    assert NEW_JS.count("function openNamePanel") == 3
     # hidden unknowns fold behind an "N hidden" expandable with Restore
     assert "} hidden" in NEW_JS and "Restore" in NEW_JS
     # the person Remove is the house two-step (armed confirm, then the POST)
