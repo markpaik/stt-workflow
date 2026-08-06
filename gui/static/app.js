@@ -296,6 +296,10 @@ function rowUnknownUid(base,display){
 // transcript legend uses, so the app has exactly one naming flow. Registry
 // uid first; a voice the registry never tracked (minting floor, or a "not a
 // real speaker" tombstone) still names from this meeting's cluster.
+// A voice dismissed as "not a real speaker" in this meeting falls through to
+// the plain chip with NO extra check here: the SERVER is the gate, dropping the
+// id out of unnamed_clusters, so there is exactly one place dismissal is
+// enforced instead of a client-side rule that can drift from it.
 function rowSpeakerChips(row){
   const unc=row.unnamed_clusters||{};
   return (row.speakers||[]).map(w=>{
@@ -303,7 +307,7 @@ function rowSpeakerChips(row){
     const tip='Who is this? Listen and name this voice';
     if(uid)
       return `<button class="nchip unk" type="button" title="${tip}"
-        onclick="openNamePanelByUid('${escJs(uid)}')">${esc(w)}<span class="nchipq">?</span></button>`;
+        onclick="openNamePanelByUid('${escJs(uid)}','${escJs(row.id)}')">${esc(w)}<span class="nchipq">?</span></button>`;
     if(cid)
       return `<button class="nchip unk" type="button" title="${tip}"
         onclick="openNamePanelByCluster('${escJs(row.id)}','${escJs(cid)}','${escJs(w)}')">${esc(w)}<span class="nchipq">?</span></button>`;
@@ -1802,7 +1806,7 @@ function mLegend(d){
     // an unnamed voice ("Speaker N" with an unknown-registry entry that lists
     // this meeting): its legend chip opens the naming slide-over
     if(uid)return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
-          onclick="openNamePanelByUid('${escJs(uid)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
+          onclick="openNamePanelByUid('${escJs(uid)}','${escJs(MP.base)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
     // an unnamed voice with NO registry entry: a 'Voice N' the minting floor
     // kept transcript-local, or a voice suppressed by a 'not a real speaker'
     // tombstone. Every unnamed voice on the page stays nameable: the chip
@@ -1810,8 +1814,10 @@ function mLegend(d){
     // which the tombstone does not gate. Without this, three different
     // suppression layers all rendered as identical dead text and the only
     // sign of a real person was an unnameable label.
+    // ...unless it was dismissed as "not a real speaker" in THIS meeting: the
+    // lines stay where they are, the chip just stops asking to be named.
     const o=opt[w];
-    if(o&&!o.named&&o.id!==w)
+    if(o&&!o.named&&!o.dismissed&&o.id!==w)
       return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
           onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
     return `<span class="mlg">${dot}${esc(w)}</span>`;
@@ -2775,9 +2781,14 @@ function mAddAtPlayhead(){
  * save the panel closes and the quiet relabel note rides the polled state
  * (relabel_pending) as the lowest-priority pill. */
 let NP=null;    // {uid} or {meeting, speaker} while the panel is open
-function openNamePanelByUid(uid){
+// `base` is OPTIONAL context, not identity: a uid names a voice across every
+// meeting, but a caller that knows WHICH meeting it is looking at (a row, the
+// transcript legend) lets the panel also show what the voice said there. The
+// speakers drawer has no meeting in hand, so it passes none and the lines
+// block is simply omitted.
+function openNamePanelByUid(uid,base){
   const u=(S&&S.unknowns||[]).find(x=>x.uid===uid);
-  openNamePanel(uid,u?u.display:uid);
+  openNamePanel(uid,u?u.display:uid,null,base);
 }
 // naming a voice the registry does NOT track (kept transcript-local by the
 // minting floor, or suppressed by a "not a real speaker" tombstone): the same
@@ -2785,7 +2796,7 @@ function openNamePanelByUid(uid){
 function openNamePanelByCluster(meeting,speaker,display){
   openNamePanel(null,display,{meeting,speaker});
 }
-async function openNamePanel(uid,display,cluster){
+async function openNamePanel(uid,display,cluster,base){
   const panel=$('#namepanel'),veil=$('#nameveil');
   if(!panel||!veil)return;
   NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker}:{uid};
@@ -2803,6 +2814,7 @@ async function openNamePanel(uid,display,cluster){
       they were heard in. Typing an <b>existing</b> name merges this voice into that person.
       Every past and future meeting relabels automatically.`}</p>
     <div id="npclips" class="npclips"><span class="spin"></span></div>
+    <div id="nplines" class="nplines"></div>
     <div class="npfield">
       <input type="text" id="npname" placeholder="Person&#8217;s name" autocomplete="off" spellcheck="false"
         aria-label="This voice belongs to"
@@ -2810,7 +2822,14 @@ async function openNamePanel(uid,display,cluster){
       <div id="npdd" class="npdd" hidden></div>
     </div>
     <div class="npbtns">
-      ${cluster?'':`<button class="btn danger mini" type="button" onclick="npForget()"
+      ${cluster
+        // per-MEETING dismissal. There is no registry entry to tombstone here,
+        // and the lines this cluster owns are real audio: dismissing keeps the
+        // transcript exactly as it reads and only stops the naming prompts for
+        // this voice in this meeting.
+        ?`<button class="btn danger mini" type="button" onclick="npDismiss()"
+        title="Grumbling, music, an echo: leave these lines as unknown and stop asking me to name this voice in this meeting">Not a real speaker</button>`
+        :`<button class="btn danger mini" type="button" onclick="npForget()"
         title="A false detection (music, crosstalk, an echo): remove this voice entirely">Not a real speaker</button>`}
       <span class="grow"></span>
       <button class="btn mini" type="button" onclick="closeNamePanel()">Cancel</button>
@@ -2825,8 +2844,13 @@ async function openNamePanel(uid,display,cluster){
     if(box0)box0.innerHTML=`<audio controls
       onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
       src="/api/snippet?meeting=${encodeURIComponent(cluster.meeting)}&speaker=${encodeURIComponent(cluster.speaker)}&secs=45"></audio>`;
+    npLines(cluster.meeting,cluster.speaker);
     return;
   }
+  // uid mode: the lines come from whichever meeting the caller was looking at.
+  // Fire and forget alongside the clips fetch, keyed on the panel identity so a
+  // reopen for another voice can never paint the previous one's lines.
+  npLines(base,display);
   let r;
   try{r=await api('/api/voice_clips?speaker='+encodeURIComponent(uid));}
   catch(e){r={clips:[]};}
@@ -2850,6 +2874,36 @@ async function openNamePanel(uid,display,cluster){
        :`<audio controls
            onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
            src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`);
+}
+// which voice the panel is open for, as a comparable string: an async render
+// that lands after the panel closed (or reopened for someone else) must drop
+// its result instead of painting the wrong voice's evidence
+function npToken(){return NP?(NP.uid||(NP.meeting+' '+NP.speaker)):'';}
+// The evidence block: what this voice actually SAID. Most unnamed voices are
+// grumbling, a cough, or a stray "mhm", and that is obvious from the text in a
+// second -- without it the only way to tell noise from a person is to play the
+// clip. Longest turns first, because that is where a real sentence shows up.
+// SILENT on failure or on no lines: an empty gap is strictly better than an
+// error message sitting where the naming form should be.
+async function npLines(base,speaker){
+  if(!base||!speaker)return;
+  const tok=npToken();
+  let r;
+  try{r=await api('/api/voice_lines?base='+encodeURIComponent(base)
+    +'&speaker='+encodeURIComponent(speaker));}
+  catch(e){return;}
+  const box=$('#nplines');
+  if(!box||!NP||npToken()!==tok)return;
+  const lines=(r&&r.lines)||[];
+  if(!lines.length)return;
+  const n=r.n||lines.length,secs=Math.round(r.talk_secs||0);
+  box.innerHTML=`<div class="nplhead">What this voice said (longest first)</div>`
+    +lines.map(l=>{
+      const m=Math.floor(l.start/60),s=String(Math.floor(l.start%60)).padStart(2,'0');
+      return `<div class="npline"><span class="npltime mono">${m}:${s}</span><span
+        class="npltext">${esc(l.text)}</span></div>`;
+    }).join('')
+    +`<div class="npltot">${n} segment${n!==1?'s':''}, ${secs}s of speech</div>`;
 }
 function npOpenAt(meeting,t){closeNamePanel();openHit(meeting,t);}
 function closeNamePanel(){
@@ -2893,6 +2947,25 @@ async function npForget(){
   const r=await api('/api/forget',{uid:NP.uid});
   if(!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=r.error||'Could not remove this voice.';}return;}
   closeNamePanel();refresh();
+}
+// cluster mode's "Not a real speaker": nothing is deleted and nothing is
+// relabeled. The lines keep their attribution ("leave it as unknown"); the
+// server drops the id out of unnamed_clusters / speaker_options, which is what
+// makes every "?" for this voice disappear in this meeting.
+async function npDismiss(){
+  if(!NP||!NP.meeting)return;
+  // captured before the await: the panel can close (Cancel/Escape) or reopen
+  // for a different voice while this request is in flight, and NP would then
+  // be null or someone else's identity by the time the response lands
+  const meeting=NP.meeting,speaker=NP.speaker;
+  const r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});
+  if(!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=r.error||'Could not dismiss this voice.';}return;}
+  const onIt=MP&&MP.base===meeting;
+  closeNamePanel();refresh();
+  // if the transcript for that meeting is open, rebuild its legend NOW: the
+  // whole promise is that the "?" stops asking, and a chip that keeps asking
+  // until the next page load reads as a failed click
+  if(onIt)mReloadSegs();
 }
 // Escape closes the panel (the autocomplete's own Escape stops propagation
 // while its dropdown is open, so that closes first)

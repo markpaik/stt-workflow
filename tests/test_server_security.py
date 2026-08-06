@@ -828,6 +828,105 @@ def test_voice_clips_archived_refs_are_not_reported_deleted(running_server):
     assert body["clips"] == [] and "reason" not in body
 
 
+# ---------- /api/voice_lines + /api/dismiss_voice: read it, or dismiss it ----
+
+def _voice_meeting(base):
+    """A meeting with one real talker and one noise cluster, so the evidence
+    endpoint has something to rank."""
+    (mfile(base, ".json")).write_text(json.dumps({
+        "source_file": f"{base}.m4a", "duration_sec": 120.0, "strict": False,
+        "speakers": [{"id": "SPEAKER_00", "display": "Speaker 1"},
+                     {"id": "SPEAKER_01", "display": "Speaker 2"}],
+        "segments": [
+            {"start": 5.0, "end": 6.0, "speaker": "SPEAKER_00", "text": "short one"},
+            {"start": 62.0, "end": 74.0, "speaker": "SPEAKER_00",
+             "text": "the long one that proves this is a person"},
+            {"start": 30.0, "end": 34.0, "speaker": "SPEAKER_00", "text": "middling"},
+            {"start": 40.0, "end": 41.0, "speaker": "SPEAKER_00", "text": "   "},
+            {"start": 90.0, "end": 90.5, "speaker": "SPEAKER_01", "text": "mm"}],
+        "words": []}))
+    (mfile(base, ".txt")).write_text("stub")
+
+
+def test_voice_lines_ranks_longest_first_with_the_totals(running_server):
+    """The panel answers "is this a person or grumbling?" by READING. Longest
+    turns first, because a real sentence is the evidence and eight "mm-hmm"s in
+    reading order would bury it. Blank-text segments never count."""
+    _voice_meeting("Voices 05012026")
+    st, body = _get(running_server,
+                    "/api/voice_lines?base=Voices%2005012026&speaker=SPEAKER_00")
+    assert st == 200
+    assert [l["text"] for l in body["lines"]] == [
+        "the long one that proves this is a person", "middling", "short one"]
+    assert body["lines"][0] == {"start": 62.0, "dur": 12.0,
+                                "text": "the long one that proves this is a person"}
+    assert body["n"] == 3 and body["talk_secs"] == 17.0
+
+
+def test_voice_lines_accepts_a_display_name_and_caps_at_eight(running_server):
+    # the legend holds cluster ids, other surfaces only the display label:
+    # both must resolve, and a chatty cluster must not dump its whole transcript
+    segs = [{"start": float(i), "end": float(i) + 1 + i * 0.01,
+             "speaker": "SPEAKER_00", "text": f"line {i}"} for i in range(20)]
+    (mfile("Chatty 05012026", ".json")).write_text(json.dumps({
+        "source_file": "Chatty 05012026.m4a", "duration_sec": 60.0,
+        "speakers": [{"id": "SPEAKER_00", "display": "Speaker 1"}],
+        "segments": segs, "words": []}))
+    (mfile("Chatty 05012026", ".txt")).write_text("stub")
+    st, body = _get(running_server,
+                    "/api/voice_lines?base=Chatty%2005012026&speaker=Speaker%201")
+    assert st == 200
+    assert len(body["lines"]) == 8 and body["n"] == 20
+    assert body["lines"][0]["text"] == "line 19"        # the longest, not the first
+    # an id that matches nothing is empty, never an error
+    _, none = _get(running_server,
+                   "/api/voice_lines?base=Chatty%2005012026&speaker=SPEAKER_99")
+    assert none["lines"] == [] and none["n"] == 0 and none["talk_secs"] == 0
+
+
+def test_voice_lines_rejects_an_unknown_base(running_server):
+    st, body = _get(running_server,
+                    "/api/voice_lines?base=../../../etc&speaker=SPEAKER_00")
+    assert st == 400 and body["error"] == "unknown meeting"
+
+
+def test_dismiss_voice_gates_base_and_speaker_then_silences_the_prompt(running_server):
+    """Per-meeting "not a real speaker": the attribution survives, the naming
+    prompt does not. /api/forget tombstones a registry unknown everywhere; this
+    is deliberately narrower."""
+    _voice_meeting("Noisy 05012026")
+    st, body = _post(running_server, "/api/dismiss_voice",
+                     {"base": "../../../etc", "speaker": "SPEAKER_01"})
+    assert st == 400 and body["error"] == "unknown meeting"
+    _, body = _post(running_server, "/api/dismiss_voice",
+                    {"base": "Noisy 05012026", "speaker": "SPEAKER_42"})
+    assert not body["ok"] and "SPEAKER_42" in body["error"]
+
+    _, body = _post(running_server, "/api/dismiss_voice",
+                    {"base": "Noisy 05012026", "speaker": "SPEAKER_01"})
+    assert body == {"ok": True, "dismissed": ["SPEAKER_01"]}
+    _, t = _get(running_server, "/api/transcript?base=Noisy%2005012026")
+    assert [(o["display"], o["dismissed"]) for o in t["speaker_options"]] == \
+        [("Speaker 1", False), ("Speaker 2", True)]
+    # the line is still there, still attributed to that voice
+    assert [s["speaker"] for s in t["segments"] if s["start"] == 90.0] == ["SPEAKER_01"]
+
+    _, body = _post(running_server, "/api/dismiss_voice",
+                    {"base": "Noisy 05012026", "speaker": "SPEAKER_01",
+                     "restore": True})
+    assert body == {"ok": True, "dismissed": []}
+    _, t = _get(running_server, "/api/transcript?base=Noisy%2005012026")
+    assert all(o["dismissed"] is False for o in t["speaker_options"])
+
+
+def test_dismiss_voice_is_blocked_from_a_foreign_origin(running_server):
+    _voice_meeting("Guarded 05012026")
+    st, body = _post(running_server, "/api/dismiss_voice",
+                     {"base": "Guarded 05012026", "speaker": "SPEAKER_01"},
+                     headers={"Origin": "http://evil.example"})
+    assert st == 403 and body["error"] == "forbidden"
+
+
 def test_snippet_secs_is_clamped_and_never_past_the_turn(running_server, monkeypatch):
     """A longer clip request plays more of the SAME turn — capped at 45s and at
     the turn's real end, so it can't bleed into the next speaker's voice."""

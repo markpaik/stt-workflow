@@ -11,7 +11,8 @@ import json
 import time
 
 from gui import server as srv
-from stt import archive, config, control, holds, recorder, status, unknowns
+from stt import (archive, config, control, holds, recorder, status, summarize,
+                 unknowns)
 from conftest import mfile
 
 # the top-level /api/state keys that existed BEFORE the timeline/tray were added
@@ -151,6 +152,119 @@ def test_needs_name_row_carries_the_review_card(sandbox):
     # maps to its cluster id; the named speaker and the id==display entry
     # are both excluded
     assert r["unnamed_clusters"] == {"Speaker 2": "SPEAKER_01"}
+
+
+# ---------- "not a real speaker", per meeting ----------
+#
+# Some clusters are grumbling, a cough, music, a hallway echo. Naming them is
+# wrong, but their lines are real audio, so the answer is "leave it as unknown
+# and stop asking": the attribution is untouched and only the "?" prompts go.
+
+DVOICES = [{"id": "SPEAKER_00", "display": "Alex Rivera", "name": "Alex Rivera"},
+           {"id": "SPEAKER_01", "display": "Speaker 2"},
+           {"id": "SPEAKER_02", "display": "Speaker 3"}]
+
+
+def test_dismissed_voice_drops_out_of_the_naming_prompts(sandbox):
+    _meeting("Grumble 07102026", speakers=[dict(s) for s in DVOICES],
+             segments=[{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_02",
+                        "text": "mmhm"}])
+    j = config.meeting_file("Grumble 07102026", ".json")
+    assert summarize.dismiss_voice("Grumble 07102026", "SPEAKER_02") == {
+        "ok": True, "dismissed": ["SPEAKER_02"]}
+    d = json.loads(j.read_text())
+    # TOP-LEVEL, not a field on the speaker entry: relabel rebuilds "speakers"
+    # wholesale, so anything parked in there would not survive the next one
+    assert d["dismissed_voices"] == ["SPEAKER_02"]
+    # the transcript is untouched: the segment still belongs to that cluster,
+    # and the speaker still appears with its label
+    assert d["segments"][0]["speaker"] == "SPEAKER_02"
+    assert [s["display"] for s in d["speakers"]] == \
+        ["Alex Rivera", "Speaker 2", "Speaker 3"]
+
+    meta = srv._meeting_meta(j, config.meetings_dir())
+    assert meta["unnamed_clusters"] == {"Speaker 2": "SPEAKER_01"}
+    assert meta["dismissed_voices"] == ["SPEAKER_02"]
+    assert meta["speakers"] == ["Alex Rivera", "Speaker 2", "Speaker 3"]
+
+
+def test_dismissal_survives_a_relabel_shaped_rewrite(sandbox):
+    """relabel.py and review._rewrite both rebuild speakers/segments/words and
+    pass every OTHER top-level key through. That passthrough is the whole reason
+    the list lives at the top level, so drive it here."""
+    from stt import output
+    _meeting("Relabeled 07102026", speakers=[dict(s) for s in DVOICES])
+    summarize.dismiss_voice("Relabeled 07102026", "SPEAKER_02")
+    j = config.meeting_file("Relabeled 07102026", ".json")
+    data = json.loads(j.read_text())
+    output.write_json(j, {k: v for k, v in data.items()
+                          if k not in ("speakers", "segments", "words")},
+                      data["speakers"], data["segments"], data["words"])
+    assert json.loads(j.read_text())["dismissed_voices"] == ["SPEAKER_02"]
+
+
+def test_dismissal_can_be_undone(sandbox):
+    _meeting("Undo 07102026", speakers=[dict(s) for s in DVOICES])
+    summarize.dismiss_voice("Undo 07102026", "SPEAKER_02")
+    summarize.dismiss_voice("Undo 07102026", "SPEAKER_01")
+    assert summarize.dismiss_voice("Undo 07102026", "SPEAKER_01")["dismissed"] == \
+        ["SPEAKER_01", "SPEAKER_02"]      # idempotent, sorted
+    assert summarize.restore_voice("Undo 07102026", "SPEAKER_01")["dismissed"] == \
+        ["SPEAKER_02"]
+    assert summarize.restore_voice("Undo 07102026", "SPEAKER_02")["dismissed"] == []
+    # emptied means the key goes, not an empty list left lying around
+    assert "dismissed_voices" not in json.loads(
+        config.meeting_file("Undo 07102026", ".json").read_text())
+    srv._meet_cache.clear()               # meta is mtime-cached; force a re-read
+    meta = srv._meeting_meta(config.meeting_file("Undo 07102026", ".json"),
+                             config.meetings_dir())
+    assert meta["unnamed_clusters"] == {"Speaker 2": "SPEAKER_01",
+                                        "Speaker 3": "SPEAKER_02"}
+
+
+def test_dismissal_refuses_a_made_up_id_or_meeting(sandbox):
+    # never store an id that matches nothing: the list would slowly fill with
+    # junk from a stale client and silence nothing
+    _meeting("Junk 07102026", speakers=[dict(s) for s in DVOICES])
+    r = summarize.dismiss_voice("Junk 07102026", "SPEAKER_99")
+    assert not r["ok"] and "SPEAKER_99" in r["error"]
+    assert not summarize.dismiss_voice("Junk 07102026", "")["ok"]
+    assert "dismissed_voices" not in json.loads(
+        config.meeting_file("Junk 07102026", ".json").read_text())
+    assert not summarize.dismiss_voice("No Such Meeting", "SPEAKER_00")["ok"]
+    assert not summarize.restore_voice("No Such Meeting", "SPEAKER_00")["ok"]
+
+
+def test_a_redo_deliberately_forgets_dismissals(sandbox, monkeypatch, tmp_path):
+    """Unlike the date and the category, this is NOT carried across a Redo.
+    process_file re-clusters, so 'SPEAKER_02' afterwards is a different voice
+    than 'SPEAKER_02' before: carrying the list would silence the wrong one."""
+    import subprocess
+
+    from stt import pipeline
+    from stt.audio import FFMPEG
+    from tests.test_layout import _fake_asr
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    src = tmp_path / "Redo Voice 05012026.m4a"
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=2", "-ac", "1", "-c:a", "aac",
+                    str(src)], check=True, capture_output=True)
+    pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                          do_verify=False)
+    base = "Redo Voice 05012026"
+    # a diarize-free run has no clusters, so plant one to dismiss (the Redo is
+    # what is under test, not the mutator)
+    j = config.meeting_file(base, ".json")
+    d = json.loads(j.read_text())
+    d["speakers"] = [{"id": "SPEAKER_02", "display": "Speaker 3"}]
+    j.write_text(json.dumps(d))
+    assert summarize.dismiss_voice(base, "SPEAKER_02")["ok"]
+    pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                          do_verify=False)   # the Redo
+    assert "dismissed_voices" not in json.loads(
+        config.meeting_file(base, ".json").read_text())
 
 
 def test_ready_state(sandbox):

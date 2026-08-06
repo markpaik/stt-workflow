@@ -821,6 +821,20 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .npopen{margin-left:6px;font:500 13px/1 var(--sans);color:var(--accent-text);
   text-decoration:none;white-space:nowrap}
 .npopen:hover{text-decoration:underline;text-underline-offset:2px}
+/* what the voice said: the read-instead-of-listen evidence. Quiet by design
+   (it sits between the player and the name box), timestamps in the mono/--sub
+   treatment the clip lines already use. Empty when there is nothing to show. */
+.nplines:empty{display:none}
+.nplines{margin-top:12px;border:1px solid var(--hair);border-radius:12px;
+  padding:10px 12px;background:var(--inset)}
+.nplhead{font:600 13px/1.35 var(--sans);color:var(--sub);
+  letter-spacing:.02em;margin-bottom:6px}
+.npline{display:flex;gap:8px;align-items:baseline;padding:3px 0;
+  font:400 13px/1.5 var(--sans);color:var(--ink)}
+.npltime{flex:none;font-size:13px;color:var(--sub)}
+.npltext{overflow-wrap:anywhere}
+.npltot{margin-top:6px;padding-top:6px;border-top:1px solid var(--hair);
+  font:400 13px/1.4 var(--sans);font-variant-numeric:tabular-nums;color:var(--sub)}
 .npfield{position:relative;margin-top:14px}
 .npfield input{width:100%;font:400 14.5px/1.3 var(--sans);color:var(--ink);
   background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
