@@ -374,6 +374,17 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "title": _display_title(j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
+                # {display: cluster id} for the voices this meeting heard but
+                # never named. The unknown registry does not track all of them
+                # (the minting floor keeps one-off voices transcript-local, and
+                # a "not a real speaker" tombstone drops others), so a caller
+                # holding only uids cannot offer naming for those. This map is
+                # the cluster-side naming path, the same one the transcript
+                # legend uses.
+                "unnamed_clusters": {s["display"]: s["id"]
+                                     for s in d.get("speakers", [])
+                                     if not s.get("name")
+                                     and s.get("id") != s.get("display")},
                 "strict": d.get("strict", False),
                 "flagged": sum(1 for s in d.get("segments", [])
                                if s.get("flags") and not review.is_minor(s)),
@@ -551,10 +562,18 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                "title": meta["title"], "date": meta["date"],
                "when": meta["processed_at"]}
         if meta["needs_review"]:
+            # the naming row is a review card, not a bare text box: the same
+            # evidence the ready row shows (length, who was heard, what the
+            # meeting was about) is exactly what a human needs to decide on a
+            # name, and the unnamed voices are nameable from here so the one
+            # pass over a fresh meeting finishes the job.
             row.update({"id": meta["base"], "state": "needs_name",
                         "suggested_title": meta["suggested"],
                         "suggested_date": meta["date"],
-                        "has_audio": bool(meta["audio"])})
+                        "has_audio": bool(meta["audio"]),
+                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "unnamed_clusters": meta["unnamed_clusters"],
+                        "summary": _preview(meta["summary"])})
         else:
             row.update({"id": meta["base"], "state": "ready",
                         "minutes": meta["minutes"], "speakers": meta["speakers"],

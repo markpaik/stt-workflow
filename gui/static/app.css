@@ -398,6 +398,31 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .nameform input:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
 
+/* the naming row is a review card: the form on top, then the evidence a human
+   names from (source filename, who was heard, what it was about). The form
+   keeps its own width behaviour; only the stack grows. */
+.nneeds{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
+.nneeds>.nameform{flex:0 0 auto}
+/* the original filename: quiet line, the stem itself an inline link (the user
+   encodes date and topic there; the AI title loses it) */
+.nsrc{font:400 13px/1.35 var(--sans);color:var(--sub)}
+.nsrcname{font:inherit;color:var(--accent-text);background:none;border:0;
+  padding:0;cursor:pointer;text-align:left}
+.nsrcname:hover{text-decoration:underline;text-underline-offset:2px}
+/* the voices heard: named people plain, unnamed ones a "?" chip opening the
+   one naming slide-over */
+.nchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.nchip{display:inline-flex;align-items:center;font:500 13px/1.2 var(--sans);
+  color:var(--sub);padding:2px 2px}
+button.nchip{background:none;border:1px solid var(--line);border-radius:99px;
+  padding:2px 9px;cursor:pointer}
+button.nchip:hover{border-color:var(--amber);color:var(--amber)}
+.nchip .nchipq{color:var(--amber);font-weight:700;margin-left:3px}
+/* the summary the local model wrote, clamped to two lines like a ready row */
+.nsum{font:400 13.5px/1.5 var(--sans);color:var(--sub);
+  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;max-height:calc(1.5em * 2)}
+
 /* small icon action buttons inside rows */
 .iact{font:500 13px/1 var(--sans);color:var(--ink);background:var(--card);
   border:1px solid var(--line);border-radius:8px;padding:5px 9px;cursor:pointer}

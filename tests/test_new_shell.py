@@ -5,6 +5,7 @@ Structure and regex over the composed page, plus live byte-compares proving
 the routing serves exactly what the composer builds.
 """
 import http.client
+import json
 import os
 import re
 import shutil
@@ -853,6 +854,167 @@ def test_click_to_edit_title_and_date_on_ready_rows():
 
 
 # ---------------------------------------------------------------------------
+# The naming row is a review card (2026-08-06): the form keeps its place, and
+# under it sit the three things a human names a meeting from -- the original
+# filename (the user encodes date and topic there; the AI title loses it), the
+# voices heard, and the summary. Unnamed voices open the ONE naming slide-over.
+# ---------------------------------------------------------------------------
+def _needs_name_case():
+    return NEW_JS[NEW_JS.index("case 'needs_name'"):NEW_JS.index("case 'ready'")]
+
+
+def test_needs_name_row_shows_the_source_filename_and_adopts_it():
+    body = _needs_name_case()
+    # the form is still first, prefilled, with Accept
+    assert 'class="ntitle"' in body and "acceptMeeting(" in body
+    # the filename line renders from the row's source_file, via the stem
+    assert "row.source_file" in body and "srcStem(" in body
+    assert 'class="nsrc"' in body and 'class="nsrcname"' in body
+    assert "nsrcAdopt(this," in body
+    # suppressed when the stem already equals the prefilled title (a recorder
+    # default), trimmed and case-insensitively
+    assert "trim().toLowerCase()!==" in body
+    # the adopter fills the row's own name box, then focuses it
+    m = re.search(r"function nsrcAdopt\(.*?\n\}", NEW_JS, re.S)
+    assert m and "'.nameform .ntitle'" in m.group(0)
+    assert "inp.value=stem" in m.group(0) and "inp.focus()" in m.group(0)
+
+
+def test_needs_name_row_chips_reuse_the_one_naming_panel():
+    body = _needs_name_case()
+    assert "rowSpeakerChips(row)" in body
+    m = re.search(r"function rowSpeakerChips\(.*?\n\}\n", NEW_JS, re.S)
+    assert m, "rowSpeakerChips missing"
+    chips = m.group(0)
+    # both naming paths: the registry uid, and the cluster for a voice the
+    # registry never tracked (minting floor / "not a real speaker" tombstone)
+    assert "openNamePanelByUid(" in chips and "openNamePanelByCluster(" in chips
+    assert "row.unnamed_clusters" in chips
+    # the uid lookup is mUnknownUid parameterized by base, and hidden
+    # (archived) unknowns are NOT filtered out of it
+    m = re.search(r"function rowUnknownUid\(.*?\n\}", NEW_JS, re.S)
+    assert m and "archived" not in m.group(0)
+    assert "(x.meetings||[]).includes(base)" in m.group(0)
+    # named people stay plain text; unnamed wear the "?" affix
+    assert '<span class="nchip">' in chips and 'class="nchipq"' in chips
+
+
+def test_needs_name_row_shows_the_summary_quietly():
+    body = _needs_name_case()
+    assert "row.summary" in body and 'class="nsum"' in body
+    # one clamped, muted paragraph on the theme tokens (no hardcoded colors)
+    m = re.search(r"(?m)^\.nsum\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "var(--sub)" in m.group(0) and "line-clamp:2" in m.group(0)
+
+
+# The three tests above pin the SOURCE TEXT of the review-card logic (the right
+# calls and operators appear), not its behavior. That leaves real regressions
+# invisible -- a reversed comparison, a stem cut at the wrong dot, or a filter
+# reintroduced on archived unknowns would all still contain the same literal
+# substrings. These drive the actual functions through node, house-style (see
+# test_stepper_orders_fabricated_out_of_order_flags_by_start_time above).
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_srcstem_strips_only_the_final_extension():
+    # a regression that cuts at the FIRST dot would silently corrupt every
+    # multi-dot filename's adopted name: "Team.Sync 0714.m4a" must adopt as
+    # "Team.Sync 0714", never "Team"
+    fixture = _js_fn("srcStem") + "\n" + (
+        "console.log(JSON.stringify(["
+        "srcStem('Team.Sync 0714.m4a'),srcStem('noext'),"
+        "srcStem(''),srcStem(null)]));")
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == ["Team.Sync 0714", "noext", "", ""]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_needs_name_row_equal_stem_is_actually_suppressed_end_to_end():
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
+        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"),
+        "let S=null;", _js_fn("bodyAndSlot"),
+        """
+const same = bodyAndSlot({state:'needs_name', id:'b1',
+  source_file:'Team Sync 0714.m4a',
+  suggested_title:'  team sync 0714  ', title:'  team sync 0714  ',
+  speakers:[], unnamed_clusters:{}});
+const diff = bodyAndSlot({state:'needs_name', id:'b2',
+  source_file:'Team.Sync 0714.m4a',
+  suggested_title:'Different Title', title:'Different Title',
+  speakers:[], unnamed_clusters:{}});
+console.log(JSON.stringify({
+  sameHasNsrc: same.includes('class="nsrc"'),
+  diffHasNsrc: diff.includes('class="nsrc"'),
+  diffKeepsInternalDot: diff.includes('Team.Sync 0714'),
+}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["sameHasNsrc"] is False, \
+        "equal stem (trimmed, case-insensitive) must suppress the from-file line"
+    assert out["diffHasNsrc"] is True
+    assert out["diffKeepsInternalDot"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_row_unknown_uid_matches_archived_voices_not_just_live_ones():
+    # archiving an unknown was meant to stop the tray/drawer nagging about a
+    # one-time voice, never to strip its naming affordance out of a row that
+    # heard them -- a regression that starts filtering archived entries here
+    # would silently turn a real, still-nameable person into a dead chip
+    fixture = _js_fn("rowUnknownUid") + "\n" + """
+S = {unknowns: [{uid:'U1', display:'Voice 9', meetings:['base1'], archived:true},
+                {uid:'U2', display:'Voice 10', meetings:['base1'], archived:false}]};
+console.log(JSON.stringify([
+  rowUnknownUid('base1','Voice 9'),
+  rowUnknownUid('base1','Voice 10'),
+  rowUnknownUid('base1','Voice 99'),
+  rowUnknownUid('otherbase','Voice 9')
+]));
+"""
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == ["U1", "U2", None, None]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_needs_name_row_escapes_hostile_filenames_and_speaker_names():
+    # a meeting really can be named after a person with an apostrophe, and a
+    # filename or a diarized display can carry quotes/angle brackets. Every
+    # interpolation into the review card must survive that without breaking
+    # out of its HTML attribute or its onclick JS-string context.
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
+        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"),
+        "let S=null;", _js_fn("bodyAndSlot"),
+        r"""
+const html = bodyAndSlot({state:'needs_name', id:"o'brien<b>",
+  source_file: "Mark C. O'Halloran <sync> \"weird\".m4a",
+  suggested_title: 'Something else', title: 'Something else',
+  speakers: ["O'Halloran <script>alert(1)</script>"],
+  unnamed_clusters: {"O'Halloran <script>alert(1)</script>": "SPEAKER_00"},
+  summary: "A <b>bold</b> claim & an 'apostrophe'"});
+console.log(JSON.stringify({html}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    html = json.loads(r.stdout)["html"]
+    # never a raw, unescaped tag from user-controlled text
+    assert "<script>alert(1)</script>" not in html
+    assert "<b>bold</b>" not in html
+    # the filename/display text renders HTML-escaped
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&lt;sync&gt;" in html and "&quot;weird&quot;" in html
+    # the onclick JS-string args are escJs'd: an embedded apostrophe is
+    # backslash-escaped so it cannot close the enclosing '...' early and spill
+    # into (and break) the surrounding double-quoted onclick="..." attribute
+    assert "onclick=\"nsrcAdopt(this,'Mark C. O\\'Halloran" in html
+    assert ("onclick=\"openNamePanelByCluster('o\\'brien&lt;b&gt;',"
+            "'SPEAKER_00','O\\'Halloran &lt;script&gt;alert(1)&lt;/script&gt;')\"") in html
+
+
+# ---------------------------------------------------------------------------
 # Flag review, second pass (2026-07-12): the sticky verdict bar (stepping
 # controls that never travel with the inline card), the Enter/a/u fast path,
 # the honest accept-all two-step, and the conveyor/workspace rule -- BAR
@@ -864,6 +1026,15 @@ def _js_fn(name):
     m = re.search(r"(?:async )?function " + re.escape(name) + r"\([\s\S]*?\n\}",
                   NEW_JS)
     assert m, f"missing function: {name}"
+    return m.group(0)
+
+
+def _js_oneline(name):
+    """A top-level function written on a single line (esc/escJs), which the
+    house \\n} convention above can't bound -- it would run on into whatever
+    later function happens to close at column 0 next."""
+    m = re.search(r"^function " + re.escape(name) + r"\(.*\)\{.*\}$", NEW_JS, re.M)
+    assert m, f"missing one-line function: {name}"
     return m.group(0)
 
 
