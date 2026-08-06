@@ -265,6 +265,52 @@ function gutter(row){
 // entities: &#9654;=play  &#10073;=heavy bar  &#10005;=x  &#8776;=approx  &#8943;=ellipsis
 function slotActions(inner){return `<span class="ractions">${inner}</span>`;}
 
+// ---- needs_name review card helpers ----
+// the filename minus its final extension, and nothing else: the date and topic
+// the user typed into the name are the whole reason the line is shown.
+function srcStem(name){
+  if(!name)return '';
+  const i=name.lastIndexOf('.');
+  return i>0?name.slice(0,i):name;
+}
+// adopt the source filename into the row's own name box (the row is the form,
+// so the input is found from the clicked button's row, never by id)
+function nsrcAdopt(el,stem){
+  const box=el.closest('.row');
+  const inp=box&&box.querySelector('.nameform .ntitle');
+  if(!inp)return;
+  inp.value=stem;inp.focus();
+  inp.setSelectionRange(inp.value.length,inp.value.length);
+}
+// mUnknownUid parameterized by meeting base: the transcript page pins one base
+// in MP, a timeline row asks about its own. Hidden (archived) unknowns are NOT
+// filtered out -- hiding stops the tray nagging, it never means the voice
+// stopped being nameable.
+function rowUnknownUid(base,display){
+  const u=(S&&S.unknowns||[]).find(x=>x.display===display
+    &&(x.meetings||[]).includes(base));
+  return u?u.uid:null;
+}
+// who the meeting heard, as chips. Named people read as plain muted text;
+// an unnamed voice gets a "?" chip that opens the SAME slide-over the
+// transcript legend uses, so the app has exactly one naming flow. Registry
+// uid first; a voice the registry never tracked (minting floor, or a "not a
+// real speaker" tombstone) still names from this meeting's cluster.
+function rowSpeakerChips(row){
+  const unc=row.unnamed_clusters||{};
+  return (row.speakers||[]).map(w=>{
+    const uid=rowUnknownUid(row.id,w),cid=unc[w];
+    const tip='Who is this? Listen and name this voice';
+    if(uid)
+      return `<button class="nchip unk" type="button" title="${tip}"
+        onclick="openNamePanelByUid('${escJs(uid)}')">${esc(w)}<span class="nchipq">?</span></button>`;
+    if(cid)
+      return `<button class="nchip unk" type="button" title="${tip}"
+        onclick="openNamePanelByCluster('${escJs(row.id)}','${escJs(cid)}','${escJs(w)}')">${esc(w)}<span class="nchipq">?</span></button>`;
+    return `<span class="nchip">${esc(w)}</span>`;
+  }).join('');
+}
+
 function bodyAndSlot(row){
   switch(row.state){
 
@@ -312,16 +358,37 @@ function bodyAndSlot(row){
         ${pct!=null?`<span class="progress" style="width:${pct}%"></span>`:''}`;
     }
 
-    case 'needs_name':
+    case 'needs_name':{
       // the row IS the form, prefilled. Builder B wires acceptMeeting().
-      return `<div class="nameform">
-        <input class="ntitle" type="text" value="${esc(row.suggested_title||row.title||'')}"
-          placeholder="Name this meeting"
-          onkeydown="if(event.key==='Enter')acceptMeeting('${escJs(row.id)}',this)">
-        <input type="date" value="${esc(row.suggested_date||row.date||'')}" aria-label="Meeting date">
-        ${row.has_audio?`<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>`:''}
-        <button class="btn primary mini" type="button" onclick="acceptMeeting('${escJs(row.id)}')">Accept</button>
+      // Under the form sits the evidence a human actually names a meeting from:
+      // the original filename, who was heard, and what it was about.
+      const want=row.suggested_title||row.title||'';
+      // the source FILENAME carries what the user encoded when they saved it
+      // (date, topic, who was in the room); the AI title throws that away, so
+      // the stem is offered as a one-click adoption. A recorder-made file's
+      // stem IS the title, so the equal case is suppressed and those rows
+      // stay clean.
+      const stem=srcStem(row.source_file);
+      const src=(stem&&stem.trim().toLowerCase()!==want.trim().toLowerCase())
+        ?`<div class="nsrc">from file:
+            <button class="nsrcname" type="button" title="Use this filename as the name"
+              onclick="nsrcAdopt(this,'${escJs(stem)}')">${esc(stem)}</button>
+          </div>`:'';
+      const chips=rowSpeakerChips(row);
+      return `<div class="nneeds">
+        <div class="nameform">
+          <input class="ntitle" type="text" value="${esc(want)}"
+            placeholder="Name this meeting"
+            onkeydown="if(event.key==='Enter')acceptMeeting('${escJs(row.id)}',this)">
+          <input type="date" value="${esc(row.suggested_date||row.date||'')}" aria-label="Meeting date">
+          ${row.has_audio?`<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>`:''}
+          <button class="btn primary mini" type="button" onclick="acceptMeeting('${escJs(row.id)}')">Accept</button>
+        </div>
+        ${src}
+        ${chips?`<div class="nchips">${chips}</div>`:''}
+        ${row.summary?`<div class="nsum">${esc(row.summary)}</div>`:''}
       </div>`;
+    }
 
     case 'ready':{
       const bits=[];

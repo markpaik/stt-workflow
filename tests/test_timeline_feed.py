@@ -125,6 +125,34 @@ def test_needs_name_state(sandbox):
     assert r["suggested_date"] == "2026-07-10" and r["has_audio"] is True
 
 
+def test_needs_name_row_carries_the_review_card(sandbox):
+    """The naming row is a review card: the original filename, how long, who was
+    heard, what it was about, and which of those voices are still unnamed. That
+    is the evidence a human names a meeting from, and the unnamed map is what
+    lets the row open the naming panel for a voice the registry never tracked."""
+    _meeting("Recording 07102026 0915", date="2026-07-10", reviewed=False,
+             ai_title="Budget Planning Cadence",
+             ai_summary="Cabinet walked the FY27 gap. Two options survive.",
+             speakers=[{"id": "SPEAKER_00", "display": "Alex Rivera",
+                        "name": "Alex Rivera"},
+                       {"id": "SPEAKER_01", "display": "Speaker 2"},
+                       # an unnamed cluster whose display already IS its raw id
+                       # (a "Voice N" fallback label with no clean int suffix):
+                       # not a real naming target, must not enter the map
+                       {"id": "Voice 3", "display": "Voice 3"}])
+    r = _row(srv.gather_state(), id="Recording 07102026 0915")
+    assert r["state"] == "needs_name"
+    # the filename the user saved: the panel offers its stem as the name
+    assert r["source_file"] == "Recording 07102026 0915.m4a"
+    assert r["minutes"] == 10
+    assert r["speakers"] == ["Alex Rivera", "Speaker 2", "Voice 3"]
+    assert r["summary"] == "Cabinet walked the FY27 gap. Two options survive."
+    # only the unnamed voice whose id differs from its display maps, and it
+    # maps to its cluster id; the named speaker and the id==display entry
+    # are both excluded
+    assert r["unnamed_clusters"] == {"Speaker 2": "SPEAKER_01"}
+
+
 def test_ready_state(sandbox):
     _meeting("Weekly Check-in 05012026", date="2026-05-01", category="work",
              ai_summary="The team agreed to pilot monthly budgets. More detail here.",
