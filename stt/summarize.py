@@ -553,3 +553,67 @@ def set_meeting_category(base: str, category: str) -> dict:
     if not r["ok"]:
         return r
     return {"ok": True, "category": r["category"]}
+
+
+def _set_dismissed(base: str, speaker_id: str, dismissed: bool) -> dict:
+    """Add or drop a cluster id in the meeting's top-level "dismissed_voices".
+
+    What it means: "leave this voice as unknown and stop asking me about it."
+    Some clusters are grumbling, a cough, a hallway echo, music. They are not
+    people, so naming them is wrong, but their lines are real audio and the
+    transcript attribution stays exactly as it is. This ONLY silences the "?"
+    prompts (row chips, transcript legend, the naming panel) for this meeting.
+
+    Why TOP-LEVEL and not a per-speaker field: relabel.py and review._rewrite
+    both rebuild "speakers"/"segments"/"words" from scratch and pass every OTHER
+    key through untouched. A flag parked on a speaker entry would be erased by
+    the next relabel; a top-level list survives both.
+
+    Why a Redo deliberately loses it: process_file re-clusters the audio, so
+    "SPEAKER_03" after a Redo is a DIFFERENT voice than "SPEAKER_03" before it.
+    Carrying the list forward (the way the date and category are carried) would
+    silence the wrong voice, which is worse than asking again. So it resets.
+
+    The id must already be one of this meeting's speakers: never store junk a
+    client made up, or the list slowly fills with ids that match nothing.
+    """
+    from . import review
+
+    if base not in config.meeting_bases():
+        return {"ok": False, "error": f"no meeting '{base}'"}
+    sid = str(speaker_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "no speaker"}
+    j = config.meeting_file(base, ".json")
+    if not j.exists():
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    with review.lock_meeting(base):
+        try:
+            d = json.loads(j.read_text())
+        except (OSError, ValueError):
+            return {"ok": False, "error": f"no transcript for '{base}'"}
+        if sid not in {s.get("id") for s in d.get("speakers", [])}:
+            return {"ok": False,
+                    "error": f"'{sid}' is not a voice in this meeting"}
+        cur = {str(x) for x in d.get("dismissed_voices", []) or []}
+        if dismissed:
+            cur.add(sid)
+        else:
+            cur.discard(sid)
+        if cur:
+            d["dismissed_voices"] = sorted(cur)
+        else:
+            d.pop("dismissed_voices", None)   # empty means no key at all
+        _write_json(j, d)
+    return {"ok": True, "dismissed": sorted(cur)}
+
+
+def dismiss_voice(base: str, speaker_id: str) -> dict:
+    """"Not a real speaker", per meeting: stop prompting to name this cluster
+    while leaving its lines attributed exactly as they are."""
+    return _set_dismissed(base, speaker_id, True)
+
+
+def restore_voice(base: str, speaker_id: str) -> dict:
+    """Undo a dismissal: the voice becomes nameable again in this meeting."""
+    return _set_dismissed(base, speaker_id, False)

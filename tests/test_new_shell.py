@@ -434,6 +434,87 @@ def test_naming_panel_replaces_the_who_bridge():
     # after a save, the quiet relabel note rides the polled state as the
     # lowest-priority pill
     assert "s.relabel_pending" in NEW_JS
+    # BOTH modes offer "Not a real speaker" now. uid mode tombstones the
+    # registry entry (/api/forget); cluster mode, which has no registry entry
+    # to tombstone, dismisses the voice in THIS meeting only.
+    assert NEW_JS.count("Not a real speaker") >= 2
+    assert re.search(r"(?:async )?function\s+npDismiss\s*\(", NEW_JS)
+    assert "onclick=\"npDismiss()\"" in NEW_JS
+
+
+def test_naming_panel_shows_what_the_voice_said():
+    # the whole point: noise is recognizable by READING, so a voice can be
+    # named or dismissed without playing anything
+    assert re.search(r"(?:async )?function\s+npLines\s*\(", NEW_JS)
+    assert 'id="nplines"' in NEW_JS
+    lines = _js_fn("npLines")
+    assert "'/api/voice_lines?base='" in lines and "&speaker='" in lines
+    # every rendered line is escaped, and the block is silent when there is
+    # nothing to show (an error where the naming form goes helps nobody)
+    assert "esc(l.text)" in lines
+    assert "if(!lines.length)return;" in lines
+    assert "catch(e){return;}" in lines
+    # both panel modes fetch it: cluster mode from its own meeting, uid mode
+    # from whatever meeting the caller was looking at (optional)
+    panel = _js_fn("openNamePanel")
+    assert "npLines(cluster.meeting,cluster.speaker)" in panel
+    assert "npLines(base,display)" in panel
+    assert re.search(r"function openNamePanelByUid\(uid,base\)", NEW_JS)
+    # the two callers that KNOW their meeting pass it
+    assert re.search(r"openNamePanelByUid\('\$\{escJs\(uid\)\}','\$\{escJs\(row\.id\)\}'\)",
+                     NEW_JS)
+    assert re.search(r"openNamePanelByUid\('\$\{escJs\(uid\)\}','\$\{escJs\(MP\.base\)\}'\)",
+                     NEW_JS)
+    # the CSS block: quiet, on the tokens, above the 13px type floor
+    m = re.search(r"(?m)^\.npltot\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "var(--sub)" in m.group(0)
+    assert re.search(r"(?m)^\.nplines\{[^}]*background:var\(--inset\)", NEW_CSS, re.S)
+
+
+def test_dismiss_posts_the_meeting_scoped_call_not_the_registry_tombstone():
+    body = _js_fn("npDismiss")
+    # per MEETING: base + cluster id, never the uid path. meeting/speaker are
+    # captured into locals BEFORE the await (not re-read off NP after it) --
+    # a Cancel/Escape click (or reopening for another voice) while the request
+    # is in flight would otherwise null out or repoint NP before this code
+    # runs again, so a post-await `NP.meeting` read is a crash-or-drift bug.
+    assert re.search(r"const meeting=NP\.meeting,speaker=NP\.speaker;\s*"
+                     r"const r=await api\('/api/dismiss_voice',\{base:meeting,speaker:speaker\}\)",
+                     body)
+    assert "/api/forget" not in body
+    assert "closeNamePanel();refresh();" in body
+    # an open transcript for that meeting rebuilds its legend immediately: a
+    # "?" that keeps asking until the next page load reads as a failed click
+    assert "MP.base===meeting" in body and "mReloadSegs()" in body
+    # the await boundary must never dereference NP again
+    assert "NP.meeting" not in body.split("await api", 1)[1]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_legend_drops_the_question_mark_for_a_dismissed_voice():
+    # a regression that ignores `dismissed` would keep nagging about the cough
+    # forever; one that over-reads it would strip a real person's only naming
+    # affordance. Drive the real mLegend over both.
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        "const box={innerHTML:''};",
+        "function $(sel){return sel==='#mlegend'?box:null;}",
+        "let S={unknowns:[]};let MP={base:'B',color:{}};",
+        _js_fn("mUnknownUid"), _js_fn("mLegend"),
+        """
+mLegend({speakers:['Alex Rivera','Speaker 2','Speaker 3'],
+  speaker_options:[
+    {id:'SPEAKER_00',display:'Alex Rivera',named:true,dismissed:false},
+    {id:'SPEAKER_01',display:'Speaker 2',named:false,dismissed:false},
+    {id:'SPEAKER_02',display:'Speaker 3',named:false,dismissed:true}]});
+const chips=box.innerHTML.split('<span class="msdot"').slice(1);
+console.log(JSON.stringify(chips.map(c=>c.includes('mlgq'))));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # named: no "?"; unnamed: "?"; dismissed: no "?" (still on the page, still
+    # attributed, just no longer asking to be named)
+    assert json.loads(r.stdout) == [False, True, False]
 
 
 def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():

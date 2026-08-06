@@ -358,6 +358,12 @@ def _meeting_meta(j: Path, dst_dir: Path):
         return _meet_cache[key]
     try:
         d = json.loads(j.read_text())
+        # voices a human marked "not a real speaker" IN THIS MEETING (grumbling,
+        # music, an echo). Their lines keep their attribution; they just stop
+        # being naming targets. This set is the ONE gate: every "?" affordance
+        # downstream reads unnamed_clusters / speaker_options, so subtracting it
+        # here silences the prompt everywhere at once.
+        dismissed = {str(x) for x in (d.get("dismissed_voices") or [])}
         audio_p = config.meeting_audio(j.stem, dst_dir)
         from datetime import date as _date
         from datetime import datetime as _dt
@@ -384,7 +390,11 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "unnamed_clusters": {s["display"]: s["id"]
                                      for s in d.get("speakers", [])
                                      if not s.get("name")
-                                     and s.get("id") != s.get("display")},
+                                     and s.get("id") != s.get("display")
+                                     and s.get("id") not in dismissed},
+                # the dismissed ids themselves, so a row or page that wants to
+                # SAY so (or offer an undo) can, without re-reading the json
+                "dismissed_voices": sorted(dismissed),
                 "strict": d.get("strict", False),
                 "flagged": sum(1 for s in d.get("segments", [])
                                if s.get("flags") and not review.is_minor(s)),
@@ -1161,6 +1171,40 @@ class Handler(BaseHTTPRequestHandler):
                         # empty instead of handing the dialog a blank player.
                         out["reason"] = "sources_deleted"
                 self._json(out)
+            elif u.path == "/api/voice_lines":
+                # WHAT this voice actually said, so the naming panel can be
+                # answered by READING instead of listening. Half the unnamed
+                # voices in a meeting are grumbling, a cough, or a stray "mhm",
+                # and that is obvious from the text in a second.
+                base = q.get("base", "")
+                if not self._require_base(base):
+                    return
+                j = config.meeting_file(base, ".json")
+                if not j.exists():
+                    self._json({"error": "no transcript"}, 404)
+                    return
+                d = json.loads(j.read_text())
+                who = q.get("speaker", "")
+                # the caller may hold either half of the pair: the timeline row
+                # and the legend know the cluster id, other surfaces only the
+                # display label. Resolve display -> id first so both work.
+                sid = next((s["id"] for s in d.get("speakers", [])
+                            if s.get("display") == who), who)
+                mine = [s for s in d.get("segments", [])
+                        if s.get("speaker") == sid and s.get("text", "").strip()]
+                # LONGEST FIRST, not chronological: the longest turns are the
+                # evidence. Noise clusters are all sub-second fragments, and a
+                # real person shows one full sentence in the first row. Reading
+                # order would bury that under eight "mm-hmm"s.
+                top = sorted(mine, key=lambda s: (s.get("end", 0) - s.get("start", 0)),
+                             reverse=True)[:8]
+                self._json({
+                    "lines": [{"start": round(s.get("start", 0), 1),
+                               "dur": round(s.get("end", 0) - s.get("start", 0), 1),
+                               "text": s.get("text", "").strip()} for s in top],
+                    "n": len(mine),
+                    "talk_secs": round(sum(s.get("end", 0) - s.get("start", 0)
+                                           for s in mine), 1)})
             elif u.path == "/api/transcript":
                 base = q["base"]
                 if not self._require_base(base):
@@ -1170,6 +1214,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "no transcript"}, 404)
                     return
                 d = json.loads(j.read_text())
+                dism = {str(x) for x in (d.get("dismissed_voices") or [])}
                 segs = [{"index": i, "start": s["start"], "end": s["end"],
                          "speaker": s.get("speaker"),
                          "who": s.get("display") or s.get("name") or s.get("speaker") or "?",
@@ -1181,8 +1226,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"base": base, "strict": d.get("strict", False),
                             "duration_sec": d.get("duration_sec", 0),
                             "speakers": [s["display"] for s in d.get("speakers", [])],
+                            # `dismissed` is what lets the legend drop the "?"
+                            # without pretending the voice was ever named
                             "speaker_options": [{"id": s["id"], "display": s["display"],
-                                                 "named": bool(s.get("name"))}
+                                                 "named": bool(s.get("name")),
+                                                 "dismissed": s["id"] in dism}
                                                 for s in d.get("speakers", [])],
                             "people": sorted(identify.load_registry().keys()),
                             "segments": segs})
@@ -1396,6 +1444,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, "note": "relabeling all meetings in background"})
             elif u.path == "/api/forget":
                 self._json({"ok": unknowns.drop(b["uid"])})
+            elif u.path == "/api/dismiss_voice":
+                # "Not a real speaker" for a voice the registry never tracked:
+                # a PER-MEETING silence, not a tombstone. /api/forget drops an
+                # unknown everywhere; this only stops the naming prompts here
+                # and leaves every attributed line exactly where it is.
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                fn = (summarize.restore_voice if b.get("restore")
+                      else summarize.dismiss_voice)
+                self._json(fn(b["base"], b.get("speaker", "")))
             elif u.path == "/api/rename_speaker":
                 ok = identify.rename_person(b["name"], b["new"])
                 if ok:
