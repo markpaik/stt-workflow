@@ -13,8 +13,8 @@ import json
 import sys
 from pathlib import Path
 
-from stt import (channels, config, diarcache, diarize, identify, merge, output,
-                 punctuate, refine, unknowns)
+from stt import (channels, config, control, diarcache, diarize, identify, merge,
+                 output, punctuate, refine, unknowns)
 
 
 def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
@@ -139,6 +139,11 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
 
 
 PENDING_FLAG_NAME = "relabel_pending.flag"
+# The lock path and the "a pass is running" marker live together in stt.control:
+# the panel has to answer "is a relabel running?" on every 2s poll and cannot
+# import this module to ask (it pulls the whole pipeline in). control.relabel_*
+# is the single source of both the path and the mechanism; see the comment there
+# for why the probe reads a marker instead of testing the lock.
 
 
 def all_bases():
@@ -155,14 +160,17 @@ def relabel_all():
     two passes re-running unknowns.assign over the same meetings at once,
     doubling the registry churn. Waiting is correct: by the time this
     returns, every naming made up to this instant has been applied."""
-    with open(config.PROJECT_DIR / "relabel.lock", "w") as lockfd:
+    with open(control.relabel_lock_path(), "w") as lockfd:
         fcntl.flock(lockfd, fcntl.LOCK_EX)
         try:
-            for base in all_bases():
-                try:
-                    relabel_one(base)
-                except Exception as e:
-                    print(f"  FAILED {base}: {e}", file=sys.stderr)
+            # the marker rides INSIDE the lock: it says "a pass is running", and
+            # the panel's "applying names" pill reads it (see stt.control)
+            with control.relabel_marker():
+                for base in all_bases():
+                    try:
+                        relabel_one(base)
+                    except Exception as e:
+                        print(f"  FAILED {base}: {e}", file=sys.stderr)
         finally:
             fcntl.flock(lockfd, fcntl.LOCK_UN)
 
@@ -182,7 +190,7 @@ def main():
     # which relabel skips (see relabel_one). Names therefore apply to finished
     # transcripts immediately instead of waiting hours for a run to end. The
     # lock here only serializes relabel against ITSELF.
-    lockfd = open(config.PROJECT_DIR / "relabel.lock", "w")
+    lockfd = open(control.relabel_lock_path(), "w")
     try:
         fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -208,11 +216,16 @@ def main():
         raise SystemExit("pass one or more meeting basenames, or --all")
 
     allowed = [s.strip() for s in args.speakers.split(",")] if args.speakers else None
-    for base in bases:
-        try:
-            relabel_one(base, strict=args.strict or None, allowed_names=allowed)
-        except Exception as e:
-            print(f"  FAILED {base}: {e}", file=sys.stderr)
+    # marker up for the whole pass (single meeting or --all), so the panel can
+    # say "applying names" for exactly as long as this is really happening. Only
+    # a pass that WON the lock publishes it: the queue-a-follow-up path above
+    # returned before this and must not claim to be running.
+    with control.relabel_marker():
+        for base in bases:
+            try:
+                relabel_one(base, strict=args.strict or None, allowed_names=allowed)
+            except Exception as e:
+                print(f"  FAILED {base}: {e}", file=sys.stderr)
     return 0
 
 

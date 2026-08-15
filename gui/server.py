@@ -838,6 +838,12 @@ def gather_state():
             "recorder_ready": recorder.available(),
             "rates": rates.summary(),
             "relabel_pending": (config.PROJECT_DIR / "relabel_pending.flag").exists(),
+            # a relabel ACTUALLY running right now (naming a voice spawns one).
+            # relabel_pending only ever meant "a second pass is queued behind a
+            # first", so an unblocked relabel -- the normal case after a save --
+            # gave the panel no signal at all and the names appeared out of
+            # nowhere minutes later. Read-only probe: see control.relabel_running.
+            "relabel_running": control.relabel_running(),
             "llm_available": summarize.available(),
             "llm_backend": summarize.llm_backend(),
             "llm_backends": {b: summarize.backend_available(b)
@@ -1392,19 +1398,34 @@ class Handler(BaseHTTPRequestHandler):
                     return {"ok": False, "warn": "suspect_sample",
                             "need_confirm": True, "error": msg, **w}
                 if b.get("uid"):
+                    # the uid is GONE (already named, merged, or forgotten —
+                    # a stale legend chip is the usual way this arrives). Say
+                    # so, before anything else: with None samples the quality
+                    # gate below silently iterated an empty list and promote()
+                    # then returned False, which the panel showed as a generic
+                    # "Could not save the name." on an already-successful save.
+                    s = unknowns.samples_of(b["uid"])
+                    if s is None:
+                        self._json({"ok": False,
+                                    "error": "That voice was already named or "
+                                             "removed. Refresh and try again."})
+                        return
                     if not confirm:
                         # naming an unknown as an EXISTING person appends the
                         # unknown's samples to that stack — same quality bar
                         # as any other enrollment
-                        s = unknowns.samples_of(b["uid"])
-                        warns = [w for w in
-                                 (identify.sample_check(name, row)
-                                  for row in (s if s is not None else []))
-                                 if w]
+                        warns = [w for w in (identify.sample_check(name, row)
+                                             for row in s) if w]
                         if warns:
                             self._json(_warn_payload(min(warns, key=lambda w: w["own"])))
                             return
-                    ok = unknowns.promote(b["uid"], name)
+                    if not unknowns.promote(b["uid"], name):
+                        # samples existed a moment ago: another tab/relabel got
+                        # there first. Still not a success, and still no relabel.
+                        self._json({"ok": False,
+                                    "error": "Could not save this voice. It may "
+                                             "have been renamed already."})
+                        return
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
@@ -1438,10 +1459,11 @@ class Handler(BaseHTTPRequestHandler):
                             self._json(_warn_payload(w))
                             return
                     identify.enroll(name, cent_emb[b["speaker"]], source=b["meeting"])
-                    ok = True
-                if ok:
-                    _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": ok, "note": "relabeling all meetings in background"})
+                # reaching here IS the success: every failure above answered with
+                # an `error` and NO note and returned. The note promises a
+                # relabel, so only a save that actually spawns one may carry it.
+                _spawn([str(RUN_SH), "relabel", "--all"])
+                self._json({"ok": True, "note": "relabeling all meetings in background"})
             elif u.path == "/api/forget":
                 self._json({"ok": unknowns.drop(b["uid"])})
             elif u.path == "/api/dismiss_voice":

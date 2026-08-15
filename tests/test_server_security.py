@@ -294,6 +294,46 @@ def test_name_endpoint_requires_confirm_for_a_suspect_sample(running_server, mon
     assert spawned, "a confirmed enrollment must still spawn the relabel"
 
 
+def test_name_endpoint_is_honest_when_the_uid_is_already_gone(running_server, monkeypatch):
+    """A legend chip rendered before the voice was named still carries the old
+    uid. Saving on it used to answer HTTP 200 {"ok": false, "note": "relabeling
+    all meetings in background"} with NO error: promote() returned False because
+    the uid was gone, the quality gate silently skipped its empty sample list,
+    and the panel could only show a generic "Could not save the name." on what
+    was in fact an already-successful naming. The failure must say what happened
+    and must never promise a relabel it did not start."""
+    import numpy as np
+
+    from stt import identify, unknowns
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(cmd))
+
+    status, body = _post(running_server, "/api/name",
+                         {"uid": "U999", "name": "Priya Shah"})
+    assert status == 200 and body["ok"] is False
+    assert "already named or removed" in body["error"]
+    assert "note" not in body, "a failure must not promise a relabel"
+    assert spawned == [], "a failed save must not spawn a relabel"
+
+    # and the same call on a REAL unknown still succeeds, still promises (and
+    # starts) the relabel that applies the name to every past transcript
+    v = np.random.default_rng(11).normal(size=256)
+    uid = unknowns.assign({"S0": v}, {"S0": None}, "Some Mtg")["S0"]
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Priya Shah"})
+    assert status == 200 and body["ok"] is True
+    assert body["note"] == "relabeling all meetings in background"
+    assert len(spawned) == 1 and "relabel" in spawned[0]
+    assert "Priya Shah" in identify.load_registry()
+
+    # naming it a SECOND time is the stale-chip case for real: the uid is gone
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Priya Shah"})
+    assert status == 200 and body["ok"] is False and "error" in body
+    assert "note" not in body
+    assert len(spawned) == 1, "the stale retry must not spawn a second relabel"
+
+
 def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
     """G2: every speaker-registry mutation is a POST, so the centralized origin
     gate refuses a cross-site request before the handler runs. Spot-check the

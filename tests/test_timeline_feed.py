@@ -499,9 +499,25 @@ def test_additive_keys(sandbox):
     st = srv.gather_state()
     # every pre-existing top-level key still present, unchanged type
     assert BASELINE_KEYS <= set(st)
-    assert set(st) == BASELINE_KEYS | {"timeline", "tray"}
+    # relabel_running joined them later (the honest "a relabel is happening
+    # right now" signal next to the queued-behind-another relabel_pending)
+    assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running"}
+    assert isinstance(st["relabel_running"], bool)
     assert isinstance(st["running"], bool)
     assert isinstance(st["meetings"], list) and isinstance(st["queue"], list)
     assert isinstance(st["active"], dict) and isinstance(st["unknowns"], list)
     # the two new keys are the promised lists
     assert isinstance(st["timeline"], list) and isinstance(st["tray"], list)
+
+
+def test_state_reports_a_relabel_that_is_actually_running(sandbox):
+    """Naming a voice spawns a relabel that rewrites every transcript, and the
+    panel has to say so. relabel_pending alone could not: it is only written
+    when a SECOND relabel finds the lock held, so the ordinary case (nothing
+    else running) showed no progress at all and the names appeared minutes
+    later out of nowhere."""
+    _meeting("Some Meeting 05012026")
+    assert srv.gather_state()["relabel_running"] is False
+    with control.relabel_marker():
+        assert srv.gather_state()["relabel_running"] is True
+    assert srv.gather_state()["relabel_running"] is False

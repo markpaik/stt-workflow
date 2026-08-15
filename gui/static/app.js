@@ -17,6 +17,23 @@ function escJs(s){return esc(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'");}
 
 let S=null;
 
+// A transient one-line notice for something that already happened elsewhere
+// (a stale chip clicked after the voice was named). Never for an error the user
+// must act on -- those stay inline next to their control. Text only, set with
+// textContent: nothing here is ever parsed as HTML.
+let TOAST_T=null;
+function toast(msg){
+  let el=document.getElementById('toast');
+  if(!el){
+    el=document.createElement('div');
+    el.id='toast';el.className='toast';el.setAttribute('role','status');
+    document.body.appendChild(el);
+  }
+  el.textContent=msg;el.hidden=false;
+  if(TOAST_T)clearTimeout(TOAST_T);
+  TOAST_T=setTimeout(()=>{const t=document.getElementById('toast');if(t)t.hidden=true;},4000);
+}
+
 // ---- small formatters (digits align via the body's tabular-nums) ----
 function clock(secs){secs=Math.max(0,Math.floor(secs||0));
   const h=Math.floor(secs/3600),m=Math.floor(secs%3600/60),s=secs%60;
@@ -80,9 +97,11 @@ function drawPill(s){
   }else if(waiting){
     cls='pill';
     html=`${waiting} waiting`;
-  }else if(s.relabel_pending){
+  }else if(s.relabel_running||s.relabel_pending){
     // the quiet relabel-in-progress note (a voice was just named): sub-colored,
-    // lowest priority, gone on its own when the relabel finishes
+    // lowest priority, gone on its own when the relabel finishes. BOTH signals:
+    // relabel_pending only means a second pass is QUEUED behind a first, so the
+    // ordinary unblocked relabel showed nothing at all.
     cls='pill';
     html='applying names&#8230;';
   }else{show=false;}
@@ -598,10 +617,31 @@ function railJump(i){const el=document.getElementById('grp-'+i);
   if(el)el.scrollIntoView({behavior:'smooth',block:'start'});}
 
 /* ============================ render loop ============================ */
+// The relabel that a naming spawns rewrites every transcript in the background,
+// so the page a user is STARING AT is the last thing to show the new name. Watch
+// the running flag across polls and rebuild once, on the falling edge.
+let RELABEL_WAS=false;
+function relabelWatch(s){
+  const now=!!(s.relabel_running||s.relabel_pending);
+  if(RELABEL_WAS&&!now){
+    // mid-edit: a rebuild here would throw away an open naming panel, an
+    // inline edit card, or a half-typed rename. Hold the flag up and let a
+    // later tick do it (this runs every 2s, so "later" is 2 seconds).
+    if(NP||document.getElementById('mcard')
+      ||document.querySelector('.renameinput,.dateinput'))return;
+    RELABEL_WAS=false;
+    refresh();
+    if(route&&route.view==='meeting')mReloadSegs();
+    return;
+  }
+  RELABEL_WAS=now;
+}
 // While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
 // live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
-function render(){if(!S)return;drawPill(S);drawRecOk(S);drawTray(S);drawDrawer(S);
+// relabelWatch runs FIRST, before that early return: the meeting view is the
+// one place the finished relabel has to be picked up.
+function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawTray(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
   if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
@@ -2788,7 +2828,20 @@ let NP=null;    // {uid} or {meeting, speaker} while the panel is open
 // block is simply omitted.
 function openNamePanelByUid(uid,base){
   const u=(S&&S.unknowns||[]).find(x=>x.uid===uid);
-  openNamePanel(uid,u?u.display:uid,null,base);
+  // the uid is GONE from the registry: this chip was rendered before the voice
+  // was named (or merged, or forgotten) and the page has not caught up. Opening
+  // the panel anyway produced a DEAD one -- the raw "U049" as both the title and
+  // the speaker key, so no lines, no audio, and a Save that failed on a voice
+  // that had in fact just been saved. Refresh the surfaces instead and say so.
+  if(!u){
+    toast(S&&(S.relabel_running||S.relabel_pending)
+      ?'Already named. Names are being applied now.'
+      :'This voice was already named.');
+    refresh();
+    if(route&&route.view==='meeting')mReloadSegs();
+    return;
+  }
+  openNamePanel(uid,u.display,null,base);
 }
 // naming a voice the registry does NOT track (kept transcript-local by the
 // minting floor, or suppressed by a "not a real speaker" tombstone): the same
@@ -2799,22 +2852,29 @@ function openNamePanelByCluster(meeting,speaker,display){
 async function openNamePanel(uid,display,cluster,base){
   const panel=$('#namepanel'),veil=$('#nameveil');
   if(!panel||!veil)return;
-  NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker}:{uid};
+  // uid mode keeps the meeting the caller was looking at as `base` (context,
+  // not identity): the save uses it to rebuild that transcript's legend
+  // immediately. It is deliberately NOT `meeting`, which is cluster mode's
+  // discriminant (npDismiss guards on it and must keep failing here).
+  NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker}:{uid,base};
   veil.hidden=false;panel.hidden=false;
+  // FORM FIRST: the name box, the buttons, and the two messages that answer
+  // them (the quality-gate confirm and the error line) sit at the top, so the
+  // control you came to use is never below a scroll of evidence. The clip
+  // player and the lines follow as the evidence you consult if unsure.
   panel.innerHTML=`
     <div class="nphead">
       <h2 class="nptitle">Who is ${esc(display)}?</h2>
       <button class="iact" type="button" title="Close" onclick="closeNamePanel()">&#10005;</button>
     </div>
     <p class="npnote">${cluster
-      ?`Listen to this voice: the clip is their longest turn in this meeting.
-      Typing an <b>existing</b> name merges this voice into that person.
-      Every past and future meeting relabels automatically.`
-      :`Listen to this voice: the clip is their longest turn in each meeting
-      they were heard in. Typing an <b>existing</b> name merges this voice into that person.
-      Every past and future meeting relabels automatically.`}</p>
-    <div id="npclips" class="npclips"><span class="spin"></span></div>
-    <div id="nplines" class="nplines"></div>
+      ?`Name this voice, or listen first: the clip below is their longest turn
+      in this meeting. Typing an <b>existing</b> name merges this voice into
+      that person. Every past and future meeting relabels automatically.`
+      :`Name this voice, or listen first: the clips below are their longest turn
+      in each meeting they were heard in. Typing an <b>existing</b> name merges
+      this voice into that person. Every past and future meeting relabels
+      automatically.`}</p>
     <div class="npfield">
       <input type="text" id="npname" placeholder="Person&#8217;s name" autocomplete="off" spellcheck="false"
         aria-label="This voice belongs to"
@@ -2836,7 +2896,9 @@ async function openNamePanel(uid,display,cluster,base){
       <button class="btn primary mini" id="npsave" type="button" onclick="npSave()">Save name</button>
     </div>
     <div id="npconfirm" class="dckconfirm" hidden></div>
-    <div id="nperr" class="mcerr" hidden></div>`;
+    <div id="nperr" class="mcerr" hidden></div>
+    <div id="npclips" class="npclips"><span class="spin"></span></div>
+    <div id="nplines" class="nplines"></div>`;
   $('#npname').focus();
   if(cluster){
     // one clip, cut from THIS meeting's cluster (no registry entry to walk)
@@ -2883,8 +2945,10 @@ function npToken(){return NP?(NP.uid||(NP.meeting+' '+NP.speaker)):'';}
 // grumbling, a cough, or a stray "mhm", and that is obvious from the text in a
 // second -- without it the only way to tell noise from a person is to play the
 // clip. Longest turns first, because that is where a real sentence shows up.
-// SILENT on failure or on no lines: an empty gap is strictly better than an
-// error message sitting where the naming form should be.
+// SILENT on failure: an error message where the evidence goes helps nobody. On
+// a successful fetch that returns NOTHING it says so in a dim line -- "no text"
+// is real evidence about the voice (that is what a cough looks like), and an
+// empty gap reads as a block that failed to load.
 async function npLines(base,speaker){
   if(!base||!speaker)return;
   const tok=npToken();
@@ -2895,7 +2959,10 @@ async function npLines(base,speaker){
   const box=$('#nplines');
   if(!box||!NP||npToken()!==tok)return;
   const lines=(r&&r.lines)||[];
-  if(!lines.length)return;
+  if(!lines.length){
+    box.innerHTML='<div class="npnote muted">No transcript text was attributed to this voice.</div>';
+    return;
+  }
   const n=r.n||lines.length,secs=Math.round(r.talk_secs||0);
   box.innerHTML=`<div class="nplhead">What this voice said (longest first)</div>`
     +lines.map(l=>{
@@ -2919,12 +2986,28 @@ async function npSave(force){
   const n=($('#npname')?$('#npname').value:'').trim();
   const err=$('#nperr'),warn=$('#npconfirm');
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
+  // captured before the await, exactly like npDismiss: the panel can close
+  // (Cancel/Escape) or reopen for another voice while the request is in flight,
+  // and NP would then be null or someone else's identity when the answer lands.
+  // The BUTTON too: a fresh lookup after a reopen would re-enable the NEW
+  // voice's Save button, and leave this one stuck reading "Saving...".
+  const uid=NP.uid,meeting=NP.meeting||NP.base||'',speaker=NP.speaker;
   const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
-  const r=await api('/api/name',NP.uid
-    ?{uid:NP.uid,name:n,confirm:!!force}
-    :{meeting:NP.meeting,speaker:NP.speaker,name:n,confirm:!!force});
-  if(!r.ok){
+  let r=null;
+  try{
+    r=await api('/api/name',uid
+      ?{uid:uid,name:n,confirm:!!force}
+      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force});
+  }catch(e){
+    r=null;    // the fetch itself failed (server gone, connection dropped)
+  }finally{
     if(btn){btn.disabled=false;btn.textContent='Save name';}
+  }
+  if(!r){
+    if(err){err.hidden=false;err.textContent='Could not reach the server.';}
+    return;
+  }
+  if(!r.ok){
     if(r.warn&&warn){
       // the enrollment quality gate: the house two-step confirm, numbers shown
       if(err)err.hidden=true;
@@ -2940,7 +3023,13 @@ async function npSave(force){
     if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
     return;
   }
+  const onIt=MP&&MP.base===meeting;
   closeNamePanel();refresh();   // the quiet relabel note rides the next poll
+  // the transcript for that meeting is open: rebuild it NOW. The relabel that
+  // applies the new name everywhere takes a while, but the legend's "?" chip
+  // must stop asking the moment the save succeeds, or the click reads as failed
+  // and the next one lands on a uid that no longer exists.
+  if(onIt)mReloadSegs();
 }
 async function npForget(){
   if(!NP)return;
