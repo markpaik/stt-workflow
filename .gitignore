@@ -59,5 +59,11 @@ native/STT Recorder.app/
 holds.json
 holds.lock
 
-# relabel progress marker: runtime state, never tracked
+# duplicate detection: transcript sketches and the "keep both" decisions.
+# Both carry meeting names, so both stay out of the repository.
+dupes_cache.json
+dupes_ignored.json
 relabel_running.json
+
+# local Claude session config
+.claude/

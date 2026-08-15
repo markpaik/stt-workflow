@@ -654,3 +654,35 @@ def test_process_one_copies_audio_atomically(sandbox, monkeypatch):
         run_batch.process_one(str(audio_src), str(config.MEETINGS_DIR), opts)
     assert not config.meeting_file("Sync 05012026", ".m4a").exists()  # nothing published
     assert audio_src.exists()                                          # original preserved
+
+
+def test_selection_never_skips_a_file_the_panel_flags_as_a_duplicate(sandbox, capsys, monkeypatch):
+    """stt.dupes is a REVIEW signal for the panel only: run_batch's own file
+    selection (held / manifest.is_processed / --only / --files) never consults
+    it, so a file that looks like a byte-identical copy of a past meeting is
+    still queued for a real run unless a human deletes or holds it themselves.
+    Pinned here with --dry-run against the exact scenario stt.dupes.
+    source_duplicates() would flag: same bytes, new filename, no manifest
+    record under this name."""
+    import sys as _sys
+
+    from conftest import mfile
+    from stt import config
+
+    import json as _json
+    audio = b"RIFF" + b"\x07" * 9000
+    mfile("Board Prep 05012026", ".json").write_text(_json.dumps(
+        {"source_file": "board prep.m4a", "duration_sec": 600.0,
+         "speakers": [], "segments": [], "words": []}))
+    mfile("Board Prep 05012026", ".m4a").write_bytes(audio)
+
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    copy = src / "board prep 2.m4a"          # byte-identical, new name
+    copy.write_bytes(audio)
+
+    monkeypatch.setattr(_sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize"])
+    assert run_batch.main() == 0
+    out = capsys.readouterr().out
+    assert "board prep 2.m4a" in out
+    assert "0 to process" not in out, "the flagged copy must still be selected"

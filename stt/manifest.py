@@ -79,9 +79,21 @@ def retarget(old_dir, new_dir, old_base=None, new_base=None):
         return False
 
 
-def mark(m: dict, key: str, mtime: float, outputs: list):
-    m["processed"][key] = {
+def mark(m: dict, key: str, mtime: float, outputs: list, fp=None, size=None):
+    rec = {
         "mtime": mtime,
         "outputs": [str(o) for o in outputs],
         "processed_at": datetime.now().isoformat(timespec="seconds"),
     }
+    # the SOURCE file's content fingerprint, taken before the pipeline moved or
+    # re-encoded it (stt.dupes.fingerprint). Optional and additive: records
+    # written before this existed simply carry no fp, and every reader treats a
+    # missing one as "no content signal, fall back to the name". It is what lets
+    # the panel recognize an already-processed recording that comes back under a
+    # different name -- and the only such signal for a VIDEO source, whose
+    # stored meeting audio is a re-encode sharing no bytes with the original.
+    if fp:
+        rec["fp"] = fp
+        if size:
+            rec["size"] = size
+    m["processed"][key] = rec

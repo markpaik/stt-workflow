@@ -334,6 +334,83 @@ def test_name_endpoint_is_honest_when_the_uid_is_already_gone(running_server, mo
     assert len(spawned) == 1, "the stale retry must not spawn a second relabel"
 
 
+def _dupe_fixture():
+    """A meeting plus three waiting files: a byte-identical copy of it, a
+    same-name-only file, and an unrelated recording."""
+    audio = b"RIFF" + b"\x07" * 9000
+    (mfile("Board Prep 05012026", ".json")).write_text(json.dumps(
+        {"source_file": "board prep.m4a", "duration_sec": 600.0,
+         "speakers": [], "segments": [], "words": []}))
+    (mfile("Board Prep 05012026", ".txt")).write_text("stub")
+    (mfile("Board Prep 05012026", ".m4a")).write_bytes(audio)
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "board prep 2.m4a").write_bytes(audio)          # identical
+    (src / "board prep 2.opts.json").write_text("{}")      # its layout sidecar
+    (src / "board prep.m4a").write_bytes(b"different bytes" * 500)   # name only
+    (src / "keep me.m4a").write_bytes(b"unrelated" * 500)
+    return src
+
+
+def test_duplicate_sweep_takes_only_the_files_it_can_prove(running_server):
+    """Deleting source files has no undo, so the bulk sweep is deliberately
+    narrow: byte-identical copies only. A file that merely shares a NAME with a
+    past meeting stays put (a recurring export reuses one name for genuinely
+    different meetings) and so does everything else in the folder."""
+    src = _dupe_fixture()
+
+    status, body = _post(running_server, "/api/queue_delete_dupes", {})
+    assert status == 200 and body["ok"] is False, "confirm is the seatbelt"
+    assert (src / "board prep 2.m4a").exists()
+
+    status, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert status == 200 and body["ok"] is True
+    assert body["deleted"] == ["board prep 2.m4a"]
+    assert body["freed_mb"] >= 0
+    assert not (src / "board prep 2.m4a").exists()
+    # the recorder's channel-layout sidecar travels with its audio
+    assert not (src / "board prep 2.opts.json").exists()
+    # a name-only match and an unrelated file are untouched
+    assert (src / "board prep.m4a").exists() and (src / "keep me.m4a").exists()
+
+
+def test_duplicate_sweep_leaves_a_held_file_alone(running_server):
+    """Held means parked on purpose. The sweep is a convenience over files
+    nobody has made a decision about; a held file already had one made, so it is
+    deleted from its own row or not at all."""
+    from stt import holds
+    src = _dupe_fixture()
+    holds.hold("board prep 2.m4a")
+    status, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert status == 200 and body["ok"] is True and body["deleted"] == []
+    assert (src / "board prep 2.m4a").exists()
+
+
+def test_duplicate_sweep_leaves_an_in_flight_file_alone(running_server):
+    """A file the batch is actively transcribing right now is not "waiting" in
+    any meaningful sense; sweeping it out from under the pipeline would delete
+    a source mid-read. Same guard as held, but a different signal (status.json's
+    active map, keyed by filename) — this pins it independently."""
+    from stt import status as st_status
+    src = _dupe_fixture()
+    st_status.set_stage("board prep 2.m4a", "transcribing")
+    status, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert status == 200 and body["ok"] is True and body["deleted"] == []
+    assert (src / "board prep 2.m4a").exists()
+
+
+def test_dupe_ignore_gates_both_bases_and_the_list_is_read_only(running_server):
+    from stt import dupes
+    _dupe_fixture()
+    status, body = _post(running_server, "/api/dupe_ignore",
+                         {"a": "Board Prep 05012026", "b": "../../etc/passwd"})
+    assert status == 400 and body["ok"] is False
+    assert dupes.ignored_pairs() == set()
+
+    status, body = _get(running_server, "/api/dupes")
+    assert status == 200 and body["pairs"] == [] and "threshold" in body
+
+
 def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
     """G2: every speaker-registry mutation is a POST, so the centralized origin
     gate refuses a cross-site request before the handler runs. Spot-check the
@@ -343,6 +420,9 @@ def test_speaker_mutations_are_blocked_from_a_foreign_origin(running_server):
         ("/api/remove_speaker", {"name": "A"}),
         ("/api/merge_speakers", {"src": "uid:U001", "dst": "name:B"}),
         ("/api/forget", {"uid": "U001"}),
+        # the duplicate sweep deletes source files, so it is exactly the kind of
+        # call a hostile page would like to make on the user's behalf
+        ("/api/queue_delete_dupes", {"confirm": True}),
     ]:
         status, _ = _post(running_server, path, payload,
                           headers={"Origin": "https://evil.example.com"})
