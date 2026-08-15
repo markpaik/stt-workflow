@@ -167,6 +167,25 @@ function _traySub(title,meta,count,call){
 // an aggregate of MORE than this many items never expands in the tray: the
 // first expansion just rebuilt the 40-row wall inside it (DESIGN, 2026-07-12)
 const TRAY_EXPAND_MAX=8;
+// the armed state of the duplicate-file sweep: deleting files has no undo, so
+// it is the house two-step, and the flag rides the tray signature so a 2s poll
+// cannot disarm it under the user's cursor
+let DUPE_ARMED=false;
+function dupeArm(on){DUPE_ARMED=!!on;drawTray(S||{});}
+async function dupeDeleteGo(btn){
+  if(btn){btn.disabled=true;btn.innerHTML='Deleting&#8230;';}
+  let r;
+  try{r=await api('/api/queue_delete_dupes',{confirm:true});}
+  catch(e){r=null;}
+  DUPE_ARMED=false;
+  if(!r||!r.ok){
+    const row=btn&&btn.closest?btn.closest('.trayrow'):null;
+    const d=row&&row.querySelector('.tw-detail');
+    if(d)d.textContent=(r&&r.error)||'Could not delete those files.';
+    return;
+  }
+  refresh();
+}
 function drawTray(s){
   const tray=$('#tray');
   const items=s.tray||[];
@@ -177,13 +196,15 @@ function drawTray(s){
   if(!items.length&&!note){tray.hidden=true;tray.dataset.sig='';tray.innerHTML='';return;}
   const stalls=items.filter(t=>t.kind==='recorder_stall');
   const fails=items.filter(t=>t.kind==='failed');
+  const dfiles=items.filter(t=>t.kind==='dupe_files');
+  const dmeets=items.filter(t=>t.kind==='dupe_meetings');
   const reviews=items.filter(t=>t.kind==='review');
   const voices=items.filter(t=>t.kind==='unknown_voice');
   // the expand flags AND the library filter fold into the signature so a poll
   // keeps an open group open and an active line active
-  const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count]))
+  const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count,t.exact]))
     +'|'+(note?note.at+'\x1f'+note.text:'')
-    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly;
+    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly+'|'+DUPE_ARMED;
   if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
   tray.dataset.sig=sig;tray.hidden=false;
 
@@ -206,6 +227,21 @@ function drawTray(s){
     h+=_trayRow(t.title,t.detail,_trayVerb('Fix',`trayAct('recorder_stall','${escJs(t.target)}')`));
   for(const t of fails)
     h+=_trayRow(t.title,t.detail,_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
+
+  // waiting files that were already processed: above the reviews, because the
+  // next automatic run spends real hours transcribing them again. The bulk
+  // delete only ever covers the byte-identical ones (t.exact) -- a name-only
+  // match is deleted one file at a time, from its own row, on purpose.
+  for(const t of dfiles){
+    const verbs=DUPE_ARMED
+      ?`<button class="btn mini tw-verb" type="button" onclick="dupeArm(false)">Cancel</button>
+        <button class="btn danger mini tw-verb" type="button"
+          onclick="dupeDeleteGo(this)">Delete ${t.exact} file${t.exact!==1?'s':''}</button>`
+      :(t.exact?_trayVerb('Delete copies',`dupeArm(true)`):'');
+    h+=_trayRow(t.title,t.detail,verbs);
+  }
+  for(const t of dmeets)
+    h+=_trayRow(t.title,t.detail,_trayVerb('Review &#8594;',`trayAct('dupe_meetings','')`));
 
   // flagged reviews: 1 -> direct; 2..8 -> one line that expands to per-meeting
   // rows; MORE than 8 -> the line FILTERS the library to flagged rows instead
@@ -284,6 +320,22 @@ function gutter(row){
 // entities: &#9654;=play  &#10073;=heavy bar  &#10005;=x  &#8776;=approx  &#8943;=ellipsis
 function slotActions(inner){return `<span class="ractions">${inner}</span>`;}
 
+// This waiting file was already processed. Said ON THE ROW, before the batch
+// ever picks it up: transcribing it again costs real hours and leaves a twin in
+// the library. The two signals are not equally strong and do not read alike --
+// identical bytes is proof, a shared filename is a suggestion (a recurring
+// export honestly reuses one name for different meetings), so only the first
+// one claims the file is a copy. The meeting it matches is one click away.
+function dupNote(row){
+  if(!row.dup_of)return '';
+  const title=esc(row.dup_title||row.dup_of);
+  const lead=row.dup_reason==='identical'
+    ?'identical to'
+    :'same source name as';
+  return `<div class="rmeta dupnote"><span class="dupflag">already processed</span>
+    ${lead} <a class="dlink" href="#m/${encodeURIComponent(row.dup_of)}">${title}</a></div>`;
+}
+
 // ---- needs_name review card helpers ----
 // the filename minus its final extension, and nothing else: the date and topic
 // the user typed into the name are the whole reason the line is shown.
@@ -350,7 +402,7 @@ function bodyAndSlot(row){
       const bits=[];
       if(row.size_mb!=null)bits.push(row.size_mb+' MB');
       if(row.est_minutes)bits.push('&#8776;'+row.est_minutes+' min');
-      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div></div>
+      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${dupNote(row)}</div>
         <div class="rslot">
           <span class="rstate spill yields">${bits.join(' &middot; ')||'waiting'}</span>
           ${slotActions(
@@ -362,7 +414,7 @@ function bodyAndSlot(row){
     }
 
     case 'held':
-      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>
+      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${dupNote(row)}
           <div class="rmeta">automatic runs skip this until you release it</div></div>
         <div class="rslot">
           <span class="rstate spill yields">&#10073;&#10073; held</span>
@@ -501,6 +553,10 @@ function sigOf(r){
   const open=r.state==='ready'&&OPEN.has(r.id);
   const m=open?(meetingByBase(r.id)||{}):null;
   return [r.id,r.state,r.title,r.date,r.pct,r.stage,r.eta,r.category,
+  // the duplicate flag lands a poll or two AFTER the row first painted (the
+  // check hashes on a size collision), so it has to be part of the signature or
+  // the chip never appears on a row that is already on screen
+  r.dup_of,r.dup_reason,
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
   r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
   (r.speakers||[]).join(','),
@@ -903,6 +959,7 @@ async function trayAct(kind,target){
     return;
   }
   if(kind==='review'){openReviewBadge(target);return;}
+  if(kind==='dupe_meetings'){openDrawer('dupes');return;}
   if(kind==='unknown_voice')openNamePanelByUid(target);
 }
 
@@ -3135,6 +3192,7 @@ const DRAWER={open:false,section:'settings',
   renameTo:null,     // the typed rename target while its merge confirm is armed
   spkErr:'',         // last speaker-action error, rendered in the section
   updNote:'',updBusy:false,   // the model-update check's client-side note
+  dupes:null,dupeScan:false,  // the duplicate-transcript review list, fetched on open
   hist:null,archived:null};   // fetched lists (results / items)
 
 function openDrawer(section){
@@ -3151,6 +3209,7 @@ function openDrawer(section){
         <section id="dsec-speakers" hidden aria-label="Speakers"></section>
         <section id="dsec-history" hidden aria-label="Processing history"></section>
         <section id="dsec-archive" hidden aria-label="Archived meetings"></section>
+        <section id="dsec-dupes" hidden aria-label="Duplicate transcripts"></section>
       </div>`;
   }
   DRAWER.open=true;v.hidden=false;d.hidden=false;
@@ -3180,7 +3239,7 @@ document.addEventListener('keydown',e=>{
 function drawerGo(sec){
   DRAWER.section=sec;
   drawerNavSync(S||{});
-  ['settings','speakers','history','archive'].forEach(k=>{
+  ['settings','speakers','history','archive','dupes'].forEach(k=>{
     const el=document.getElementById('dsec-'+k);
     if(el)el.hidden=(k!==sec);
   });
@@ -3188,6 +3247,7 @@ function drawerGo(sec){
   else if(sec==='speakers')dSpeakersDraw(S||{});
   else if(sec==='history')dHistLoad();     // (re)fetches; the filter values persist
   else if(sec==='archive')dArchLoad();
+  else if(sec==='dupes')dDupesLoad();
 }
 // the poll's entry point: cheap when closed; only live sections rebuild, and
 // only when their signature changed (History/Archive own their own fetches)
@@ -3200,11 +3260,15 @@ function drawDrawer(s){
 function drawerNavSync(s){
   const nav=$('#dnav');if(!nav)return;
   const n=(s&&s.archived_count)||0;   // the old page's "Archived · N" lives on the tab
-  const sig=DRAWER.section+'|'+n;
+  // the duplicate-transcript count rides its tab the same way, so the section
+  // is findable without the tray line that sent you there
+  const dn=((s&&s.tray||[]).find(t=>t.kind==='dupe_meetings')||{}).count||0;
+  const sig=DRAWER.section+'|'+n+'|'+dn;
   if(nav.dataset.sig===sig)return;
   nav.dataset.sig=sig;
   const tabs=[['settings','Settings'],['speakers','Speakers'],['history','History'],
-    ['archive','Archive'+(n?' &middot; '+n:'')]];
+    ['archive','Archive'+(n?' &middot; '+n:'')],
+    ['dupes','Duplicates'+(dn?' &middot; '+dn:'')]];
   nav.innerHTML=tabs.map(([k,l])=>
     `<button class="dtab${DRAWER.section===k?' on':''}" type="button" onclick="drawerGo('${k}')">${l}</button>`).join('');
 }
@@ -3865,6 +3929,85 @@ async function dArchDelGo(base,btn){
   DRAWER.dconfirm=null;
   dErr('darcherr',{ok:true});
   dArchLoad();refresh();
+}
+
+/* ------------------------------------------------------ duplicates -------- *
+ * Two transcripts of the same recording. The server scores every pair of
+ * same-length meetings by how much text they share and lists the ones over the
+ * threshold; this section shows BOTH sides with everything needed to tell them
+ * apart, and the human decides. Nothing is ever deleted automatically: a pair
+ * can be a genuine re-run, a re-recording of the same standup, or two different
+ * meetings that happen to read alike, and only a person can tell. "Keep both"
+ * is a real answer and it sticks. */
+function dDupesLoad(){
+  const el=document.getElementById('dsec-dupes');
+  if(!el)return;
+  if(!el.dataset.built){
+    el.dataset.built='1';
+    el.innerHTML=`<p class="dnote">Transcripts that read like the same meeting.
+      Compare the two, delete the copy you do not want, or keep both and this
+      pair stops being offered.</p>
+    <div id="ddupelist"><div class="dloading"><span class="spin"></span></div></div>
+    <div id="ddupeerr" class="derr" hidden></div>`;
+  }
+  api('/api/dupes').then(r=>{
+    DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;dDupesRender();
+  }).catch(()=>{DRAWER.dupes=[];dDupesRender();});
+}
+function _dupeSide(side,other,score){
+  const day=side.date?new Date(side.date+'T12:00:00')
+    .toLocaleDateString([],{year:'numeric',month:'short',day:'numeric'}):'';
+  const who=(side.speakers||[]).join(', ');
+  const arm=DRAWER.dconfirm==='dupdel:'+side.base;
+  return `<div class="dupside">
+    <div class="grow"><div class="dname">${esc(side.title||side.base)}</div>
+      <div class="dsub">${esc(day)}${side.minutes?' &middot; '+side.minutes+' min':''}${
+        who?' &middot; '+esc(who):''}</div>
+      ${side.source_file?`<div class="dsub">from ${esc(side.source_file)}</div>`:''}</div>
+    <a class="dlink" href="#m/${encodeURIComponent(side.base)}"
+      onclick="closeDrawer()">Open</a>
+    <button class="btn danger mini" type="button"
+      onclick="dDupeDelAsk('${escJs(side.base)}')">Delete&#8230;</button>
+    ${arm?`<div class="dckconfirm">Delete &#8220;${esc(side.title||side.base)}&#8221;?
+      This permanently removes the transcript, the stored audio, and every cache.
+      It cannot be undone.
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn danger mini" type="button"
+        onclick="dDupeDelGo('${escJs(side.base)}',this)">Delete forever</button></div>`:''}
+  </div>`;
+}
+function dDupesRender(){
+  const box=document.getElementById('ddupelist');
+  if(!box||DRAWER.dupes===null)return;
+  box.innerHTML=DRAWER.dupes.map(p=>`<div class="dupepair">
+      <div class="dupehdr">${Math.round((p.score||0)*100)}% of the words match</div>
+      ${_dupeSide(p.a,p.b,p.score)}
+      ${_dupeSide(p.b,p.a,p.score)}
+      <div class="dupeacts">
+        <button class="btn mini" type="button"
+          title="Two different meetings: stop offering this pair"
+          onclick="dDupeKeep('${escJs(p.a.base)}','${escJs(p.b.base)}',this)">Keep both</button>
+      </div>
+    </div>`).join('')
+    ||`<div class="dempty">${DRAWER.dupeScan
+      ?'Comparing transcripts&#8230;'
+      :'No duplicate transcripts found.'}</div>`;
+}
+function dDupeDelAsk(base){DRAWER.dconfirm='dupdel:'+base;dDupesRender();}
+async function dDupeDelGo(base,btn){
+  btn.disabled=true;
+  const r=await api('/api/delete_meeting',{base,confirm:true});
+  if(!r.ok){btn.disabled=false;dErr('ddupeerr',r);return;}
+  DRAWER.dconfirm=null;
+  dErr('ddupeerr',{ok:true});
+  dDupesLoad();refresh();
+}
+async function dDupeKeep(a,b,btn){
+  btn.disabled=true;
+  const r=await api('/api/dupe_ignore',{a,b});
+  if(!r.ok){btn.disabled=false;dErr('ddupeerr',r);return;}
+  dErr('ddupeerr',{ok:true});
+  dDupesLoad();refresh();
 }
 
 /* the quiet "archived · view" hint an Archive action leaves behind: small,

@@ -1578,3 +1578,87 @@ def test_figtree_fontface_and_stack_ride_the_composed_page():
     assert "/static/fonts/figtree-latin.woff2" in page
     # Figtree fronts the UI stack; -apple-system stays the fallback
     assert "--sans:'Figtree',-apple-system" in NEW_CSS
+
+
+# ---------------------------------------------------------------------------
+# Duplicates (2026-08-15). Two surfaces: the "already processed" line on a
+# waiting row (with the narrow bulk sweep in the tray), and the duplicate
+# TRANSCRIPT review section in the drawer. The rules that keep both honest --
+# identical bytes may be swept, a shared name may not, and no transcript is
+# ever deleted without a human -- are pinned in tests/test_dupes.py; these pin
+# that the panel actually shows them.
+# ---------------------------------------------------------------------------
+def test_a_waiting_row_says_when_it_was_already_processed():
+    body = _js_fn("dupNote")
+    assert "row.dup_of" in body
+    # the two signals never read alike: bytes are proof, a name is a suggestion
+    assert "identical to" in body and "same source name as" in body
+    assert "dup_reason==='identical'" in body
+    # everything user-derived is escaped, and the matched meeting is one click
+    assert "esc(row.dup_title||row.dup_of)" in body
+    assert "#m/${encodeURIComponent(row.dup_of)}" in body
+    # both queue states carry it (a held file is still worth flagging)
+    waiting = NEW_JS.split("case 'waiting':", 1)[1].split("case 'held':", 1)
+    assert "dupNote(row)" in waiting[0] and "dupNote(row)" in waiting[1][:900]
+    # ...and the flag is part of the row signature: the check hashes on a size
+    # collision, so it lands a poll or two after the row first painted
+    assert "r.dup_of,r.dup_reason" in _js_fn("sigOf")
+    m = re.search(r"(?m)^\.dupflag\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "var(--amber)" in m.group(0) and "13px" in m.group(0)
+
+
+def test_the_duplicate_sweep_is_a_two_step_and_deletes_only_copies():
+    tray = _js_fn("drawTray")
+    assert "t.kind==='dupe_files'" in tray and "t.kind==='dupe_meetings'" in tray
+    # the armed flag rides the tray signature, or a 2s poll would disarm the
+    # confirm under the user's cursor
+    assert "DUPE_ARMED" in tray and "+DUPE_ARMED" in tray
+    # the count offered for deletion is the EXACT (byte-identical) subset,
+    # never every flagged file
+    assert "t.exact" in tray
+    go = _js_fn("dupeDeleteGo")
+    assert "api('/api/queue_delete_dupes',{confirm:true})" in go
+    assert "DUPE_ARMED=false" in go
+    # a failed sweep says so in the row instead of silently doing nothing
+    assert "Could not delete those files." in go
+
+
+def test_duplicate_transcripts_get_their_own_drawer_section():
+    assert 'id="dsec-dupes"' in NEW_JS
+    assert "['dupes','Duplicates'" in NEW_JS          # the tab, with its count
+    assert "else if(sec==='dupes')dDupesLoad();" in NEW_JS
+    assert "if(kind==='dupe_meetings'){openDrawer('dupes');return;}" in _js_fn("trayAct")
+    load = _js_fn("dDupesLoad")
+    assert "api('/api/dupes')" in load
+    side = _js_fn("_dupeSide")
+    # both meetings are shown the same way: neither is presented as "the
+    # original", because the panel cannot know which one that is
+    assert "esc(side.title||side.base)" in side
+    assert "dDupeDelAsk(" in side and "#m/${encodeURIComponent(side.base)}" in side
+    # deleting a transcript is the house two-step, with the full consequence
+    assert "It cannot be undone." in side
+    assert "api('/api/delete_meeting',{base,confirm:true})" in _js_fn("dDupeDelGo")
+    # "keep both" is a real answer and it sticks
+    assert "api('/api/dupe_ignore',{a,b})" in _js_fn("dDupeKeep")
+    assert "Keep both" in _js_fn("dDupesRender")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_duplicate_line_survives_a_hostile_meeting_name():
+    """Meeting titles carry apostrophes and worse, and this one renders inside
+    an anchor next to an interpolated href."""
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
+        r"""
+console.log(JSON.stringify({html:dupNote({dup_of:"o'brien<b>",
+  dup_title:"O'Halloran <script>alert(1)</script>", dup_reason:'identical'}),
+  none:dupNote({state:'waiting'})}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["none"] == "", "a row with no duplicate renders nothing at all"
+    html = out["html"]
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "o'brien%3Cb%3E" in html   # the href is percent-encoded, not raw

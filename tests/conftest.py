@@ -2,7 +2,7 @@
 touch real voiceprints, manifests, status, or transcripts."""
 import pytest
 
-from stt import config, control, jobs, manifest, rates, status
+from stt import config, control, holds, jobs, manifest, rates, status
 
 
 def mfile(base, suffix):
@@ -35,6 +35,12 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(rates, "RATES_LOG", d / "rates.jsonl")
     monkeypatch.setattr(jobs, "PATH", d / "queued_jobs.json")
     monkeypatch.setattr(jobs, "_LOCK", d / "queued_jobs.lock")
+    # queue holds bind their paths at import, so a test that parks a file was
+    # writing the REAL holds.json — leaving a phantom hold on the developer's
+    # own queue, and leaking that state into the next test run (a file "held"
+    # by nobody is skipped by every automatic run, silently, forever)
+    monkeypatch.setattr(holds, "PATH", d / "holds.json")
+    monkeypatch.setattr(holds, "_LOCK", d / "holds.lock")
     monkeypatch.setattr(rates, "_cache", {"sig": None, "learned": None})
     monkeypatch.setattr(control, "_snap", {"t": 0.0, "pids": [], "mem_mb": 0})
     # HERMETIC process discovery: pgrep sees the REAL machine — without this,

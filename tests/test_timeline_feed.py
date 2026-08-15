@@ -521,3 +521,24 @@ def test_state_reports_a_relabel_that_is_actually_running(sandbox):
     with control.relabel_marker():
         assert srv.gather_state()["relabel_running"] is True
     assert srv.gather_state()["relabel_running"] is False
+
+
+def test_dupe_scan_never_kicks_while_a_batch_is_running(sandbox, monkeypatch):
+    """The duplicate-transcript scan reads the whole library, so it is only
+    ever kicked off an IDLE poll (see _kick_dupe_scan's caller in
+    gather_state). Two meetings so it would have something to compare, and a
+    call counter on _kick_dupe_scan itself rather than the real thread
+    machinery, which is exercised elsewhere."""
+    _meeting("A Mtg 05012026")
+    _meeting("B Mtg 05012026")
+    calls = []
+    monkeypatch.setattr(srv, "_kick_dupe_scan", lambda: calls.append(1))
+
+    _running(monkeypatch)                 # a batch is in flight
+    srv.gather_state()
+    assert calls == [], "the scan must not be kicked while a batch is running"
+
+    monkeypatch.setattr(control, "snapshot",
+                        lambda max_age=1.5: {"pids": [], "mem_mb": 0})
+    srv.gather_state()
+    assert calls == [1], "an idle poll is exactly when the scan should be kicked"

@@ -325,6 +325,15 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
         except (OSError, ValueError):
             input_opts = None
 
+    # the source's content fingerprint, taken NOW: after this returns the file
+    # may have been moved into the meeting folder (or, for a video, replaced by
+    # an extracted .m4a that shares none of its bytes). Recorded on the manifest
+    # so the panel can recognize this exact recording if it ever comes back
+    # under another name. Materialized above, so no iCloud download is forced.
+    from stt import dupes
+    src_fp = dupes.fingerprint(src)
+    src_size = src.stat().st_size
+
     res = pipeline.process_file(
         src, dest_dir=dest, do_diarize=opts["do_diarize"], strict=opts["strict"],
         do_verify=opts.get("verify", False),
@@ -364,6 +373,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
     return {"ok": success, "key": key, "base": base, "mtime": mtime,
+            "fp": src_fp, "size": src_size,
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs}
@@ -551,7 +561,8 @@ def main():
     def _record(res, n_active):
         nonlocal processed, failed
         if res["ok"]:
-            manifest.mark(m, res["key"], res["mtime"], res["outputs"])
+            manifest.mark(m, res["key"], res["mtime"], res["outputs"],
+                          fp=res.get("fp"), size=res.get("size"))
             manifest.save(m)
             holds.release(res["key"])  # processed: the park can't outlive the file
             rates.record(res.get("duration_sec"), res.get("stage_secs"),

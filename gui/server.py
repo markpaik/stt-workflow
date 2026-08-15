@@ -15,8 +15,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from stt import (config, control, dates, export, identify, jobs, manifest, rates,
-                 recorder, review, search, status, unknowns)
+from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
+                 rates, recorder, review, search, status, unknowns)
 
 PORT = 8737
 # The batch agent's launchd plist. Sandboxed like every other state path: under
@@ -253,6 +253,66 @@ def _kick_jobs():
         return
     _jobs_kicked["at"] = _time.monotonic()
     _spawn(jobs.spawn_args(nxt[0]))
+
+
+# ---------- duplicate transcripts: computed OFF the poll thread ----------
+# Comparing every transcript against every other one reads the whole library.
+# That is milliseconds per meeting, but on a first run over hundreds of them it
+# is seconds — far too long to sit inside a 2s status poll. So the poll only ever
+# READS the cache (dupes.cached_pairs) and, when the library has changed since
+# the cached answer, kicks one worker to recompute. The worker is exactly one at
+# a time and swallows its own errors: a duplicate scan must never take the panel
+# down with it.
+_dupe_worker = {"busy": False}
+
+
+def _dupe_refresh():
+    """Recompute the duplicate-transcript pairs. Synchronous: the thread below
+    calls it, and so do the tests."""
+    try:
+        dupes.similar_meetings(dest_dir=config.meetings_dir())
+    except Exception:
+        pass
+
+
+def _kick_dupe_scan():
+    if _dupe_worker["busy"]:
+        return
+    try:
+        if len(config.meeting_bases(config.meetings_dir())) < 2:
+            return          # nothing can pair up: never even open the cache
+        if dupes.cache_is_current(config.meetings_dir()):
+            return
+    except Exception:
+        return
+    _dupe_worker["busy"] = True
+
+    def run():
+        try:
+            _dupe_refresh()
+        finally:
+            _dupe_worker["busy"] = False
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _dupe_pair_rows(dst_dir=None):
+    """The review list the drawer shows: each pair with both sides resolved to
+    what a human needs to tell them apart (title, date, length, speakers)."""
+    dst_dir = dst_dir or config.meetings_dir()
+    rows = []
+    for p in dupes.cached_pairs(dst_dir):
+        sides = []
+        for base in (p["a"], p["b"]):
+            j = config.meeting_file(base, ".json", dst_dir)
+            meta = _meeting_meta(j, dst_dir)
+            if not meta:
+                break
+            sides.append({"base": base, "title": meta["title"], "date": meta["date"],
+                          "minutes": meta["minutes"], "speakers": meta["speakers"],
+                          "source_file": meta.get("source_file")})
+        if len(sides) == 2:
+            rows.append({"a": sides[0], "b": sides[1], "score": p["score"]})
+    return rows
 
 
 def _queue_file(name):
@@ -606,6 +666,10 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                "title": name, "date": dates.meeting_date(name),
                "when": _dt.fromtimestamp(f["mtime"]).isoformat(timespec="seconds"),
                "size_mb": f["size_mb"], "est_minutes": f.get("est_min")}
+        if f.get("dup_of"):
+            # the row says so before the batch ever picks the file up
+            row.update({"dup_of": f["dup_of"], "dup_title": f.get("dup_title"),
+                        "dup_reason": f.get("dup_reason")})
         if f["held"]:
             row.update({"state": "held", "held": True})
         elif name in failed_map:
@@ -644,6 +708,33 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
     for row in failed_entries:
         tray.append({"kind": "failed", "title": row["title"],
                      "detail": row["error"], "target": row["id"], "count": 1})
+    # waiting files that were already processed. Ranked here, above reviews: the
+    # next automatic run spends real hours transcribing them again, so it is
+    # worth deciding before that happens. `count` is what a bulk delete would
+    # take: the content-identical ones, never a name-only guess.
+    dups = [f for f in queue if f.get("dup_of") and not f["processed"]
+            and f["name"] not in active_out]
+    if dups:
+        exact = [f for f in dups if f.get("dup_reason") == "identical" and not f["held"]]
+        one = dups[0]
+        tray.append({"kind": "dupe_files",
+                     "title": "Already processed" if len(dups) > 1 else one["name"],
+                     "detail": (f"{len(dups)} waiting files were already processed"
+                                if len(dups) > 1
+                                else f"already processed as {one.get('dup_title')}"),
+                     "target": f"src:{one['name']}",
+                     "exact": len(exact), "count": len(dups)})
+    # transcripts that look like the same meeting twice. Read from the cache
+    # only: the comparison itself runs off the poll thread (see _dupe_refresh).
+    try:
+        pair_n = len(dupes.cached_pairs(config.meetings_dir()))
+    except Exception:
+        pair_n = 0
+    if pair_n:
+        tray.append({"kind": "dupe_meetings", "title": "Duplicate transcripts",
+                     "detail": f"{pair_n} pair{'s' if pair_n != 1 else ''} "
+                               f"look like the same meeting",
+                     "target": "dupes", "count": pair_n})
     for meta in meetings:
         if meta["base"] not in active_bases and meta["flagged"] and not meta["needs_review"]:
             tray.append({"kind": "review", "title": meta["title"],
@@ -680,7 +771,7 @@ def gather_state():
     # BOTH watched folders: the iCloud source AND the recorder's staging dir.
     # Only the source used to be listed, so a finished recording waited for the
     # batch completely invisibly — "I stopped, where did it go?"
-    _qfiles, _qseen = [], set()
+    _qfiles, _qseen, _qpaths = [], set(), {}
     for _qd in (src_dir, config.recordings_dir()):
         try:
             for p in sorted(_qd.iterdir()):
@@ -710,6 +801,8 @@ def gather_state():
                               "processed": done, "est_min": est_min,
                               "mtime": p.stat().st_mtime,  # timeline sort key
                               "held": p.name in _held, "est_detail": est_detail})
+                if not done:
+                    _qpaths[p.name] = p    # for the duplicate check below
     except Exception:
         pass
     meetings = []
@@ -727,6 +820,25 @@ def gather_state():
         meta = _meeting_meta(j, dst_dir)
         if meta:
             meetings.append(meta)
+    # already processed, and back in the folder anyway: a copy under a new name,
+    # an iCloud re-sync, a second export. The manifest keys on name + mtime and
+    # cannot see it, so without this the file is transcribed a second time and
+    # the library grows a twin. Only waiting files are checked (a processed one
+    # is already its meeting), and only a SIZE COLLISION is ever hashed, so an
+    # idle poll does no reading at all.
+    dup_map = {}
+    if _qpaths:
+        try:
+            dup_map = dupes.source_duplicates(_qpaths.values(), meetings, m, dst_dir)
+        except Exception:
+            dup_map = {}
+    _titles = {meta["base"]: meta["title"] for meta in meetings}
+    for f in queue:
+        d = dup_map.get(f["name"])
+        if d:
+            f["dup_of"] = d["base"]
+            f["dup_title"] = _titles.get(d["base"], d["base"])
+            f["dup_reason"] = d["reason"]
     reg = unknowns.load()
     unknown_list = []
     # "heard in N meetings" may only count meetings that still EXIST — live
@@ -778,6 +890,10 @@ def gather_state():
             _spawn([str(RUN_SH), "relabel", "--all"])
     if not running:
         _kick_jobs()  # self-heal: idle with queued jobs -> start the next one
+        # the duplicate-transcript scan reads the whole library, so it waits for
+        # an idle machine and runs in its own thread; the poll itself only ever
+        # reads the cached answer
+        _kick_dupe_scan()
     active = st.get("active", {}) if running else {}
     n_active = max(1, len(active))
     active_out, active_eta_sum = {}, 0.0
@@ -1106,6 +1222,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             elif u.path == "/api/state":
                 self._json(gather_state())
+            elif u.path == "/api/dupes":
+                # the duplicate-transcript review list, fetched when its drawer
+                # section opens. Deliberately NOT part of /api/state: two sides
+                # of every pair resolved on a 2s poll would be pure waste for
+                # the 99% of polls where nobody is looking at it.
+                self._json({"pairs": _dupe_pair_rows(),
+                            "scanning": bool(_dupe_worker["busy"]),
+                            "threshold": dupes.THRESHOLD})
             elif u.path == "/api/snippet":
                 meeting = q.get("meeting", "")
                 if meeting and not _known_base(meeting):
@@ -1607,6 +1731,54 @@ class Handler(BaseHTTPRequestHandler):
                 # the recorder's channel-layout sidecar travels with its audio
                 f.with_suffix(".opts.json").unlink(missing_ok=True)
                 self._json({"ok": True, "freed_mb": mb})
+            elif u.path == "/api/queue_delete_dupes":
+                # bin every waiting file that is BYTE-IDENTICAL to a meeting that
+                # already exists. The list is re-derived here from the files on
+                # disk, never taken from the client: the panel can ask for the
+                # sweep, it cannot name what the sweep deletes.
+                #
+                # Content-identical only. A file that merely shares a NAME with a
+                # past meeting's source is flagged in the row and deletable one
+                # by one, because a recurring export honestly reuses one name for
+                # different meetings, and this action has no undo.
+                if not b.get("confirm"):
+                    self._json({"ok": False, "error": "missing confirmation"})
+                    return
+                st_now = status.read().get("active", {})
+                from stt import holds as _holds
+                held_now = _holds.items()
+                deleted, freed = [], 0.0
+                for f in gather_state()["queue"]:
+                    if f.get("dup_reason") != "identical" or f["processed"]:
+                        continue
+                    if f["name"] in st_now or f["name"] in held_now:
+                        continue          # in flight, or parked on purpose
+                    p = _queue_file(f["name"])
+                    if p is None:
+                        continue
+                    try:
+                        freed += p.stat().st_size / 1e6
+                        p.unlink()
+                        p.with_suffix(".opts.json").unlink(missing_ok=True)
+                        deleted.append(f["name"])
+                    except OSError:
+                        continue
+                self._json({"ok": True, "deleted": deleted,
+                            "freed_mb": round(freed, 1)})
+            elif u.path == "/api/dupe_ignore":
+                # "keep both": this pair is two different meetings. Nothing is
+                # deleted and nothing is hidden from the library — the pair just
+                # stops being offered for review.
+                a, b_ = str(b.get("a") or ""), str(b.get("b") or "")
+                if not _known_base(a) or not _known_base(b_):
+                    self._json({"ok": False, "error": "unknown meeting"}, 400)
+                    return
+                self._json({"ok": dupes.ignore_pair(a, b_)})
+            elif u.path == "/api/dupe_scan":
+                # recompute now (the drawer's Rescan): synchronous, because the
+                # user asked for it and is watching the section redraw
+                _dupe_refresh()
+                self._json({"ok": True, "pairs": _dupe_pair_rows()})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
