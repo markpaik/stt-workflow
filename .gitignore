@@ -58,3 +58,6 @@ native/STT Recorder.app/
 # runtime state from queue holds
 holds.json
 holds.lock
+
+# relabel progress marker: runtime state, never tracked
+relabel_running.json

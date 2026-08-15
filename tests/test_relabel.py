@@ -307,3 +307,102 @@ def test_naming_queued_during_a_pass_survives_it_and_both_names_land(sandbox, mo
     names = {s["name"] for s in
              json.loads(mfile("Mtg", ".json").read_text())["speakers"]}
     assert {"Alice", "Bob"} <= names
+
+
+# ---------------------------------------------------------------------------
+# "Is a relabel running right now?" — the panel polls this every 2 seconds to
+# show its "applying names" pill and to rebuild the open transcript when the
+# pass finishes. It must be a pure READ: a probe that took the lock (even
+# non-blocking) would race a relabel that is just starting into thinking
+# another pass owns the lock, so it would queue a phantom follow-up instead of
+# running. control.relabel_running() reads a marker the running pass publishes.
+# ---------------------------------------------------------------------------
+def test_relabel_running_reads_a_live_pass_and_writes_nothing(sandbox):
+    from stt import control
+
+    pending = config.PROJECT_DIR / "relabel_pending.flag"
+    assert control.relabel_running() is False
+    assert not pending.exists()
+    assert not control.relabel_lock_path().exists(), "the probe must not touch the lock"
+
+    with control.relabel_marker():                      # a pass is mid-flight
+        assert control.relabel_running() is True
+        assert not pending.exists(), \
+            "probing must never queue a follow-up relabel"
+    assert control.relabel_running() is False           # the pass finished
+    assert not control.relabel_marker_path().exists()
+    assert not pending.exists()
+
+
+def test_relabel_running_ignores_a_stale_marker_and_a_recycled_pid(sandbox):
+    """A hard kill (SIGKILL, a crash) leaves the marker behind. A dead pid reads
+    as not running; a pid RECYCLED onto an unrelated process reads as not
+    running too, because the marker records the process start time as well.
+    Without that, one crash would pin the panel on "applying names" forever."""
+    import json as _json
+    import os
+
+    from stt import control
+
+    m = control.relabel_marker_path()
+    m.write_text(_json.dumps({"pid": 999999, "started": "whenever"}))
+    assert control.relabel_running() is False           # nothing with that pid
+
+    # same pid, different process: the start times cannot match
+    m.write_text(_json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970"}))
+    assert control.relabel_running() is False
+
+
+def test_a_relabel_pass_publishes_itself_for_the_whole_run(sandbox, monkeypatch):
+    """The marker is up for as long as the pass really is, and only for a pass
+    that WON the lock: the queue-a-follow-up path claims nothing."""
+    import fcntl
+    import sys as _sys
+
+    import relabel
+    from stt import control
+
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    _seed_meeting("Mtg")
+    seen = []
+    real_one = relabel.relabel_one
+    monkeypatch.setattr(relabel, "relabel_one",
+                        lambda base, **kw: (seen.append(control.relabel_running()),
+                                            real_one(base, **kw))[1])
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "--all"])
+    assert relabel.main() == 0
+    assert seen == [True], "the pass must publish itself while it is working"
+    assert control.relabel_running() is False           # cleaned up on exit
+
+    # a second pass that CANNOT get the lock queues a follow-up and returns
+    holder = open(control.relabel_lock_path(), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        seen.clear()
+        assert relabel.main() == 0
+        assert seen == [], "the blocked pass relabeled nothing"
+        assert control.relabel_running() is False, \
+            "a pass that never ran must not claim to be running"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_relabel_all_publishes_itself_too(sandbox, monkeypatch):
+    """relabel_all() is the OTHER entry point (run_batch's end-of-run pass);
+    it must publish the marker just like main(), or the panel shows no
+    "applying names" pill for names given mid-batch."""
+    import relabel
+    from stt import control
+
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    _seed_meeting("Mtg")
+    seen = []
+    real_one = relabel.relabel_one
+    monkeypatch.setattr(relabel, "relabel_one",
+                        lambda base, **kw: (seen.append(control.relabel_running()),
+                                            real_one(base, **kw))[1])
+    relabel.relabel_all()
+    assert seen == [True], "relabel_all must publish itself while it is working"
+    assert control.relabel_running() is False           # cleaned up on exit
+    assert not control.relabel_marker_path().exists()

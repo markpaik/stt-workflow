@@ -10,10 +10,12 @@ run_batch processes share their launcher's process group (caffeinate/launchd),
 and status.json records that pgid, so we can find and signal every member even
 after the parent dies. stop_run() verifies termination and escalates to SIGKILL.
 """
+import json
 import os
 import signal
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 from . import config, status
@@ -56,6 +58,83 @@ def stopping_recently(within: float = STOP_WINDOW) -> bool:
         return (time.time() - STOP_FLAG.stat().st_mtime) < within
     except OSError:
         return False
+
+
+# ---------- relabel: the lock, and an honest "is one running right now?" ----
+#
+# relabel.py serializes itself with an flock on relabel.lock. The panel needs to
+# SAY a relabel is running (naming a voice spawns one, and the transcripts only
+# change when it finishes), and it polls every 2 seconds -- so the probe must
+# never touch the lock. A non-blocking acquire from the poll would momentarily
+# TAKE the lock and race a relabel that is just starting into thinking another
+# pass owns it, which makes it queue a phantom relabel_pending.flag instead of
+# running. So the running pass publishes a marker while it holds the lock, and
+# the probe only reads.
+#
+# The marker records pid + the process START TIME (`ps -o lstart=`), the same
+# anti-recycling idea as recorder._recorder_running's cmdline check but stricter:
+# a pid recycled onto an unrelated process reads a different start time, so a
+# marker left behind by a hard kill can never be mistaken for a live pass.
+#
+# Paths are resolved per call, never bound at import: tests point
+# config.PROJECT_DIR at a sandbox after this module is imported.
+
+
+def relabel_lock_path():
+    return config.PROJECT_DIR / "relabel.lock"
+
+
+def relabel_marker_path():
+    return config.PROJECT_DIR / "relabel_running.json"
+
+
+def _proc_started(pid) -> str:
+    """The process's start time as the OS reports it, or "" if it is gone."""
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return out.strip()
+
+
+@contextmanager
+def relabel_marker():
+    """Publish "a relabel pass is running here" for the duration of the block.
+    Written only by a pass that HOLDS the lock, removed in a finally so a normal
+    exit (or an exception mid-pass) leaves nothing behind."""
+    p = relabel_marker_path()
+    pid = os.getpid()
+    try:
+        p.write_text(json.dumps({"pid": pid, "started": _proc_started(pid)}))
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def relabel_running() -> bool:
+    """True only while a relabel pass is actually alive. Reads the marker; no
+    lock is taken and NOTHING is written, so the 2s poll cannot perturb a
+    relabel that is starting up."""
+    p = relabel_marker_path()
+    try:
+        m = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return False           # no marker: nothing running, and no ps spawned
+    pid, started = m.get("pid"), m.get("started")
+    if not pid:
+        return False
+    now = _proc_started(pid)
+    if not now:
+        return False           # the pass died without cleaning up
+    # a recycled pid is a DIFFERENT process: same number, later start time
+    return not started or now == started
 
 
 def _pgrep(args):

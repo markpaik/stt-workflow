@@ -414,9 +414,12 @@ def test_naming_panel_replaces_the_who_bridge():
     assert "'/api/voice_clips?speaker='" in NEW_JS
     # the save posts to /api/name in BOTH panel modes: by registry uid, and by
     # this-meeting cluster (the path that names a voice the registry does not
-    # track — sub-floor 'Voice N' scraps and tombstone-suppressed voices)
-    assert re.search(r"\{uid:NP\.uid,name:n,confirm:!!force\}", NEW_JS)
-    assert re.search(r"\{meeting:NP\.meeting,speaker:NP\.speaker,name:n,confirm:!!force\}", NEW_JS)
+    # track — sub-floor 'Voice N' scraps and tombstone-suppressed voices).
+    # The identity is read off NP into locals BEFORE the await (see
+    # test_save_captures_its_identity_before_the_await), so the payloads carry
+    # those locals, never a post-await NP dereference.
+    assert re.search(r"\{uid:uid,name:n,confirm:!!force\}", NEW_JS)
+    assert re.search(r"\{meeting:meeting,speaker:speaker,name:n,confirm:!!force\}", NEW_JS)
     assert re.search(r"function\s+openNamePanelByCluster\s*\(", NEW_JS)
     # the meeting legend offers the cluster chip for unnamed, un-tracked voices
     assert "openNamePanelByCluster(" in NEW_JS and NEW_JS.count("openNamePanelByCluster(") >= 2
@@ -449,10 +452,13 @@ def test_naming_panel_shows_what_the_voice_said():
     assert 'id="nplines"' in NEW_JS
     lines = _js_fn("npLines")
     assert "'/api/voice_lines?base='" in lines and "&speaker='" in lines
-    # every rendered line is escaped, and the block is silent when there is
-    # nothing to show (an error where the naming form goes helps nobody)
+    # every rendered line is escaped, and the block is silent on FAILURE (an
+    # error where the evidence goes helps nobody). A successful fetch with no
+    # lines is different: "this voice said nothing" is itself evidence, so it
+    # gets a dim note instead of a gap that reads as a block that failed to load
     assert "esc(l.text)" in lines
-    assert "if(!lines.length)return;" in lines
+    assert "if(!lines.length){" in lines
+    assert "No transcript text was attributed to this voice." in lines
     assert "catch(e){return;}" in lines
     # both panel modes fetch it: cluster mode from its own meeting, uid mode
     # from whatever meeting the caller was looking at (optional)
@@ -488,6 +494,224 @@ def test_dismiss_posts_the_meeting_scoped_call_not_the_registry_tombstone():
     assert "MP.base===meeting" in body and "mReloadSegs()" in body
     # the await boundary must never dereference NP again
     assert "NP.meeting" not in body.split("await api", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# The naming flyout, second pass (2026-08-15): the form comes FIRST, the save
+# survives the panel closing under it, and a stale "?" chip never opens a dead
+# panel. Same regex-over-the-file style, plus node for the behavior.
+# ---------------------------------------------------------------------------
+def test_naming_panel_puts_the_form_above_the_evidence():
+    """The control you came to use must not sit below a scroll of clips and
+    transcript lines. Name box, buttons, and the two messages those buttons
+    produce (the quality-gate confirm, the error line) render before the player
+    and the lines block."""
+    panel = _js_fn("openNamePanel")
+    frags = ('class="npfield"', 'class="npbtns"', 'id="npconfirm"', 'id="nperr"',
+             'id="npclips"', 'id="nplines"')
+    for f in frags:
+        assert f in panel, f"panel template lost {f}"
+    order = [panel.index(f) for f in frags]
+    assert order == sorted(order), \
+        f"panel template out of order: {list(zip(frags, order))}"
+    # the autocomplete dropdown overlays whatever now sits under the field:
+    # .npfield is the positioned parent, .npdd is above it in the stack, and
+    # neither .npclips nor .nplines creates a stacking context of its own
+    m = re.search(r"(?m)^\.npfield\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "position:relative" in m.group(0)
+    m = re.search(r"(?m)^\.npdd\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "z-index:5" in m.group(0)
+
+
+def test_stale_uid_chip_never_opens_a_dead_panel():
+    body = _js_fn("openNamePanelByUid")
+    # the transient notice is TEXT, never innerHTML: nothing user-derived can
+    # arrive as markup through it
+    assert "el.textContent=msg" in _js_fn("toast")
+    assert "toast(" in body and "refresh();" in body
+    m = re.search(r"(?m)^\.toast\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "var(--card)" in m.group(0) and "13px" in m.group(0)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_save_captures_its_identity_before_the_await():
+    """The reported bug: naming U049 from the transcript legend succeeded
+    server-side while the panel showed nothing. The save must (1) post the uid
+    it was OPENED for even if the panel closes or reopens for another voice
+    mid-flight, and (2) rebuild the open transcript on success, so the "?" chip
+    stops asking instead of surviving to be clicked again on a dead uid."""
+    fixture = "\n".join([
+        "const els={};",
+        "for(const k of ['#npname','#nperr','#npconfirm','#npsave'])"
+        "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false};",
+        "els['#npname'].value='  Priya Shah  ';",
+        "function $(sel){return els[sel]||null;}",
+        "function esc(s){return s;}",
+        "let posted=null,release=null;",
+        "function api(p,body){posted={p,body};return new Promise(r=>{release=r;});}",
+        "let reloads=0,refreshes=0,closed=0;",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "function closeNamePanel(){closed++;NP=null;}",
+        "let NP={uid:'U049',base:'LT Meeting 05212026'};",
+        "let MP={base:'LT Meeting 05212026'};",
+        _js_fn("npSave"),
+        """
+(async()=>{
+  const p=npSave();
+  // the panel is reopened for a DIFFERENT voice while the request is in flight
+  NP={uid:'U050',base:'Another Meeting'};
+  release({ok:true,note:'relabeling all meetings in background'});
+  await p;
+  console.log(JSON.stringify({posted,reloads,refreshes,closed,
+    label:els['#npsave'].textContent,disabled:els['#npsave'].disabled}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["posted"]["p"] == "/api/name"
+    assert out["posted"]["body"] == {"uid": "U049", "name": "Priya Shah",
+                                     "confirm": False}, \
+        "the save posted the voice the panel was reopened for, not the one saved"
+    assert out["closed"] == 1 and out["refreshes"] == 1
+    assert out["reloads"] == 1, \
+        "the open transcript must rebuild on success (the legend '?' must stop asking)"
+    # the button never stays stuck on "Saving..."
+    assert out["label"] == "Save name" and out["disabled"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_save_survives_a_fetch_that_never_answers():
+    """A dropped connection used to leave the Save button disabled and reading
+    "Saving..." forever, with no way to retry but a page reload."""
+    fixture = "\n".join([
+        "const els={};",
+        "for(const k of ['#npname','#nperr','#npconfirm','#npsave'])"
+        "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false};",
+        "els['#npname'].value='Priya Shah';",
+        "function $(sel){return els[sel]||null;}",
+        "function esc(s){return s;}",
+        "function api(){return Promise.reject(new Error('network down'));}",
+        "let reloads=0,refreshes=0,closed=0;",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "function closeNamePanel(){closed++;NP=null;}",
+        "let NP={uid:'U049',base:'B'};let MP=null;",
+        _js_fn("npSave"),
+        """
+(async()=>{
+  await npSave();
+  console.log(JSON.stringify({err:els['#nperr'].textContent,
+    errShown:!els['#nperr'].hidden,label:els['#npsave'].textContent,
+    disabled:els['#npsave'].disabled,closed,reloads}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["err"] == "Could not reach the server." and out["errShown"] is True
+    assert out["label"] == "Save name" and out["disabled"] is False
+    assert out["closed"] == 0 and out["reloads"] == 0   # nothing was saved
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_uid_that_is_no_longer_unknown_refreshes_instead_of_opening():
+    """A legend chip rendered before the voice was named still carries the old
+    uid. Opening the panel on it gave a DEAD flyout (the raw uid as the title
+    and the speaker key: no lines, no audio, a save that could only fail)."""
+    fixture = "\n".join([
+        "let opened=[];",
+        "function openNamePanel(uid,display,cluster,base){opened.push([uid,display,base]);}",
+        "let toasts=[];function toast(m){toasts.push(m);}",
+        "let refreshes=0,reloads=0;",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "let route={view:'meeting',base:'B'};",
+        "let S={unknowns:[{uid:'U050',display:'Speaker 50',meetings:['B']}],"
+        "relabel_running:true};",
+        _js_fn("openNamePanelByUid"),
+        """
+openNamePanelByUid('U049','B');                 // named already: gone from S
+const stale={opened:opened.length,toasts:toasts.slice(),refreshes,reloads};
+S.relabel_running=false;S.relabel_pending=false;
+openNamePanelByUid('U049','B');                 // and once the relabel is done
+const after={toasts:toasts.slice(-1)};
+openNamePanelByUid('U050','B');                 // a voice that IS still unknown
+console.log(JSON.stringify({stale,after,opened}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["stale"]["opened"] == 0, "a stale uid must not build the panel"
+    assert out["stale"]["toasts"] == ["Already named. Names are being applied now."]
+    assert out["stale"]["refreshes"] == 1 and out["stale"]["reloads"] == 1
+    assert out["after"]["toasts"] == ["This voice was already named."]
+    # a live unknown still opens, with its display name (never the raw uid)
+    assert out["opened"] == [["U050", "Speaker 50", "B"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_finished_relabel_rebuilds_the_open_transcript():
+    """The relabel a naming spawns rewrites every transcript in the background,
+    so the page being stared at is the LAST place the new name shows up. The
+    watcher fires on the falling edge, and it runs before render()'s meeting-view
+    early return -- the meeting view is the only place this matters."""
+    fixture = "\n".join([
+        "let refreshes=0,reloads=0;",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "let NP=null,route={view:'meeting',base:'B'};",
+        "let card=null,inline=null;",
+        "const document={getElementById:()=>card,querySelector:()=>inline};",
+        "let RELABEL_WAS=false;",
+        _js_fn("relabelWatch"),
+        """
+relabelWatch({relabel_running:true});
+relabelWatch({relabel_running:true});
+const during={refreshes,reloads};
+relabelWatch({relabel_running:false});
+const done={refreshes,reloads};
+// a second poll after the edge must NOT reload again
+relabelWatch({relabel_running:false});
+const settled={refreshes,reloads};
+// mid-edit: the transition is held, not lost -- a later tick does the reload
+relabelWatch({relabel_running:true});
+NP={uid:'U1'};
+relabelWatch({relabel_running:false});
+const held={refreshes,reloads};
+NP=null;
+relabelWatch({relabel_running:false});
+const later={refreshes,reloads};
+// the pending flag counts as running too (a follow-up pass is queued)
+relabelWatch({relabel_pending:true});
+relabelWatch({});
+console.log(JSON.stringify({during,done,settled,held,later,
+  final:{refreshes,reloads}}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["during"] == {"refreshes": 0, "reloads": 0}
+    assert out["done"] == {"refreshes": 1, "reloads": 1}
+    assert out["settled"] == {"refreshes": 1, "reloads": 1}
+    assert out["held"] == {"refreshes": 1, "reloads": 1}, \
+        "a reload must not blow away an open naming panel"
+    assert out["later"] == {"refreshes": 2, "reloads": 2}, \
+        "the held transition must fire on a later tick, not be dropped"
+    assert out["final"] == {"refreshes": 3, "reloads": 3}
+
+
+def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
+    body = _js_fn("render")
+    assert "relabelWatch(S);" in body
+    assert body.index("relabelWatch(S);") < body.index("route.view==='meeting'"), \
+        "placed after the early return, the watcher never fires on a meeting page"
+    # the pill takes BOTH signals: relabel_pending alone only ever meant "a
+    # second pass is queued behind a first"
+    assert "s.relabel_running||s.relabel_pending" in _js_fn("drawPill")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")

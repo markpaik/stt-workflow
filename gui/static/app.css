@@ -989,6 +989,14 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
   box-shadow:var(--shadow);display:flex;gap:6px;align-items:center}
 .archhint .dlink{font-size:13px}
 
+/* the transient notice (toast): same quiet pill as the archive hint, but it
+   can appear over the naming slide-over, so it sits above it in the stack */
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:70;
+  max-width:min(420px,92vw);font:500 13px/1.35 var(--sans);color:var(--ink);
+  background:var(--card);border:1px solid var(--hair);border-radius:99px;
+  padding:9px 14px;box-shadow:var(--shadow);text-align:center}
+.toast[hidden]{display:none}
+
 /* reduced motion: the drawer appears in place, switches do not slide */
 @media(prefers-reduced-motion:reduce){
   .drawer{animation:none}
