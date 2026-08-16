@@ -623,10 +623,17 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
     # --- meetings: needs_name (awaiting a human name/date) or ready. A meeting
     # being reprocessed shows as its processing row above, not twice. ---
     active_bases = {e.get("base") for e in active_out.values() if e.get("base")}
+    # names sitting in the watched folder RIGHT NOW, unprocessed. When a meeting
+    # shares one, the file was re-dropped (new mtime, so the manifest reads it as
+    # brand new) and the batch really will transcribe it again, so its waiting
+    # row -- and the duplicate chip on it -- has to show. Claiming the name here
+    # hid work that was about to happen.
+    unprocessed = {f["name"] for f in queue if not f["processed"]}
     for meta in meetings:
         if meta["base"] in active_bases:
             continue
-        if meta.get("source_file"):
+        if meta.get("source_file") and meta["source_file"] not in unprocessed:
+            # a PROCESSED source still lingering in the folder is this meeting
             emitted.add(meta["source_file"])
         row = {"source_file": meta.get("source_file"),
                "title": meta["title"], "date": meta["date"],
