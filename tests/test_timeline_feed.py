@@ -11,8 +11,8 @@ import json
 import time
 
 from gui import server as srv
-from stt import (archive, config, control, holds, recorder, status, summarize,
-                 unknowns)
+from stt import (archive, config, control, holds, manifest, recorder, status,
+                 summarize, unknowns)
 from conftest import mfile
 
 # the top-level /api/state keys that existed BEFORE the timeline/tray were added
@@ -368,6 +368,38 @@ def test_reprocessed_meeting_shows_processing_not_twice(sandbox, monkeypatch):
     _running(monkeypatch)
     rows = [r for r in srv.gather_state()["timeline"] if r["id"] == "Board Prep 07022026"]
     assert len(rows) == 1 and rows[0]["state"] == "processing"
+
+
+def test_redropped_source_keeps_its_waiting_row_beside_the_meeting(sandbox):
+    """A file already processed into a meeting, dropped back into the watched
+    folder: the mtime is new, so the manifest reads it as brand new and the
+    batch WILL transcribe it a second time. Both rows show -- the meeting, and
+    the waiting row carrying the duplicate chip -- because the meeting owning
+    that source name would otherwise hide work that is really about to run."""
+    _meeting("Weekly Sync 07012026", date="2026-07-01")   # source_file: <base>.m4a
+    _source("Weekly Sync 07012026.m4a")
+    st = srv.gather_state()
+    assert _row(st, id="Weekly Sync 07012026") is not None       # the meeting
+    r = _row(st, id="src:Weekly Sync 07012026.m4a")              # and the re-drop
+    assert r is not None and r["state"] == "waiting"
+    # the chip says which meeting it matched, and on which (weaker) signal
+    assert r["dup_of"] == "Weekly Sync 07012026" and r["dup_reason"] == "name"
+
+
+def test_processed_source_still_in_the_folder_has_no_waiting_row(sandbox):
+    """The inverse guard: the SAME file, but the manifest records it processed
+    at this exact mtime. Nothing will re-run it, so it is only its meeting --
+    a lingering source never doubles the feed."""
+    base = "Weekly Sync 07012026"
+    _meeting(base, date="2026-07-01")
+    src = _source(f"{base}.m4a")
+    m = manifest.load()
+    manifest.mark(m, src.name, src.stat().st_mtime,
+                  [str(mfile(base, ".json")), str(mfile(base, ".txt"))])
+    manifest.save(m)
+    st = srv.gather_state()
+    assert _row(st, id=base) is not None
+    assert _row(st, id=f"src:{base}.m4a") is None
 
 
 # ---------- archived exclusion ----------
