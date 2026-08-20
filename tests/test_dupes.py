@@ -257,3 +257,141 @@ def test_an_empty_library_never_scans_or_writes_a_cache(sandbox):
     srv.gather_state()
     assert not dupes.cache_path().exists(), \
         "a poll with nothing to compare must not start a scan"
+
+
+# ------------------------------------------------- review-fix regressions --
+
+def test_fingerprint_hashes_the_tail_of_a_mid_size_file(sandbox):
+    """Files between one and two chunks used to have everything past the first
+    chunk EXCLUDED from the hash: two same-size files sharing their first
+    megabyte read as byte-identical, and "identical" is the signal that gates
+    the no-undo bulk delete."""
+    pad = dupes.CHUNK // 2
+    a = sandbox / "a.m4a"
+    a.write_bytes(b"\x01" * dupes.CHUNK + b"A" * pad)
+    b = sandbox / "b.m4a"
+    b.write_bytes(b"\x01" * dupes.CHUNK + b"B" * pad)
+    dupes._fp_cache.clear()
+    assert a.stat().st_size == b.stat().st_size
+    assert dupes.fingerprint(a) != dupes.fingerprint(b)
+
+
+def test_a_deleted_meetings_record_matches_nothing(sandbox):
+    """The user deleted that transcript, and delete_meeting promises the source
+    will be re-transcribed -- so its manifest record must not flag the file,
+    and above all must not hand the bulk sweep the only remaining copy. A base
+    that still exists (live or archived) keeps matching: an archived meeting is
+    restorable, so re-transcribing it is exactly the waste the gate prevents."""
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "cabinet.m4a"
+    f.write_bytes(b"RIFF" + b"\x02" * 9000)
+    fp = dupes.fingerprint(f)
+    m = {"processed": {"cabinet.m4a": {
+        "mtime": 1.0, "fp": fp, "size": f.stat().st_size,
+        "outputs": [str(mfile("Cabinet 05012026", ".json"))]}}}
+    # the base is dead: neither signal (fp, name) may fire
+    assert dupes.source_duplicates([f], [], m, config.meetings_dir(),
+                                   live=set()) == {}
+    # the same record with the base alive flags normally
+    out = dupes.source_duplicates([f], [], m, config.meetings_dir(),
+                                  live={"Cabinet 05012026"})
+    assert out["cabinet.m4a"]["reason"] == "identical"
+
+
+def test_delete_meeting_scrubs_its_manifest_record(sandbox):
+    """The record IS the meeting's processing history; with the meeting gone it
+    must go too, or its stored fingerprint keeps flagging (and the sweep keeps
+    offering to delete) a source the user is entitled to re-process."""
+    from stt import archive
+    _meeting("Standup 05012026", "standup.m4a", b"AUD" * 100)
+    m = manifest.load()
+    manifest.mark(m, "standup.m4a", 5.0,
+                  [str(mfile("Standup 05012026", ".json"))],
+                  fp="deadbeef", size=300)
+    manifest.save(m)
+    assert archive.delete_meeting("Standup 05012026")["ok"]
+    assert "standup.m4a" not in manifest.load()["processed"]
+
+
+def test_a_truncated_scan_admits_it_and_checks_closest_lengths_first(sandbox, monkeypatch):
+    """MAX_PAIRS exhausted used to stop comparing silently and stamp the cache
+    as the authoritative answer. Now the budget is spent on the closest-length
+    pairs first (same recording means same length), the cache says truncated --
+    and the sig is STILL stamped, or the idle poll would re-kick the identical
+    truncated scan forever."""
+    body = _words(400)
+    _meeting("A Mtg 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("B Mtg 05012026", "b.m4a", text=body, dur=601.0)   # closest pair
+    _meeting("C Mtg 05012026", "c.m4a", text=_words(400, "c"), dur=680.0)
+    monkeypatch.setattr(dupes, "MAX_PAIRS", 1)
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert dupes.cache_truncated() is True
+    assert dupes.cache_is_current(config.meetings_dir()) is True
+    assert {(p["a"], p["b"]) for p in pairs} == \
+        {("A Mtg 05012026", "B Mtg 05012026")}, \
+        "the one comparison in the budget went to the closest-length pair"
+    # a full re-run clears the flag
+    monkeypatch.setattr(dupes, "MAX_PAIRS", 20000)
+    dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert dupes.cache_truncated() is False
+
+
+def test_cache_writes_use_unique_ignored_tmp_names(sandbox, monkeypatch):
+    """Two concurrent writers used to share ONE fixed .json.tmp path, so one
+    could promote the other's half-written file. The unique names must keep the
+    .json.tmp suffix: .gitignore matches *.json.tmp, and these files carry
+    meeting names."""
+    import fnmatch
+    import os as _os
+    from pathlib import Path as _P
+    seen = []
+    real = _os.replace
+
+    def spy(a, b):
+        seen.append(str(a))
+        return real(a, b)
+    monkeypatch.setattr(dupes.os, "replace", spy)
+    dupes._save_cache({"sketches": {}, "pairs": [], "sig": "s"})
+    dupes.ignore_pair("A 05012026", "B 05012026")
+    assert len(seen) == 2
+    for tmp in seen:
+        assert fnmatch.fnmatch(_P(tmp).name, "*.json.tmp")
+        assert _P(tmp).name not in ("dupes_cache.json.tmp",
+                                    "dupes_ignored.json.tmp"), \
+            "the tmp name must be unique per writer, never one shared path"
+    assert not list(config.PROJECT_DIR.glob("*.json.tmp")), "nothing left behind"
+
+
+def test_concurrent_keep_both_clicks_lose_nothing(sandbox):
+    """ignore_pair is a read-modify-write; two in-flight "Keep both" clicks
+    used to race it and silently drop one decision. The lock makes both land."""
+    import threading as _t
+    pairs = [("A 05012026", "B 05012026"), ("C 05012026", "D 05012026")]
+    barrier = _t.Barrier(2)
+
+    def go(p):
+        barrier.wait()
+        dupes.ignore_pair(*p)
+    ts = [_t.Thread(target=go, args=(p,)) for p in pairs]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert {tuple(sorted(p)) for p in pairs} <= dupes.ignored_pairs()
+
+
+def test_unknown_durations_never_outrank_a_real_close_pair(sandbox, monkeypatch):
+    """A meeting with no recorded duration scored 0.0 closeness, the best
+    possible, so zero-duration noise pairs could eat the whole comparison
+    budget ahead of the genuinely closest pair. Unknown now sorts last."""
+    body = _words(400)
+    _meeting("A Mtg 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("B Mtg 05012026", "b.m4a", text=body, dur=601.0)     # the real pair
+    _meeting("X Mtg 05012026", "x.m4a", text=_words(400, "x"), dur=0.0)
+    _meeting("Y Mtg 05012026", "y.m4a", text=_words(400, "y"), dur=0.0)
+    monkeypatch.setattr(dupes, "MAX_PAIRS", 1)
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert {(p["a"], p["b"]) for p in pairs} == \
+        {("A Mtg 05012026", "B Mtg 05012026")}, \
+        "the one budgeted comparison must go to the known-close pair"

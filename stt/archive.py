@@ -184,6 +184,24 @@ def delete_meeting(base: str) -> dict:
         # rename path nests the same way), so the scrub inside is deadlock-free
         purge_meeting_dir(target)
 
+    # the manifest record is this meeting's processing history; with the meeting
+    # gone it must go too. is_processed would self-heal anyway (the outputs are
+    # gone), but the record's stored FINGERPRINT would keep matching the source
+    # file as "identical" -- and the duplicate sweep would offer to delete the
+    # only remaining copy of a recording whose re-transcription this very
+    # function just promised. Never blocks the delete itself.
+    try:
+        m = manifest.load()
+        stale = [k for k, rec in m.get("processed", {}).items()
+                 if any(str(o).endswith(".json") and Path(o).stem == base
+                        for o in rec.get("outputs") or [])]
+        for k in stale:
+            m["processed"].pop(k, None)
+        if stale:
+            manifest.save(m)
+    except Exception:
+        pass
+
     note = None
     if src_name:
         for folder in (config.source_dir(), config.recordings_dir()):

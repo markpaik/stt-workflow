@@ -399,6 +399,24 @@ def test_duplicate_sweep_leaves_an_in_flight_file_alone(running_server):
     assert (src / "board prep 2.m4a").exists()
 
 
+def test_the_dupe_sweep_never_starts_a_run(running_server, monkeypatch):
+    """The sweep derives its file list through the PURE queue helper. The old
+    path called gather_state(), whose side effects kick the next queued batch
+    (and the dupe scan) on an idle machine -- so the delete POST could itself
+    start the run that then claimed the file it was about to unlink, and its
+    pre-loop active snapshot would never have noticed."""
+    kicked = []
+    monkeypatch.setattr(srv, "_kick_jobs", lambda: kicked.append("jobs"))
+    monkeypatch.setattr(srv, "_kick_dupe_scan", lambda: kicked.append("scan"))
+    monkeypatch.setattr(srv, "_spawn", lambda *a, **k: kicked.append("spawn"))
+    src = _dupe_fixture()
+    status, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert status == 200 and body["ok"] is True
+    assert body["deleted"] == ["board prep 2.m4a"]
+    assert not (src / "board prep 2.m4a").exists()
+    assert kicked == [], "a delete request must never start a batch or a scan"
+
+
 def test_dupe_ignore_gates_both_bases_and_the_list_is_read_only(running_server):
     from stt import dupes
     _dupe_fixture()
@@ -1285,3 +1303,19 @@ def test_mic_speaker_endpoint_persists_and_clears(running_server):
     # never echoed as an env dump; state carries only the name
     _, state = _get(running_server, "/api/state")
     assert "mic_speaker" in state
+
+
+def test_the_sweep_rechecks_the_matched_meeting_before_each_unlink(running_server, monkeypatch):
+    """A concurrent delete_meeting can land between the sweep's queue snapshot
+    and a file's unlink. The file would then be the only remaining copy of that
+    recording. The sweep re-checks the matched meeting exists, per file, right
+    before it deletes."""
+    src = _dupe_fixture()
+    stale_queue = [{"name": "board prep 2.m4a", "processed": False, "held": False,
+                    "dup_of": "Ghost Meeting 01012026",   # deleted mid-sweep
+                    "dup_reason": "identical"}]
+    monkeypatch.setattr(srv, "_queue_and_dupes", lambda: (stale_queue, [], set()))
+    status, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert status == 200 and body["ok"] is True and body["deleted"] == []
+    assert (src / "board prep 2.m4a").exists(), \
+        "a file whose matched meeting vanished must survive the sweep"

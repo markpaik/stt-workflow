@@ -60,10 +60,12 @@ holds.json
 holds.lock
 
 # duplicate detection: transcript sketches and the "keep both" decisions.
-# Both carry meeting names, so both stay out of the repository.
+# Both carry meeting names, so both stay out of the repository, and so do
+# their atomic-write temp files (a crash mid-write leaves one behind).
 dupes_cache.json
 dupes_ignored.json
 relabel_running.json
+*.json.tmp
 
 # local Claude session config
 .claude/

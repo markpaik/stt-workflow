@@ -169,9 +169,11 @@ function _traySub(title,meta,count,call){
 const TRAY_EXPAND_MAX=8;
 // the armed state of the duplicate-file sweep: deleting files has no undo, so
 // it is the house two-step, and the flag rides the tray signature so a 2s poll
-// cannot disarm it under the user's cursor
-let DUPE_ARMED=false;
-function dupeArm(on){DUPE_ARMED=!!on;drawTray(S||{});}
+// cannot disarm it under the user's cursor. A FAILURE is state too (DUPE_ERR):
+// writing it straight into the DOM died within 2s, because the signature was
+// computed before the flag flipped and the next poll rebuilt the tray over it.
+let DUPE_ARMED=false,DUPE_ERR='';
+function dupeArm(on){DUPE_ARMED=!!on;if(on)DUPE_ERR='';drawTray(S||{});}
 async function dupeDeleteGo(btn){
   if(btn){btn.disabled=true;btn.innerHTML='Deleting&#8230;';}
   let r;
@@ -179,11 +181,11 @@ async function dupeDeleteGo(btn){
   catch(e){r=null;}
   DUPE_ARMED=false;
   if(!r||!r.ok){
-    const row=btn&&btn.closest?btn.closest('.trayrow'):null;
-    const d=row&&row.querySelector('.tw-detail');
-    if(d)d.textContent=(r&&r.error)||'Could not delete those files.';
+    DUPE_ERR=(r&&r.error)||'Could not delete those files.';
+    drawTray(S||{});
     return;
   }
+  DUPE_ERR='';
   refresh();
 }
 function drawTray(s){
@@ -204,7 +206,7 @@ function drawTray(s){
   // keeps an open group open and an active line active
   const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count,t.exact]))
     +'|'+(note?note.at+'\x1f'+note.text:'')
-    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly+'|'+DUPE_ARMED;
+    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly+'|'+DUPE_ARMED+'|'+DUPE_ERR;
   if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
   tray.dataset.sig=sig;tray.hidden=false;
 
@@ -238,7 +240,9 @@ function drawTray(s){
         <button class="btn danger mini tw-verb" type="button"
           onclick="dupeDeleteGo(this)">Delete ${t.exact} file${t.exact!==1?'s':''}</button>`
       :(t.exact?_trayVerb('Delete copies',`dupeArm(true)`):'');
-    h+=_trayRow(t.title,t.detail,verbs);
+    // a failed sweep replaces the detail until the next arm or a success:
+    // the renderer owns this text, so a poll's rebuild keeps it visible
+    h+=_trayRow(t.title,DUPE_ERR&&!DUPE_ARMED?DUPE_ERR:t.detail,verbs);
   }
   for(const t of dmeets)
     h+=_trayRow(t.title,t.detail,_trayVerb('Review &#8594;',`trayAct('dupe_meetings','')`));
@@ -3015,7 +3019,11 @@ async function npLines(base,speaker){
   catch(e){return;}
   const box=$('#nplines');
   if(!box||!NP||npToken()!==tok)return;
-  const lines=(r&&r.lines)||[];
+  // only a SUCCESSFUL fetch may assert "no text": the server answers errors
+  // with parseable JSON ({error}, non-200), which lands here too -- and a
+  // mid-relabel 404 must not read as "this voice is just a cough"
+  if(!r||r.error||!Array.isArray(r.lines))return;
+  const lines=r.lines;
   if(!lines.length){
     box.innerHTML='<div class="npnote muted">No transcript text was attributed to this voice.</div>';
     return;
@@ -3193,6 +3201,8 @@ const DRAWER={open:false,section:'settings',
   spkErr:'',         // last speaker-action error, rendered in the section
   updNote:'',updBusy:false,   // the model-update check's client-side note
   dupes:null,dupeScan:false,  // the duplicate-transcript review list, fetched on open
+  dupeBusy:false,dupeTrunc:false,  // fetch in flight; last scan hit its pair budget
+  dupeSeen:undefined,   // tray pair count at the last fetch: the poll refetches on change
   hist:null,archived:null};   // fetched lists (results / items)
 
 function openDrawer(section){
@@ -3256,6 +3266,7 @@ function drawDrawer(s){
   drawerNavSync(s);
   dSettingsDraw(s);
   dSpeakersDraw(s);
+  dDupesPoll(s);
 }
 function drawerNavSync(s){
   const nav=$('#dnav');if(!nav)return;
@@ -3564,10 +3575,11 @@ async function dCkClearGo(prov){
   dSettingsForce();
   refresh();
 }
-// clears whichever two-step confirm is armed and repaints its section
+// clears whichever two-step confirm is armed and repaints its section --
+// EVERY section that renders a confirm, or Cancel leaves a live armed button
 function dConfirmClear(){
   DRAWER.dconfirm=null;DRAWER.renameTo=null;
-  dSettingsForce();dSpeakersForce();dArchRender();
+  dSettingsForce();dSpeakersForce();dArchRender();dDupesRender();
 }
 
 /* ------------------------------------------------------------ speakers ----- *
@@ -3950,9 +3962,36 @@ function dDupesLoad(){
     <div id="ddupelist"><div class="dloading"><span class="spin"></span></div></div>
     <div id="ddupeerr" class="derr" hidden></div>`;
   }
+  DRAWER.dupeBusy=true;
   api('/api/dupes').then(r=>{
-    DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;dDupesRender();
-  }).catch(()=>{DRAWER.dupes=[];dDupesRender();});
+    DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;
+    DRAWER.dupeTrunc=!!r.truncated;dDupesRender();
+  }).catch(()=>{DRAWER.dupes=[];dDupesRender();})
+    .finally(()=>{DRAWER.dupeBusy=false;});
+}
+// the poll's hook: the section owns its fetch, so the 2s poll only re-fetches
+// when the answer may have changed -- a scan was running on the last fetch
+// (this is how "Comparing transcripts..." ever resolves), or the tab's polled
+// pair count disagrees with what is rendered. Self-stopping either way.
+function dDupesPoll(s){
+  if(DRAWER.section!=='dupes'||DRAWER.dupeBusy||DRAWER.dupes===null)return;
+  const el=document.getElementById('dsec-dupes');
+  if(!el||el.hidden)return;
+  const dn=(((s&&s.tray)||[]).find(t=>t.kind==='dupe_meetings')||{}).count||0;
+  // keyed on the count CHANGING, never on it disagreeing with the rendered
+  // list: the tray counts raw cached pairs while the drawer resolves both
+  // sides, so one meeting with unparseable metadata would make the two
+  // disagree forever and a disagreement condition would refetch every 2s
+  if(DRAWER.dupeScan||dn!==DRAWER.dupeSeen){DRAWER.dupeSeen=dn;dDupesLoad();}
+}
+async function dDupeRescan(btn){
+  if(btn)btn.disabled=true;
+  try{
+    const r=await api('/api/dupe_scan',{go:true});
+    DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;
+    DRAWER.dupeTrunc=!!r.truncated;dDupesRender();
+  }catch(e){}
+  finally{if(btn)btn.disabled=false;}
 }
 function _dupeSide(side,other,score){
   const day=side.date?new Date(side.date+'T12:00:00')
@@ -3979,7 +4018,7 @@ function _dupeSide(side,other,score){
 function dDupesRender(){
   const box=document.getElementById('ddupelist');
   if(!box||DRAWER.dupes===null)return;
-  box.innerHTML=DRAWER.dupes.map(p=>`<div class="dupepair">
+  box.innerHTML=(DRAWER.dupes.map(p=>`<div class="dupepair">
       <div class="dupehdr">${Math.round((p.score||0)*100)}% of the words match</div>
       ${_dupeSide(p.a,p.b,p.score)}
       ${_dupeSide(p.b,p.a,p.score)}
@@ -3991,10 +4030,16 @@ function dDupesRender(){
     </div>`).join('')
     ||`<div class="dempty">${DRAWER.dupeScan
       ?'Comparing transcripts&#8230;'
-      :'No duplicate transcripts found.'}</div>`;
+      :'No duplicate transcripts found.'}</div>`)
+    +`<div class="dupefoot">${DRAWER.dupeTrunc
+      ?`<span class="dnote">Pair budget reached: this list may be incomplete.</span>`:''}
+      <button class="btn mini" type="button" onclick="dDupeRescan(this)">Rescan</button></div>`;
 }
 function dDupeDelAsk(base){DRAWER.dconfirm='dupdel:'+base;dDupesRender();}
 async function dDupeDelGo(base,btn){
+  // the confirm may have been disarmed since this button rendered (Cancel,
+  // Escape, another confirm arming): a click on a stale button deletes nothing
+  if(DRAWER.dconfirm!=='dupdel:'+base){dDupesRender();return;}
   btn.disabled=true;
   const r=await api('/api/delete_meeting',{base,confirm:true});
   if(!r.ok){btn.disabled=false;dErr('ddupeerr',r);return;}

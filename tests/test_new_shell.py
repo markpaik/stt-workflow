@@ -1662,3 +1662,56 @@ console.log(JSON.stringify({html:dupNote({dup_of:"o'brien<b>",
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "o'brien%3Cb%3E" in html   # the href is percent-encoded, not raw
+
+
+# ---- review fix pass: the duplicate surfaces stay honest ----
+
+def test_cancel_disarms_the_dupes_delete_confirm():
+    """Cancel on the armed "Delete forever" card runs dConfirmClear, which used
+    to repaint every section EXCEPT dupes: the flag cleared but the live danger
+    button stayed rendered and clickable, and a second click deleted a meeting
+    the user believed was disarmed. Two independent halves pin it: the clear
+    repaints the section, and a click on a stale button re-checks the flag."""
+    clear = re.search(r"function dConfirmClear\(\)\{.*?\n\}", NEW_JS, re.S).group(0)
+    assert "dDupesRender()" in clear
+    assert "if(DRAWER.dconfirm!=='dupdel:'+base){dDupesRender();return;}" in NEW_JS
+
+
+def test_the_dupes_drawer_keeps_itself_current():
+    """The section fetched /api/dupes exactly once on open: a user arriving
+    mid-scan watched "Comparing transcripts..." forever while the tab count
+    beside it updated, and the server's Rescan endpoint had no caller at all.
+    The poll's drawer pass now gives the section a chance to re-fetch (only
+    while a scan was running, or when the tab count disagrees with what is
+    rendered -- self-stopping either way), and Rescan is a real button that
+    also surfaces the truncation note."""
+    draw = re.search(r"function drawDrawer\(s\)\{.*?\n\}", NEW_JS, re.S).group(0)
+    assert "dDupesPoll(s)" in draw
+    poll = re.search(r"function dDupesPoll\(s\)\{.*?\n\}", NEW_JS, re.S).group(0)
+    assert "DRAWER.dupeScan" in poll and "dDupesLoad()" in poll
+    assert "DRAWER.dupeBusy" in poll, "a fetch in flight must not stack another"
+    assert "dn!==DRAWER.dupeSeen" in poll, \
+        "the refetch keys on the tray count CHANGING, never on it disagreeing" \
+        " with the rendered list, which can differ forever on unparseable metadata"
+    assert "/api/dupe_scan" in NEW_JS and "dDupeRescan" in NEW_JS
+    assert "Pair budget reached" in NEW_JS
+
+
+def test_a_failed_sweep_survives_the_next_poll():
+    """The failure message used to be written straight into tray DOM after the
+    armed flag flipped -- the next poll's rebuild (signature mismatch) erased
+    it within two seconds and the row snapped back as if nothing was clicked.
+    It is state now: part of the signature, rendered by drawTray itself."""
+    assert "let DUPE_ARMED=false,DUPE_ERR=''" in NEW_JS
+    assert "+DUPE_ARMED+'|'+DUPE_ERR" in NEW_JS
+    assert "DUPE_ERR&&!DUPE_ARMED?DUPE_ERR:t.detail" in NEW_JS
+    assert re.search(r"DUPE_ERR=\(r&&r\.error\)\|\|'Could not delete", NEW_JS)
+
+
+def test_voice_lines_error_is_not_read_as_silence():
+    """/api/voice_lines answers errors as parseable JSON and api() never checks
+    HTTP status, so a mid-relabel 404 landed in the same branch as a genuinely
+    quiet voice and painted "No transcript text was attributed to this voice"
+    -- inviting a "Not a real speaker" tombstone on a real person. Only a
+    successful fetch carrying a real array may assert silence."""
+    assert "if(!r||r.error||!Array.isArray(r.lines))return;" in NEW_JS
