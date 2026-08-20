@@ -574,3 +574,72 @@ def test_dupe_scan_never_kicks_while_a_batch_is_running(sandbox, monkeypatch):
                         lambda max_age=1.5: {"pids": [], "mem_mb": 0})
     srv.gather_state()
     assert calls == [1], "an idle poll is exactly when the scan should be kicked"
+
+
+def test_the_pure_queue_helper_never_kicks_anything(sandbox, monkeypatch):
+    """/api/queue_delete_dupes derives its file list through _queue_and_dupes
+    precisely because gather_state kicks the next batch and the dupe scan as
+    side effects: a delete request must never be the thing that starts a run.
+    gather_state keeps those side effects, one layer up."""
+    calls = []
+    monkeypatch.setattr(srv, "_kick_jobs", lambda: calls.append("jobs"))
+    monkeypatch.setattr(srv, "_kick_dupe_scan", lambda: calls.append("scan"))
+    monkeypatch.setattr(srv, "_spawn", lambda *a, **k: calls.append("spawn"))
+    _meeting("Some Meeting 05012026")
+    srv._queue_and_dupes()
+    assert calls == [], "the pure helper spawned or kicked something"
+    srv.gather_state()
+    assert "jobs" in calls and "scan" in calls, \
+        "the side effects belong to gather_state, and must still happen there"
+
+
+def test_two_concurrent_kicks_run_one_scan(sandbox, monkeypatch):
+    """The busy flag's check-then-set spans real file I/O; unguarded, two 2s
+    polls from two tabs could both pass it and run two full-library scans."""
+    import threading as _t
+    _meeting("A Mtg 05012026")
+    _meeting("B Mtg 05012026")
+    started, release = [], _t.Event()
+
+    def slow_refresh():
+        started.append(1)
+        release.wait(2)
+    monkeypatch.setattr(srv, "_dupe_refresh", slow_refresh)
+    barrier = _t.Barrier(2)
+
+    def kick():
+        barrier.wait()
+        srv._kick_dupe_scan()
+    ts = [_t.Thread(target=kick) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    for _ in range(100):                    # let the one worker thread start
+        if started:
+            break
+        _t.Event().wait(0.02)
+    release.set()
+    for _ in range(100):                    # and drain it
+        with srv._dupe_lock:
+            if not srv._dupe_worker["busy"]:
+                break
+        _t.Event().wait(0.02)
+    assert started == [1], "exactly one scan may run at a time"
+
+
+def test_rescan_respects_the_single_flight_guard(sandbox, monkeypatch):
+    """/api/dupe_scan used to bypass the busy flag entirely and run a third
+    concurrent scan. It now answers False while one is running (the drawer
+    keeps polling) and runs under the same guard otherwise."""
+    with srv._dupe_lock:
+        srv._dupe_worker["busy"] = True
+    try:
+        assert srv._force_dupe_scan() is False
+    finally:
+        with srv._dupe_lock:
+            srv._dupe_worker["busy"] = False
+    calls = []
+    monkeypatch.setattr(srv, "_dupe_refresh", lambda: calls.append(1))
+    assert srv._force_dupe_scan() is True
+    assert calls == [1]

@@ -26,9 +26,35 @@ import json
 import os
 import re
 import struct
+import tempfile
+import threading
 from pathlib import Path
 
 from . import config
+
+# one lock for every cache/ignore write: the panel's poll thread, the scan
+# worker, and a "Keep both" request can all write these files, and a
+# read-modify-write that races another one silently drops a decision
+_io_lock = threading.Lock()
+
+
+def _atomic_write(p: Path, text: str):
+    """tmp + os.replace with a UNIQUE tmp per writer, so two concurrent writers
+    can never promote each other's half-written file. The prefix/suffix shape
+    (name., random, .json.tmp) is load-bearing: .gitignore matches *.json.tmp,
+    and these files carry meeting names."""
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.stem + ".",
+                               suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # ---------------------------------------------------------------- files -----
 
@@ -67,7 +93,12 @@ def fingerprint(path):
             h = hashlib.sha256(struct.pack("<Q", st.st_size))
             with open(p, "rb") as fh:
                 h.update(fh.read(CHUNK))
-                if st.st_size > 2 * CHUNK:
+                # any file bigger than one chunk gets its tail hashed too. The
+                # old cut-off was 2*CHUNK, which left everything past the first
+                # megabyte of a 1-2 MB file OUT of the "byte-identical" proof
+                # that gates the no-undo bulk delete; an overlapping tail read
+                # is merely redundant, never wrong
+                if st.st_size > CHUNK:
                     fh.seek(-CHUNK, os.SEEK_END)
                     h.update(fh.read(CHUNK))
             fp = h.hexdigest()
@@ -85,13 +116,14 @@ def _record_base(rec) -> str:
     return ""
 
 
-def source_duplicates(files, meetings, man=None, dest_dir=None) -> dict:
+def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> dict:
     """{filename: {"base": meeting, "reason": "identical"|"name"}} for the
     waiting files that were already processed.
 
     `files` are the candidate source paths (unprocessed queue entries),
-    `meetings` the panel's meeting metas (base + source_file). Two independent
-    signals, and they are NOT equally strong:
+    `meetings` the panel's meeting metas (base + source_file), `live` the set of
+    bases that still exist (live plus archived). Two independent signals, and
+    they are NOT equally strong:
 
       identical -- same size AND same head/tail hash as a meeting's stored
         audio (a plain copy of the original) or as the fingerprint the manifest
@@ -100,6 +132,13 @@ def source_duplicates(files, meetings, man=None, dest_dir=None) -> dict:
         and useful, but a recurring export ("Weekly Sync.m4a") legitimately
         reuses one name for genuinely different meetings, so this one only ever
         gets a chip and the ordinary one-file delete.
+
+    A manifest record whose meeting was DELETED matches nothing: the user
+    deleted that transcript and delete_meeting promises re-transcription, so
+    re-processing the source is legitimate work, and the bulk sweep must never
+    be offered the only surviving copy of a recording. An ARCHIVED meeting
+    still matches -- it is restorable, so re-transcribing it is exactly the
+    waste this gate exists to prevent.
     """
     files = [Path(f) for f in files]
     if not files:
@@ -122,10 +161,14 @@ def source_duplicates(files, meetings, man=None, dest_dir=None) -> dict:
     # manifest records: the fingerprint of the ORIGINAL source, taken before the
     # pipeline moved (or converted) it. The only signal that survives a video
     # source, whose stored audio is a re-encode and shares no bytes with it.
+    # Gated on liveness: records outlive their meetings (deletions before the
+    # delete_meeting scrub existed left dead records behind).
     for key, rec in (man.get("processed") or {}).items():
         fp, size = rec.get("fp"), rec.get("size")
         base = _record_base(rec)
         if not base:
+            continue
+        if live is not None and base not in live:
             continue
         by_name.setdefault(key, base)
         if fp and size:
@@ -231,11 +274,9 @@ def _load_cache() -> dict:
 
 
 def _save_cache(c: dict):
-    p = cache_path()
     try:
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(c))
-        os.replace(tmp, p)       # atomic: a truncated cache must not read as empty
+        with _io_lock:
+            _atomic_write(cache_path(), json.dumps(c))
     except OSError:
         pass
 
@@ -250,12 +291,12 @@ def ignored_pairs() -> set:
 
 
 def ignore_pair(a: str, b: str) -> bool:
-    keep = sorted(ignored_pairs() | {tuple(sorted((a, b)))})
+    # the read sits INSIDE the lock: two concurrent "Keep both" clicks each
+    # read-modify-write this file, and the loser's pair would silently vanish
     try:
-        p = ignored_path()
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps([list(x) for x in keep]))
-        os.replace(tmp, p)
+        with _io_lock:
+            keep = sorted(ignored_pairs() | {tuple(sorted((a, b)))})
+            _atomic_write(ignored_path(), json.dumps([list(x) for x in keep]))
         return True
     except OSError:
         return False
@@ -298,7 +339,10 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
 
     skip = ignored_pairs()
     bases = sorted(sketches)
-    pairs, budget = [], MAX_PAIRS
+    # gather every duration-eligible pair FIRST, then compare the closest
+    # lengths first: same recording means same length, so when the budget
+    # cannot cover everything it is the far-apart pairs that go unchecked
+    cand = []
     for i, a in enumerate(bases):
         for b in bases[i + 1:]:
             if (a, b) in skip:
@@ -306,17 +350,32 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
             da, db = durs.get(a, 0.0), durs.get(b, 0.0)
             if da > 0 and db > 0 and abs(da - db) > DUR_TOL * max(da, db):
                 continue          # different lengths: not the same recording
-            if budget <= 0:
-                break
-            budget -= 1
-            s = similarity(sketches[a], sketches[b])
-            if s >= threshold:
-                pairs.append({"a": a, "b": b, "score": round(s, 3)})
+            # unknown durations sort LAST (1.0), never first: a gated real pair
+            # is within DUR_TOL, so zero-duration noise must not outrank it and
+            # eat the budget
+            close = abs(da - db) / max(da, db) if max(da, db) > 0 else 1.0
+            cand.append((close, a, b))
+    cand.sort()
+    truncated = len(cand) > MAX_PAIRS
+    pairs = []
+    for _, a, b in cand[:MAX_PAIRS]:
+        s = similarity(sketches[a], sketches[b])
+        if s >= threshold:
+            pairs.append({"a": a, "b": b, "score": round(s, 3)})
     pairs.sort(key=lambda p: (-p["score"], p["a"], p["b"]))
     cache["pairs"] = pairs
+    # a truncated run says so instead of posing as the whole answer. The sig is
+    # stamped EITHER WAY: leaving it unstamped would make cache_is_current stay
+    # False and re-kick this identical truncated scan on every idle poll forever
+    cache["truncated"] = truncated
     cache["sig"] = library_signature(dest_dir)
     _save_cache(cache)
     return pairs
+
+
+def cache_truncated() -> bool:
+    """Did the last scan hit MAX_PAIRS and leave pairs uncompared?"""
+    return bool(_load_cache().get("truncated"))
 
 
 def cached_pairs(dest_dir=None) -> list:

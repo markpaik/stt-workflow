@@ -264,6 +264,10 @@ def _kick_jobs():
 # a time and swallows its own errors: a duplicate scan must never take the panel
 # down with it.
 _dupe_worker = {"busy": False}
+# guards the busy flag's check-then-set: ThreadingHTTPServer polls concurrently,
+# and the eligibility checks below do file I/O, plenty of room for two polls to
+# both pass a bare flag test and start two full-library scans
+_dupe_lock = threading.Lock()
 
 
 def _dupe_refresh():
@@ -276,23 +280,42 @@ def _dupe_refresh():
 
 
 def _kick_dupe_scan():
-    if _dupe_worker["busy"]:
-        return
-    try:
-        if len(config.meeting_bases(config.meetings_dir())) < 2:
-            return          # nothing can pair up: never even open the cache
-        if dupes.cache_is_current(config.meetings_dir()):
+    with _dupe_lock:
+        if _dupe_worker["busy"]:
             return
-    except Exception:
-        return
-    _dupe_worker["busy"] = True
+        try:
+            if len(config.meeting_bases(config.meetings_dir())) < 2:
+                return      # nothing can pair up: never even open the cache
+            if dupes.cache_is_current(config.meetings_dir()):
+                return
+        except Exception:
+            return
+        _dupe_worker["busy"] = True
 
     def run():
         try:
             _dupe_refresh()
         finally:
-            _dupe_worker["busy"] = False
+            with _dupe_lock:
+                _dupe_worker["busy"] = False
     threading.Thread(target=run, daemon=True).start()
+
+
+def _force_dupe_scan() -> bool:
+    """The drawer's Rescan: recompute NOW, but through the same single-flight
+    guard as the poll's kick -- an unguarded path here was how two scans could
+    run at once. Returns False when one is already running (the caller answers
+    with the current cache and scanning=True; the drawer keeps polling)."""
+    with _dupe_lock:
+        if _dupe_worker["busy"]:
+            return False
+        _dupe_worker["busy"] = True
+    try:
+        _dupe_refresh()
+    finally:
+        with _dupe_lock:
+            _dupe_worker["busy"] = False
+    return True
 
 
 def _dupe_pair_rows(dst_dir=None):
@@ -768,10 +791,13 @@ def _failed_at(st, name):
     return at
 
 
-def gather_state():
-    from stt import holds, summarize
+def _queue_and_dupes():
+    """The queue (with duplicate flags), the meeting metas, and the set of bases
+    that still exist. PURE: no spawns, no kicks, no cache writes. gather_state
+    layers its side effects on top; /api/queue_delete_dupes calls ONLY this, so
+    asking for a delete can never be the thing that starts a batch run."""
+    from stt import holds
     _held = holds.items()
-    st = status.read()
     m = manifest.load()
     src_dir, dst_dir = config.source_dir(), config.meetings_dir()
     queue = []
@@ -827,6 +853,10 @@ def gather_state():
         meta = _meeting_meta(j, dst_dir)
         if meta:
             meetings.append(meta)
+    # the bases that still EXIST, live or archived: the duplicate gate and the
+    # unknowns section both need exactly this membership, derived once so the
+    # poll and the sweep endpoint can never disagree about it
+    resolvable = set(config.meeting_bases(dst_dir)) | set(config.archived_bases(dst_dir))
     # already processed, and back in the folder anyway: a copy under a new name,
     # an iCloud re-sync, a second export. The manifest keys on name + mtime and
     # cannot see it, so without this the file is transcribed a second time and
@@ -836,7 +866,8 @@ def gather_state():
     dup_map = {}
     if _qpaths:
         try:
-            dup_map = dupes.source_duplicates(_qpaths.values(), meetings, m, dst_dir)
+            dup_map = dupes.source_duplicates(_qpaths.values(), meetings, m,
+                                              dst_dir, live=resolvable)
         except Exception:
             dup_map = {}
     _titles = {meta["base"]: meta["title"] for meta in meetings}
@@ -846,15 +877,22 @@ def gather_state():
             f["dup_of"] = d["base"]
             f["dup_title"] = _titles.get(d["base"], d["base"])
             f["dup_reason"] = d["reason"]
+    return queue, meetings, resolvable
+
+
+def gather_state():
+    from stt import summarize
+    st = status.read()
+    queue, meetings, resolvable = _queue_and_dupes()
+    src_dir, dst_dir = config.source_dir(), config.meetings_dir()
     reg = unknowns.load()
     unknown_list = []
     # "heard in N meetings" may only count meetings that still EXIST — live
     # (the same membership the clip endpoints gate on) or archived (restorable,
     # so their refs deliberately survive). Deletes scrub refs at the source,
-    # but refs can predate the scrub, so liveness is re-derived every poll
-    # rather than trusted from the raw arrays: the count and the ▶ playback
-    # can then never disagree.
-    resolvable = set(config.meeting_bases(dst_dir)) | set(config.archived_bases(dst_dir))
+    # but refs can predate the scrub, so liveness (`resolvable`, from the
+    # helper above) is re-derived every poll rather than trusted from the raw
+    # arrays: the count and the ▶ playback can then never disagree.
     for uid, meta in sorted(reg["speakers"].items()):
         if meta.get("dropped"):
             continue  # tombstoned "not a real speaker" — never surfaces again
@@ -1236,6 +1274,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the 99% of polls where nobody is looking at it.
                 self._json({"pairs": _dupe_pair_rows(),
                             "scanning": bool(_dupe_worker["busy"]),
+                            "truncated": dupes.cache_truncated(),
                             "threshold": dupes.THRESHOLD})
             elif u.path == "/api/snippet":
                 meeting = q.get("meeting", "")
@@ -1751,15 +1790,31 @@ class Handler(BaseHTTPRequestHandler):
                 if not b.get("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
-                st_now = status.read().get("active", {})
                 from stt import holds as _holds
                 held_now = _holds.items()
                 deleted, freed = [], 0.0
-                for f in gather_state()["queue"]:
+                # the PURE helper, never gather_state: gather_state kicks the
+                # next queued batch and the dupe scan as side effects, and a
+                # delete request must not be the thing that starts a run
+                _sweep_queue, _, _ = _queue_and_dupes()
+                for f in _sweep_queue:
                     if f.get("dup_reason") != "identical" or f["processed"]:
                         continue
-                    if f["name"] in st_now or f["name"] in held_now:
-                        continue          # in flight, or parked on purpose
+                    if f["name"] in held_now:
+                        continue          # parked on purpose
+                    # active is re-read per file, immediately before its unlink:
+                    # a run can start at any moment (another poll's kick), and a
+                    # snapshot taken before the loop would happily delete a
+                    # source mid-transcode
+                    if f["name"] in (status.read().get("active") or {}):
+                        continue
+                    # the matched meeting is re-checked too: a concurrent
+                    # delete_meeting between the snapshot above and this unlink
+                    # would leave this file as the only copy of that recording,
+                    # the exact loss the liveness gate exists to prevent
+                    if (f.get("dup_of") not in set(config.meeting_bases())
+                            | set(config.archived_bases())):
+                        continue
                     p = _queue_file(f["name"])
                     if p is None:
                         continue
@@ -1783,9 +1838,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": dupes.ignore_pair(a, b_)})
             elif u.path == "/api/dupe_scan":
                 # recompute now (the drawer's Rescan): synchronous, because the
-                # user asked for it and is watching the section redraw
-                _dupe_refresh()
-                self._json({"ok": True, "pairs": _dupe_pair_rows()})
+                # user asked for it and is watching the section redraw. Goes
+                # through the same single-flight guard as the poll's kick; when
+                # a scan is already running this answers with the current cache
+                # and scanning=True, and the drawer keeps polling.
+                ran = _force_dupe_scan()
+                self._json({"ok": True, "ran": ran, "pairs": _dupe_pair_rows(),
+                            "scanning": bool(_dupe_worker["busy"]),
+                            "truncated": dupes.cache_truncated()})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
