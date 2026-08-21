@@ -515,15 +515,21 @@ function bodyAndSlot(row){
     }
 
     case 'failed':
+      // the note comes from the row: "still in the folder, re-runs" and "the
+      // original is gone" are OPPOSITE situations, and the old hardcoded line
+      // claimed the first even when the server said the second. A gone source
+      // gets no Retry (there is nothing to run) and its X dismisses the record
+      // instead of calling the file-delete endpoint, which would refuse.
       return `<div class="rbody">
           <div class="rtitle">${esc(row.title)}</div>
           <div class="rmeta err">${esc(row.error||'failed')}</div>
-          <div class="rmeta">original stays in the watched folder</div>
+          <div class="rmeta">${esc(row.retry_note||'original stays in the watched folder')}</div>
         </div>
         <div class="rslot">
           <span class="rstate spill rec yields">failed</span>
-          ${slotActions(
-            `<button class="iact" type="button" onclick="rowRetry('${escJs(row.id)}')">Retry</button>
+          ${slotActions(row.gone
+            ?`<button class="iact" type="button" onclick="failDismiss('${escJs(row.id)}')" title="Dismiss this failure">&#10005;</button>`
+            :`<button class="iact" type="button" onclick="rowRetry('${escJs(row.id)}')">Retry</button>
              <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Remove">&#10005;</button>`)}
         </div>`;
 
@@ -1072,6 +1078,11 @@ async function rowDeleteGo(id){
     return;
   }
   closePop();refresh();
+}
+async function failDismiss(id){           // a failure whose source file is gone
+  const r=rowById(id);if(!r||!r.source_file)return;
+  const res=await api('/api/dismiss_failure',{name:r.source_file});
+  if(res&&res.ok)refresh();
 }
 function rowRetry(id){                    // re-run a failed source still in the folder
   const r=rowById(id);if(!r||!r.source_file)return;
@@ -1900,10 +1911,14 @@ function _mTranscriptShell(){
 }
 function mLegend(d){
   const box=$('#mlegend');if(!box)return;
-  const opt={};(d.speaker_options||[]).forEach(o=>{opt[o.display]=o;});
-  box.innerHTML=(d.speakers||[]).map(w=>{
+  // one chip per CLUSTER, straight off speaker_options: a display-keyed
+  // lookup collapsed two speakers sharing one name (a local name matching an
+  // enrolled person's) into a single entry, and both chips then opened the
+  // naming panel for the same, possibly wrong, cluster
+  box.innerHTML=(d.speaker_options||[]).map(o=>{
+    const w=o.display;
     const dot=`<span class="msdot" style="background:${MP.color[w]}"></span>`;
-    const uid=mUnknownUid(w);
+    const uid=o.named?null:mUnknownUid(w);
     // an unnamed voice ("Speaker N" with an unknown-registry entry that lists
     // this meeting): its legend chip opens the naming slide-over
     if(uid)return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
@@ -1917,10 +1932,15 @@ function mLegend(d){
     // sign of a real person was an unnameable label.
     // ...unless it was dismissed as "not a real speaker" in THIS meeting: the
     // lines stay where they are, the chip just stops asking to be named.
-    const o=opt[w];
-    if(o&&!o.named&&!o.dismissed&&o.id!==w)
+    if(!o.named&&!o.dismissed&&o.id!==w)
       return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
           onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}<span class="mlgq">?</span></button>`;
+    // named for THIS meeting only (no voiceprint): the chip stays editable,
+    // because re-saving through the same floor-then-confirm flow is the only
+    // way to fix a typo in a name the registry never learned
+    if(o.named&&o.local)
+      return `<button class="mlg unk" type="button" title="Named for this meeting only. Click to change"
+          onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}</button>`;
     return `<span class="mlg">${dot}${esc(w)}</span>`;
   }).join('');
 }
@@ -3046,7 +3066,7 @@ function closeNamePanel(){
   panel.hidden=true;panel.innerHTML='';
   if(veil)veil.hidden=true;
 }
-async function npSave(force){
+async function npSave(force,local){
   if(!NP)return;
   const n=($('#npname')?$('#npname').value:'').trim();
   const err=$('#nperr'),warn=$('#npconfirm');
@@ -3062,7 +3082,7 @@ async function npSave(force){
   try{
     r=await api('/api/name',uid
       ?{uid:uid,name:n,confirm:!!force}
-      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force});
+      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local});
   }catch(e){
     r=null;    // the fetch itself failed (server gone, connection dropped)
   }finally{
@@ -3073,6 +3093,19 @@ async function npSave(force){
     return;
   }
   if(!r.ok){
+    if(r.floor&&warn){
+      // the quality floor refused to LEARN the voice, but the transcript is
+      // still the human's to label: offer the meeting-only save. This is the
+      // opposite of the panel's merge promise, so it says so plainly.
+      if(err)err.hidden=true;
+      warn.hidden=false;
+      warn.innerHTML=`${esc(r.error||'Too little speech to learn this voice.')}
+        You can still label them here. Save for this meeting only. The system
+        does not learn this voice.
+        <button class="btn mini" type="button" onclick="$('#npconfirm').hidden=true">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="npSave(false,true)">Name for this meeting</button>`;
+      return;
+    }
     if(r.warn&&warn){
       // the enrollment quality gate: the house two-step confirm, numbers shown
       if(err)err.hidden=true;

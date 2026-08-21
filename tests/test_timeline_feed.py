@@ -643,3 +643,36 @@ def test_rescan_respects_the_single_flight_guard(sandbox, monkeypatch):
     monkeypatch.setattr(srv, "_dupe_refresh", lambda: calls.append(1))
     assert srv._force_dupe_scan() is True
     assert calls == [1]
+
+
+def test_a_gone_source_failure_is_honest_and_dismissible(sandbox, monkeypatch):
+    """A failure whose source file no longer exists rendered under a hardcoded
+    "original stays in the watched folder" line, with an X that called the
+    file-delete endpoint, which refused because there was no file: a permanent
+    ghost row. The row now says the original is gone (gone: true), and
+    dismissing it filters every PAST failure for that name while a NEWER
+    failure still surfaces."""
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "ghost.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "[Errno 2] No such file or directory"}])
+    st = srv.gather_state()
+    row = [r for r in st["timeline"] if r.get("id") == "src:ghost.m4a"][0]
+    assert row["state"] == "failed" and row.get("gone") is True
+    assert "the original is gone" in row["retry_note"]
+
+    assert srv.dismiss_failure("ghost.m4a") is True
+    st = srv.gather_state()
+    assert not [r for r in st["timeline"] if r.get("id") == "src:ghost.m4a"], \
+        "a dismissed failure must leave the timeline"
+
+    # a NEWER failure for the same name resurfaces: dismissal silences the
+    # past, never the file
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "ghost.m4a", "at": "2126-01-01T00:00:00", "ok": False,
+         "summary": "failed again"}])
+    st = srv.gather_state()
+    assert [r for r in st["timeline"] if r.get("id") == "src:ghost.m4a"]
+
+    # junk names are refused, nothing stored
+    assert srv.dismiss_failure("../../etc/passwd") is False
+    assert srv.dismiss_failure("") is False

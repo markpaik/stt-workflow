@@ -419,7 +419,7 @@ def test_naming_panel_replaces_the_who_bridge():
     # test_save_captures_its_identity_before_the_await), so the payloads carry
     # those locals, never a post-await NP dereference.
     assert re.search(r"\{uid:uid,name:n,confirm:!!force\}", NEW_JS)
-    assert re.search(r"\{meeting:meeting,speaker:speaker,name:n,confirm:!!force\}", NEW_JS)
+    assert re.search(r"\{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local\}", NEW_JS)
     assert re.search(r"function\s+openNamePanelByCluster\s*\(", NEW_JS)
     # the meeting legend offers the cluster chip for unnamed, un-tracked voices
     assert "openNamePanelByCluster(" in NEW_JS and NEW_JS.count("openNamePanelByCluster(") >= 2
@@ -1715,3 +1715,40 @@ def test_voice_lines_error_is_not_read_as_silence():
     -- inviting a "Not a real speaker" tombstone on a real person. Only a
     successful fetch carrying a real array may assert silence."""
     assert "if(!r||r.error||!Array.isArray(r.lines))return;" in NEW_JS
+
+
+def test_the_floor_refusal_offers_the_meeting_only_save():
+    """A sub-floor voice used to hit a dead error. The floor response now
+    carries floor:true and the panel renders a confirm strip whose copy states
+    the opposite of the panel's merge promise, plainly: the save is for this
+    meeting only and the system does not learn the voice. The strip's button
+    re-posts with local:true, and the save payload carries the flag."""
+    assert "if(r.floor&&warn){" in NEW_JS
+    assert "Save for this meeting only." in NEW_JS
+    assert "does not learn this voice" in NEW_JS
+    assert "npSave(false,true)" in NEW_JS
+    assert re.search(r"local:!!local", NEW_JS), "meeting mode must carry the flag"
+
+
+def test_a_locally_named_chip_stays_editable():
+    """Once a cluster carries a name its ? chip used to vanish, so a typo in a
+    meeting-local name was uncorrectable short of a full Redo. A local name
+    keeps its chip clickable through the same floor-then-confirm flow."""
+    assert "o.named&&o.local" in NEW_JS
+    assert "Named for this meeting only. Click to change" in NEW_JS
+    # chips are built per CLUSTER off speaker_options, never through a
+    # display-keyed map: two speakers sharing one display name (a local name
+    # matching an enrolled person) must keep their own ids on their own chips
+    assert "opt[o.display]=o" not in NEW_JS
+    leg = re.search(r"function mLegend\(d\)\{.*?\n\}", NEW_JS, re.S).group(0)
+    assert "(d.speaker_options||[]).map(o=>" in leg
+
+
+def test_a_failed_row_tells_the_truth_about_its_retry():
+    """The failed-row note comes from the server's retry_note (gone vs still
+    re-running are opposite situations), a gone source shows no Retry, and its
+    X dismisses the failure record instead of calling the file-delete endpoint
+    that refused on a missing file."""
+    assert "row.retry_note||'original stays in the watched folder'" in NEW_JS
+    assert "row.gone" in NEW_JS
+    assert "failDismiss" in NEW_JS and "/api/dismiss_failure" in NEW_JS

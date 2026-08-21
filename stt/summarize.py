@@ -617,3 +617,56 @@ def dismiss_voice(base: str, speaker_id: str) -> dict:
 def restore_voice(base: str, speaker_id: str) -> dict:
     """Undo a dismissal: the voice becomes nameable again in this meeting."""
     return _set_dismissed(base, speaker_id, False)
+
+
+def set_local_name(base: str, speaker_id: str, name: str) -> dict:
+    """Name a cluster for THIS meeting only: a transcript label, never a
+    voiceprint. The quality floor refuses to ENROLL a voice with seconds of
+    speech (a thin embedding would mislabel people in every future meeting),
+    but the human still knows who spoke, and the transcript is theirs to label.
+
+    Stored in the meeting's top-level "local_names" {cluster_id: name}, the
+    same persistence contract as "dismissed_voices": relabel passes top-level
+    keys through and re-applies the names onto the rebuilt roster, and a Redo
+    deliberately resets it because re-clustering reshuffles the ids.
+
+    An empty name clears the entry (the undo). The id must be one of this
+    meeting's speakers: never store junk a client made up."""
+    from . import review
+
+    if base not in config.meeting_bases():
+        return {"ok": False, "error": f"no meeting '{base}'"}
+    sid = str(speaker_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "no speaker"}
+    nm = str(name or "").strip()
+    if len(nm) > 80:
+        return {"ok": False, "error": "that name is too long"}
+    j = config.meeting_file(base, ".json")
+    if not j.exists():
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    if not config.meeting_file(base, ".diar.npz").exists():
+        # only a relabel can carry the label onto the roster, the segments,
+        # and the .txt, and relabel_one skips a meeting with no diar cache.
+        # Accepting the write would store a name that can never apply.
+        return {"ok": False, "error": "this meeting has no speaker cache, so "
+                                      "the name could never be applied"}
+    with review.lock_meeting(base):
+        try:
+            d = json.loads(j.read_text())
+        except (OSError, ValueError):
+            return {"ok": False, "error": f"no transcript for '{base}'"}
+        if sid not in {s.get("id") for s in d.get("speakers", [])}:
+            return {"ok": False,
+                    "error": f"'{sid}' is not a voice in this meeting"}
+        cur = dict(d.get("local_names") or {})
+        if nm:
+            cur[sid] = nm
+        else:
+            cur.pop(sid, None)
+        if cur:
+            d["local_names"] = cur
+        else:
+            d.pop("local_names", None)   # empty means no key at all
+        _write_json(j, d)
+    return {"ok": True, "local_names": cur}

@@ -1319,3 +1319,49 @@ def test_the_sweep_rechecks_the_matched_meeting_before_each_unlink(running_serve
     assert status == 200 and body["ok"] is True and body["deleted"] == []
     assert (src / "board prep 2.m4a").exists(), \
         "a file whose matched meeting vanished must survive the sweep"
+
+
+def test_a_subfloor_voice_can_be_named_for_this_meeting_only(running_server, monkeypatch):
+    """The floor still refuses to LEARN a voice with seconds of speech, but the
+    refusal now carries floor:true so the panel can offer the fallback: a
+    meeting-local label. The label writes local_names, enrolls NOTHING, and
+    rebuilds exactly one meeting, never the whole library."""
+    import numpy as np
+
+    from stt import identify
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(cmd))
+    v = np.random.default_rng(9).normal(size=256)
+    _make_meeting_with_cache("Thin Local Mtg",
+                             {"SPEAKER_00": [(0.0, 11.0)]},
+                             {"SPEAKER_00": v})
+    mj = json.loads(mfile("Thin Local Mtg", ".json").read_text())
+    mj["speakers"] = [{"id": "SPEAKER_00", "name": None, "display": "Voice 1"}]
+    mfile("Thin Local Mtg", ".json").write_text(json.dumps(mj))
+
+    # the refusal says the fallback applies, and changes nothing
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Thin Local Mtg", "speaker": "SPEAKER_00",
+                          "name": "Jordan Lee"})
+    assert status == 200 and body["ok"] is False and body.get("floor") is True
+    assert "Jordan Lee" not in identify.load_registry()
+    assert spawned == []
+
+    # the meeting-only save: label stored, registry untouched, ONE meeting spawns
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Thin Local Mtg", "speaker": "SPEAKER_00",
+                          "name": "Jordan Lee", "local": True})
+    assert status == 200 and body["ok"] is True and body.get("local") is True
+    assert "Jordan Lee" not in identify.load_registry()
+    mj = json.loads(mfile("Thin Local Mtg", ".json").read_text())
+    assert mj["local_names"] == {"SPEAKER_00": "Jordan Lee"}
+    assert len(spawned) == 1 and spawned[0][-1] == "Thin Local Mtg"
+    assert "--all" not in spawned[0], "a local label must never relabel the library"
+
+    # a junk cluster id is refused and never stored
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": "Thin Local Mtg", "speaker": "SPEAKER_99",
+                          "name": "Jordan Lee", "local": True})
+    assert status == 200 and body["ok"] is False
+    mj = json.loads(mfile("Thin Local Mtg", ".json").read_text())
+    assert "SPEAKER_99" not in mj.get("local_names", {})
