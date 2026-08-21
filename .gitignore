@@ -65,6 +65,7 @@ holds.lock
 dupes_cache.json
 dupes_ignored.json
 relabel_running.json
+dismissed_failures.json
 *.json.tmp
 
 # local Claude session config

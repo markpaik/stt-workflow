@@ -59,13 +59,39 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         turns, names, stats = diarize.build_attribution(
             raw_turns, turn_embeddings, cluster_names, vps if config.REFINE else {},
             cluster_centroids=cent_emb, words=words, strict=strict)
+        # meeting-local names: a human named a cluster the quality floor will
+        # not let enroll (seconds of speech). The name is a transcript label
+        # for THIS meeting only -- no voiceprint, no registry entry -- and it
+        # outlives every relabel the way dismissed_voices does (a top-level
+        # key, re-applied onto the rebuilt roster below). A Redo re-clusters
+        # from scratch, so it resets there on purpose.
+        local_names = {str(k): str(v) for k, v in
+                       (data.get("local_names") or {}).items() if str(v).strip()}
         if not data.get("one_time_speakers"):
-            uid_map = unknowns.assign(cent_emb, cluster_names, base,
+            # the registry must see a locally named cluster as NAMED, or a
+            # floor-passing cluster the human labeled would still mint a
+            # persistent voice sample -- the exact thing "a transcript label,
+            # never a voiceprint" promises does not happen. The view is only
+            # for assign(): build_attribution above must keep treating the
+            # label as unmatched, because no voiceprint backs the name.
+            assign_view = dict(cluster_names)
+            for cid, nm in local_names.items():
+                if cid in assign_view and not assign_view[cid]:
+                    assign_view[cid] = nm
+            uid_map = unknowns.assign(cent_emb, assign_view, base,
                                       stats=unknowns.talk_stats(raw_turns))
             for label, uid in uid_map.items():
                 if label in names and not names[label].get("name"):
                     names[label]["global_id"] = uid
                     names[label]["display"] = unknowns.display(uid)
+        # applied AFTER matching and unknown assignment: an unbacked name must
+        # never look like a voiceprint match to refine, and the human's word
+        # beats both.
+        for cid, nm in local_names.items():
+            if cid in names:
+                names[cid]["name"] = nm
+                names[cid]["display"] = nm
+                names[cid]["global_id"] = None
 
         # channel-aware recordings: re-overlay the mic owner's turns from the
         # cache, RE-GATED against the CURRENT voiceprint — so un-enrolling the
@@ -119,6 +145,12 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         manual_speakers = [s for s in data.get("speakers", [])
                            if str(s.get("id", "")).startswith("MANUAL_")]
         data["speakers"] = output.build_speakers(labels, names) + manual_speakers
+        # the roster entry says the name is meeting-local, so the panel can
+        # keep its chip editable (re-saving is the typo fix) and never claim
+        # the system knows this voice
+        for s in data["speakers"]:
+            if s.get("id") in local_names:
+                s["local"] = True
         data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
         data["strict"] = strict
         data["punctuated"] = bool(config.PUNCTUATE)

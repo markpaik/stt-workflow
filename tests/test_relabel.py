@@ -406,3 +406,97 @@ def test_relabel_all_publishes_itself_too(sandbox, monkeypatch):
     assert seen == [True], "relabel_all must publish itself while it is working"
     assert control.relabel_running() is False           # cleaned up on exit
     assert not control.relabel_marker_path().exists()
+
+
+def test_a_meeting_local_name_survives_relabel_and_never_enrolls(sandbox):
+    """A human named a cluster the quality floor will not let enroll. The name
+    is a top-level local_names entry, so every relabel re-applies it onto the
+    rebuilt roster (name, display, segments, txt) while the voiceprint registry
+    and the unknown registry never hear about it. Clearing the entry undoes it."""
+    import relabel
+    from stt import identify, summarize, unknowns
+
+    _seed_meeting("Mtg")
+    r = summarize.set_local_name("Mtg", "SPEAKER_01", "Jordan Lee")
+    assert r["ok"]
+
+    assert relabel.relabel_one("Mtg") is True
+    after = json.loads((mfile("Mtg", ".json")).read_text())
+    sp = [s for s in after["speakers"] if s["id"] == "SPEAKER_01"][0]
+    assert sp["name"] == "Jordan Lee" and sp["display"] == "Jordan Lee"
+    assert sp.get("local") is True and sp.get("global_id") is None
+    assert any(s.get("display") == "Jordan Lee" for s in after["segments"])
+    assert "Jordan Lee:" in (mfile("Mtg", ".txt")).read_text()
+    assert "Jordan Lee" not in identify.load_registry()
+    assert unknowns.load()["speakers"] == {}, \
+        "a locally named voice must never reach the unknown registry"
+    # the label rides a SECOND relabel too, and the key survives the rewrite
+    assert relabel.relabel_one("Mtg") is True
+    again = json.loads((mfile("Mtg", ".json")).read_text())
+    assert again["local_names"] == {"SPEAKER_01": "Jordan Lee"}
+    assert [s for s in again["speakers"] if s["id"] == "SPEAKER_01"][0]["name"] \
+        == "Jordan Lee"
+
+    # an empty name clears the entry, and the next relabel forgets the label
+    assert summarize.set_local_name("Mtg", "SPEAKER_01", "")["ok"]
+    assert relabel.relabel_one("Mtg") is True
+    cleared = json.loads((mfile("Mtg", ".json")).read_text())
+    assert "local_names" not in cleared
+    assert [s for s in cleared["speakers"] if s["id"] == "SPEAKER_01"][0]["name"] is None
+
+
+def test_a_local_name_on_a_talk_rich_cluster_mints_no_unknown(sandbox):
+    """The leak QA proved: unknowns.assign() ran before the local overlay and
+    read only the voiceprint-matched names, so a locally named cluster that
+    crossed the minting floor STILL minted a persistent voice sample -- "a
+    transcript label, never a voiceprint" was false for exactly the voices
+    with the most speech. assign() now sees local names as names."""
+    import relabel
+    from stt import summarize, unknowns
+
+    base = "Guest Talk 05012026"
+    words = [{"start": i * 3.0 + 0.2, "end": i * 3.0 + 0.6, "word": f"w{i}"}
+             for i in range(12)]
+    data = {"source_file": f"{base}.m4a", "duration_sec": 40.0, "strict": False,
+            "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Voice 1"}],
+            "segments": [], "words": words}
+    mfile(base, ".json").write_text(json.dumps(data))
+    mfile(base, ".txt").write_text("stub")
+    rng = np.random.default_rng(6)
+    # 12 turns x 3s = 36s talk, 12 reliable turns: comfortably over BOTH floors
+    raw = [{"start": i * 3.0, "end": i * 3.0 + 3.0, "cluster": "SPEAKER_00"}
+           for i in range(12)]
+    diarcache.save(mfile(base, ".diar.npz"), raw, [None] * 12,
+                   {"SPEAKER_00": rng.normal(size=256)})
+
+    # sanity: WITHOUT the local name this cluster mints (the floor passes)
+    assert relabel.relabel_one(base) is True
+    assert unknowns.load()["speakers"], "fixture must cross the minting floor"
+
+    # reset the registry, name locally, relabel: nothing may mint
+    import shutil
+    shutil.rmtree(config.VOICEPRINTS_DIR, ignore_errors=True)
+    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    assert summarize.set_local_name(base, "SPEAKER_00", "Jordan Lee")["ok"]
+    assert relabel.relabel_one(base) is True
+    assert unknowns.load()["speakers"] == {}, \
+        "a locally named cluster must not mint a registry unknown"
+    after = json.loads(mfile(base, ".json").read_text())
+    sp = [s for s in after["speakers"] if s["id"] == "SPEAKER_00"][0]
+    assert sp["name"] == "Jordan Lee" and sp.get("local") is True
+
+
+def test_a_local_name_needs_the_diar_cache(sandbox):
+    """set_local_name refuses a meeting with no .diar.npz: only a relabel can
+    carry the label onto the roster and the txt, and relabel_one skips such a
+    meeting -- accepting the write would store a name that never applies."""
+    from stt import summarize
+    base = "Old Mtg 05012026"
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": f"{base}.m4a", "duration_sec": 9.0,
+         "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Voice 1"}],
+         "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    r = summarize.set_local_name(base, "SPEAKER_00", "Jordan Lee")
+    assert r["ok"] is False and "speaker cache" in r["error"]
+    assert "local_names" not in json.loads(mfile(base, ".json").read_text())

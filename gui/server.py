@@ -10,6 +10,7 @@ import os
 import plistlib
 import re
 import subprocess
+import tempfile
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -584,8 +585,52 @@ def _failed_sources(st):
         prev = latest.get(nm)
         if prev is None or (r.get("at") or "") >= (prev.get("at") or ""):
             latest[nm] = r
+    dism = _dismissed_failures()
     return {nm: (r.get("summary") or "failed")
-            for nm, r in latest.items() if not r.get("ok")}
+            for nm, r in latest.items()
+            if not r.get("ok") and (r.get("at") or "") > (dism.get(nm) or "")}
+
+
+def _dismissed_failures() -> dict:
+    """{source_file: dismissed_at} — failures a human said to stop showing."""
+    try:
+        return json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+_dismiss_lock = threading.Lock()
+
+
+def dismiss_failure(name: str) -> bool:
+    """Silence every PAST failure for `name`. A failure newer than the
+    dismissal surfaces again: this means "stop telling me about that one",
+    never "never tell me about this file". Exists because a history-only
+    failure (the source file is gone) has no other exit — its X used to call
+    the file-delete endpoint, which refused because there was no file, so the
+    dead row was permanent.
+
+    The read-modify-write runs under a lock (ThreadingHTTPServer handles
+    requests concurrently, and an unguarded RMW silently drops the losing
+    dismissal), with a unique tmp per writer, and the map self-caps at the
+    newest 200 entries so a years-old panel never carries an unbounded file
+    of dead filenames."""
+    nm = str(name or "").strip()
+    if not nm or "/" in nm or "\\" in nm or nm.startswith("."):
+        return False
+    p = config.PROJECT_DIR / "dismissed_failures.json"
+    with _dismiss_lock:
+        d = _dismissed_failures()
+        d[nm] = status._now()
+        if len(d) > 200:
+            d = dict(sorted(d.items(), key=lambda kv: kv[1])[-200:])
+        fd, tmp = tempfile.mkstemp(dir=str(p.parent),
+                                   prefix="dismissed_failures.",
+                                   suffix=".json.tmp")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(d))
+        os.replace(tmp, p)
+    return True
 
 
 def _preview(text, sentences=2, cap=320):
@@ -720,7 +765,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
         row = {"id": f"src:{name}", "state": "failed", "source_file": name,
                "title": name, "date": dates.meeting_date(name),
                "when": _failed_at(st, name) or status._now(),
-               "error": err,
+               "error": err, "gone": True,
                "retry_note": "the original is gone — re-add it to the watched folder to retry"}
         timeline.append(row)
         failed_entries.append(row)
@@ -1406,6 +1451,7 @@ class Handler(BaseHTTPRequestHandler):
                             # without pretending the voice was ever named
                             "speaker_options": [{"id": s["id"], "display": s["display"],
                                                  "named": bool(s.get("name")),
+                                                 "local": bool(s.get("local")),
                                                  "dismissed": s["id"] in dism}
                                                 for s in d.get("speakers", [])],
                             "people": sorted(identify.load_registry().keys()),
@@ -1599,6 +1645,22 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
+                    if b.get("local"):
+                        # a transcript label for THIS meeting only: no floor
+                        # check and no enrollment, because nothing is learned.
+                        # The panel offers this after the floor refuses the
+                        # real enrollment; re-saving the same cluster is the
+                        # typo fix. Only this one meeting rebuilds.
+                        from stt import summarize
+                        res = summarize.set_local_name(
+                            b["meeting"], b["speaker"], name)
+                        if not res.get("ok"):
+                            self._json(res)
+                            return
+                        _spawn([str(RUN_SH), "relabel", b["meeting"]])
+                        self._json({"ok": True, "local": True,
+                                    "note": "renaming this meeting in background"})
+                        return
                     from stt import diarcache
                     raw_turns, _, cent_emb, _ = diarcache.load(
                         config.meeting_file(b["meeting"], ".diar.npz"))
@@ -1608,11 +1670,12 @@ class Handler(BaseHTTPRequestHandler):
                                              "in this meeting."})
                         return
                     # quality floor: a cluster with seconds of speech cannot
-                    # identify anyone — refuse outright (no confirm override).
-                    # Pooled across the cluster's same-meeting split twins,
-                    # exactly like assign()'s minting gate: a person the
+                    # identify anyone — refuse ENROLLMENT outright (no confirm
+                    # override). Pooled across the cluster's same-meeting split
+                    # twins, exactly like assign()'s minting gate: a person the
                     # diarizer split three ways must not be refused because
-                    # each fragment alone looks like a noise floor.
+                    # each fragment alone looks like a noise floor. `floor`
+                    # tells the panel the meeting-only fallback applies.
                     mj = json.loads(
                         config.meeting_file(b["meeting"], ".json").read_text())
                     unnamed = [s["id"] for s in mj.get("speakers", [])
@@ -1621,7 +1684,7 @@ class Handler(BaseHTTPRequestHandler):
                         b["speaker"], cent_emb,
                         unknowns.talk_stats(raw_turns), unnamed))
                     if veto:
-                        self._json({"ok": False, "error": veto})
+                        self._json({"ok": False, "floor": True, "error": veto})
                         return
                     if not confirm:
                         w = identify.sample_check(name, cent_emb[b["speaker"]])
@@ -1846,6 +1909,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "ran": ran, "pairs": _dupe_pair_rows(),
                             "scanning": bool(_dupe_worker["busy"]),
                             "truncated": dupes.cache_truncated()})
+            elif u.path == "/api/dismiss_failure":
+                # the X on a failed row whose source file no longer exists:
+                # nothing to delete, just stop showing that old failure
+                self._json({"ok": dismiss_failure(b.get("name", ""))})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
