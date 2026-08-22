@@ -861,6 +861,9 @@ button.mlg{background:none;border:1px solid var(--line);border-radius:99px;
   padding:4px 10px;cursor:pointer}
 button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 .mlg .mlgq{color:var(--amber);font-weight:700;margin-left:2px}
+/* the undo glyph on a dismissed voice's chip: quiet, never the amber nag --
+   the voice stopped asking to be named, the chip only offers the way back */
+.mlg .mlgr{color:var(--sub);font-weight:700;margin-left:2px}
 
 /* reduced motion: the slide-over appears in place, cards do not transition */
 @media(prefers-reduced-motion:reduce){
