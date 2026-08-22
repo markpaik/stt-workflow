@@ -247,29 +247,6 @@ function drawTray(s){
   for(const t of dmeets)
     h+=_trayRow(t.title,t.detail,_trayVerb('Review &#8594;',`trayAct('dupe_meetings','')`));
 
-  // flagged reviews: 1 -> direct; 2..8 -> one line that expands to per-meeting
-  // rows; MORE than 8 -> the line FILTERS the library to flagged rows instead
-  // (full-size rows out there, never a second smaller library in here) and
-  // reads as active while the filter is on
-  if(reviews.length===1)
-    h+=_trayRow(reviews[0].title,reviews[0].detail,
-        _trayVerb('Review &#8594;',`trayAct('review','${escJs(reviews[0].target)}')`));
-  else if(reviews.length>TRAY_EXPAND_MAX){
-    h+=`<div class="trayrow${flaggedOnly?' active':''}"><span class="tw-title agg">${
-      esc(`Flagged lines in ${reviews.length} meetings`)}</span>${
-      _trayVerb(flaggedOnly?'Showing &#10005;':'Review &#8594;','flaggedToggle()')}</div>`;
-  }
-  else if(reviews.length>1){
-    h+=_trayAgg(`Flagged lines in ${reviews.length} meetings`,
-        _trayVerb(trayOpen.review?'Hide':'Review &#8594;',`trayExpand('review')`));
-    if(trayOpen.review)h+=reviews.map(t=>{
-      const r=rowById(t.target);
-      const meta=r&&r.date?esc(shortDate(r.date)):'';
-      return _traySub(t.title,meta,t.count+' to check',
-        `openReviewBadge('${escJs(t.target)}')`);
-    }).join('');
-  }
-
   // unknown voices: 1 -> direct; 2..8 -> one line that expands to per-voice
   // rows; more than 8 never expands (name them one at a time, largest first)
   if(voices.length===1)
@@ -286,6 +263,30 @@ function drawTray(s){
       const n=t.count;
       return _traySub(t.title,'heard in '+n+' meeting'+(n!==1?'s':''),'',
         `openNamePanelByUid('${escJs(t.target)}')`);
+    }).join('');
+  }
+
+  // flagged reviews, LAST on purpose (a per-line accuracy chore, rarely the
+  // day's work -- deprioritized 2026-08-21 by request): 1 -> direct; 2..8 ->
+  // one line that expands to per-meeting rows; MORE than 8 -> the line FILTERS
+  // the library to flagged rows instead (full-size rows out there, never a
+  // second smaller library in here) and reads as active while the filter is on
+  if(reviews.length===1)
+    h+=_trayRow(reviews[0].title,reviews[0].detail,
+        _trayVerb('Review &#8594;',`trayAct('review','${escJs(reviews[0].target)}')`));
+  else if(reviews.length>TRAY_EXPAND_MAX){
+    h+=`<div class="trayrow${flaggedOnly?' active':''}"><span class="tw-title agg">${
+      esc(`Flagged lines in ${reviews.length} meetings`)}</span>${
+      _trayVerb(flaggedOnly?'Showing &#10005;':'Review &#8594;','flaggedToggle()')}</div>`;
+  }
+  else if(reviews.length>1){
+    h+=_trayAgg(`Flagged lines in ${reviews.length} meetings`,
+        _trayVerb(trayOpen.review?'Hide':'Review &#8594;',`trayExpand('review')`));
+    if(trayOpen.review)h+=reviews.map(t=>{
+      const r=rowById(t.target);
+      const meta=r&&r.date?esc(shortDate(r.date)):'';
+      return _traySub(t.title,meta,t.count+' to check',
+        `openReviewBadge('${escJs(t.target)}')`);
     }).join('');
   }
   tray.innerHTML=h;
@@ -1941,8 +1942,18 @@ function mLegend(d){
     if(o.named&&o.local)
       return `<button class="mlg unk" type="button" title="Named for this meeting only. Click to change"
           onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}</button>`;
+    // dismissed as "not a real speaker": the chip stopped asking, but a human
+    // who changes their mind needs a way BACK -- a dismissal with no undo on
+    // the page left the voice permanently unnameable from the transcript
+    if(!o.named&&o.dismissed)
+      return `<button class="mlg unk" type="button" title="Dismissed as not a real speaker. Click to make it nameable again"
+          onclick="mRestoreVoice('${escJs(MP.base)}','${escJs(o.id)}')">${dot}${esc(w)}<span class="mlgr">&#8634;</span></button>`;
     return `<span class="mlg">${dot}${esc(w)}</span>`;
   }).join('');
+}
+async function mRestoreVoice(base,sid){
+  const r=await api('/api/dismiss_voice',{base:base,speaker:sid,restore:true});
+  if(r&&r.ok){refresh();if(MP&&MP.base===base)mReloadSegs();}
 }
 function mUnknownUid(display){
   // hidden (archived) unknowns keep their "Who is this?" chip: hiding was meant

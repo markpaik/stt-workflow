@@ -741,6 +741,43 @@ console.log(JSON.stringify(chips.map(c=>c.includes('mlgq'))));
     assert json.loads(r.stdout) == [False, True, False]
 
 
+def test_a_dismissed_voice_offers_the_way_back():
+    """Dismissal silenced the nag AND stripped every path back: a human who
+    changed their mind about a "not a real speaker" could never name the voice
+    from the transcript again. The chip now carries a quiet undo (its own
+    glyph class, never the amber ?) that posts the restore."""
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        "const box={innerHTML:''};",
+        "function $(sel){return sel==='#mlegend'?box:null;}",
+        "let S={unknowns:[]};let MP={base:'B',color:{}};",
+        _js_fn("mUnknownUid"), _js_fn("mLegend"),
+        """
+mLegend({speaker_options:[
+    {id:'SPEAKER_02',display:'Voice 2',named:false,dismissed:true}]});
+console.log(JSON.stringify({
+  restore:box.innerHTML.includes("mRestoreVoice('B','SPEAKER_02')"),
+  button:box.innerHTML.includes('<button'),
+  nag:box.innerHTML.includes('mlgq'),
+  undo:box.innerHTML.includes('mlgr')}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out == {"restore": True, "button": True, "nag": False, "undo": True}
+    assert re.search(r"api\('/api/dismiss_voice',\{base:base,speaker:sid,restore:true\}\)", NEW_JS)
+
+
+def test_flagged_reviews_sit_last_in_the_tray():
+    """Deprioritized by request (2026-08-21): flagged-line review is a per-line
+    accuracy chore, rarely the day's first work, so its tray block renders
+    BELOW unknown voices. The order is the source order of the two blocks."""
+    tray = re.search(r"function drawTray\(s\)\{.*?\n\}", NEW_JS, re.S).group(0)
+    voices_at = tray.index("voices need names")
+    reviews_at = tray.index("Flagged lines in")
+    assert voices_at < reviews_at, "unknown voices render above flagged reviews"
+
+
 def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():
     # everything a row can do, the page can do: the same fillRowMenu feeds both
     assert re.search(r"function\s+mMenu\s*\(", NEW_JS)
