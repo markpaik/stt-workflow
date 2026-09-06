@@ -37,6 +37,7 @@ batch.lock
 relabel.lock
 status.lock
 llm.lock
+manifest.lock
 paused.flag
 stopping.flag
 relabel_pending.flag

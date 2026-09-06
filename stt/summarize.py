@@ -402,7 +402,7 @@ def _move_folder(base: str, new_base: str) -> list:
     source still sitting in a watched folder reads as unprocessed and the next
     run silently re-transcribes the meeting into a duplicate.
     The caller holds lock_meeting(base)."""
-    from . import identify, manifest, unknowns
+    from . import dupes, identify, manifest, unknowns
     old_dir, new_dir = config.meeting_dir(base), config.meeting_dir(new_base)
     renamed = []
     prefix = base + "."
@@ -415,6 +415,10 @@ def _move_folder(base: str, new_base: str) -> list:
     try:
         unknowns.rename_meeting_refs(base, new_base)
         identify.rename_source_refs(base, new_base)
+        # the "keep both" list keys pairs by base name too: without this, a
+        # title edit or a date correction re-offers a pair the user already
+        # reviewed, as a fresh 100 percent match
+        dupes.rename_pair_refs(base, new_base)
     except Exception as e:
         print(f"   rename: registry references not updated ({e})", file=sys.stderr)
     manifest.retarget(old_dir, new_dir, base, new_base)
@@ -474,11 +478,11 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             return {"ok": False, "error": "empty name"}
 
     j = config.meeting_file(base, ".json")
-    with review.lock_meeting(base):
-        try:
-            d = json.loads(j.read_text())
-        except (OSError, ValueError):
-            return {"ok": False, "error": f"no transcript for '{base}'"}
+
+    def _apply(d) -> str:
+        """Fold the requested edits into `d` and return the folder name they
+        imply. Writes nothing, so it can be re-run under a wider set of locks
+        without repeating a side effect."""
         if iso is not None:
             d["date"] = iso
         if category is not None:
@@ -514,12 +518,60 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # suffix first) rather than appending a second date
                 want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
+        return want
 
-        _write_json(j, d)
-        renamed = _move_folder(base, want) if want != base else []
+    def _dest_taken(want: str) -> bool:
+        # mirrors _unique_base's case-insensitive self-match: on APFS a
+        # capitalization fix sees its OWN folder through Path.exists()
+        if want.lower() == base.lower():
+            return False
+        return (config.meeting_dir(want).exists()
+                or (config.archive_dir() / want).exists())
 
-    return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
-            "category": d.get("category"), "reviewed": d.get("reviewed")}
+    # A move needs the DESTINATION locked as well as the source. Two meetings
+    # restamping onto one name each saw it free, both started moving, and the
+    # loser's folder rename raised OSError with its data stranded under the
+    # winner's filenames -- the meeting then vanished from every list.
+    # Phase one reads and plans under the source's own lock. Phase two takes
+    # source and destination in NAME order (one fixed order can never deadlock)
+    # and re-checks the destination is still free while holding both.
+    for _ in range(8):
+        with review.lock_meeting(base):
+            try:
+                d = json.loads(j.read_text())
+            except (OSError, ValueError):
+                return {"ok": False, "error": f"no transcript for '{base}'"}
+            want = _apply(d)
+            if want == base:
+                _write_json(j, d)          # no move: the source lock is enough
+                return {"ok": True, "base": base, "renamed": [],
+                        "date": d.get("date"), "category": d.get("category"),
+                        "reviewed": d.get("reviewed")}
+
+        # NAME order, and case-folded to one lock when the move is only a
+        # capitalization fix: APFS is case-insensitive, so 'board prep' and
+        # 'Board Prep' are the same lock FILE, and taking it twice on one
+        # thread deadlocks against itself (flock is per-fd, not per-thread).
+        targets = ([base] if want.lower() == base.lower()
+                   else sorted((base, want)))
+        with contextlib.ExitStack() as locks:
+            for t in targets:
+                locks.enter_context(review.lock_meeting(t))
+            if _dest_taken(want):
+                continue      # claimed between the plan and the lock: re-plan
+            try:
+                d = json.loads(j.read_text())
+            except (OSError, ValueError):
+                return {"ok": False, "error": f"no transcript for '{base}'"}
+            if _apply(d) != want:
+                continue      # the meeting moved under us: re-plan and re-lock
+            _write_json(j, d)
+            renamed = _move_folder(base, want)
+        return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
+                "category": d.get("category"), "reviewed": d.get("reviewed")}
+
+    return {"ok": False,
+            "error": "another edit keeps taking that name -- try again in a moment"}
 
 
 def rename_meeting(base: str, new_base: str) -> dict:

@@ -241,3 +241,26 @@ def test_snapshot_caches(sandbox, monkeypatch):
     control.snapshot()
     control.snapshot()
     assert calls["n"] == cold  # subsequent calls served from cache within TTL
+
+
+def test_a_blank_started_marker_is_not_a_running_relabel(sandbox):
+    """W33: a blank `started` is written when the process-start check fails.
+    Treating it exactly like a marker with NO timestamp field fell back to
+    trusting any live process at that pid, so a failed check plus a hard kill
+    plus pid reuse read as a live relabel."""
+    import json
+
+    p = control.relabel_marker_path()
+    p.write_text(json.dumps({"pid": os.getpid(), "started": ""}))
+    assert control.relabel_running() is False, \
+        "an unknown identity must never override the recycled-pid guard"
+
+    # a LEGACY marker, written before the field existed, still gets the benefit
+    # of the doubt: absent is not the same as blank
+    p.write_text(json.dumps({"pid": os.getpid()}))
+    assert control.relabel_running() is True
+
+    # and a marker whose start time actually matches is still live
+    p.write_text(json.dumps({"pid": os.getpid(),
+                             "started": control._proc_started(os.getpid())}))
+    assert control.relabel_running() is True

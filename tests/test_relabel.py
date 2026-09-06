@@ -500,3 +500,48 @@ def test_a_local_name_needs_the_diar_cache(sandbox):
     r = summarize.set_local_name(base, "SPEAKER_00", "Jordan Lee")
     assert r["ok"] is False and "speaker cache" in r["error"]
     assert "local_names" not in json.loads(mfile(base, ".json").read_text())
+
+
+def test_relabel_skips_a_meeting_that_moved_mid_pass(sandbox, monkeypatch):
+    """W17: the .json and .diar.npz existence checks are a SNAPSHOT. A
+    concurrent rename or archive moves both files in the gap before the reads,
+    and the unguarded read raised out of relabel_all's per-meeting handler,
+    which reported the failure with a raw filesystem path in it. The pass must
+    skip the meeting honestly instead."""
+    import contextlib
+    import shutil
+
+    import relabel
+
+    _seed_meeting("Mtg")
+    real = review.lock_meeting
+
+    @contextlib.contextmanager
+    def racing_lock(base):
+        with real(base):
+            # a rename lands here: after the existence checks, before the reads
+            shutil.rmtree(config.meeting_dir(base))
+            yield
+
+    monkeypatch.setattr(review, "lock_meeting", racing_lock)
+    assert relabel.relabel_one("Mtg") is False
+
+
+def test_relabel_skips_a_meeting_whose_diar_cache_vanished_mid_pass(sandbox, monkeypatch):
+    """W17: the same race from the other angle -- the transcript is still
+    readable but the diarization cache is gone by the time it is loaded."""
+    import contextlib
+
+    import relabel
+
+    _seed_meeting("Mtg")
+    real = review.lock_meeting
+
+    @contextlib.contextmanager
+    def racing_lock(base):
+        with real(base):
+            config.meeting_file(base, ".diar.npz").unlink()
+            yield
+
+    monkeypatch.setattr(review, "lock_meeting", racing_lock)
+    assert relabel.relabel_one("Mtg") is False

@@ -133,8 +133,16 @@ def relabel_running() -> bool:
     now = _proc_started(pid)
     if not now:
         return False           # the pass died without cleaning up
+    if "started" not in m:
+        return True            # a legacy marker, written before this field
+    if not started:
+        # the marker's OWN start-time check failed when it was written, so the
+        # pass's identity is UNKNOWN. An unknown identity must never override
+        # the recycled-pid guard: a hard kill plus pid reuse would otherwise
+        # read as a live relabel. A blank field is not the same as no field.
+        return False
     # a recycled pid is a DIFFERENT process: same number, later start time
-    return not started or now == started
+    return now == started
 
 
 def _pgrep(args):

@@ -395,3 +395,60 @@ def test_unknown_durations_never_outrank_a_real_close_pair(sandbox, monkeypatch)
     assert {(p["a"], p["b"]) for p in pairs} == \
         {("A Mtg 05012026", "B Mtg 05012026")}, \
         "the one budgeted comparison must go to the known-close pair"
+
+
+# ------------------------------------------------- batch-1 regressions -----
+
+def test_fingerprint_hashes_the_middle_as_well_as_the_head_and_tail(sandbox):
+    """W2: head + tail alone left every byte between them OUT of the hash, so
+    two files above 2*CHUNK that differ only in the middle read as identical --
+    and this hash is the "byte-identical" proof that gates a bulk delete with
+    no undo. The cut-off sat exactly at 2*CHUNK+1 bytes."""
+    n = dupes.CHUNK
+    a, b = sandbox / "a.m4a", sandbox / "b.m4a"
+    a.write_bytes(b"H" * n + b"\x00" * n + b"T" * n)
+    b.write_bytes(b"H" * n + b"\xff" * n + b"T" * n)   # same size, head, tail
+    dupes._fp_cache.clear()
+    assert dupes.fingerprint(a) != dupes.fingerprint(b)
+    # a real copy still matches: the middle read is additive, never selective
+    c = sandbox / "c.m4a"
+    c.write_bytes(a.read_bytes())
+    assert dupes.fingerprint(a) == dupes.fingerprint(c)
+
+
+def test_a_short_clip_is_length_gated_even_with_no_duration_recorded(sandbox):
+    """W28: the duration gate only fired when BOTH sides reported a positive
+    duration. A transcript with no duration_sec (a known pre-migration state)
+    skipped the gate entirely, and bottom-k Jaccard reads a contained subset as
+    a full 100 percent match -- so a clip paired with an hour-long meeting."""
+    line = "the board approved the budget for the coming fiscal year "
+    _meeting("All Hands 05012026", "all hands.m4a", text=line * 200, dur=3600.0)
+    # no duration_sec at all, and a tiny fraction of the words
+    mfile("Clip 05012026", ".json").write_text(json.dumps(
+        {"source_file": "clip.m4a", "speakers": [],
+         "segments": [{"text": line * 2}], "words": []}))
+    mfile("Clip 05012026", ".txt").write_text("stub")
+
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert pairs == [], "an hour of audio and a two-line clip are not one recording"
+
+
+def test_a_kept_pair_follows_a_date_correction(sandbox):
+    """W20: a kept pair is stored as two literal base names, and a date
+    correction re-stamps one of them through the ordinary edit path. Without
+    the rename hook the next scan offers the same two transcripts again as a
+    fresh, unreviewed 100 percent match."""
+    from stt import summarize
+    body = _words(400)
+    _meeting("Budget Review 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("Budget Review Copy 05012026", "b.m4a", text=body, dur=600.0)
+
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert len(pairs) == 1 and pairs[0]["score"] == 1.0
+    assert dupes.ignore_pair(pairs[0]["a"], pairs[0]["b"])
+    assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
+
+    r = summarize.set_meeting_date("Budget Review Copy 05012026", "2026-06-15")
+    assert r["ok"] and r["base"] == "Budget Review Copy 06152026"
+    assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == [], \
+        "the 'keep both' decision must follow the meeting's new name"

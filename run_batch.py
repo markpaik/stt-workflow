@@ -557,14 +557,48 @@ def main():
     processed = failed = 0
     succeeded = []  # keys of files that fully processed (for auto-summary)
     failed_names = set()  # files that failed THIS run — never retried in rescan
+    _overridden_holds = set()   # parks the caller overrode by naming the file
+
+    def hold_skips(src: Path) -> bool:
+        """True when `src` must be skipped because it is parked RIGHT NOW.
+
+        The todo list read the parks once, before the run started. A park
+        placed on a later file in the same run therefore did not stop it -- and
+        the run then released a hold it had never honored. The park file is
+        re-read here, immediately before each file starts, so a hold placed
+        mid-run still stops the file it names."""
+        name = src.name
+        if name not in holds.items():
+            return False
+        try:
+            explicit = wanted is not None or src.resolve() in explicit_paths
+        except OSError:
+            explicit = wanted is not None
+        if not explicit:
+            return True            # an automatic sweep: the park wins
+        _overridden_holds.add(name)  # asked for by name: the park is overridden
+        return False
+
+    def announce_hold(name):
+        nonlocal skipped
+        skipped += 1
+        print(f"   on hold, skipping: {name}", flush=True)
 
     def _record(res, n_active):
         nonlocal processed, failed
         if res["ok"]:
-            manifest.mark(m, res["key"], res["mtime"], res["outputs"],
-                          fp=res.get("fp"), size=res.get("size"))
-            manifest.save(m)
-            holds.release(res["key"])  # processed: the park can't outlive the file
+            # a LOCKED read-modify-write against the file on disk, not a save of
+            # the snapshot `m` taken hours ago at the start of this run: saving
+            # the snapshot drops every record the GUI or a second run wrote in
+            # between. The returned record keeps our own snapshot current.
+            m["processed"][res["key"]] = manifest.record(
+                res["key"], res["mtime"], res["outputs"],
+                fp=res.get("fp"), size=res.get("size"))
+            if res["key"] in _overridden_holds:
+                # the park was OVERRIDDEN by name, and the file it parked is
+                # now processed, so clearing it cannot pin a stale name. A hold
+                # placed DURING the run was never honored and must survive.
+                holds.release(res["key"])
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
                          rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
@@ -582,6 +616,17 @@ def main():
             failed += 1
 
     def run_todo(batch):
+        # the parks are re-read here, at the last moment before any of these
+        # files starts -- never from the snapshot the todo list was built with
+        keep = []
+        for src in batch:
+            if hold_skips(src):
+                announce_hold(src.name)
+            else:
+                keep.append(src)
+        batch = keep
+        if not batch:
+            return
         # the concurrency actually used for THIS batch — a solo/short batch runs
         # single-worker even under --parallel 2, so rate samples must be tagged
         # with the real n_active, not the outer run's initial worker count.
@@ -630,6 +675,11 @@ def main():
                         nonlocal_fail(src.name, e)
         else:
             for src in batch:
+                # re-read again per file: this loop can run for hours, and a
+                # park placed on file 3 while file 1 transcodes must be honored
+                if hold_skips(src):
+                    announce_hold(src.name)
+                    continue
                 print(f"[processing] {src.name}", flush=True)
                 try:
                     _record(process_one(str(src), str(dest), opts_for(src)), n_used)

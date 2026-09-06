@@ -495,3 +495,57 @@ def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
     summarize.suggest_title("M")
     summarize.answer_question("M", "What was decided?")
     assert calls == [False, True]
+
+
+def test_a_restamp_holds_the_destination_name_it_moves_onto(sandbox):
+    """W4: apply_meeting_edits locked a meeting by its OWN base name only, so
+    two different meetings restamping to the same destination name both saw it
+    free. _move_folder renames the inner files before the folder, so the
+    loser's folder rename raised OSError and the meeting dropped out of every
+    list with its data stranded under the winner's filenames.
+
+    The destination is now locked too, in name order. A holder of the
+    destination lock must block the move until it lets go."""
+    _meeting_with_segment("Team Sync 05012026")
+    done = []
+
+    def edit():
+        done.append(summarize.set_meeting_date("Team Sync 05012026", "2026-06-15"))
+
+    with review.lock_meeting("Team Sync 06152026"):     # the destination name
+        t = threading.Thread(target=edit)
+        t.start()
+        t.join(timeout=1.0)
+        assert not done, "the move started without holding the destination's lock"
+    t.join(timeout=5.0)
+
+    assert done and done[0]["ok"] and done[0]["base"] == "Team Sync 06152026"
+    assert config.meeting_file("Team Sync 06152026", ".json").exists()
+    assert not config.meeting_dir("Team Sync 05012026").exists()
+
+
+def test_a_destination_taken_after_the_plan_is_re_planned(sandbox):
+    """W4, the other half: when the destination is claimed between the plan and
+    the lock, the edit must re-plan onto a free name rather than move onto a
+    folder that now belongs to somebody else."""
+    _meeting_with_segment("Team Sync 05012026")
+    real = summarize._unique_base
+    calls = []
+
+    def racing_unique_base(candidate, current):
+        want = real(candidate, current)
+        # a rival edit lands the instant our name is chosen, before we lock it
+        if want == "Team Sync 06152026" and not calls:
+            calls.append(want)
+            config.meeting_dir(want).mkdir(parents=True)
+            (config.meeting_dir(want) / f"{want}.json").write_text("{}")
+        return want
+
+    summarize._unique_base = racing_unique_base
+    try:
+        r = summarize.set_meeting_date("Team Sync 05012026", "2026-06-15")
+    finally:
+        summarize._unique_base = real
+
+    assert r["ok"] and r["base"] == "Team Sync 06152026 (2)"
+    assert config.meeting_file("Team Sync 06152026 (2)", ".json").exists()

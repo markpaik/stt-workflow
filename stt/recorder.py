@@ -63,12 +63,31 @@ def _pid_alive(pid) -> bool:
         return False
 
 
-def _proc_cmdline(pid) -> str:
+def _proc_cmdline(pid):
+    """The process's command line, or None when the CHECK ITSELF failed.
+
+    A failed ps (binary missing, fork failure, timeout) is not evidence of
+    anything. Returning "" for it made a failed check read exactly like a
+    genuine mismatch, and recover_orphans acts on a mismatch by finalizing and
+    DELETING the CAF -- of a recorder that is still running and still writing to
+    it. None keeps "we could not tell" distinguishable from "not ours"."""
     try:
         return subprocess.run(["/bin/ps", "-p", str(int(pid)), "-o", "command="],
                               capture_output=True, text=True, timeout=5).stdout
     except (OSError, ValueError, subprocess.SubprocessError):
-        return ""
+        return None
+
+
+def _recorder_identity(pid):
+    """True (this pid IS our recorder), False (it is not, or it is gone), or
+    None (the identity check failed and nothing is known). Every caller that
+    can DESTROY data must act only on an explicit False."""
+    if not _pid_alive(pid):
+        return False
+    cmd = _proc_cmdline(pid)
+    if cmd is None:
+        return None
+    return "stt-recorder" in cmd
 
 
 def _recorder_running(pid) -> bool:
@@ -76,10 +95,12 @@ def _recorder_running(pid) -> bool:
     0) reads a RECYCLED pid as a live recording — which would refuse every new
     start, make halt() SIGINT an unrelated process group, and hide a genuine
     orphan from recovery. The stored pid is the caffeinate wrapper whose command
-    line carries the stt-recorder binary path (see start())."""
-    if not _pid_alive(pid):
-        return False
-    return "stt-recorder" in _proc_cmdline(pid)
+    line carries the stt-recorder binary path (see start()).
+
+    An UNKNOWN identity counts as running: the pid is alive, and every caller
+    reads False as "no capture" -- which would let a second recorder start on
+    top of a live one."""
+    return _recorder_identity(pid) is not False
 
 
 def live_recording():
@@ -237,27 +258,49 @@ def resume() -> dict:
 
 
 STALL_AFTER_SECS = 8
+STALL_QUIET_SECS = 60   # a growing CAF that stops growing for this long
+
+# caf path -> (last size seen, monotonic time it was last seen to GROW). A
+# fixed size floor can only ever fire before the CAF first crosses it, so a
+# mid-recording stall -- the device swap the docstring names -- was invisible
+# for the rest of the session. Growth needs memory between calls.
+_growth = {}
 
 
 def capture_stalled(rec) -> bool:
-    """True when a live recording SHOULD have audio by now but its CAF is still
-    header-only. Two known causes, both silent: the tap's writer gate (macOS
-    starts a tap-containing device only once some app plays audio; start()
-    kicks it with a silent file, but a mid-recording device swap can re-arm
-    it), and a TCC denial — classically after a REBUILD, since the ad-hoc
-    signature is pinned to the exact build (cdhash) and rebuilding orphans
-    the old grant.
-    This lets the menu bar say so ~10 seconds into the meeting, instead of the
-    user discovering an empty capture at stop. A paused recording does not
-    grow and does not count as stalled."""
-    if not rec or rec.get("paused"):
+    """True when a live recording is not capturing audio. Two known causes,
+    both silent: the tap's writer gate (macOS starts a tap-containing device
+    only once some app plays audio; start() kicks it with a silent file, but a
+    mid-recording device swap can re-arm it), and a TCC denial -- classically
+    after a REBUILD, since the ad-hoc signature is pinned to the exact build
+    (cdhash) and rebuilding orphans the old grant.
+
+    Two readings, so a swap MID-recording is caught too: the CAF is still
+    header-only past STALL_AFTER_SECS, or it grew once and has not grown for
+    STALL_QUIET_SECS. This lets the menu bar say so ~10 seconds into the
+    meeting, instead of the user discovering an empty capture at stop. A
+    paused recording does not grow and does not count as stalled."""
+    if not rec:
+        return False
+    caf = str(rec.get("caf", ""))
+    try:
+        size = Path(caf).stat().st_size
+    except OSError:
+        return False
+    now = time.monotonic()
+    prev = _growth.get(caf)
+    if prev is None or size > prev[0] or rec.get("paused"):
+        # a pause is not a stall: keep the clock fresh so resuming does not
+        # report the paused span as silence
+        _growth[caf] = (size, now)
+        prev = _growth[caf]
+    if rec.get("paused"):
         return False
     if elapsed_seconds(rec) < STALL_AFTER_SECS:
         return False
-    try:
-        return Path(rec.get("caf", "")).stat().st_size < 8192
-    except OSError:
-        return False
+    if size < 8192:
+        return True                      # header-only: the capture never began
+    return (now - prev[1]) >= STALL_QUIET_SECS
 
 
 def elapsed_seconds(rec) -> int:
@@ -315,6 +358,7 @@ def finalize(caf: Path, name=None) -> dict:
     """Transcode a finished CAF to a named stereo m4a in the watched folder,
     atomically (only a complete file ever becomes visible), then drop the CAF."""
     caf = Path(caf)
+    _growth.pop(str(caf), None)   # this capture is over; its growth history is too
 
     def _clear_if_ours():
         # drop the recording state ONLY when it still points at THIS capture.
@@ -418,7 +462,11 @@ def recover_orphans() -> list:
     Called at menu-bar startup. Returns the names recovered."""
     recovered = []
     rec = status.recording()
-    if rec and not _recorder_running(rec.get("pid")):  # dead OR a recycled pid
+    # _recorder_running is False only on an EXPLICIT mismatch -- dead, or a
+    # recycled pid. An UNKNOWN identity (the ps call itself failed) reads as
+    # running and never reaches this branch: finalize() deletes the CAF, and
+    # the real recorder would keep writing to a file that no longer exists.
+    if rec and not _recorder_running(rec.get("pid")):
         caf = Path(rec.get("caf", ""))
         r = finalize(caf, None)  # default 'Recording ...' name; clears the state
         if r.get("ok"):
@@ -435,4 +483,33 @@ def recover_orphans() -> list:
             r = finalize(caf, None)
             if r.get("ok"):
                 recovered.append(r["name"])
+    sweep_orphan_parts()
     return recovered
+
+
+PART_STALE_SECS = 600   # no write for this long = no transcode is behind it
+
+
+def sweep_orphan_parts() -> int:
+    """Delete hidden .m4a.part files nothing is writing any more.
+
+    finalize() drops the CAF before it publishes the transcode, so a crash in
+    between leaves a COMPLETE .part on disk with its CAF already gone.
+    recover_orphans globs the CAF pattern only, and nothing else in the app
+    looks at these, so they were a permanent, silent disk leak. A file written
+    within PART_STALE_SECS is left alone: a long transcode may still be
+    filling it. Returns how many were removed."""
+    staging = config.recordings_dir()
+    if not staging.exists():
+        return 0
+    now = time.time()
+    swept = 0
+    for part in staging.glob(".*.m4a.part"):
+        try:
+            if now - part.stat().st_mtime < PART_STALE_SECS:
+                continue
+            part.unlink()
+            swept += 1
+        except OSError:
+            continue
+    return swept

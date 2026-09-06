@@ -215,3 +215,45 @@ def test_unknown_bases_are_refused_everywhere(sandbox):
         r = fn("../../etc/passwd")
         assert not r["ok"] and "no " in r["error"]
     assert not archive.restore_meeting("Never Archived")["ok"]
+
+
+# ---------- batch-1 regressions ----------
+
+def test_archiving_onto_a_taken_name_follows_the_registry(sandbox):
+    """W18: archive_meeting uniquifies a colliding destination name but never
+    migrated the unknowns / identify refs to the new name, unlike
+    restore_meeting for the symmetric case. The ref kept pointing at a name
+    that now belongs to a DIFFERENT archived meeting, so a later restore on
+    that stale name brought back the wrong meeting."""
+    _meeting("Weekly 05012026")
+    assert archive.archive_meeting("Weekly 05012026")["base"] == "Weekly 05012026"
+    _meeting("Weekly 05012026")                       # a second, different meeting
+    reg = unknowns.load()
+    reg["speakers"]["U001"] = {"file": "u001.npy", "meetings": ["Weekly 05012026"]}
+    unknowns.save(reg)
+
+    r = archive.archive_meeting("Weekly 05012026")
+    assert r["ok"] and r["base"] == "Weekly 05012026 (2)"
+    assert unknowns.load()["speakers"]["U001"]["meetings"] == ["Weekly 05012026 (2)"], \
+        "the voice ref must name the meeting it actually landed under"
+
+
+def test_deleting_one_of_two_same_named_meetings_spares_the_others_record(sandbox):
+    """W19: the stale-manifest scrub matched a record by base name only, with no
+    check of the record's directory. A live and an archived meeting can share a
+    base (real for pre-feature names), so deleting one wiped the other's record
+    too -- its still-present source then read as unprocessed and was silently
+    re-transcribed on the next run."""
+    _meeting("Weekly 05012026")
+    archive.archive_meeting("Weekly 05012026")
+    _meeting("Weekly 05012026")
+
+    archived_json = config.archive_dir() / "Weekly 05012026" / "Weekly 05012026.json"
+    manifest.save({"processed": {
+        "live.m4a": {"mtime": 1.0,
+                     "outputs": [str(config.meeting_file("Weekly 05012026", ".json"))]},
+        "archived.m4a": {"mtime": 1.0, "outputs": [str(archived_json)]}}})
+
+    assert archive.delete_meeting("Weekly 05012026")["ok"]
+    assert sorted(manifest.load()["processed"]) == ["archived.m4a"], \
+        "the archived meeting's processing history is not the deleted one's"

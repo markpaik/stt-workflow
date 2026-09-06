@@ -1365,3 +1365,148 @@ def test_a_subfloor_voice_can_be_named_for_this_meeting_only(running_server, mon
     assert status == 200 and body["ok"] is False
     mj = json.loads(mfile("Thin Local Mtg", ".json").read_text())
     assert "SPEAKER_99" not in mj.get("local_names", {})
+
+
+# ---------- batch-1 regressions ----------
+
+def test_a_newline_in_a_settings_value_is_refused(running_server):
+    """W9: every config value is written into stt.env as one KEY=VALUE line, so
+    a newline injects an arbitrary extra STT_*=... line into the file that
+    stores the API keys. config re-reads that file on every call, so the
+    injected line takes effect on the next poll with no restart."""
+    envp = config.PROJECT_DIR / "stt.env"
+    st, body = _post(running_server, "/api/mic_speaker",
+                     {"name": "Alex Rivera\nSTT_ANTHROPIC_KEY=stolen"})
+    assert st == 500, "a line break in a settings value must be refused"
+    assert not envp.exists() or "STT_ANTHROPIC_KEY" not in envp.read_text()
+
+    st, body = _post(running_server, "/api/mic_speaker",
+                     {"name": "Alex Rivera\rSTT_MEETINGS_DIR=/tmp/evil"})
+    assert st == 500
+    assert not envp.exists() or "STT_MEETINGS_DIR" not in envp.read_text()
+
+    # the ordinary value still saves
+    st, body = _post(running_server, "/api/mic_speaker", {"name": "Alex Rivera"})
+    assert st == 200 and body["mic_speaker"] == "Alex Rivera"
+
+
+def test_the_model_endpoint_accepts_only_a_listed_choice(running_server):
+    """W25: any string went into STT_ASR_BACKEND verbatim, so a plain typo
+    silently corrupted the backend setting -- and this was the route the
+    newline injection travelled."""
+    envp = config.PROJECT_DIR / "stt.env"
+    st, body = _post(running_server, "/api/model", {"model": "parakeeet"})
+    assert st == 200 and body["ok"] is False
+    assert not envp.exists() or "parakeeet" not in envp.read_text()
+
+    st, body = _post(running_server, "/api/model",
+                     {"model": "parakeet\nSTT_MEETINGS_DIR=/tmp/evil"})
+    assert st == 200 and body["ok"] is False
+    assert not envp.exists() or "STT_MEETINGS_DIR" not in envp.read_text()
+
+    st, body = _post(running_server, "/api/model", {"model": "parakeet"})
+    assert st == 200 and body["ok"] is True
+    assert "STT_ASR_BACKEND=parakeet" in envp.read_text()
+
+
+def test_deleting_a_queued_file_reports_the_twin_in_the_other_folder(running_server):
+    """W11: a name that exists in BOTH watched folders resolves to the
+    first-folder copy everywhere in the GUI, and queue_delete unlinked that one
+    copy with no check of the other folder. The second folder's file became a
+    new row under the same name right after the delete, silently inheriting any
+    hold the first one carried."""
+    src, rec = config.source_dir(), config.recordings_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
+    (src / "Weekly Sync.m4a").write_bytes(b"FIRST" + b"\x01" * 900)
+    (rec / "Weekly Sync.m4a").write_bytes(b"SECOND" + b"\x02" * 4000)
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert body.get("shadowed") is True
+    assert "other watched folder" in body.get("note", "")
+    assert not (src / "Weekly Sync.m4a").exists()
+    assert (rec / "Weekly Sync.m4a").exists(), \
+        "only the file the row showed may be deleted"
+
+    # with one copy left, the delete is an ordinary one and says nothing extra
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True and "shadowed" not in body
+    assert not (rec / "Weekly Sync.m4a").exists()
+
+
+def test_the_sweep_spares_a_file_whose_meeting_dropped_its_audio(running_server):
+    """R2: drop_audio removes a meeting's stored audio and keeps the transcript,
+    but the manifest's recorded fingerprint goes on matching the source. The
+    base still reads live, so the sweep deleted the ONLY remaining copy of that
+    recording anywhere."""
+    from stt import dupes, manifest
+    audio = b"RIFF" + b"\x05" * 9000
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "board prep.m4a"
+    f.write_bytes(audio)
+    dupes._fp_cache.clear()
+    fp = dupes.fingerprint(f)
+
+    base = "Board Prep 05012026"
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": "board prep.m4a", "duration_sec": 600.0, "strict": False,
+         "speakers": [], "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    # no <base>.m4a on disk: drop_audio already took it
+    manifest.save({"processed": {"board prep.m4a": {
+        "mtime": 0.0, "fp": fp, "size": len(audio),
+        "outputs": [str(config.meeting_file(base, ".json"))]}}})
+
+    _, state = _get(running_server, "/api/state")
+    row = [q for q in state["queue"] if q["name"] == "board prep.m4a"][0]
+    assert row["dup_reason"] == "identical" and row["dup_of"] == base
+
+    st, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body["deleted"] == []
+    assert f.exists(), "the last copy of a recording must never be swept"
+
+
+def test_the_sweep_reproves_the_bytes_before_each_unlink(running_server, monkeypatch):
+    """R3: the sweep re-resolves each file by NAME at unlink time, and the
+    per-file re-checks covered active and meeting liveness but never the
+    content. Between the snapshot and the unlink, iCloud can deliver this
+    week's export under the same recurring name."""
+    src = _dupe_fixture()
+    stale = [{"name": "board prep 2.m4a", "processed": False, "held": False,
+              "dup_of": "Board Prep 05012026", "dup_reason": "identical",
+              "dup_fp": "0" * 64}]      # the file on disk no longer hashes to this
+    monkeypatch.setattr(srv, "_queue_and_dupes", lambda: (stale, [], set()))
+
+    st, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body["deleted"] == []
+    assert (src / "board prep 2.m4a").exists(), \
+        "identity must be proven at unlink time, not taken from the snapshot"
+
+
+def test_the_sweep_still_takes_a_file_it_can_prove_right_now(running_server):
+    """R2 and R3 together must not disarm the feature: a real byte-identical
+    copy of a meeting that still holds its audio is still swept."""
+    src = _dupe_fixture()
+    st, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body["deleted"] == ["board prep 2.m4a"]
+    assert not (src / "board prep 2.m4a").exists()
+    assert (src / "board prep.m4a").exists() and (src / "keep me.m4a").exists()
+
+
+def test_naming_a_meeting_that_moved_mid_request_is_an_honest_error(running_server):
+    """W17: the real-enrollment branch assumed the meeting's json and diar cache
+    still existed at the name it was called with. A concurrent rename or
+    archive, or a missing diar cache, raised an unguarded exception -- a bare
+    500 showing the server's own filesystem path."""
+    _make_meeting("Board Prep 05012026")     # a transcript, but no .diar.npz
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": "Board Prep 05012026", "speaker": "SPEAKER_00",
+                      "name": "Jordan Lee"})
+    assert st == 200 and body["ok"] is False
+    assert "changed while you were naming it" in body["error"]
+    assert str(config.PROJECT_DIR) not in json.dumps(body), \
+        "an error must never carry the server's own filesystem path"
