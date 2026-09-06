@@ -347,3 +347,81 @@ def test_start_kicks_the_tap_writer_gate(sandbox, monkeypatch):
     kicks = [c for c in calls if c[0] == "/usr/bin/afplay"]
     assert kicks, "start() never played the silent writer-gate kick"
     assert kicks[0][1].endswith("silence.wav")
+
+
+# ------------------------------------------------- batch-1 regressions -----
+
+def test_a_failed_ps_never_finalizes_a_live_recording(sandbox, monkeypatch):
+    """W1: a failed ps call returned an empty string, which read exactly like a
+    genuine mismatch. recover_orphans runs at menu-bar startup -- precisely when
+    a live detached recording is the expected case -- and acts on a mismatch by
+    finalizing the CAF, deleting it, and clearing its status entry, while the
+    real recorder keeps writing to the deleted file. A failed check is UNKNOWN,
+    never a mismatch."""
+    import os
+
+    d = config.recordings_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    caf = d / ".rec-live.caf"
+    caf.write_bytes(b"\x00" * 512)          # a capture that just started
+    live = {"pid": os.getpid(), "caf": str(caf)}
+    status.set_recording(live)
+
+    def _fork_failed(*a, **k):
+        raise OSError("ps: fork failed")
+
+    monkeypatch.setattr(recorder.subprocess, "run", _fork_failed)
+    assert recorder._proc_cmdline(os.getpid()) is None
+    assert recorder._recorder_identity(os.getpid()) is None
+    assert recorder._recorder_running(os.getpid()) is True
+
+    assert recorder.recover_orphans() == []
+    assert caf.exists(), "one failed ps call must never delete a live capture"
+    assert status.recording() == live
+
+
+def test_a_mid_recording_stall_is_caught_once_the_caf_stops_growing(sandbox, monkeypatch):
+    """W10: the check compared the CAF size to a fixed floor and kept no record
+    of a prior size or check time, so once the file crossed the floor the check
+    could never fire again. A mid-recording device swap that re-arms the writer
+    gate went undetected for the rest of the session."""
+    d = config.recordings_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    caf = d / ".rec-stall.caf"
+    caf.write_bytes(b"\x00" * (2 * 1024 * 1024))     # 2 MB captured by t=160
+    rec = {"caf": str(caf), "started_monotonic": 0.0, "paused": False}
+
+    clock = {"t": 160.0}
+    monkeypatch.setattr(recorder.time, "monotonic", lambda: clock["t"])
+    recorder._growth.clear()
+    assert recorder.capture_stalled(rec) is False     # growing: nothing wrong
+
+    clock["t"] = 700.0                                # frozen ever since, 0 new bytes
+    assert recorder.capture_stalled(rec) is True
+
+    # a PAUSE is not a stall: the paused span must not read as silence
+    recorder._growth.clear()
+    clock["t"] = 800.0
+    assert recorder.capture_stalled({**rec, "paused": True}) is False
+    clock["t"] = 830.0
+    assert recorder.capture_stalled(rec) is False
+
+
+def test_an_orphaned_transcode_part_is_swept(sandbox):
+    """W35: a crash between a successful transcode and the CAF's own unlink
+    leaves a complete hidden .m4a.part on disk. recover_orphans globbed only the
+    CAF pattern and nothing else in the app looks at these files, so they were a
+    permanent, silent disk leak."""
+    import os
+
+    d = config.recordings_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    orphan = d / ".Board Prep 05012026.m4a.part"
+    orphan.write_bytes(b"x" * 4096)
+    os.utime(orphan, (0, 0))                 # nothing has written it in years
+    live = d / ".Still Transcoding.m4a.part"  # a transcode running right now
+    live.write_bytes(b"x" * 4096)
+
+    assert recorder.recover_orphans() == []
+    assert not orphan.exists()
+    assert live.exists(), "a .part still being written must be left alone"

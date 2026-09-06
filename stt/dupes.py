@@ -73,11 +73,16 @@ def ignored_path():
 def fingerprint(path):
     """A content fingerprint for a media file, or None when one cannot be taken.
 
-    Size plus the first and last megabyte: two recordings that agree on all
-    three are the same bytes for any practical purpose, and it costs one seek
-    instead of reading gigabytes. NEVER touches a dataless iCloud file --
+    Size plus the first, MIDDLE and last megabyte: two recordings that agree on
+    all four are the same bytes for any practical purpose, and it costs two
+    seeks instead of reading gigabytes. NEVER touches a dataless iCloud file --
     reading one would trigger a multi-gigabyte download from a status poll,
-    which is exactly the surprise this feature is supposed to prevent."""
+    which is exactly the surprise this feature is supposed to prevent.
+
+    A fingerprint recorded by an older build (head and tail only) no longer
+    equals the one taken here. That is a FALSE NEGATIVE and nothing worse: the
+    file simply reads as not-yet-proven-identical, so the bulk sweep leaves it
+    alone and the name signal still flags it."""
     p = Path(path)
     try:
         st = p.stat()
@@ -100,6 +105,13 @@ def fingerprint(path):
                 # is merely redundant, never wrong
                 if st.st_size > CHUNK:
                     fh.seek(-CHUNK, os.SEEK_END)
+                    h.update(fh.read(CHUNK))
+                # and a MIDDLE megabyte. Head plus tail alone leaves every byte
+                # between them out of the hash, so two files above 2*CHUNK that
+                # differ only in the middle collided -- and this hash is the
+                # "byte-identical" proof that gates a bulk delete with no undo.
+                if st.st_size > 2 * CHUNK:
+                    fh.seek((st.st_size - CHUNK) // 2)
                     h.update(fh.read(CHUNK))
             fp = h.hexdigest()
     except OSError:
@@ -302,6 +314,75 @@ def ignore_pair(a: str, b: str) -> bool:
         return False
 
 
+def rename_pair_refs(old_base: str, new_base: str) -> int:
+    """A meeting rename must follow into the "keep both" list.
+
+    A kept pair is stored as two literal base names, and a title edit or a date
+    correction re-stamps one of them through the ordinary edit path. Without
+    this, the next scan finds the same two transcripts under the new name,
+    offers them again as a fresh 100 percent match, and the user's earlier
+    decision is silently orphaned. Returns how many pairs were rewritten."""
+    if not old_base or old_base == new_base:
+        return 0
+    n = 0
+    try:
+        with _io_lock:
+            out = set()
+            for a, b in ignored_pairs():
+                na = new_base if a == old_base else a
+                nb = new_base if b == old_base else b
+                if (na, nb) != (a, b):
+                    n += 1
+                out.add(tuple(sorted((na, nb))))
+            if n:
+                _atomic_write(ignored_path(),
+                              json.dumps([list(x) for x in sorted(out)]))
+    except OSError:
+        return 0
+    return n
+
+
+def _length_signal(d: dict) -> tuple:
+    """(duration_sec, word count) for one transcript.
+
+    duration_sec is the gate's real signal, but it is MISSING on
+    pre-migration transcripts, and a missing one used to skip the gate
+    outright -- which let a short clip match an hour-long meeting at a full
+    100 percent (bottom-k Jaccard reads a contained subset as identical).
+    The word count is always available and stands in when the duration is
+    not."""
+    dur = 0.0
+    try:
+        dur = float(d.get("duration_sec") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        # the transcript's own timing, when it has any
+        for key, field in (("segments", "end"), ("words", "end")):
+            for item in reversed(d.get(key) or []):
+                try:
+                    dur = max(dur, float(item.get(field) or 0.0))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if dur > 0:
+                    break
+            if dur > 0:
+                break
+    words = len(_tokens(" ".join(str(s.get("text") or "")
+                                 for s in d.get("segments") or [])))
+    return max(0.0, dur), words
+
+
+def _length_gate(da, db, wa, wb) -> bool:
+    """True when two meetings are too different in length to be the same
+    recording. Duration when both sides have one, word count otherwise."""
+    if da > 0 and db > 0:
+        return abs(da - db) > DUR_TOL * max(da, db)
+    if wa > 0 and wb > 0:
+        return abs(wa - wb) > DUR_TOL * max(wa, wb)
+    return False
+
+
 def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     """[{"a": base, "b": base, "score": float}] for every live pair that looks
     like the same recording, best score first.
@@ -313,7 +394,7 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     threshold = THRESHOLD if threshold is None else threshold
     cache = _load_cache()
     old = cache.get("sketches") or {}
-    sketches, durs = {}, {}
+    sketches, durs, lens = {}, {}, {}
     for base in sorted(config.meeting_bases(dest_dir)):
         j = config.meeting_file(base, ".json", dest_dir)
         try:
@@ -321,9 +402,13 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
         except OSError:
             continue
         prev = old.get(base)
-        if prev and abs(prev.get("mtime", 0) - mtime) < 1.0:
+        # "words" is required: an entry cached by an older build carries no
+        # word count, and the length gate below needs one whenever the
+        # duration is missing
+        if prev and abs(prev.get("mtime", 0) - mtime) < 1.0 and "words" in prev:
             sketches[base] = prev["hashes"]
             durs[base] = prev.get("dur") or 0.0
+            lens[base] = prev.get("words") or 0
             continue
         try:
             d = json.loads(j.read_text())
@@ -331,9 +416,9 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
             continue
         text = " ".join(str(s.get("text") or "") for s in d.get("segments") or [])
         sk = sketch(text)
-        dur = float(d.get("duration_sec") or 0.0)
-        sketches[base], durs[base] = sk, dur
-        old[base] = {"mtime": mtime, "dur": dur, "hashes": sk}
+        dur, nwords = _length_signal(d)
+        sketches[base], durs[base], lens[base] = sk, dur, nwords
+        old[base] = {"mtime": mtime, "dur": dur, "words": nwords, "hashes": sk}
     # drop cache entries for meetings that are gone (deleted, archived, renamed)
     cache["sketches"] = {b: v for b, v in old.items() if b in sketches}
 
@@ -348,7 +433,7 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
             if (a, b) in skip:
                 continue
             da, db = durs.get(a, 0.0), durs.get(b, 0.0)
-            if da > 0 and db > 0 and abs(da - db) > DUR_TOL * max(da, db):
+            if _length_gate(da, db, lens.get(a, 0), lens.get(b, 0)):
                 continue          # different lengths: not the same recording
             # unknown durations sort LAST (1.0), never first: a gated real pair
             # is within DUR_TOL, so zero-duration noise must not outrank it and

@@ -317,3 +317,93 @@ def test_near_miss_stranger_stays_open_set_and_floor_gates_the_mint(sandbox):
                            stats={"S1": THIN_STATS})
     assert "S1" not in out2
     assert len(unknowns.load()["speakers"]) == 1
+
+
+# ---------- batch-1 regressions ----------
+
+def test_the_ghost_prune_never_deletes_a_dropped_tombstone(sandbox):
+    """W12: the prune at the end of assign() retires an unknown whose only
+    meeting reference a named cluster in this pass now matches. It never checked
+    the voice's own dropped flag -- so an unrelated named cluster in the same
+    meeting, merely resembling the tombstoned sample above the match floor,
+    deleted the tombstone during an ordinary background relabel. The suppressed
+    voice then resurfaced under a fresh id the next time it was heard."""
+    v = _unit(21)
+    uid = unknowns.assign({"S0": v}, {"S0": None}, "Mtg A",
+                          stats={"S0": GOOD_STATS})["S0"]
+    assert unknowns.drop(uid)
+    assert unknowns.load()["speakers"][uid].get("dropped")
+
+    # a DIFFERENT person, already named here, who happens to resemble the
+    # tombstoned voice at 0.65 -- above MATCH_MIN, below SPLIT_SIM
+    near = _at_cosine(v, 0.65, seed=22)
+    unknowns.assign({"S1": near}, {"S1": "Alex Rivera"}, "Mtg A")
+
+    reg = unknowns.load()["speakers"]
+    assert uid in reg and reg[uid].get("dropped"), \
+        "a tombstone must survive an ordinary relabel of its own meeting"
+    assert (config.VOICEPRINTS_DIR / reg[uid]["file"]).exists()
+
+    # and the suppression still holds the next time the voice is heard
+    out = unknowns.assign({"S0": _at_cosine(v, 0.95, seed=23)}, {"S0": None},
+                          "Mtg B", stats={"S0": GOOD_STATS})
+    assert out == {} and set(unknowns.load()["speakers"]) == {uid}
+
+
+def test_promote_enrolls_every_sample_or_none_of_them(sandbox):
+    """W13: promote enrolled the samples one row at a time and deleted the
+    source unknown only after every row succeeded. A raising row partway
+    through left the new name PARTIALLY enrolled and the unknown still live and
+    nameable, and every retry raised on the same row, so the state was stuck."""
+    good = _unit(31)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy",
+            np.vstack([good, np.zeros(256)]))     # the second row is zero-norm
+    unknowns.save({"speakers": {
+        "U001": {"file": "U001.npy", "meetings": ["Mtg A", "Mtg B"]}}})
+
+    for attempt in range(3):
+        assert unknowns.promote("U001", "Priya Shah") is False, \
+            f"attempt {attempt}: a failing promote must report failure, not raise"
+    assert "Priya Shah" not in identify.load_registry(), \
+        "a failed naming must enroll nothing at all"
+    assert "U001" in unknowns.load()["speakers"], \
+        "the source unknown stays nameable so the user can retry"
+    assert unknowns.samples_of("U001").shape == (2, 256)
+
+
+def test_a_failed_promote_restores_an_existing_profile_exactly(sandbox):
+    """W13, the other half: naming an unknown as an ALREADY enrolled person
+    appends to that person's stack. A row that raises partway must leave their
+    saved samples byte-for-byte as they were."""
+    identify.enroll("Alex Rivera", _unit(41), source="Mtg Z")
+    before_entry = dict(identify.load_registry()["Alex Rivera"])
+    before_rows = np.load(config.VOICEPRINTS_DIR / before_entry["file"]).copy()
+
+    np.save(config.VOICEPRINTS_DIR / "U001.npy",
+            np.vstack([_unit(42), np.zeros(256)]))
+    unknowns.save({"speakers": {"U001": {"file": "U001.npy", "meetings": ["Mtg A"]}}})
+
+    assert unknowns.promote("U001", "Alex Rivera") is False
+    after_entry = identify.load_registry()["Alex Rivera"]
+    after_rows = np.load(config.VOICEPRINTS_DIR / after_entry["file"])
+    assert after_entry == before_entry
+    assert after_rows.shape == before_rows.shape
+    assert np.allclose(after_rows, before_rows)
+
+
+def test_merge_refuses_a_dropped_voice_on_either_side(sandbox):
+    """W22: merge never checked the dropped flag. Merging a dropped voice INTO
+    a live one deletes the tombstone and lets the suppressed voice resurface
+    under the live id; merging a live voice INTO a dropped one buries a real
+    identity under the tombstone with no way back."""
+    live = unknowns.assign({"S0": _unit(51)}, {"S0": None}, "Mtg A",
+                           stats={"S0": GOOD_STATS})["S0"]
+    tomb = unknowns.assign({"S0": _unit(52)}, {"S0": None}, "Mtg B",
+                           stats={"S0": GOOD_STATS})["S0"]
+    assert unknowns.drop(tomb)
+
+    assert unknowns.merge(tomb, live) is False
+    assert unknowns.merge(live, tomb) is False
+    reg = unknowns.load()["speakers"]
+    assert set(reg) == {live, tomb}
+    assert reg[tomb].get("dropped") and not reg[live].get("dropped")

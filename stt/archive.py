@@ -88,6 +88,21 @@ def archive_meeting(base: str) -> dict:
             return {"ok": False, "error": f"no meeting folder for '{base}'"}
         new_base = _move(base, old_dir, config.archive_dir())
     manifest.retarget(old_dir, config.archive_dir() / new_base, base, new_base)
+    if new_base != base:
+        # a collision renamed the folder, so every registry that keys meetings
+        # BY NAME has to follow -- exactly as restore_meeting does for the
+        # symmetric case. Without this a voice reference keeps pointing at the
+        # pre-collision name, which now either does not exist or names a
+        # DIFFERENT archived meeting, and a later restore brings back the wrong
+        # one. Best-effort: the move itself already stands.
+        from . import dupes, identify, unknowns
+        try:
+            unknowns.rename_meeting_refs(base, new_base)
+            identify.rename_source_refs(base, new_base)
+            dupes.rename_pair_refs(base, new_base)
+        except Exception as e:
+            print(f"   archive: registry references not updated ({e})",
+                  file=sys.stderr)
     return {"ok": True, "base": new_base}
 
 
@@ -104,12 +119,12 @@ def restore_meeting(base: str) -> dict:
         new_base = _move(base, src_dir, config.meetings_dir())
     manifest.retarget(src_dir, config.meeting_dir(new_base), base, new_base)
     if new_base != base:
-        from . import identify, unknowns
+        from . import dupes, identify, unknowns
         try:
             unknowns.rename_meeting_refs(base, new_base)
             identify.rename_source_refs(base, new_base)
+            dupes.rename_pair_refs(base, new_base)
         except Exception as e:
-            import sys
             print(f"   restore: registry references not updated ({e})",
                   file=sys.stderr)
     # a meeting archived before the naming convention restores under its plain
@@ -190,15 +205,25 @@ def delete_meeting(base: str) -> dict:
     # file as "identical" -- and the duplicate sweep would offer to delete the
     # only remaining copy of a recording whose re-transcription this very
     # function just promised. Never blocks the delete itself.
+    #
+    # The record is matched on its output DIRECTORY, not just the base name: a
+    # live meeting and an archived one can carry the same base (real for
+    # pre-feature names), and a name-only match wiped the other one's record
+    # too -- so its still-present source read as unprocessed and got silently
+    # re-transcribed on the next run.
     try:
-        m = manifest.load()
-        stale = [k for k, rec in m.get("processed", {}).items()
-                 if any(str(o).endswith(".json") and Path(o).stem == base
-                        for o in rec.get("outputs") or [])]
-        for k in stale:
-            m["processed"].pop(k, None)
-        if stale:
-            manifest.save(m)
+        # one lock across the read and the write: a concurrent batch mark()
+        # must not be discarded by this scrub, nor the scrub by it
+        with manifest.locked():
+            m = manifest.load()
+            stale = [k for k, rec in m.get("processed", {}).items()
+                     if any(str(o).endswith(".json") and Path(o).stem == base
+                            and Path(o).parent == target
+                            for o in rec.get("outputs") or [])]
+            for k in stale:
+                m["processed"].pop(k, None)
+            if stale:
+                manifest.save(m)
     except Exception:
         pass
 

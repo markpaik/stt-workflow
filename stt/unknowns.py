@@ -321,10 +321,17 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
         # retires the stale "Speaker N" entry. Requiring the voice match keeps
         # this safe for partial-cluster calls; multi-meeting unknowns are
         # never touched here.
+        # A DROPPED voice is exempt. Its entry is a tombstone: the whole point
+        # is that deleting it lets the very next relabel re-register the same
+        # voice under a fresh number. An unrelated named cluster in this
+        # meeting resembling it above MATCH_MIN is not evidence that the
+        # tombstoned person got named -- and pruning on that resemblance
+        # resurrected suppressed voices during an ordinary background relabel.
         named_vecs = [np.asarray(v, float) for label, v in cent_emb.items()
                       if cluster_names.get(label)]
         for uid in [u for u, m in reg["speakers"].items()
-                    if m.get("meetings") == [meeting] and u not in out.values()]:
+                    if m.get("meetings") == [meeting] and u not in out.values()
+                    and not m.get("dropped")]:
             s = _samples(reg, uid)
             if s is None or not named_vecs:
                 continue
@@ -335,9 +342,33 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
         return out
 
 
+def _restore_profile(name: str, entry, rows):
+    """Put an enrolled profile back exactly as promote() found it -- the entry
+    and the sample stack, or neither when the name was brand new."""
+    from . import identify
+    with lock_registry():
+        reg = identify.load_registry()
+        if entry is None:
+            gone = reg.pop(name, None)
+            if gone and gone.get("file"):
+                (config.VOICEPRINTS_DIR / gone["file"]).unlink(missing_ok=True)
+        else:
+            reg[name] = entry
+            if rows is not None:
+                np.save(config.VOICEPRINTS_DIR / entry["file"], rows)
+        identify.save_registry(reg)
+
+
 def promote(uid: str, name: str) -> bool:
     """Name an unknown: move their samples into the enrolled library and retire the
-    unknown id. Caller should then relabel past meetings."""
+    unknown id. Caller should then relabel past meetings.
+
+    ALL of the rows or none of them. Enrolling row by row and deleting the
+    source only at the end left a raising row (a zero-norm sample) with the
+    name half-enrolled AND the unknown still live and nameable -- and every
+    retry raised on the same row, so the state was stuck forever. On any
+    failure the rows added here are removed and the unknown is kept, so the
+    retry starts from exactly the state the user can see."""
     from . import identify
     with lock_registry():
         reg = load()
@@ -346,12 +377,26 @@ def promote(uid: str, name: str) -> bool:
         s = _samples(reg, uid)
         if s is None:
             return False
+        # the destination profile as it stands BEFORE any row is added
+        before = identify.load_registry().get(name)
+        rows_before = None
+        if before is not None and before.get("file"):
+            f0 = config.VOICEPRINTS_DIR / before["file"]
+            if f0.exists():
+                rows_before = np.load(f0)
         # carry meeting provenance along (samples were appended one per meeting;
         # align best-effort — the sample window and meeting list can drift apart)
         meetings = reg["speakers"][uid].get("meetings", [])
-        for i, row in enumerate(s):
-            src = meetings[i] if i < len(meetings) else (meetings[-1] if meetings else None)
-            identify.enroll(name, row, source=src)
+        try:
+            for i, row in enumerate(s):
+                src = meetings[i] if i < len(meetings) else (meetings[-1] if meetings else None)
+                identify.enroll(name, row, source=src)
+        except Exception as e:
+            _restore_profile(name, before, rows_before)
+            print(f"WARNING: naming {display(uid)} '{name}' failed ({e}) -- "
+                  "nothing was enrolled and the voice is still nameable.",
+                  file=sys.stderr)
+            return False
         f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
         f.unlink(missing_ok=True)
         del reg["speakers"][uid]
@@ -365,6 +410,14 @@ def merge(uid_src: str, uid_dst: str) -> bool:
     with lock_registry():
         reg = load()
         if uid_src not in reg["speakers"] or uid_dst not in reg["speakers"] or uid_src == uid_dst:
+            return False
+        # a DROPPED voice is a tombstone and may be neither side of a merge.
+        # Merging a dropped voice INTO a live one deletes the tombstone and
+        # lets the suppressed voice resurface under the live id; merging a live
+        # voice INTO a dropped one buries a real identity under the tombstone
+        # with no way back. Undo the drop first (Restore), then merge.
+        if (reg["speakers"][uid_src].get("dropped")
+                or reg["speakers"][uid_dst].get("dropped")):
             return False
         s, d = _samples(reg, uid_src), _samples(reg, uid_dst)
         if d is None:

@@ -94,6 +94,15 @@ _env_lock = threading.Lock()
 
 
 def _env_file_set(updates: dict, remove=()):
+    # A value is written into stt.env as one KEY=VALUE line. A newline or
+    # carriage return inside it therefore INJECTS a whole extra STT_*=... line
+    # into the file that stores the API keys -- and config re-reads that file on
+    # every call, so the injected line takes effect on the next poll with no
+    # restart. Refuse the write outright: no field this endpoint family accepts
+    # (a model id, a person's name, an API key) has any use for a line break.
+    for k, v in updates.items():
+        if any(c in str(k) or c in str(v) for c in ("\n", "\r")):
+            raise ValueError("settings values cannot contain line breaks")
     # serialize the read-modify-write: settings POSTs each land on their own
     # ThreadingHTTPServer thread, so two concurrent saves would otherwise read
     # the same snapshot and the later write would silently drop the earlier key
@@ -339,8 +348,22 @@ def _dupe_pair_rows(dst_dir=None):
     return rows
 
 
-def _queue_file(name):
-    """The waiting source file called `name`, or None.
+def _watched_dirs():
+    """The watched folders, in THE resolution order -- the iCloud source first,
+    then the recorder's staging dir. The queue shows one row per NAME, so every
+    by-name endpoint has to walk them in this same order or it acts on a file
+    the row never showed."""
+    return (config.source_dir(), config.recordings_dir())
+
+
+def _queue_files(name):
+    """EVERY waiting source file called `name`, in resolution order.
+
+    A name can exist in both watched folders with different bytes behind it.
+    The queue lists only the first, so a delete that ignores the second leaves
+    a file that instantly becomes a new row under the same name -- inheriting,
+    silently, whatever hold the deleted one carried. Callers that act on a file
+    take the first entry (the one the row showed) and REPORT the rest.
 
     Queue items have no meeting yet, so there is no base to gate on — this is
     their equivalent of _known_base. A name is accepted ONLY if it lands, after
@@ -350,19 +373,48 @@ def _queue_file(name):
     dotfiles are refused so an in-progress .rec-*.caf capture can't be served
     or deleted out from under the recorder."""
     if not name or not isinstance(name, str):
-        return None
+        return []
     if "/" in name or "\\" in name or name.startswith("."):
-        return None
-    for folder in (config.source_dir(), config.recordings_dir()):
+        return []
+    out = []
+    for folder in _watched_dirs():
         try:
             p = (folder / name).resolve()
             if p.parent != folder.resolve() or not p.is_file():
                 continue
             if p.suffix.lower() not in config.AUDIO_EXTS:
                 continue
-            return p
+            if p not in out:
+                out.append(p)
         except OSError:
             continue
+    return out
+
+
+def _queue_file(name):
+    """The waiting source file called `name` -- the one the queue row shows --
+    or None. See _queue_files for the resolution rule."""
+    found = _queue_files(name)
+    return found[0] if found else None
+
+
+def _stored_audio(base):
+    """The meeting's own audio on disk -- live or archived -- or None.
+
+    drop_audio() deletes it and keeps the transcript, and the manifest's
+    recorded fingerprint goes on matching the original source afterwards. So
+    "the meeting still exists" is NOT enough to prove a waiting file is a
+    second copy: without this check the sweep deletes the last copy of that
+    recording anywhere."""
+    if not base or not isinstance(base, str):
+        return None
+    for d in (config.meetings_dir(), config.archive_dir()):
+        try:
+            p = config.meeting_audio(base, d)
+        except OSError:
+            continue
+        if p is not None:
+            return p
     return None
 
 
@@ -844,13 +896,15 @@ def _queue_and_dupes():
     from stt import holds
     _held = holds.items()
     m = manifest.load()
-    src_dir, dst_dir = config.source_dir(), config.meetings_dir()
+    dst_dir = config.meetings_dir()
     queue = []
     # BOTH watched folders: the iCloud source AND the recorder's staging dir.
     # Only the source used to be listed, so a finished recording waited for the
     # batch completely invisibly — "I stopped, where did it go?"
+    # _watched_dirs is the ONE resolution order: the row this loop emits and the
+    # path every by-name endpoint acts on must be the same file
     _qfiles, _qseen, _qpaths = [], set(), {}
-    for _qd in (src_dir, config.recordings_dir()):
+    for _qd in _watched_dirs():
         try:
             for p in sorted(_qd.iterdir()):
                 if p.name not in _qseen:
@@ -922,6 +976,15 @@ def _queue_and_dupes():
             f["dup_of"] = d["base"]
             f["dup_title"] = _titles.get(d["base"], d["base"])
             f["dup_reason"] = d["reason"]
+            if d["reason"] == "identical":
+                # the fingerprint the match was made against, taken here and
+                # carried on the row, so the bulk delete can re-take it at
+                # unlink time and prove the file on disk is still that file.
+                # dupes caches per (path, size, mtime), so this costs no I/O:
+                # source_duplicates just took it.
+                fp_now = dupes.fingerprint(_qpaths[f["name"]])
+                if fp_now:
+                    f["dup_fp"] = fp_now
     return queue, meetings, resolvable
 
 
@@ -1584,6 +1647,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif u.path == "/api/model":
                 choice = b["model"]
+                # only a model the settings UI actually offers. Any other string
+                # went into STT_ASR_BACKEND verbatim, so a plain typo silently
+                # corrupted the backend setting, and this was the route the
+                # newline injection above travelled.
+                if choice not in {c["id"] for c in ASR_CHOICES}:
+                    self._json({"ok": False, "error": "Unknown model."})
+                    return
                 if choice.startswith("cloud:"):
                     from stt import asr_cloud
                     prov = asr_cloud.provider_from_backend(choice)
@@ -1662,8 +1732,21 @@ class Handler(BaseHTTPRequestHandler):
                                     "note": "renaming this meeting in background"})
                         return
                     from stt import diarcache
-                    raw_turns, _, cent_emb, _ = diarcache.load(
-                        config.meeting_file(b["meeting"], ".diar.npz"))
+                    # the meeting can be renamed, restamped or archived in the
+                    # gap between the membership check above and these reads. An
+                    # unguarded read answered with a bare 500 carrying the
+                    # server's own filesystem path.
+                    try:
+                        raw_turns, _, cent_emb, _ = diarcache.load(
+                            config.meeting_file(b["meeting"], ".diar.npz"))
+                        mj = json.loads(config.meeting_file(
+                            b["meeting"], ".json").read_text())
+                    except (OSError, ValueError, KeyError):
+                        self._json({"ok": False,
+                                    "error": "That meeting changed while you "
+                                             "were naming it. Refresh and try "
+                                             "again."})
+                        return
                     if b["speaker"] not in cent_emb:
                         self._json({"ok": False,
                                     "error": "That speaker has no voice embedding "
@@ -1676,8 +1759,6 @@ class Handler(BaseHTTPRequestHandler):
                     # diarizer split three ways must not be refused because
                     # each fragment alone looks like a noise floor. `floor`
                     # tells the panel the meeting-only fallback applies.
-                    mj = json.loads(
-                        config.meeting_file(b["meeting"], ".json").read_text())
                     unnamed = [s["id"] for s in mj.get("speakers", [])
                                if not s.get("name")]
                     veto = unknowns.floor_violation(unknowns.pooled_stats(
@@ -1827,10 +1908,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
                 name = b.get("name")
-                f = _queue_file(name)
-                if f is None:
+                # every copy of this name, in the queue's own resolution order:
+                # the first is the file the row showed and the only one deleted
+                found = _queue_files(name)
+                if not found:
                     self._json({"ok": False, "error": "no such queued file"})
                     return
+                f = found[0]
                 if name in status.read().get("active", {}):
                     self._json({"ok": False,
                                 "error": "this file is being processed right now"})
@@ -1839,7 +1923,17 @@ class Handler(BaseHTTPRequestHandler):
                 f.unlink()
                 # the recorder's channel-layout sidecar travels with its audio
                 f.with_suffix(".opts.json").unlink(missing_ok=True)
-                self._json({"ok": True, "freed_mb": mb})
+                out = {"ok": True, "freed_mb": mb}
+                if len(found) > 1:
+                    # the same name in the OTHER watched folder is a DIFFERENT
+                    # recording. It takes this row's place immediately, and it
+                    # inherits the deleted file's hold -- say so instead of
+                    # letting the row look like it never went away.
+                    out["shadowed"] = True
+                    out["note"] = ("another file with this name is waiting in "
+                                   "the other watched folder -- it takes this "
+                                   "row's place, hold and all")
+                self._json(out)
             elif u.path == "/api/queue_delete_dupes":
                 # bin every waiting file that is BYTE-IDENTICAL to a meeting that
                 # already exists. The list is re-derived here from the files on
@@ -1878,8 +1972,24 @@ class Handler(BaseHTTPRequestHandler):
                     if (f.get("dup_of") not in set(config.meeting_bases())
                             | set(config.archived_bases())):
                         continue
+                    # and the meeting must still HOLD that audio. A manifest
+                    # fingerprint keeps matching after drop_audio removed the
+                    # meeting's own copy, so the base reads live while the only
+                    # remaining bytes of that recording are the file below.
+                    if not _stored_audio(f.get("dup_of")):
+                        continue
                     p = _queue_file(f["name"])
                     if p is None:
+                        continue
+                    # identity is proven HERE, not in the snapshot: this file is
+                    # re-resolved by NAME, and a recurring export name can point
+                    # at a different recording by now (iCloud delivered this
+                    # week's file; the source-dir copy vanished and a same-named
+                    # one in recordings_dir took the row). Re-fingerprint the
+                    # exact path about to be unlinked and require it to equal
+                    # the fingerprint that earned the match.
+                    snap = f.get("dup_fp")
+                    if not snap or dupes.fingerprint(p) != snap:
                         continue
                     try:
                         freed += p.stat().st_size / 1e6

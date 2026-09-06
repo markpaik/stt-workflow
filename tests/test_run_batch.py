@@ -686,3 +686,91 @@ def test_selection_never_skips_a_file_the_panel_flags_as_a_duplicate(sandbox, ca
     out = capsys.readouterr().out
     assert "board prep 2.m4a" in out
     assert "0 to process" not in out, "the flagged copy must still be selected"
+
+
+def test_a_hold_placed_mid_run_stops_the_next_file(sandbox, monkeypatch):
+    """W3: the todo list read the parks ONCE, before the run started. A hold
+    placed on a later file in the same run did not stop that file from
+    processing, and on success the run also released the hold it had never
+    honored -- breaking the documented contract that an automatic sweep always
+    skips a held file."""
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, holds, summarize
+
+    (config.ICLOUD_DIR / "one.m4a").write_bytes(b"\x00" * 64)
+    (config.ICLOUD_DIR / "two.m4a").write_bytes(b"\x00" * 64)
+
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        src = Path(src_str)
+        seen.append(src.name)
+        if src.name == "one.m4a":
+            holds.hold("two.m4a")        # the user parks the next file mid-run
+            holds.hold("one.m4a")        # and parks the one being processed
+        return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime,
+                "outputs": [], "summary": "1 speaker(s)", "who": "",
+                "base": src.stem, "duration_sec": 1.0, "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    assert seen == ["one.m4a"], "a park placed mid-run must stop the next file"
+    assert holds.items() == {"one.m4a", "two.m4a"}, \
+        "the run must never release a hold it did not honor"
+
+
+def test_naming_a_held_file_overrides_the_park_and_clears_it(sandbox, monkeypatch):
+    """W3, the other side of the contract: naming a held file explicitly is the
+    user asking for it, which outranks the park -- and once the file is
+    processed, clearing that park cannot pin a stale name."""
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, holds, summarize
+
+    (config.ICLOUD_DIR / "one.m4a").write_bytes(b"\x00" * 64)
+    holds.hold("one.m4a")
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        src = Path(src_str)
+        seen.append(src.name)
+        return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime,
+                "outputs": [], "summary": "1 speaker(s)", "who": "",
+                "base": src.stem, "duration_sec": 1.0, "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--files", "one.m4a",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+    assert seen == ["one.m4a"]
+    assert holds.items() == set()

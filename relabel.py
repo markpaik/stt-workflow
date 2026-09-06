@@ -41,8 +41,19 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
     # otherwise be silently clobbered by our (by-then-stale) rewrite.
     from stt import review
     with review.lock_meeting(base):
-        data = json.loads(jpath.read_text())
-        words = [{"start": w["start"], "end": w["end"], "word": w["word"]} for w in data["words"]]
+        # the existence checks above are a SNAPSHOT: a concurrent rename,
+        # restamp or archive moves both files in the gap before these reads.
+        # An unguarded read raised out of relabel_all's per-meeting handler,
+        # which then reported a failure with a raw filesystem path in it.
+        try:
+            data = json.loads(jpath.read_text())
+            words = [{"start": w["start"], "end": w["end"], "word": w["word"]}
+                     for w in data["words"]]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"  skip {base}: its transcript moved or is unreadable "
+                  f"({type(e).__name__}) -- it will pick up the new name on the "
+                  "next pass")
+            return False
         # heal ASR hallucination loops in transcripts processed before the guard
         from stt import sanitize
         words, loop_spans = sanitize.collapse_repeats(words)
@@ -50,7 +61,13 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         vps = identify.load_voiceprints()
         if allowed_names is not None:
             vps = {n: s for n, s in vps.items() if n in allowed_names}
-        raw_turns, turn_embeddings, cent_emb, overlaps = diarcache.load(dpath)
+        try:
+            raw_turns, turn_embeddings, cent_emb, overlaps = diarcache.load(dpath)
+        except (OSError, ValueError, KeyError) as e:
+            print(f"  skip {base}: its diarization cache moved or is unreadable "
+                  f"({type(e).__name__}) -- it will pick up the new name on the "
+                  "next pass")
+            return False
         cluster_names = ({k: v["name"] for k, v in
                           identify.name_speakers(cent_emb, allowed_names=allowed_names,
                                                  context=f"relabel:{base}").items()}
