@@ -676,3 +676,105 @@ def test_a_gone_source_failure_is_honest_and_dismissible(sandbox, monkeypatch):
     # junk names are refused, nothing stored
     assert srv.dismiss_failure("../../etc/passwd") is False
     assert srv.dismiss_failure("") is False
+
+
+# ---------- fix pass 2 (2026-09-06) ----------
+
+def test_the_tray_failed_line_carries_the_gone_flag(sandbox, monkeypatch):
+    """R5: the gone-source fix landed on the timeline row but not on the tray
+    entry built from it, so the tray still offered Retry for a file that is no
+    longer on disk -- a POST to /api/run for nothing."""
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "ghost.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "boom"}])
+    st = srv.gather_state()
+    entry = [t for t in st["tray"] if t["kind"] == "failed"][0]
+    assert entry["gone"] is True, "the tray entry dropped the row's gone flag"
+
+    # a failure whose source IS still in the folder keeps gone false, so the
+    # tray goes on offering the retry that actually works
+    _source("still here.m4a")
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "still here.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "boom"}])
+    st = srv.gather_state()
+    entry = [t for t in st["tray"] if t["kind"] == "failed"][0]
+    assert entry["gone"] is False
+
+
+def test_a_duplicate_of_an_archived_meeting_says_so_and_resolves_its_title(
+        sandbox, monkeypatch):
+    """R7: dup_of can name an ARCHIVED meeting (the duplicate gate spans live
+    plus archived by design), but the title map is built from LIVE metas only.
+    The row fell back to the raw stamped base and linked it into the meeting
+    view, which renders live meetings only: a dead link under a permanent
+    "Loading meeting" spinner."""
+    from stt import archive, dupes
+    _meeting("Board Prep 05012026")
+    assert archive.archive_meeting("Board Prep 05012026")["ok"]
+    _source("board prep.m4a")
+    monkeypatch.setattr(dupes, "source_duplicates",
+                        lambda *a, **k: {"board prep.m4a": {
+                            "base": "Board Prep 05012026", "reason": "name"}})
+
+    queue, _, _ = srv._queue_and_dupes()
+    row = [f for f in queue if f["name"] == "board prep.m4a"][0]
+    assert row["dup_of"] == "Board Prep 05012026"
+    assert row["dup_archived"] is True
+    assert row["dup_title"] == "Board Prep", \
+        "the title must resolve from the archived meeting, not the raw base"
+
+    st = srv.gather_state()
+    tl = [r for r in st["timeline"] if r["id"] == "src:board prep.m4a"][0]
+    assert tl["dup_archived"] is True and tl["dup_title"] == "Board Prep"
+
+
+def test_a_live_duplicate_still_links_and_is_not_marked_archived(
+        sandbox, monkeypatch):
+    """R7 must not disarm the ordinary case: a LIVE match keeps its link."""
+    from stt import dupes
+    _meeting("Board Prep 05012026")
+    _source("board prep.m4a")
+    monkeypatch.setattr(dupes, "source_duplicates",
+                        lambda *a, **k: {"board prep.m4a": {
+                            "base": "Board Prep 05012026", "reason": "name"}})
+    queue, _, _ = srv._queue_and_dupes()
+    row = [f for f in queue if f["name"] == "board prep.m4a"][0]
+    assert row["dup_title"] == "Board Prep" and not row.get("dup_archived")
+    st = srv.gather_state()
+    tl = [r for r in st["timeline"] if r["id"] == "src:board prep.m4a"][0]
+    assert tl["dup_archived"] is False
+
+
+def test_a_short_file_never_estimates_zero_minutes(sandbox, monkeypatch):
+    """W26: a one-second file still carries the pipeline's fixed per-file
+    overhead, but round() turned that into 0 -- and every downstream check is a
+    plain truthiness test, so 0 read as NO estimate. A running batch with only
+    short files pending then reported no ETA anywhere on screen."""
+    _source("blip.m4a")
+    monkeypatch.setattr(srv, "_est_duration", lambda p: 1.0)
+    queue, _, _ = srv._queue_and_dupes()
+    row = [f for f in queue if f["name"] == "blip.m4a"][0]
+    assert row["est_min"] >= 1, "a real estimate must never round down to zero"
+
+    # and it reaches the row instead of vanishing into a falsy 0
+    st = srv.gather_state()
+    tl = [r for r in st["timeline"] if r["id"] == "src:blip.m4a"][0]
+    assert tl["est_minutes"] >= 1
+
+
+def test_the_waiting_row_carries_the_stage_breakdown(sandbox, monkeypatch):
+    """W27: est_detail (the transcribe/speakers split) was computed on every
+    poll for every queued file and then thrown away -- the timeline row the
+    shell renders never carried it. Either render it or stop computing it; it
+    renders."""
+    _source("long talk.m4a")
+    monkeypatch.setattr(srv, "_est_duration", lambda p: 3600.0)
+    queue, _, _ = srv._queue_and_dupes()
+    row = [f for f in queue if f["name"] == "long talk.m4a"][0]
+    assert row["est_detail"], "the split is still computed"
+
+    st = srv.gather_state()
+    tl = [r for r in st["timeline"] if r["id"] == "src:long talk.m4a"][0]
+    assert tl["est_detail"] == row["est_detail"], \
+        "the computed breakdown must reach the row the shell renders"

@@ -174,6 +174,13 @@ const TRAY_EXPAND_MAX=8;
 // computed before the flag flipped and the next poll rebuilt the tray over it.
 let DUPE_ARMED=false,DUPE_ERR='';
 function dupeArm(on){DUPE_ARMED=!!on;if(on)DUPE_ERR='';drawTray(S||{});}
+// the armed state belongs to the dupe_files row that armed it. Arm the sweep,
+// walk away without confirming, and the flagged file leaves the queue by
+// another path: the flag used to survive, so the NEXT duplicate row (days
+// later, different files) rendered pre-armed and its first click fired the
+// no-undo bulk delete with confirm:true. Cleared whenever that row is gone,
+// and on every route change.
+function dupeDisarm(){DUPE_ARMED=false;DUPE_ERR='';}
 async function dupeDeleteGo(btn){
   if(btn){btn.disabled=true;btn.innerHTML='Deleting&#8230;';}
   let r;
@@ -186,11 +193,28 @@ async function dupeDeleteGo(btn){
     return;
   }
   DUPE_ERR='';
+  // ok:true with an empty deleted list is NOT success: every server-side skip
+  // (held, mid-run, the matched meeting gone, the last copy, a changed file,
+  // an unlink that failed) answered that way, so the row re-rendered its
+  // Delete button and silently no-opped on every further click. The server
+  // names each skip; say so in the row's own detail line.
+  if(!(r.deleted&&r.deleted.length)){
+    const why=[...new Set((r.skipped||[]).map(x=>x.reason).filter(Boolean))];
+    DUPE_ERR=why.length
+      ?'Nothing was deleted: '+why.join('; ')+'.'
+      :'Nothing was deleted: no waiting file is still an exact copy.';
+    drawTray(S||{});
+    refresh();
+    return;
+  }
   refresh();
 }
 function drawTray(s){
   const tray=$('#tray');
   const items=s.tray||[];
+  // BEFORE the signature and before the empty early-return: no dupe_files row
+  // means there is nothing armed to confirm (see dupeDisarm)
+  if(!items.some(t=>t.kind==='dupe_files'))dupeDisarm();
   // the recorder's last outcome when it FAILED ("captured NO audio..."): a
   // decision, so it outranks everything, even a live stall. A SUCCESS note is
   // the quiet #recok line under the header instead (drawRecOk), never in here.
@@ -227,8 +251,13 @@ function drawTray(s){
   // rare + urgent: one line each, acted on in place
   for(const t of stalls)
     h+=_trayRow(t.title,t.detail,_trayVerb('Fix',`trayAct('recorder_stall','${escJs(t.target)}')`));
+  // a failure whose source file is GONE has nothing to re-run: the tray line
+  // offered Retry anyway, which posted /api/run for a file that is not there.
+  // Same split the row makes, from the same flag.
   for(const t of fails)
-    h+=_trayRow(t.title,t.detail,_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
+    h+=_trayRow(t.title,t.detail,t.gone
+      ?_trayVerb('Dismiss',`trayAct('failed_gone','${escJs(t.target)}')`)
+      :_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
 
   // waiting files that were already processed: above the reviews, because the
   // next automatic run spends real hours transcribing them again. The bulk
@@ -337,8 +366,14 @@ function dupNote(row){
   const lead=row.dup_reason==='identical'
     ?'identical to'
     :'same source name as';
+  // an ARCHIVED match has no page in the meeting view (it renders live
+  // meetings only), so the chip linked to a permanent "Loading meeting"
+  // spinner. Name it plainly and say where it lives instead.
+  const what=row.dup_archived
+    ?`<span class="dupname">${title}</span> <span class="dupwhere">(archived)</span>`
+    :`<a class="dlink" href="#m/${encodeURIComponent(row.dup_of)}">${title}</a>`;
   return `<div class="rmeta dupnote"><span class="dupflag">already processed</span>
-    ${lead} <a class="dlink" href="#m/${encodeURIComponent(row.dup_of)}">${title}</a></div>`;
+    ${lead} ${what}</div>`;
 }
 
 // ---- needs_name review card helpers ----
@@ -407,7 +442,12 @@ function bodyAndSlot(row){
       const bits=[];
       if(row.size_mb!=null)bits.push(row.size_mb+' MB');
       if(row.est_minutes)bits.push('&#8776;'+row.est_minutes+' min');
-      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${dupNote(row)}</div>
+      // the split the total hides: transcription and speaker separation
+      // dominate and scale differently per file. The server computes it on
+      // every poll, so it renders rather than being thrown away.
+      const det=row.est_detail
+        ?`<div class="rmeta estdetail">${esc(row.est_detail)}</div>`:'';
+      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${det}${dupNote(row)}</div>
         <div class="rslot">
           <span class="rstate spill yields">${bits.join(' &middot; ')||'waiting'}</span>
           ${slotActions(
@@ -567,8 +607,9 @@ function sigOf(r){
   // the duplicate flag lands a poll or two AFTER the row first painted (the
   // check hashes on a size collision), so it has to be part of the signature or
   // the chip never appears on a row that is already on screen
-  r.dup_of,r.dup_reason,
+  r.dup_of,r.dup_reason,r.dup_archived,
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
+  r.est_detail,
   r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
   (r.speakers||[]).join(','),
   open?1:0,m?(m.summary||''):'',m?(m.next_steps||[]).join(''):''];}
@@ -692,9 +733,12 @@ function relabelWatch(s){
   const now=!!(s.relabel_running||s.relabel_pending);
   if(RELABEL_WAS&&!now){
     // mid-edit: a rebuild here would throw away an open naming panel, an
-    // inline edit card, or a half-typed rename. Hold the flag up and let a
+    // inline edit card, a half-typed rename, or an unsaved transcript search
+    // query (mReloadSegs clears the find box). Hold the flag up and let a
     // later tick do it (this runs every 2s, so "later" is 2 seconds).
+    const fb=document.getElementById('mfind');
     if(NP||document.getElementById('mcard')
+      ||(fb&&fb.value&&fb.value.trim())
       ||document.querySelector('.renameinput,.dateinput'))return;
     RELABEL_WAS=false;
     refresh();
@@ -812,6 +856,7 @@ function openPop(el,anchor,fill,ignoreSel){
     document.removeEventListener('mousedown',onDoc);
     document.removeEventListener('keydown',onKey);
     el.hidden=true;el.dataset.open='';el.innerHTML='';
+    _bulkPop=null;   // a selection-scoped confirm dies with its popover
     if(el.id==='processPop')$('#processBtn').setAttribute('aria-expanded','false');
     if(el.id==='rowmenu'){el.dataset.rowid='';rowActing(null);}
   };
@@ -969,6 +1014,7 @@ async function trayAct(kind,target){
     if(r&&r.source_file)api('/api/run',{files:[r.source_file],...runOpts()}).then(refresh);
     return;
   }
+  if(kind==='failed_gone'){failDismiss(target);return;}
   if(kind==='review'){openReviewBadge(target);return;}
   if(kind==='dupe_meetings'){openDrawer('dupes');return;}
   if(kind==='unknown_voice')openNamePanelByUid(target);
@@ -1365,8 +1411,14 @@ function applySel(){                       // reapply after any rebuild; prune s
 function _selReady(){return [...SEL].filter(id=>{const r=rowById(id);return r&&r.state==='ready';});}
 function drawBulkBar(){
   const bar=$('#bulkbar'),bases=_selReady();
-  if(!bases.length){bar.hidden=true;bar.innerHTML='';return;}
+  if(!bases.length){bar.hidden=true;bar.dataset.sig='';bar.innerHTML='';return;}
   bar.hidden=false;
+  // only rebuild when the count actually changed: an unconditional rebuild
+  // detached the very button an open confirm popover is anchored to, on every
+  // 2s poll, and the popover then had no geometry to re-anchor against
+  const sig=String(bases.length);
+  if(bar.dataset.sig===sig)return;
+  bar.dataset.sig=sig;
   bar.innerHTML=`<span class="bcount">${bases.length} selected</span>
     <button class="btn mini" type="button" onclick="bulk('category','work')">Work</button>
     <button class="btn mini" type="button" onclick="bulk('category','personal')">Personal</button>
@@ -1383,15 +1435,60 @@ function drawBulkBar(){
 async function bulk(action,value,extra){
   const bases=_selReady();
   if(!bases.length)return;
-  const r=await api('/api/bulk',{bases,action,value,...(extra||{})});
+  let r=null;
+  try{r=await api('/api/bulk',{bases,action,value,...(extra||{})});}
+  catch(e){r=null;}
+  if(!r){
+    // the call itself failed (server gone, connection dropped). It used to
+    // surface only as an unhandled rejection in the console: the popover
+    // closed, nothing else appeared, and the selection never cleared. Say so,
+    // and KEEP the selection so the action can simply be tried again.
+    bulkResult('Could not reach the server',
+      'Nothing was reported as done. The selection is still here, so you can try again.',true);
+    return;
+  }
   const fails=(r.results||[]).filter(x=>!x.ok);
-  if(fails.length)
-    bulkResult(`${fails.length} of ${bases.length} could not be done`,
-      fails.slice(0,8).map(f=>esc(f.base)+': '+esc(f.error||'failed')).join('<br>'),true);
+  const notes=fails.slice(0,8).map(f=>esc(f.base)+': '+esc(f.error||'failed'));
+  // the server caps a bulk action at 500 items and now SAYS how many it
+  // dropped; a silently lost tail read exactly like an item never selected
+  if(r.dropped)notes.push(esc(r.dropped+' were over the 500-item limit and were not attempted.'));
+  if(!r.results&&r.error)notes.push(esc(r.error));
+  if(notes.length)
+    bulkResult(`${fails.length+(r.dropped||0)} of ${bases.length} could not be done`,
+      notes.join('<br>'),true);
   else if(r.freed_mb)
     bulkResult('Done',`Freed ${r.freed_mb} MB of audio.`,false);
   if(action==='archive'&&!fails.length)archHint();   // quiet pointer to the drawer's Archive
   SEL.clear();refresh();
+}
+/* a bulk confirm states a COUNT ("Delete 2 meetings?"). The 2s poll can change
+ * the selection underneath it (a row left the library, a meeting was archived
+ * elsewhere), and afterRender's reposition-or-close check only ever fired on a
+ * truthy rowid, which a bulk popover never sets. So the popover could name one
+ * count while bulkDeleteGo sent another. It now re-reads the live selection on
+ * every render: repaint at a new count, close outright at zero. Popovers
+ * carrying a typed value (rename, set date) pass repaint:false so a poll never
+ * wipes the half-typed field; they still close when the selection empties. */
+let _bulkPop=null;      // {fill, anchor, n, repaint} while such a popover is open
+function openBulkPop(anchor,fill,repaint){
+  const pop=$('#rowmenu');pop.dataset.rowid='';
+  _bulkPop={fill,anchor,n:_selReady().length,repaint:repaint!==false};
+  openPop(pop,anchor,()=>fill(pop,_bulkPop.n));
+  return pop;
+}
+function bulkPopSync(){
+  const pop=$('#rowmenu');
+  if(!_bulkPop||!pop||!pop.dataset.open)return;
+  const n=_selReady().length;
+  if(!n){closePop();return;}                     // nothing left to act on
+  if(n!==_bulkPop.n&&_bulkPop.repaint){
+    _bulkPop.n=n;
+    _bulkPop.fill(pop,n);
+  }else if(n!==_bulkPop.n){_bulkPop.n=n;}
+  // the bar rebuilds when the count changes, so the anchor button can be
+  // detached by now; the bar itself always survives
+  const a=(_bulkPop.anchor&&_bulkPop.anchor.isConnected)?_bulkPop.anchor:$('#bulkbar');
+  if(a)_posPop(pop,a);
 }
 // bulk outcome as a popover off the bulk bar (never a browser alert or banner)
 function bulkResult(title,note,isErr){
@@ -1405,9 +1502,8 @@ function bulkResult(title,note,isErr){
   });
 }
 function bulkRename(btn){                  // name input in a popover, never a native prompt
-  const n=_selReady().length;if(!n)return;
-  const pop=$('#rowmenu');pop.dataset.rowid='';
-  openPop(pop,btn,()=>{
+  if(!_selReady().length)return;
+  const pop=openBulkPop(btn,(pop,n)=>{
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Rename ${n} selected</div>
       <div class="ppcnote">One name for all of them. Each keeps its own date in the filename, so recurring meetings stay separate folders.</div>
@@ -1416,7 +1512,7 @@ function bulkRename(btn){                  // name input in a popover, never a n
         <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
         <button class="btn primary mini" type="button" onclick="bulkRenameGo()">Rename</button>
       </div></div>`;
-  });
+  },false);
   const inp=pop.querySelector('.ppinput');
   if(inp){inp.focus();inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();bulkRenameGo();}};}
 }
@@ -1426,9 +1522,8 @@ function bulkRenameGo(){
   closePop();bulk('rename',nm);
 }
 function bulkDate(btn){                     // date input in a popover, never a native prompt
-  const n=_selReady().length;if(!n)return;
-  const pop=$('#rowmenu');pop.dataset.rowid='';
-  openPop(pop,btn,()=>{
+  if(!_selReady().length)return;
+  const pop=openBulkPop(btn,(pop,n)=>{
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Set the date for ${n} selected</div>
       <div class="ppcnote">The folder name is re-stamped to match. Each keeps its own name.</div>
@@ -1437,7 +1532,7 @@ function bulkDate(btn){                     // date input in a popover, never a 
         <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
         <button class="btn primary mini" type="button" onclick="bulkDateGo()">Set date</button>
       </div></div>`;
-  });
+  },false);
   const inp=pop.querySelector('.ppinput');
   if(inp){inp.focus();inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();bulkDateGo();}};}
 }
@@ -1447,9 +1542,8 @@ function bulkDateGo(){
   closePop();bulk('date',d);
 }
 function bulkDropAudio(btn){                // confirm popover, never a native dialog
-  const n=_selReady().length;if(!n)return;
-  const pop=$('#rowmenu');pop.dataset.rowid='';
-  openPop(pop,btn,()=>{
+  if(!_selReady().length)return;
+  openBulkPop(btn,(pop,n)=>{
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Delete stored audio for ${n} meeting${n>1?'s':''}?</div>
       <div class="ppcnote">The transcripts are kept. This frees most of the space, but it cannot be undone.</div>
@@ -1461,9 +1555,8 @@ function bulkDropAudio(btn){                // confirm popover, never a native d
 }
 function bulkDropAudioGo(){closePop();bulk('drop_audio',null,{confirm:true});}
 function bulkDelete(btn){                   // two-step confirm popover, never a native dialog
-  const n=_selReady().length;if(!n)return;
-  const pop=$('#rowmenu');pop.dataset.rowid='';
-  openPop(pop,btn,()=>{
+  if(!_selReady().length)return;
+  openBulkPop(btn,(pop,n)=>{
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Delete ${n} meeting${n>1?'s':''}?</div>
       <div class="ppcnote">This removes the transcript, audio, and every cache. It cannot be undone.</div>
@@ -1523,6 +1616,7 @@ function scheduleSearch(){
 function afterRender(){
   mountClip();
   applySel();
+  bulkPopSync();     // an open bulk confirm re-reads the live selection
   kbRestore();
   const rm=$('#rowmenu');
   if(rm.dataset.open&&rm.dataset.rowid){
@@ -1564,6 +1658,7 @@ function parseHash(){
 }
 function applyRoute(){
   if(NP)closeNamePanel();          // a route change closes the naming slide-over
+  dupeDisarm();                    // and disarms the no-undo duplicate sweep
   if(route.view==='meeting')enterMeeting(route.base);
   else exitMeeting();
 }
@@ -1940,8 +2035,8 @@ function mLegend(d){
     // because re-saving through the same floor-then-confirm flow is the only
     // way to fix a typo in a name the registry never learned
     if(o.named&&o.local)
-      return `<button class="mlg unk" type="button" title="Named for this meeting only. Click to change"
-          onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}')">${dot}${esc(w)}</button>`;
+      return `<button class="mlg unk" type="button" title="Named for this meeting only. Click to change or clear"
+          onclick="openNamePanelByCluster('${escJs(MP.base)}','${escJs(o.id)}','${escJs(w)}',true)">${dot}${esc(w)}</button>`;
     // dismissed as "not a real speaker": the chip stopped asking, but a human
     // who changes their mind needs a way BACK -- a dismissal with no undo on
     // the page left the voice permanently unnameable from the transcript
@@ -2938,8 +3033,13 @@ function openNamePanelByUid(uid,base){
 // naming a voice the registry does NOT track (kept transcript-local by the
 // minting floor, or suppressed by a "not a real speaker" tombstone): the same
 // panel, but the save enrolls straight from this meeting's cluster embedding
-function openNamePanelByCluster(meeting,speaker,display){
-  openNamePanel(null,display,{meeting,speaker});
+// `local` says this cluster already carries a meeting-only name, which changes
+// what the panel may offer: a locally NAMED voice is a person the human already
+// identified, so "Not a real speaker" is nonsense there (the legend has no
+// named-and-dismissed rendering, so the click produced no visible change at
+// all). It gets Clear name instead, the documented undo.
+function openNamePanelByCluster(meeting,speaker,display,local){
+  openNamePanel(null,display,{meeting,speaker,local:!!local});
 }
 async function openNamePanel(uid,display,cluster,base){
   const panel=$('#namepanel'),veil=$('#nameveil');
@@ -2948,7 +3048,8 @@ async function openNamePanel(uid,display,cluster,base){
   // not identity): the save uses it to rebuild that transcript's legend
   // immediately. It is deliberately NOT `meeting`, which is cluster mode's
   // discriminant (npDismiss guards on it and must keep failing here).
-  NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker}:{uid,base};
+  NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker,
+              local:!!cluster.local}:{uid,base};
   veil.hidden=false;panel.hidden=false;
   // FORM FIRST: the name box, the buttons, and the two messages that answer
   // them (the quality-gate confirm and the error line) sit at the top, so the
@@ -2975,12 +3076,18 @@ async function openNamePanel(uid,display,cluster,base){
     </div>
     <div class="npbtns">
       ${cluster
-        // per-MEETING dismissal. There is no registry entry to tombstone here,
-        // and the lines this cluster owns are real audio: dismissing keeps the
-        // transcript exactly as it reads and only stops the naming prompts for
-        // this voice in this meeting.
-        ?`<button class="btn danger mini" type="button" onclick="npDismiss()"
-        title="Grumbling, music, an echo: leave these lines as unknown and stop asking me to name this voice in this meeting">Not a real speaker</button>`
+        ?(cluster.local
+          // already named for this meeting only: the documented undo. An empty
+          // name in the local branch clears the entry, and the voice becomes
+          // an ordinary unnamed cluster again.
+          ?`<button class="btn mini" type="button" id="npclear" onclick="npClearName()"
+        title="Remove the meeting-only name; this voice goes back to being unnamed here">Clear name</button>`
+          // per-MEETING dismissal. There is no registry entry to tombstone
+          // here, and the lines this cluster owns are real audio: dismissing
+          // keeps the transcript exactly as it reads and only stops the naming
+          // prompts for this voice in this meeting.
+          :`<button class="btn danger mini" type="button" onclick="npDismiss()"
+        title="Grumbling, music, an echo: leave these lines as unknown and stop asking me to name this voice in this meeting">Not a real speaker</button>`)
         :`<button class="btn danger mini" type="button" onclick="npForget()"
         title="A false detection (music, crosstalk, an echo): remove this voice entirely">Not a real speaker</button>`}
       <span class="grow"></span>
@@ -3025,6 +3132,11 @@ async function openNamePanel(uid,display,cluster,base){
     </div>`;}).join('')
     ||(r.reason==='sources_deleted'
        ?'<div class="npnote muted">No audio available. The source recordings were deleted.</div>'
+       // every meeting this voice was heard in is ARCHIVED. The audio is still
+       // there, but the clip endpoints gate on live membership, so the bare
+       // player below would 404 with no explanation. Point at Restore instead.
+       :r.reason==='sources_archived'
+       ?'<div class="npnote muted">No audio available here. Every meeting this voice was heard in is archived. Restore one from the drawer to hear them.</div>'
        :`<audio controls
            onplay="document.querySelectorAll('audio').forEach(a=>{if(a!==this)a.pause()})"
            src="/api/snippet?speaker=${encodeURIComponent(uid)}&secs=45"></audio>`);
@@ -3032,7 +3144,15 @@ async function openNamePanel(uid,display,cluster,base){
 // which voice the panel is open for, as a comparable string: an async render
 // that lands after the panel closed (or reopened for someone else) must drop
 // its result instead of painting the wrong voice's evidence
-function npToken(){return NP?(NP.uid||(NP.meeting+' '+NP.speaker)):'';}
+// The MEETING is part of the identity in uid mode too: the same uid opened
+// from a second meeting shows THAT meeting's lines, so a uid-only token let a
+// late response from the FIRST meeting pass the guard and overwrite the lines
+// block the reader was looking at, silently and with the wrong text.
+function npToken(){
+  if(!NP)return '';
+  return NP.uid?'uid\x00'+NP.uid+'\x00'+(NP.base||'')
+               :'cl\x00'+NP.meeting+'\x00'+NP.speaker;
+}
 // The evidence block: what this voice actually SAID. Most unnamed voices are
 // grumbling, a cough, or a stray "mhm", and that is obvious from the text in a
 // second -- without it the only way to tell noise from a person is to play the
@@ -3077,8 +3197,25 @@ function closeNamePanel(){
   panel.hidden=true;panel.innerHTML='';
   if(veil)veil.hidden=true;
 }
+/* ONE naming request at a time. The Save button disables itself, but the floor
+ * strip's "Name for this meeting" and the warn strip's "Save anyway" are
+ * separate buttons carrying no guard of their own: a double click on either
+ * fired two independent saves, and the local-name and non-uid enroll paths have
+ * no registry lock server-side to catch the second one. npBusy owns the flag
+ * AND disables whichever confirm buttons are on screen. */
+let NPBUSY=false;
+function npConfirmBtns(){
+  const w=$('#npconfirm');
+  const btns=(w&&w.querySelectorAll)?[...w.querySelectorAll('button')]:[];
+  const c=$('#npclear');
+  return c?btns.concat([c]):btns;
+}
+function npBusy(on){
+  NPBUSY=!!on;
+  npConfirmBtns().forEach(b=>{b.disabled=!!on;});
+}
 async function npSave(force,local){
-  if(!NP)return;
+  if(!NP||NPBUSY)return;
   const n=($('#npname')?$('#npname').value:'').trim();
   const err=$('#nperr'),warn=$('#npconfirm');
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
@@ -3088,7 +3225,9 @@ async function npSave(force,local){
   // The BUTTON too: a fresh lookup after a reopen would re-enable the NEW
   // voice's Save button, and leave this one stuck reading "Saving...".
   const uid=NP.uid,meeting=NP.meeting||NP.base||'',speaker=NP.speaker;
+  const tok=npToken();   // WHICH panel this save belongs to (see npToken)
   const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
+  npBusy(true);
   let r=null;
   try{
     r=await api('/api/name',uid
@@ -3097,6 +3236,7 @@ async function npSave(force,local){
   }catch(e){
     r=null;    // the fetch itself failed (server gone, connection dropped)
   }finally{
+    npBusy(false);
     if(btn){btn.disabled=false;btn.textContent='Save name';}
   }
   if(!r){
@@ -3133,33 +3273,71 @@ async function npSave(force,local){
     return;
   }
   const onIt=MP&&MP.base===meeting;
-  closeNamePanel();refresh();   // the quiet relabel note rides the next poll
+  // close ONLY if the panel still shows the voice this save acted on. A slow
+  // request used to force-close whatever panel happened to be open when it
+  // landed, wiping a name the user was in the middle of typing for a second,
+  // unrelated voice.
+  if(npToken()===tok)closeNamePanel();
+  refresh();   // the quiet relabel note rides the next poll
   // the transcript for that meeting is open: rebuild it NOW. The relabel that
   // applies the new name everywhere takes a while, but the legend's "?" chip
   // must stop asking the moment the save succeeds, or the click reads as failed
   // and the next one lands on a uid that no longer exists.
   if(onIt)mReloadSegs();
 }
+// the documented undo for a meeting-local label: an EMPTY name in the local
+// branch drops the entry, and the server allows an empty name only there
+async function npClearName(){
+  if(!NP||!NP.meeting||NPBUSY)return;
+  const meeting=NP.meeting,speaker=NP.speaker,tok=npToken();
+  const err=$('#nperr');
+  npBusy(true);
+  let r=null;
+  try{r=await api('/api/name',{meeting:meeting,speaker:speaker,name:'',local:true});}
+  catch(e){r=null;}
+  finally{npBusy(false);}
+  if(!r||!r.ok){
+    if(err){err.hidden=false;
+      err.textContent=(r&&r.error)||'Could not clear this name.';}
+    return;
+  }
+  const onIt=MP&&MP.base===meeting;
+  if(npToken()===tok)closeNamePanel();
+  refresh();
+  if(onIt)mReloadSegs();
+}
 async function npForget(){
-  if(!NP)return;
-  const r=await api('/api/forget',{uid:NP.uid});
-  if(!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=r.error||'Could not remove this voice.';}return;}
-  closeNamePanel();refresh();
+  if(!NP||NPBUSY)return;
+  const uid=NP.uid,tok=npToken();
+  npBusy(true);
+  let r=null;
+  try{r=await api('/api/forget',{uid:uid});}
+  catch(e){r=null;}
+  finally{npBusy(false);}
+  if(!r||!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=(r&&r.error)||'Could not remove this voice.';}return;}
+  if(npToken()===tok)closeNamePanel();   // only if this voice is still shown
+  refresh();
 }
 // cluster mode's "Not a real speaker": nothing is deleted and nothing is
 // relabeled. The lines keep their attribution ("leave it as unknown"); the
 // server drops the id out of unnamed_clusters / speaker_options, which is what
 // makes every "?" for this voice disappear in this meeting.
 async function npDismiss(){
-  if(!NP||!NP.meeting)return;
+  if(!NP||!NP.meeting||NPBUSY)return;
   // captured before the await: the panel can close (Cancel/Escape) or reopen
   // for a different voice while this request is in flight, and NP would then
   // be null or someone else's identity by the time the response lands
-  const meeting=NP.meeting,speaker=NP.speaker;
-  const r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});
-  if(!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=r.error||'Could not dismiss this voice.';}return;}
+  const meeting=NP.meeting,speaker=NP.speaker,tok=npToken();
+  npBusy(true);
+  let r=null;
+  try{r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});}
+  catch(e){r=null;}
+  finally{npBusy(false);}
+  if(!r||!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=(r&&r.error)||'Could not dismiss this voice.';}return;}
   const onIt=MP&&MP.base===meeting;
-  closeNamePanel();refresh();
+  // only when the panel still shows the voice that was dismissed
+  if(npToken()===tok)closeNamePanel();
+  refresh();
   // if the transcript for that meeting is open, rebuild its legend NOW: the
   // whole promise is that the "?" stops asking, and a chip that keeps asking
   // until the next page load reads as a failed click
@@ -3245,6 +3423,7 @@ const DRAWER={open:false,section:'settings',
   spkErr:'',         // last speaker-action error, rendered in the section
   updNote:'',updBusy:false,   // the model-update check's client-side note
   dupes:null,dupeScan:false,  // the duplicate-transcript review list, fetched on open
+  dupeScanned:undefined,      // has a scan EVER run? (undefined = not asked yet)
   dupeBusy:false,dupeTrunc:false,  // fetch in flight; last scan hit its pair budget
   dupeSeen:undefined,   // tray pair count at the last fetch: the poll refetches on change
   hist:null,archived:null};   // fetched lists (results / items)
@@ -3974,7 +4153,14 @@ async function dRestore(base,btn){
   btn.disabled=true;
   const r=await api('/api/restore_meeting',{base});
   if(!r.ok){btn.disabled=false;dErr('darcherr',r);return;}
-  dErr('darcherr',{ok:true});
+  // a live meeting can already hold this name, and restore_meeting then
+  // uniquifies. Saying so is the difference between "it worked" and hunting
+  // the library for a meeting that is no longer called what you clicked.
+  const e=document.getElementById('darcherr');
+  if(r.base&&r.base!==base&&e){
+    e.hidden=false;
+    e.textContent='That name was taken, so it came back as "'+r.base+'".';
+  }else dErr('darcherr',{ok:true});
   dArchLoad();refresh();
 }
 function dArchDelAsk(base){DRAWER.dconfirm='adel:'+base;dArchRender();}
@@ -4009,9 +4195,17 @@ function dDupesLoad(){
   DRAWER.dupeBusy=true;
   api('/api/dupes').then(r=>{
     DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;
+    DRAWER.dupeScanned=!!r.scanned;
     DRAWER.dupeTrunc=!!r.truncated;dDupesRender();
-  }).catch(()=>{DRAWER.dupes=[];dDupesRender();})
-    .finally(()=>{DRAWER.dupeBusy=false;});
+    dErr('ddupeerr',{ok:true});
+  }).catch(()=>{
+    // a genuine fetch failure. dupeScan stayed TRUE here, so dDupesPoll
+    // refetched every 2s forever with no stopping condition while the empty
+    // state claimed "Comparing transcripts..." the whole time.
+    DRAWER.dupes=DRAWER.dupes||[];DRAWER.dupeScan=false;
+    dDupesRender();
+    dErr('ddupeerr',{ok:false,error:'The duplicate list could not be loaded.'});
+  }).finally(()=>{DRAWER.dupeBusy=false;});
 }
 // the poll's hook: the section owns its fetch, so the 2s poll only re-fetches
 // when the answer may have changed -- a scan was running on the last fetch
@@ -4033,6 +4227,7 @@ async function dDupeRescan(btn){
   try{
     const r=await api('/api/dupe_scan',{go:true});
     DRAWER.dupes=r.pairs||[];DRAWER.dupeScan=!!r.scanning;
+    DRAWER.dupeScanned=!!r.scanned;
     DRAWER.dupeTrunc=!!r.truncated;dDupesRender();
   }catch(e){}
   finally{if(btn)btn.disabled=false;}
@@ -4074,6 +4269,13 @@ function dDupesRender(){
     </div>`).join('')
     ||`<div class="dempty">${DRAWER.dupeScan
       ?'Comparing transcripts&#8230;'
+      // never-scanned and scanned-and-empty are DIFFERENT answers, and only
+      // the server can tell them apart (the cache carries a signature once a
+      // scan has written one). The scan is idle-only, so a long batch can keep
+      // it from ever running, and asserting "none found" about a comparison
+      // that never happened is a claim the drawer cannot support.
+      :DRAWER.dupeScanned===false
+      ?'Not compared yet. Rescan reads every transcript and compares them.'
       :'No duplicate transcripts found.'}</div>`)
     +`<div class="dupefoot">${DRAWER.dupeTrunc
       ?`<span class="dnote">Pair budget reached: this list may be incomplete.</span>`:''}

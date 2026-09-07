@@ -313,6 +313,12 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .dupflag{flex:none;font:600 13px/1.3 var(--sans);color:var(--amber);
   background:var(--amber-soft);border-radius:99px;padding:1px 8px}
 .dupnote .dlink{padding:0}
+/* an ARCHIVED match: named, never linked (the meeting view renders live
+   meetings only, so a link there is a permanent loading spinner) */
+.dupname{font:500 13px/1.3 var(--sans);color:var(--ink)}
+.dupwhere{font:500 13px/1.3 var(--sans);color:var(--sub)}
+/* the per-stage split under a waiting row's size/minutes line */
+.estdetail{font:500 13px/1.3 var(--sans);color:var(--sub)}
 .dateinput{font:500 13px/1.3 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--ink);background:var(--card);border:1px solid var(--accent);
   border-radius:7px;padding:2px 7px;color-scheme:inherit}

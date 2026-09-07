@@ -423,7 +423,11 @@ def test_naming_panel_replaces_the_who_bridge():
     assert re.search(r"function\s+openNamePanelByCluster\s*\(", NEW_JS)
     # the meeting legend offers the cluster chip for unnamed, un-tracked voices
     assert "openNamePanelByCluster(" in NEW_JS and NEW_JS.count("openNamePanelByCluster(") >= 2
-    assert re.search(r"api\('/api/forget',\{uid:NP\.uid\}\)", NEW_JS)
+    # the uid is captured into a local BEFORE the await, like every other
+    # panel action (W14): NP can be null or another voice by the time the
+    # response lands
+    assert re.search(r"api\('/api/forget',\{uid:uid\}\)", NEW_JS)
+    assert re.search(r"const uid=NP\.uid,tok=npToken\(\);", _js_fn("npForget"))
     # the enrollment quality gate answers with a warning: the panel renders
     # the house two-step confirm (numbers shown), never a native dialog
     assert 'id="npconfirm"' in NEW_JS and "npSave(true)" in NEW_JS
@@ -484,11 +488,15 @@ def test_dismiss_posts_the_meeting_scoped_call_not_the_registry_tombstone():
     # a Cancel/Escape click (or reopening for another voice) while the request
     # is in flight would otherwise null out or repoint NP before this code
     # runs again, so a post-await `NP.meeting` read is a crash-or-drift bug.
-    assert re.search(r"const meeting=NP\.meeting,speaker=NP\.speaker;\s*"
-                     r"const r=await api\('/api/dismiss_voice',\{base:meeting,speaker:speaker\}\)",
+    assert re.search(r"const meeting=NP\.meeting,speaker=NP\.speaker,tok=npToken\(\);",
+                     body)
+    assert re.search(r"api\('/api/dismiss_voice',\{base:meeting,speaker:speaker\}\)",
                      body)
     assert "/api/forget" not in body
-    assert "closeNamePanel();refresh();" in body
+    # closing is scoped to the voice this call acted on (W14): a late response
+    # must not force-close a panel the user has since reopened for someone else
+    assert "if(npToken()===tok)closeNamePanel();" in body
+    assert "refresh();" in body
     # an open transcript for that meeting rebuilds its legend immediately: a
     # "?" that keeps asking until the next page load reads as a failed click
     assert "MP.base===meeting" in body and "mReloadSegs()" in body
@@ -555,6 +563,8 @@ def test_save_captures_its_identity_before_the_await():
         "function closeNamePanel(){closed++;NP=null;}",
         "let NP={uid:'U049',base:'LT Meeting 05212026'};",
         "let MP={base:'LT Meeting 05212026'};",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        "let NPBUSY=false;",
         _js_fn("npSave"),
         """
 (async()=>{
@@ -575,7 +585,12 @@ def test_save_captures_its_identity_before_the_await():
     assert out["posted"]["body"] == {"uid": "U049", "name": "Priya Shah",
                                      "confirm": False}, \
         "the save posted the voice the panel was reopened for, not the one saved"
-    assert out["closed"] == 1 and out["refreshes"] == 1
+    # ...and it must NOT close the panel it found open, because that panel is
+    # showing a DIFFERENT voice by now (W14). Closing it here wiped a name the
+    # user was in the middle of typing.
+    assert out["closed"] == 0, \
+        "a late save closed a panel that had moved on to another voice"
+    assert out["refreshes"] == 1
     assert out["reloads"] == 1, \
         "the open transcript must rebuild on success (the legend '?' must stop asking)"
     # the button never stays stuck on "Saving..."
@@ -599,6 +614,8 @@ def test_save_survives_a_fetch_that_never_answers():
         "function mReloadSegs(){reloads++;}",
         "function closeNamePanel(){closed++;NP=null;}",
         "let NP={uid:'U049',base:'B'};let MP=null;",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        "let NPBUSY=false;",
         _js_fn("npSave"),
         """
 (async()=>{
@@ -1789,3 +1806,686 @@ def test_a_failed_row_tells_the_truth_about_its_retry():
     assert "row.retry_note||'original stays in the watched folder'" in NEW_JS
     assert "row.gone" in NEW_JS
     assert "failDismiss" in NEW_JS and "/api/dismiss_failure" in NEW_JS
+
+
+# ---------------------------------------------------------------------------
+# Fix pass 2 (2026-09-06): the tray, the bulk bar, the naming flyout, and the
+# duplicates drawer.
+# ---------------------------------------------------------------------------
+_TRAY_HARNESS = [
+    _js_oneline("esc"), _js_oneline("escJs"),
+    "const tray={hidden:true,dataset:{},innerHTML:''};",
+    "function $(sel){return sel==='#tray'?tray:null;}",
+    "function rowById(){return null;}",
+    "function shortDate(){return '';}",
+    "let trayOpen={review:false,voices:false},flaggedOnly=false;",
+    "const TRAY_EXPAND_MAX=8;",
+    "let DUPE_ARMED=false,DUPE_ERR='';",
+    "let S=null;",
+    _js_fn("_trayVerb"), _js_fn("_trayRow"), _js_fn("_trayAgg"), _js_fn("_traySub"),
+    _js_oneline("dupeDisarm"),
+    _js_fn("drawTray"),
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_dupe_sweep_disarms_when_its_tray_row_goes_away():
+    """R1: arm "Delete copies", walk away without confirming, and the flagged
+    file leaves the queue by another path. DUPE_ARMED survived, so a FUTURE
+    duplicate row -- different files, days later -- rendered pre-armed and its
+    first click fired the no-undo bulk delete with confirm:true."""
+    fixture = "\n".join(_TRAY_HARNESS + ["""
+const withDupes={tray:[{kind:'dupe_files',title:'Already processed',
+  detail:'2 waiting files were already processed',target:'src:a.m4a',
+  exact:2,count:2}]};
+drawTray(withDupes);
+DUPE_ARMED=true;                       // the user armed the sweep
+tray.dataset.sig='';drawTray(withDupes);
+const armed={html:tray.innerHTML.includes('dupeDeleteGo(this)'),flag:DUPE_ARMED};
+// the flagged file leaves the queue some other way: no dupe_files row at all
+drawTray({tray:[{kind:'review',title:'Board Prep',detail:'3 flagged',
+  target:'Board Prep',count:3}]});
+const gone={flag:DUPE_ARMED};
+// and the NEXT duplicate row must render unarmed
+drawTray(withDupes);
+const later={html:tray.innerHTML.includes('dupeDeleteGo(this)'),
+  arm:tray.innerHTML.includes('dupeArm(true)'),flag:DUPE_ARMED};
+// an empty tray disarms too (the early return must not skip the reset)
+DUPE_ARMED=true;drawTray({tray:[]});
+const emptied={flag:DUPE_ARMED};
+console.log(JSON.stringify({armed,gone,later,emptied}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["armed"] == {"html": True, "flag": True}
+    assert out["gone"]["flag"] is False, \
+        "the armed sweep outlived the row that armed it"
+    assert out["later"] == {"html": False, "arm": True, "flag": False}, \
+        "a fresh duplicate row must render unarmed, behind the two-step"
+    assert out["emptied"]["flag"] is False
+
+
+def test_a_route_change_disarms_the_duplicate_sweep():
+    """R1's other half: opening a meeting (or coming back) must not leave a
+    no-undo delete armed behind the page you left."""
+    body = _js_fn("applyRoute")
+    assert "dupeDisarm();" in body
+    assert re.search(r"function dupeDisarm\(\)\{DUPE_ARMED=false;DUPE_ERR='';\}", NEW_JS)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_tray_offers_dismiss_not_retry_for_a_gone_failure():
+    """R5, client half: the tray line kept offering Retry for a source that is
+    no longer on disk, so the click posted /api/run for nothing."""
+    fixture = "\n".join(_TRAY_HARNESS + ["""
+drawTray({tray:[{kind:'failed',title:'ghost.m4a',detail:'boom',
+  target:'src:ghost.m4a',count:1,gone:true}]});
+const gone=tray.innerHTML;
+drawTray({tray:[{kind:'failed',title:'here.m4a',detail:'boom',
+  target:'src:here.m4a',count:1,gone:false}]});
+const here=tray.innerHTML;
+console.log(JSON.stringify({
+  goneVerb:gone.includes("trayAct('failed_gone','src:ghost.m4a')"),
+  goneRetry:gone.includes("trayAct('failed','src:ghost.m4a')"),
+  hereRetry:here.includes("trayAct('failed','src:here.m4a')"),
+  hereDismiss:here.includes('failed_gone')}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"goneVerb": True, "goneRetry": False,
+                                    "hereRetry": True, "hereDismiss": False}
+    # and the dispatcher routes that verb to the dismissal, never to /api/run
+    assert "if(kind==='failed_gone'){failDismiss(target);return;}" in _js_fn("trayAct")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_sweep_that_deleted_nothing_says_why():
+    """R9: every server-side skip answered {ok:true, deleted:[]}, which reads
+    as full success -- no message at all, and the same Delete button
+    re-rendered and silently no-opped on every further click."""
+    fixture = "\n".join([
+        "let DUPE_ARMED=true,DUPE_ERR='';let S={};",
+        "let trays=0;function drawTray(){trays++;}",
+        "let refreshes=0;function refresh(){refreshes++;}",
+        "let reply=null;function api(){return Promise.resolve(reply);}",
+        _js_fn("dupeDeleteGo"),
+        """
+(async()=>{
+  reply={ok:true,deleted:[],skipped:[{name:'a.m4a',reason:'it is held'},
+    {name:'b.m4a',reason:'the meeting it copied is gone'},
+    {name:'c.m4a',reason:'it is held'}]};
+  await dupeDeleteGo(null);
+  const none={err:DUPE_ERR,armed:DUPE_ARMED};
+  DUPE_ARMED=true;
+  reply={ok:true,deleted:['a.m4a'],skipped:[],freed_mb:12.5};
+  await dupeDeleteGo(null);
+  const some={err:DUPE_ERR};
+  DUPE_ARMED=true;
+  reply={ok:true,deleted:[],skipped:[]};
+  await dupeDeleteGo(null);
+  const quiet={err:DUPE_ERR};
+  console.log(JSON.stringify({none,some,quiet,trays,refreshes}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    # every distinct reason, once each, in the row's own detail line
+    assert out["none"]["err"] == \
+        "Nothing was deleted: it is held; the meeting it copied is gone."
+    assert out["none"]["armed"] is False, "a finished sweep is never left armed"
+    assert out["some"]["err"] == "", "a sweep that DID delete says nothing extra"
+    assert out["quiet"]["err"] == \
+        "Nothing was deleted: no waiting file is still an exact copy."
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_bulk_reports_a_rejected_call_and_keeps_the_selection():
+    """W24: bulk had no try/catch and no caller caught the rejection either, so
+    a network failure closed the popover, left nothing on screen, never cleared
+    the selection, and surfaced only as an unhandled console rejection."""
+    fixture = "\n".join([
+        _js_oneline("esc"),
+        "const SEL=new Set(['A','B']);",
+        "function _selReady(){return [...SEL];}",
+        "let results=[];function bulkResult(t,n,e){results.push([t,n,e]);}",
+        "let hints=0;function archHint(){hints++;}",
+        "let refreshes=0;function refresh(){refreshes++;}",
+        "let mode='reject';",
+        "function api(){return mode==='reject'"
+        "?Promise.reject(new Error('network down'))"
+        ":Promise.resolve({ok:false,results:[{base:'A',ok:true},"
+        "{base:'B',ok:false,error:'busy'}],dropped:3});}",
+        _js_fn("bulk"),
+        """
+(async()=>{
+  await bulk('archive');
+  const failed={results:results.slice(),sel:SEL.size,refreshes,hints};
+  results=[];mode='answer';
+  await bulk('archive');
+  const partial={results:results.slice(),sel:SEL.size,refreshes};
+  console.log(JSON.stringify({failed,partial}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, "the rejection must never escape bulk()"
+    assert len(out["failed"]["results"]) == 1
+    assert out["failed"]["results"][0][0] == "Could not reach the server"
+    assert out["failed"]["results"][0][2] is True
+    assert out["failed"]["sel"] == 2, \
+        "a failed call must keep the selection so it can be retried"
+    assert out["failed"]["refreshes"] == 0 and out["failed"]["hints"] == 0
+    # a partial answer reports the per-item failures AND the dropped tail (W34)
+    note = out["partial"]["results"][0]
+    assert note[0] == "4 of 2 could not be done" or "could not be done" in note[0]
+    assert "B: busy" in note[1] and "3 were over the 500-item limit" in note[1]
+    assert out["partial"]["sel"] == 0 and out["partial"]["refreshes"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_bulk_confirm_follows_the_live_selection():
+    """W7: every bulk popover set an empty rowid, and afterRender's
+    reposition-or-close check only fired on a TRUTHY rowid, so it never touched
+    one. A poll that changed the selection under an open delete confirm left
+    the stated count untouched: the user confirmed one number and a different
+    number was deleted."""
+    fixture = "\n".join([
+        "const pop={dataset:{},innerHTML:'',hidden:true};",
+        "const bar={dataset:{},innerHTML:'',hidden:false};",
+        "function $(sel){return sel==='#rowmenu'?pop:(sel==='#bulkbar'?bar:null);}",
+        "let sel=['A','B'];function _selReady(){return sel;}",
+        "let closes=0;function closePop(){closes++;pop.dataset.open='';_bulkPop=null;}",
+        "let poses=0;function _posPop(){poses++;}",
+        "function openPop(el,anchor,fill){el.dataset.open='1';el.hidden=false;fill();}",
+        "let _bulkPop=null;",
+        _js_fn("openBulkPop"), _js_fn("bulkPopSync"), _js_fn("bulkDelete"),
+        """
+bulkDelete({});                       // the anchor is a stub object
+const opened=pop.innerHTML;
+sel=['A'];                            // a poll drops one meeting
+bulkPopSync();
+const afterPoll=pop.innerHTML;
+sel=[];                               // and then the last one
+bulkPopSync();
+console.log(JSON.stringify({
+  opened2:opened.includes('Delete 2 meetings?'),
+  repainted1:afterPoll.includes('Delete 1 meeting?'),
+  stale2:afterPoll.includes('Delete 2 meetings?'),
+  closes,open:pop.dataset.open}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["opened2"] is True
+    assert out["repainted1"] is True and out["stale2"] is False, \
+        "the confirm must restate the live count, not the count it opened with"
+    assert out["closes"] == 1 and out["open"] == "", \
+        "an empty selection must close the confirm outright"
+    # and the poll actually calls it
+    assert "bulkPopSync();" in _js_fn("afterRender")
+    # a popover carrying a typed value never repaints under the user (it would
+    # wipe the half-typed name), but still closes at zero
+    assert re.search(r"\},false\);", _js_fn("bulkRename"))
+    assert re.search(r"\},false\);", _js_fn("bulkDate"))
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_an_archived_duplicate_is_named_but_never_linked():
+    """R7, client half: dup_of can name an ARCHIVED meeting, but the chip
+    linked it into the meeting view, which renders live meetings only -- a dead
+    link under a permanent "Loading meeting" spinner."""
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_fn("dupNote"),
+        """
+const arch=dupNote({dup_of:'Board Prep 05012026',dup_title:'Board Prep',
+  dup_reason:'identical',dup_archived:true});
+const live=dupNote({dup_of:'Board Prep 05012026',dup_title:'Board Prep',
+  dup_reason:'identical',dup_archived:false});
+console.log(JSON.stringify({
+  archLink:arch.includes('<a '),archTitle:arch.includes('Board Prep'),
+  archSays:arch.includes('(archived)'),
+  liveLink:live.includes('href="#m/Board%20Prep%2005012026"'),
+  liveSays:live.includes('(archived)'),
+  none:dupNote({})}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["archLink"] is False, "an archived match must not render a link"
+    assert out["archTitle"] is True and out["archSays"] is True
+    assert out["liveLink"] is True and out["liveSays"] is False
+    assert out["none"] == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_waiting_row_renders_the_stage_breakdown():
+    """W27: est_detail was computed on every poll for every queued file and
+    never rendered. Either render it or stop computing it; it renders."""
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
+        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"), _js_fn("dupNote"),
+        _js_fn("slotActions"), "let S=null;", _js_fn("bodyAndSlot"),
+        """
+const withDet=bodyAndSlot({state:'waiting',id:'src:a.m4a',title:'a.m4a',
+  size_mb:42.1,est_minutes:9,est_detail:'transcribe ~6m \\u00b7 speakers ~3m'});
+const without=bodyAndSlot({state:'waiting',id:'src:b.m4a',title:'b.m4a',
+  size_mb:1.0,est_minutes:1});
+console.log(JSON.stringify({
+  shown:withDet.includes('transcribe ~6m'),
+  cls:withDet.includes('class="rmeta estdetail"'),
+  quiet:without.includes('estdetail')}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"shown": True, "cls": True, "quiet": False}
+    # the field folds into the row signature, or a late estimate never repaints
+    assert "r.est_detail," in _js_fn("sigOf")
+    m = re.search(r"(?m)^\.estdetail\{[^}]*\}", NEW_CSS, re.S)
+    assert m and "13px" in m.group(0) and "var(--sub)" in m.group(0)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_relabel_never_wipes_a_half_typed_transcript_search():
+    """W30: relabelWatch's falling-edge guard covered the naming panel, an open
+    edit card, and a rename or date field -- but not the find box, which
+    mReloadSegs clears. A background relabel finishing mid-typing wiped the
+    query with no warning."""
+    fixture = "\n".join([
+        "let refreshes=0,reloads=0;",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "let NP=null,route={view:'meeting',base:'B'};",
+        "const find={value:''};",
+        "const document={getElementById:id=>(id==='mfind'?find:null),"
+        "querySelector:()=>null};",
+        "let RELABEL_WAS=false;",
+        _js_fn("relabelWatch"),
+        """
+relabelWatch({relabel_running:true});
+find.value='budget';                     // mid-typing an unsaved query
+relabelWatch({relabel_running:false});
+const held={refreshes,reloads,query:find.value};
+find.value='   ';                        // whitespace is not a query
+relabelWatch({relabel_running:false});
+const blank={refreshes,reloads};
+find.value='';
+relabelWatch({relabel_running:false});
+console.log(JSON.stringify({held,blank,after:{refreshes,reloads}}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["held"] == {"refreshes": 0, "reloads": 0, "query": "budget"}, \
+        "a finished relabel must not rebuild over a half-typed search"
+    assert out["blank"] == {"refreshes": 1, "reloads": 1}, \
+        "whitespace alone is not a query worth holding the rebuild for"
+    assert out["after"] == {"refreshes": 1, "reloads": 1}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_uniquified_restore_says_what_it_came_back_as():
+    """W32: dRestore ignored the response's base, so a restore that landed on a
+    taken name and came back uniquified gave no on-screen sign that the meeting
+    is no longer called what the user clicked Restore on."""
+    fixture = "\n".join([
+        "const err={hidden:true,textContent:''};",
+        "const document={getElementById:id=>(id==='darcherr'?err:null)};",
+        "let reply=null;function api(){return Promise.resolve(reply);}",
+        "function dErr(id,r){if(r&&r.ok===false){err.hidden=false;"
+        "err.textContent=r.error||'failed';}else err.hidden=true;}",
+        "let loads=0,refreshes=0;",
+        "function dArchLoad(){loads++;}function refresh(){refreshes++;}",
+        _js_fn("dRestore"),
+        """
+(async()=>{
+  reply={ok:true,base:'Board Prep 05012026 (2)'};
+  await dRestore('Board Prep 05012026',{disabled:false});
+  const moved={text:err.textContent,shown:!err.hidden};
+  err.textContent='';err.hidden=true;
+  reply={ok:true,base:'Clean Mtg 05012026'};
+  await dRestore('Clean Mtg 05012026',{disabled:false});
+  const same={text:err.textContent,shown:!err.hidden};
+  console.log(JSON.stringify({moved,same,loads,refreshes}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["moved"]["shown"] is True
+    assert "Board Prep 05012026 (2)" in out["moved"]["text"]
+    assert out["same"] == {"text": "", "shown": False}, \
+        "an ordinary restore stays quiet"
+    assert out["loads"] == 2 and out["refreshes"] == 2
+
+
+_NP_HARNESS = [
+    "const els={};",
+    "for(const k of ['#npname','#nperr','#npconfirm','#npsave','#npclear'])"
+    "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false};",
+    "function $(sel){return els[sel]||null;}",
+    "function esc(s){return s;}",
+    "let refreshes=0,reloads=0,closed=0;",
+    "function refresh(){refreshes++;}",
+    "function mReloadSegs(){reloads++;}",
+    "function closeNamePanel(){closed++;NP=null;}",
+    "let NP=null,MP=null,NPBUSY=false;",
+]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_save_for_the_voice_still_shown_does_close_the_panel():
+    """W14's other side: the identity check must not break the ordinary case.
+    When the panel still shows the voice that was saved, it closes as before."""
+    fixture = "\n".join(_NP_HARNESS + [
+        "els['#npname'].value='Priya Shah';",
+        "function api(){return Promise.resolve({ok:true,note:'relabeling'});}",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        _js_fn("npSave"),
+        """
+(async()=>{
+  NP={uid:'U049',base:'B'};MP={base:'B'};
+  await npSave();
+  console.log(JSON.stringify({closed,refreshes,reloads,np:NP}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["closed"] == 1 and out["refreshes"] == 1 and out["reloads"] == 1
+    assert out["np"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_forget_and_dismiss_close_only_the_panel_they_acted_on():
+    """W14: npForget and npDismiss closed the panel unconditionally on success,
+    from their own captured data alone. A slow request landing after the user
+    had opened a SECOND panel force-closed that one and wiped the name being
+    typed in it."""
+    fixture = "\n".join(_NP_HARNESS + [
+        "let release=null,posted=[];",
+        "function api(p,body){posted.push({p,body});"
+        "return new Promise(r=>{release=r;});}",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        _js_fn("npForget"), _js_fn("npDismiss"),
+        """
+(async()=>{
+  // forget on U049, then reopen for U050 while the request is in flight
+  NP={uid:'U049',base:'A'};
+  const p1=npForget();
+  NP={uid:'U050',base:'A'};
+  release({ok:true});await p1;
+  const moved={closed,posted:posted.slice(),np:NP&&NP.uid};
+  // the same call with the panel unchanged still closes
+  posted=[];NP={uid:'U050',base:'A'};
+  const p2=npForget();release({ok:true});await p2;
+  const stayed={closed};
+  // dismiss, scoped to its own meeting+cluster
+  posted=[];NP={meeting:'A',speaker:'SPEAKER_02'};MP={base:'A'};
+  const p3=npDismiss();
+  NP={meeting:'A',speaker:'SPEAKER_03'};      // a different voice in the same meeting
+  release({ok:true});await p3;
+  const dMoved={closed,posted:posted.slice()};
+  console.log(JSON.stringify({moved,stayed,dMoved}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["moved"]["closed"] == 0, \
+        "a late forget closed a panel that had moved on to another voice"
+    assert out["moved"]["posted"] == [{"p": "/api/forget", "body": {"uid": "U049"}}]
+    assert out["moved"]["np"] == "U050"
+    assert out["stayed"]["closed"] == 1, "the unchanged panel still closes"
+    assert out["dMoved"]["closed"] == 1, \
+        "a late dismiss must not close the panel showing another cluster"
+    assert out["dMoved"]["posted"] == [
+        {"p": "/api/dismiss_voice", "body": {"base": "A", "speaker": "SPEAKER_02"}}]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_panel_token_includes_the_meeting_in_uid_mode():
+    """W15: npToken keyed the stale-response guard on the voice id alone in uid
+    mode. Reopening the SAME uid's panel from a second meeting, while the first
+    meeting's lines fetch was still in flight, let the late wrong-meeting
+    response pass the guard and overwrite the lines block being read."""
+    fixture = "\n".join([
+        "const box={innerHTML:''};",
+        "function $(sel){return sel==='#nplines'?box:null;}",
+        "function esc(s){return s;}",
+        "let NP=null;",
+        "const pend={};",
+        "function api(p){return new Promise(r=>{pend[p]=r;});}",
+        _js_fn("npToken"), _js_fn("npLines"),
+        """
+(async()=>{
+  NP={uid:'U1',base:'Meeting A'};
+  const tokA=npToken();
+  const pA=npLines('Meeting A','Speaker 1');
+  const relA=pend['/api/voice_lines?base=Meeting%20A&speaker=Speaker%201'];
+  NP={uid:'U1',base:'Meeting B'};
+  const tokB=npToken();
+  const pB=npLines('Meeting B','Speaker 1');
+  const relB=pend['/api/voice_lines?base=Meeting%20B&speaker=Speaker%201'];
+  relB({lines:[{start:5,dur:9,text:'MEETING B LINE'}],n:1,talk_secs:9});
+  await pB;
+  const afterB=box.innerHTML;
+  relA({lines:[{start:1,dur:4,text:'MEETING A LINE'}],n:1,talk_secs:4});
+  await pA;
+  console.log(JSON.stringify({differ:tokA!==tokB,
+    afterB:afterB.includes('MEETING B LINE'),
+    final:box.innerHTML.includes('MEETING B LINE'),
+    leaked:box.innerHTML.includes('MEETING A LINE')}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["differ"] is True, \
+        "the same uid opened from two meetings must not share one token"
+    assert out["afterB"] is True
+    assert out["final"] is True and out["leaked"] is False, \
+        "a late response from the wrong meeting overwrote the visible lines"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_floor_and_warn_confirms_cannot_double_save():
+    """W23: only the original Save button disabled itself during a request. The
+    floor strip's "Name for this meeting" and the warn strip's "Save anyway"
+    are separate buttons with no guard, so a double click on either fired two
+    independent saves -- and the local-name and non-uid enroll paths have no
+    registry lock server-side to stop the second one."""
+    fixture = "\n".join(_NP_HARNESS + [
+        "els['#npname'].value='Jordan Lee';",
+        "let posts=0,release=null;",
+        "function api(){posts++;return new Promise(r=>{release=r;});}",
+        "els['#npconfirm'].querySelectorAll=()=>btns;",
+        "const btns=[{disabled:false},{disabled:false}];",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        _js_fn("npSave"),
+        """
+(async()=>{
+  NP={meeting:'A',speaker:'SPEAKER_01'};MP={base:'A'};
+  const p1=npSave(false,true);            // the floor strip's local save
+  const p2=npSave(false,true);            // ...double-clicked
+  const during={posts,btns:btns.map(b=>b.disabled),
+    clear:els['#npclear'].disabled};
+  release({ok:true,local:true,applied:true});
+  await p1;await p2;
+  const after={posts,btns:btns.map(b=>b.disabled)};
+  // the warn strip's "Save anyway" is guarded by the same flag (the panel
+  // closed on the success above, so reopen it first)
+  NP={meeting:'A',speaker:'SPEAKER_01'};
+  const p3=npSave(true);const p4=npSave(true);
+  const warned={posts};
+  release({ok:true});await p3;await p4;
+  console.log(JSON.stringify({during,after,warned,posts}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["during"]["posts"] == 1, "the second click posted a duplicate save"
+    assert out["during"]["btns"] == [True, True], \
+        "the confirm buttons must disable while the request is in flight"
+    assert out["during"]["clear"] is True
+    assert out["after"] == {"posts": 1, "btns": [False, False]}
+    assert out["warned"]["posts"] == 2, "the warn confirm posted twice"
+    assert out["posts"] == 2
+
+
+def test_a_locally_named_voice_gets_clear_name_not_not_a_real_speaker():
+    """W29 and R11 together: the cluster-mode dismiss button showed for a voice
+    that is already named locally. The click succeeded server-side, but the
+    legend has no named-and-dismissed branch, so nothing visibly changed and
+    the flag sat inert on the meeting json. A locally named voice gets the
+    documented undo instead."""
+    panel = _js_fn("openNamePanel")
+    assert "cluster.local" in panel
+    assert 'onclick="npClearName()"' in panel
+    assert re.search(r"id=\"npclear\"", panel)
+    # the local branch comes BEFORE the dismiss branch, so a locally named
+    # cluster can never fall through to "Not a real speaker"
+    assert panel.index("npClearName()") < panel.index('onclick="npDismiss()"')
+    # the legend chip for a local name passes the flag
+    assert re.search(
+        r"openNamePanelByCluster\('\$\{escJs\(MP\.base\)\}','\$\{escJs\(o\.id\)\}',"
+        r"'\$\{escJs\(w\)\}',true\)", _js_fn("mLegend"))
+    # and an UNnamed cluster chip does not
+    assert re.search(r"function openNamePanelByCluster\(meeting,speaker,display,local\)",
+                     NEW_JS)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_clear_name_posts_an_empty_local_name():
+    """R11: the documented undo for a meeting-local label is an EMPTY name in
+    the local branch. It was unreachable from the panel -- npSave refuses an
+    empty name client-side and /api/name asserted one server-side."""
+    fixture = "\n".join(_NP_HARNESS + [
+        "let posted=null,reply={ok:true};",
+        "function api(p,body){posted={p,body};return Promise.resolve(reply);}",
+        _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        _js_fn("npClearName"),
+        """
+(async()=>{
+  NP={meeting:'A',speaker:'SPEAKER_01',local:true};MP={base:'A'};
+  await npClearName();
+  const ok={posted,closed,refreshes,reloads};
+  // a refusal keeps the panel open and says why
+  NP={meeting:'A',speaker:'SPEAKER_01',local:true};
+  reply={ok:false,error:'that voice is dismissed'};
+  await npClearName();
+  const bad={closed,err:els['#nperr'].textContent,shown:!els['#nperr'].hidden};
+  // uid mode has no local entry to clear, so the control never fires there
+  posted=null;NP={uid:'U1',base:'A'};
+  await npClearName();
+  console.log(JSON.stringify({ok,bad,uidPosted:posted}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["ok"]["posted"] == {
+        "p": "/api/name",
+        "body": {"meeting": "A", "speaker": "SPEAKER_01", "name": "", "local": True}}
+    assert out["ok"]["closed"] == 1 and out["ok"]["reloads"] == 1
+    assert out["bad"]["closed"] == 1, "a refusal must leave the panel open"
+    assert out["bad"]["shown"] is True and "dismissed" in out["bad"]["err"]
+    assert out["uidPosted"] is None
+
+
+def test_an_archived_only_voice_points_at_restore_instead_of_a_dead_player():
+    """W31: an archived-only reference got no distinct reason from
+    /api/voice_clips, so the client fell back to a bare audio tag with no
+    meeting hint, which 404s: a silently broken player where a message
+    pointing at Restore belongs."""
+    panel = _js_fn("openNamePanel")
+    assert "r.reason==='sources_archived'" in panel
+    assert "is archived" in panel and "Restore one" in panel
+    # the older contract survives unchanged
+    assert "r.reason==='sources_deleted'" in panel
+    assert "The source recordings were deleted." in panel
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_duplicates_drawer_separates_never_scanned_from_none_found():
+    """R8: the drawer asserted "No duplicate transcripts found" when no scan
+    had ever run. The scan is idle-only, so a long batch keeps it from ever
+    running, and a cold cache is indistinguishable from a scanned empty one
+    without the server's own flag."""
+    fixture = "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        "const box={innerHTML:''};",
+        "const document={getElementById:id=>(id==='ddupelist'?box:null)};",
+        "const DRAWER={dupes:[],dupeScan:false,dupeScanned:undefined,"
+        "dupeTrunc:false,dconfirm:null};",
+        "function _dupeSide(){return '';}",
+        _js_fn("dDupesRender"),
+        """
+DRAWER.dupeScanned=false;dDupesRender();
+const cold=box.innerHTML;
+DRAWER.dupeScanned=true;dDupesRender();
+const scanned=box.innerHTML;
+DRAWER.dupeScan=true;dDupesRender();
+const running=box.innerHTML;
+console.log(JSON.stringify({
+  coldSays:cold.includes('Not compared yet'),
+  coldClaims:cold.includes('No duplicate transcripts found'),
+  scannedSays:scanned.includes('No duplicate transcripts found'),
+  runningSays:running.includes('Comparing transcripts')}));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"coldSays": True, "coldClaims": False,
+                                    "scannedSays": True, "runningSays": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_failed_dupes_fetch_stops_the_poll_loop():
+    """W21: the catch branch never reset dupeScan, so dDupesPoll refetched
+    every two seconds forever with no stopping condition, while the empty state
+    showed a false "Comparing transcripts..." the whole time."""
+    fixture = "\n".join([
+        "const sec={hidden:false,dataset:{built:'1'}};",
+        "const errEl={hidden:true,textContent:''};",
+        "const document={getElementById:id=>(id==='dsec-dupes'?sec:"
+        "(id==='ddupeerr'?errEl:null))};",
+        "let calls=0,mode='ok';",
+        "function api(){calls++;return mode==='ok'"
+        "?Promise.resolve({pairs:[],scanning:true,scanned:true})"
+        ":Promise.reject(new Error('down'));}",
+        "let renders=0;function dDupesRender(){renders++;}",
+        "function dErr(id,r){if(r&&r.ok===false){errEl.hidden=false;"
+        "errEl.textContent=r.error;}else errEl.hidden=true;}",
+        "const DRAWER={section:'dupes',dupes:null,dupeScan:false,"
+        "dupeScanned:undefined,dupeBusy:false,dupeTrunc:false,dupeSeen:undefined};",
+        _js_fn("dDupesLoad"), _js_fn("dDupesPoll"),
+        """
+(async()=>{
+  dDupesLoad();await new Promise(r=>setTimeout(r,0));
+  const first={calls,scan:DRAWER.dupeScan};      // a scan is running: keep polling
+  mode='fail';
+  for(let i=0;i<5;i++){dDupesPoll({tray:[]});await new Promise(r=>setTimeout(r,0));}
+  console.log(JSON.stringify({first,calls,scan:DRAWER.dupeScan,
+    errShown:!errEl.hidden,err:errEl.textContent}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert "threw" not in out, out
+    assert out["first"] == {"calls": 1, "scan": True}
+    assert out["scan"] is False, \
+        "a fetch failure must clear dupeScan, or the poll never stops"
+    assert out["calls"] == 2, \
+        f"the poll refetched forever: {out['calls']} calls for one failure"
+    assert out["errShown"] is True and "could not be loaded" in out["err"]

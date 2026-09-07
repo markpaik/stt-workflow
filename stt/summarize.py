@@ -691,6 +691,14 @@ def set_local_name(base: str, speaker_id: str, name: str) -> dict:
     sid = str(speaker_id or "").strip()
     if not sid:
         return {"ok": False, "error": "no speaker"}
+    if sid.startswith("MANUAL_"):
+        # a MANUAL_ speaker is a person a human ADDED to a line; the diarizer
+        # never heard them, so there is no cluster and relabel's local_names
+        # overlay (which only walks diarized clusters) can never apply the
+        # name. Accepting it reported ok:true for a save that does nothing.
+        return {"ok": False,
+                "error": "that speaker was added by hand, so it has no voice "
+                         "cluster to name -- edit the line's speaker instead"}
     nm = str(name or "").strip()
     if len(nm) > 80:
         return {"ok": False, "error": "that name is too long"}
@@ -711,6 +719,13 @@ def set_local_name(base: str, speaker_id: str, name: str) -> dict:
         if sid not in {s.get("id") for s in d.get("speakers", [])}:
             return {"ok": False,
                     "error": f"'{sid}' is not a voice in this meeting"}
+        if nm and sid in {str(x) for x in (d.get("dismissed_voices") or [])}:
+            # dismissed means "this is not a person": naming it anyway leaves
+            # the meeting both dismissed and named, a state no surface renders.
+            # Clearing a name (nm == "") stays allowed: that is the undo.
+            return {"ok": False,
+                    "error": "that voice is dismissed as not a real speaker in "
+                             "this meeting -- restore it first, then name it"}
         cur = dict(d.get("local_names") or {})
         if nm:
             cur[sid] = nm
