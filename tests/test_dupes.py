@@ -452,3 +452,35 @@ def test_a_kept_pair_follows_a_date_correction(sandbox):
     assert r["ok"] and r["base"] == "Budget Review Copy 06152026"
     assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == [], \
         "the 'keep both' decision must follow the meeting's new name"
+
+
+def test_a_cold_cache_is_distinguishable_from_a_scanned_empty_one(sandbox):
+    """R8: a never-scanned cache and a scanned-and-empty library both read
+    pairs == [], so the drawer asserted "No duplicate transcripts found" about
+    a comparison that never ran. The scan is idle-only, so a long batch can
+    keep it from ever running. `sig` is written by similar_meetings and by
+    nothing else, so its presence IS the record of a completed scan."""
+    assert dupes.cache_scanned() is False
+    assert dupes.cached_pairs() == []
+
+    # two meetings that share nothing: a real scan, a real empty answer
+    mfile("A Mtg 05012026", ".txt").write_text("apples pears plums quinces")
+    mfile("A Mtg 05012026", ".json").write_text(json.dumps(
+        {"duration_sec": 600.0, "words": [{"w": 1}] * 40}))
+    mfile("B Mtg 05022026", ".txt").write_text("bicycles trains ferries buses")
+    mfile("B Mtg 05022026", ".json").write_text(json.dumps(
+        {"duration_sec": 600.0, "words": [{"w": 1}] * 40}))
+    assert dupes.similar_meetings() == []
+    assert dupes.cache_scanned() is True, \
+        "a completed scan must be distinguishable from a cold cache"
+
+
+def test_the_dupes_endpoint_publishes_whether_a_scan_has_run(sandbox):
+    """R8, the wire half: the drawer cannot tell the two empties apart without
+    this flag, so it rides both /api/dupes and /api/dupe_scan."""
+    import gui.server as _srv
+    assert dupes.cache_scanned() is False
+    dupes.similar_meetings()          # writes a signature, finds nothing
+    assert dupes.cache_scanned() is True
+    src = (_srv.Path(_srv.__file__).resolve().parent / "server.py").read_text()
+    assert '"scanned": dupes.cache_scanned()' in src

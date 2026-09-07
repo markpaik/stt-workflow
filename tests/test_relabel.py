@@ -545,3 +545,56 @@ def test_relabel_skips_a_meeting_whose_diar_cache_vanished_mid_pass(sandbox, mon
 
     monkeypatch.setattr(review, "lock_meeting", racing_lock)
     assert relabel.relabel_one("Mtg") is False
+
+
+def test_a_manual_speaker_cannot_be_named_locally(sandbox):
+    """R10: a MANUAL_ speaker is a person a human ADDED to a line; the diarizer
+    never heard them, so there is no cluster and relabel's local_names overlay
+    (which walks diarized clusters only) can never apply the name. The roster
+    check passed them, so the save reported ok:true for a name that never
+    applied -- and the roster loop then stamped the MANUAL_ entry local:true."""
+    import relabel
+    from stt import summarize
+
+    _seed_meeting("Mtg")
+    j = mfile("Mtg", ".json")
+    data = json.loads(j.read_text())
+    data["speakers"].append({"id": "MANUAL_1", "name": "Priya Shah",
+                             "display": "Priya Shah"})
+    j.write_text(json.dumps(data))
+
+    r = summarize.set_local_name("Mtg", "MANUAL_1", "Alex Rivera")
+    assert r["ok"] is False and "added by hand" in r["error"]
+    assert "local_names" not in json.loads(j.read_text())
+
+    # a stale entry written before the refusal must not stamp local:true either
+    data = json.loads(j.read_text())
+    data["local_names"] = {"MANUAL_1": "Alex Rivera"}
+    j.write_text(json.dumps(data))
+    assert relabel.relabel_one("Mtg") is True
+    after = json.loads(j.read_text())
+    manual = [s for s in after["speakers"] if s["id"] == "MANUAL_1"][0]
+    assert manual.get("local") is not True, \
+        "a MANUAL_ speaker must never be stamped as a meeting-local name"
+    assert manual["display"] == "Priya Shah", "the manual name is untouched"
+
+    # a real diarized cluster still names locally
+    assert summarize.set_local_name("Mtg", "SPEAKER_01", "Alex Rivera")["ok"]
+
+
+def test_a_dismissed_cluster_cannot_be_named_locally(sandbox):
+    """W16, the summarize half: dismissed means "this is not a person", so
+    naming it anyway leaves the meeting both dismissed and named -- a state no
+    surface renders. Clearing a name stays allowed: that is the undo."""
+    from stt import summarize
+
+    _seed_meeting("Mtg")
+    assert summarize.dismiss_voice("Mtg", "SPEAKER_01")["ok"]
+    r = summarize.set_local_name("Mtg", "SPEAKER_01", "Jordan Lee")
+    assert r["ok"] is False and "dismissed" in r["error"]
+    assert "local_names" not in json.loads((mfile("Mtg", ".json")).read_text())
+    # clearing is never refused
+    assert summarize.set_local_name("Mtg", "SPEAKER_01", "")["ok"] is True
+    # restore it, and naming works again
+    assert summarize.restore_voice("Mtg", "SPEAKER_01")["ok"]
+    assert summarize.set_local_name("Mtg", "SPEAKER_01", "Jordan Lee")["ok"]

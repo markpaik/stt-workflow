@@ -953,7 +953,12 @@ def test_voice_clips_says_why_when_every_source_meeting_was_deleted(running_serv
 def test_voice_clips_archived_refs_are_not_reported_deleted(running_server):
     """Archived is NOT deleted — a restore brings playback straight back, so
     the 'recordings were deleted' reason must not show while a ref still
-    resolves into the archive."""
+    resolves into the archive.
+
+    W31: it gets its OWN reason instead. The clip endpoints gate on LIVE
+    membership, so the client's bare-audio fallback 404s and the user sees a
+    silently broken player. sources_archived names the way out (Restore),
+    which sources_deleted would describe wrongly."""
     from stt import archive, unknowns
     _make_meeting("Shelved Mtg")
     (mfile("Shelved Mtg", ".m4a")).write_bytes(b"audio")
@@ -963,7 +968,20 @@ def test_voice_clips_archived_refs_are_not_reported_deleted(running_server):
 
     st, body = _get(running_server, "/api/voice_clips?speaker=U006")
     assert st == 200
-    assert body["clips"] == [] and "reason" not in body
+    assert body["clips"] == []
+    assert body.get("reason") == "sources_archived"
+
+
+def test_voice_clips_still_reports_a_truly_deleted_source(running_server):
+    """W31's new reason must not swallow the old one: a reference that resolves
+    neither live nor into the archive is still sources_deleted."""
+    from stt import unknowns
+    unknowns.save({"speakers": {"U007": {
+        "file": "U007.npy", "meetings": ["Vanished Mtg 01012026"]}}})
+    st, body = _get(running_server, "/api/voice_clips?speaker=U007")
+    assert st == 200
+    assert body["clips"] == []
+    assert body.get("reason") == "sources_deleted"
 
 
 # ---------- /api/voice_lines + /api/dismiss_voice: read it, or dismiss it ----
@@ -1347,16 +1365,21 @@ def test_a_subfloor_voice_can_be_named_for_this_meeting_only(running_server, mon
     assert "Jordan Lee" not in identify.load_registry()
     assert spawned == []
 
-    # the meeting-only save: label stored, registry untouched, ONE meeting spawns
+    # the meeting-only save: label stored, registry untouched, and the ONE
+    # meeting is relabeled INSIDE the request (R4) -- no spawn at all, because
+    # a spawned pass finished between polls and the open page never saw it
     status, body = _post(running_server, "/api/name",
                          {"meeting": "Thin Local Mtg", "speaker": "SPEAKER_00",
                           "name": "Jordan Lee", "local": True})
     assert status == 200 and body["ok"] is True and body.get("local") is True
+    assert body.get("applied") is True, \
+        "the answer must mean the name is already applied"
     assert "Jordan Lee" not in identify.load_registry()
     mj = json.loads(mfile("Thin Local Mtg", ".json").read_text())
     assert mj["local_names"] == {"SPEAKER_00": "Jordan Lee"}
-    assert len(spawned) == 1 and spawned[0][-1] == "Thin Local Mtg"
-    assert "--all" not in spawned[0], "a local label must never relabel the library"
+    assert spawned == [], "the synchronous path must not also spawn a pass"
+    assert "Jordan Lee" in [s.get("display") for s in mj["speakers"]], \
+        "the roster the client reloads must already carry the name"
 
     # a junk cluster id is refused and never stored
     status, body = _post(running_server, "/api/name",
@@ -1510,3 +1533,234 @@ def test_naming_a_meeting_that_moved_mid_request_is_an_honest_error(running_serv
     assert "changed while you were naming it" in body["error"]
     assert str(config.PROJECT_DIR) not in json.dumps(body), \
         "an error must never carry the server's own filesystem path"
+
+
+# ---------- fix pass 2 (2026-09-06) ----------
+
+def _thin_local_meeting(base="Thin Local Mtg"):
+    """A meeting whose one cluster is under the enrollment floor, with the
+    diar cache set_local_name requires."""
+    import numpy as np
+
+    v = np.random.default_rng(9).normal(size=256)
+    _make_meeting_with_cache(base, {"SPEAKER_00": [(0.0, 11.0)]},
+                             {"SPEAKER_00": v})
+    j = mfile(base, ".json")
+    mj = json.loads(j.read_text())
+    mj["speakers"] = [{"id": "SPEAKER_00", "name": None, "display": "Voice 1"}]
+    j.write_text(json.dumps(mj))
+    return base
+
+
+def test_a_bulk_item_that_raises_never_stops_the_rest(running_server, monkeypatch):
+    """W5: the loop had no per-item guard. One item's exception aborted it, so
+    the items before it stayed applied on disk, the items after it were never
+    attempted, and the client got a bare 500 with no results key at all -- no
+    report, and it still cleared the selection."""
+    from stt import archive
+    for b in ("Alpha Mtg", "Bravo Mtg", "Charlie Mtg"):
+        _make_meeting(b)
+    real = archive.archive_meeting
+
+    def boom(base):
+        if base == "Bravo Mtg":
+            raise OSError(13, "Permission denied")
+        return real(base)
+    monkeypatch.setattr(archive, "archive_meeting", boom)
+
+    st, body = _post(running_server, "/api/bulk",
+                     {"bases": ["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"],
+                      "action": "archive"})
+    assert st == 200, "one bad item must not 500 the whole call"
+    assert body["ok"] is False
+    assert [r["base"] for r in body["results"]] == \
+        ["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"], \
+        "every item must be attempted and reported"
+    assert body["results"][0]["ok"] is True
+    assert body["results"][1]["ok"] is False and body["results"][1]["error"]
+    assert body["results"][2]["ok"] is True, \
+        "the item AFTER the failure must still be attempted"
+    assert body["n_ok"] == 2
+    live = set(config.meeting_bases())
+    assert "Alpha Mtg" not in live and "Charlie Mtg" not in live
+    assert "Bravo Mtg" in live
+
+
+def test_a_bulk_selection_over_the_cap_says_what_it_dropped(running_server):
+    """W34: the endpoint slices to 500 with no note, so a bigger selection
+    silently lost its tail and the client could not tell a dropped item from
+    one that was never selected."""
+    bases = [f"Ghost {i}" for i in range(600)]
+    st, body = _post(running_server, "/api/bulk",
+                     {"bases": bases, "action": "category", "value": "work"})
+    assert st == 200
+    assert len(body["results"]) == 500
+    assert body["dropped"] == 100
+    assert body["ok"] is False
+    assert "not attempted" in body["error"]
+
+
+def test_a_bulk_delete_reports_the_space_it_freed(running_server):
+    """W6: delete_meeting returned ok and a note but never freed_mb, so the
+    bulk handler summed zero for every delete and a fully successful delete of
+    real audio told the user nothing at all."""
+    _make_meeting("Heavy Mtg")
+    (mfile("Heavy Mtg", ".m4a")).write_bytes(b"\x00" * 3_000_000)
+    st, body = _post(running_server, "/api/bulk",
+                     {"bases": ["Heavy Mtg"], "action": "delete",
+                      "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert body["results"][0]["freed_mb"] >= 3.0
+    assert body["freed_mb"] >= 3.0, "the bulk total must not be zero"
+
+
+def test_naming_a_dismissed_voice_is_refused(running_server, monkeypatch):
+    """W16: neither branch of /api/name checked dismissed_voices, so a stale
+    panel, a second tab, or a direct POST could enroll a real voiceprint (or
+    set a local name) for a voice the user had just called not a speaker --
+    leaving a meeting both dismissed and named, a state nothing renders."""
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    base = _thin_local_meeting("Dismissed Mtg")
+    st, body = _post(running_server, "/api/dismiss_voice",
+                     {"base": base, "speaker": "SPEAKER_00"})
+    assert st == 200 and body["ok"] is True
+
+    # the enrollment branch
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "name": "Priya Shah"})
+    assert st == 200 and body["ok"] is False
+    assert "dismissed" in body["error"]
+    assert "Priya Shah" not in identify.load_registry()
+
+    # and the meeting-local branch
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "name": "Priya Shah", "local": True})
+    assert st == 200 and body["ok"] is False
+    mj = json.loads(mfile(base, ".json").read_text())
+    assert "SPEAKER_00" not in (mj.get("local_names") or {})
+    assert mj["dismissed_voices"] == ["SPEAKER_00"], "the dismissal stands"
+
+
+def test_an_empty_name_clears_a_meeting_local_label_and_nothing_else(
+        running_server, monkeypatch):
+    """R11: the documented undo (an empty name clears the local entry) was
+    unreachable -- /api/name asserted a non-empty name before set_local_name
+    ever saw it, so a meeting-local label could only be removed by a full
+    Redo. The empty name is accepted in the LOCAL branch only."""
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    base = _thin_local_meeting("Clearable Mtg")
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "name": "Jordan Lee", "local": True})
+    assert st == 200 and body["ok"] is True
+    assert json.loads(mfile(base, ".json").read_text())["local_names"] == \
+        {"SPEAKER_00": "Jordan Lee"}
+
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "name": "", "local": True})
+    assert st == 200 and body["ok"] is True
+    assert "local_names" not in json.loads(mfile(base, ".json").read_text())
+
+    # an empty name anywhere else is a plain mistake, and answers as one
+    # (never the old bare 500 from `assert name`)
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00", "name": "  "})
+    assert st == 200 and body["ok"] is False and body["error"] == "Type a name first."
+    st, body = _post(running_server, "/api/name", {"uid": "U001", "name": ""})
+    assert st == 200 and body["ok"] is False and body["error"] == "Type a name first."
+
+
+def test_a_local_name_falls_back_to_a_spawn_while_a_relabel_holds_the_guard(
+        running_server, monkeypatch):
+    """R4: the local save relabels its one meeting INSIDE the request, so the
+    answer means "applied" and the client's reload sees the new roster. When
+    another pass already owns the single-flight guard it spawns instead, and
+    SAYS so rather than blocking the request behind a library-wide pass."""
+    import fcntl
+
+    from stt import control
+    spawned = []
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(cmd))
+    base = _thin_local_meeting("Busy Guard Mtg")
+
+    with open(control.relabel_lock_path(), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        st, body = _post(running_server, "/api/name",
+                         {"meeting": base, "speaker": "SPEAKER_00",
+                          "name": "Jordan Lee", "local": True})
+        assert st == 200 and body["ok"] is True
+        assert body["applied"] is False
+        assert "another relabel is running" in body["note"]
+        assert len(spawned) == 1 and spawned[0][-1] == base
+        assert "--all" not in spawned[0], \
+            "a local label must never relabel the library"
+        fcntl.flock(held, fcntl.LOCK_UN)
+    # the label itself is stored either way
+    assert json.loads(mfile(base, ".json").read_text())["local_names"] == \
+        {"SPEAKER_00": "Jordan Lee"}
+
+
+def test_deleting_a_failed_source_dismisses_the_failure_it_orphans(
+        running_server, monkeypatch):
+    """R6: the X on a failed row unlinked the file but recorded no dismissal,
+    so the very next poll re-emitted the same failure as a history-only
+    gone:true row demanding a second, separate dismissal."""
+    src = config.source_dir()
+    (src / "bad take.m4a").write_bytes(b"\x00" * 2048)
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "bad take.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "boom"}])
+    rows = [r for r in srv.gather_state()["timeline"]
+            if r["id"] == "src:bad take.m4a"]
+    assert rows and rows[0]["state"] == "failed"
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "bad take.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert body.get("dismissed_failure") is True
+    assert not (src / "bad take.m4a").exists()
+    assert [r for r in srv.gather_state()["timeline"]
+            if r["id"] == "src:bad take.m4a"] == [], \
+        "the failure must not come straight back as a gone row"
+
+
+def test_deleting_an_ordinary_queued_file_records_no_dismissal(
+        running_server, sandbox):
+    """R6 must not write a dead entry for every delete: only a name that
+    really is a live failure is dismissed."""
+    (config.source_dir() / "fine.m4a").write_bytes(b"\x00" * 2048)
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "fine.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert "dismissed_failure" not in body
+    assert srv._dismissed_failures() == {}
+
+
+def test_a_sweep_that_deletes_nothing_says_why(running_server, monkeypatch):
+    """R9: every server-side skip answered {ok:true, deleted:[]}, which reads
+    as full success -- no message, and the same Delete button re-rendered and
+    silently no-opped on every click."""
+    from stt import holds
+    src = _dupe_fixture()
+    holds.hold("board prep 2.m4a")
+    st, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body["ok"] is True and body["deleted"] == []
+    assert body["skipped"] == [{"name": "board prep 2.m4a",
+                                "reason": "it is held"}]
+    assert (src / "board prep 2.m4a").exists()
+
+
+def test_a_sweep_names_the_meeting_that_vanished(running_server, monkeypatch):
+    """R9, the other common skip: the matched meeting is gone by unlink time."""
+    _dupe_fixture()
+    stale = [{"name": "board prep 2.m4a", "processed": False, "held": False,
+              "dup_of": "Ghost Meeting 01012026", "dup_reason": "identical"}]
+    monkeypatch.setattr(srv, "_queue_and_dupes", lambda: (stale, [], set()))
+    st, body = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body["deleted"] == []
+    assert body["skipped"] == [{"name": "board prep 2.m4a",
+                                "reason": "the meeting it copied is gone"}]

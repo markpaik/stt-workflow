@@ -463,6 +463,17 @@ def cache_truncated() -> bool:
     return bool(_load_cache().get("truncated"))
 
 
+def cache_scanned() -> bool:
+    """Has a scan ever WRITTEN an answer into this cache?
+
+    A cold cache and a scanned-and-empty library both read pairs == [], and a
+    reader that cannot tell them apart says "no duplicate transcripts found"
+    about a comparison that never ran (the scan is idle-only, so a long batch
+    can keep it from ever running). `sig` is stamped by similar_meetings and by
+    nothing else, so its presence IS the record of a completed scan."""
+    return bool(_load_cache().get("sig"))
+
+
 def cached_pairs(dest_dir=None) -> list:
     """The last computed pair list, with pairs whose meetings have since been
     deleted or ignored dropped. Never computes: this is what the 2s poll reads."""

@@ -173,7 +173,7 @@ def delete_meeting(base: str) -> dict:
     registry's references (the audio is gone; enrolled voiceprint samples are
     KEPT, their embeddings still identify people in future meetings — only the
     clip playback for samples sourced here dies, and the clip endpoints skip
-    non-live meetings gracefully). Returns {ok, note?, error?}."""
+    non-live meetings gracefully). Returns {ok, freed_mb, note?, error?}."""
     from . import review
     if base in config.meeting_bases():
         if _is_active(base):
@@ -192,6 +192,16 @@ def delete_meeting(base: str) -> dict:
     try:
         src_name = json.loads((target / f"{base}.json").read_text()).get("source_file")
     except (OSError, ValueError):
+        pass
+
+    # measured BEFORE the folder goes, so a successful delete can say what it
+    # actually freed. Without it every bulk delete summed freed_mb to zero and
+    # a fully successful sweep of real audio told the user nothing at all.
+    freed = 0.0
+    try:
+        freed = sum(p.stat().st_size for p in target.rglob("*")
+                    if p.is_file()) / 1e6
+    except OSError:
         pass
 
     with review.lock_meeting(base):
@@ -238,4 +248,4 @@ def delete_meeting(base: str) -> dict:
                     break
             except OSError:
                 pass
-    return {"ok": True, "note": note}
+    return {"ok": True, "freed_mb": round(freed, 1), "note": note}

@@ -82,8 +82,13 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         # outlives every relabel the way dismissed_voices does (a top-level
         # key, re-applied onto the rebuilt roster below). A Redo re-clusters
         # from scratch, so it resets there on purpose.
+        # MANUAL_ ids are excluded: they name a person a human ADDED to a line,
+        # not a diarized cluster, so this overlay can never apply to them --
+        # and a stale MANUAL_ entry (written before set_local_name refused
+        # them) would still stamp local:true on that roster row below.
         local_names = {str(k): str(v) for k, v in
-                       (data.get("local_names") or {}).items() if str(v).strip()}
+                       (data.get("local_names") or {}).items()
+                       if str(v).strip() and not str(k).startswith("MANUAL_")}
         if not data.get("one_time_speakers"):
             # the registry must see a locally named cluster as NAMED, or a
             # floor-passing cluster the human labeled would still mint a

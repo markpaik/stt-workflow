@@ -257,3 +257,23 @@ def test_deleting_one_of_two_same_named_meetings_spares_the_others_record(sandbo
     assert archive.delete_meeting("Weekly 05012026")["ok"]
     assert sorted(manifest.load()["processed"]) == ["archived.m4a"], \
         "the archived meeting's processing history is not the deleted one's"
+
+
+def test_delete_reports_the_space_it_freed(sandbox):
+    """W6: delete_meeting returned ok and a note but never a freed_mb value, so
+    every caller that sums it (the bulk handler) reported zero for a delete of
+    real audio and the user got no confirmation at all."""
+    _meeting("Heavy Mtg 05012026")
+    mfile("Heavy Mtg 05012026", ".m4a").write_bytes(b"\x00" * 3_000_000)
+    r = archive.delete_meeting("Heavy Mtg 05012026")
+    assert r["ok"] is True
+    assert r["freed_mb"] >= 3.0, "a delete must say what it freed"
+    assert "Heavy Mtg 05012026" not in config.meeting_bases()
+
+
+def test_delete_reports_zero_for_a_meeting_with_no_audio(sandbox):
+    """W6 must stay honest in the other direction: a transcript-only meeting
+    frees almost nothing, and says so rather than inventing a number."""
+    _meeting("Light Mtg 05012026")
+    r = archive.delete_meeting("Light Mtg 05012026")
+    assert r["ok"] is True and r["freed_mb"] < 1.0

@@ -483,6 +483,22 @@ def _display_title(base: str) -> str:
     return dates.strip_stamp(base)
 
 
+def _archived_title(base: str) -> str:
+    """The display title of an ARCHIVED meeting, read from its own folder.
+
+    The live title map is built from live metas only, so a duplicate source
+    whose match is archived (the duplicate gate deliberately spans live +
+    archived) fell back to the raw stamped base -- and the row then linked that
+    base into the meeting view, which renders live meetings only. Resolve the
+    title here and let the row say "archived" instead of offering a dead link.
+    """
+    try:
+        d = json.loads((config.archive_dir() / base / f"{base}.json").read_text())
+    except (OSError, ValueError):
+        d = {}
+    return d.get("title") or _display_title(base)
+
+
 def _meeting_meta(j: Path, dst_dir: Path):
     """Metadata for one meeting JSON, cached by mtime — the panel polls every 2s
     and transcripts run to hundreds of KB; parse each file once per change."""
@@ -792,11 +808,16 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
         row = {"id": f"src:{name}", "source_file": name,
                "title": name, "date": dates.meeting_date(name),
                "when": _dt.fromtimestamp(f["mtime"]).isoformat(timespec="seconds"),
-               "size_mb": f["size_mb"], "est_minutes": f.get("est_min")}
+               "size_mb": f["size_mb"], "est_minutes": f.get("est_min"),
+               # the split the total hides (transcription vs speaker
+               # separation): computed per poll for every queued file, so it
+               # rides the row the shell renders rather than being thrown away
+               "est_detail": f.get("est_detail")}
         if f.get("dup_of"):
             # the row says so before the batch ever picks the file up
             row.update({"dup_of": f["dup_of"], "dup_title": f.get("dup_title"),
-                        "dup_reason": f.get("dup_reason")})
+                        "dup_reason": f.get("dup_reason"),
+                        "dup_archived": bool(f.get("dup_archived"))})
         if f["held"]:
             row.update({"state": "held", "held": True})
         elif name in failed_map:
@@ -833,8 +854,12 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                      "target": f"rec:{Path(rec.get('caf', 'recording')).stem or 'recording'}",
                      "count": 1})
     for row in failed_entries:
+        # `gone` rides the tray entry too: the timeline row uses it to swap
+        # Retry for a dismiss, and a tray line that kept offering Retry posted
+        # /api/run for a file that is no longer on disk
         tray.append({"kind": "failed", "title": row["title"],
-                     "detail": row["error"], "target": row["id"], "count": 1})
+                     "detail": row["error"], "target": row["id"], "count": 1,
+                     "gone": bool(row.get("gone"))})
     # waiting files that were already processed. Ranked here, above reviews: the
     # next automatic run spends real hours transcribing them again, so it is
     # worth deciding before that happens. `count` is what a bulk delete would
@@ -920,7 +945,12 @@ def _queue_and_dupes():
                 est_min, est_detail = None, None
                 if dur:
                     ests = status.stage_estimates(dur)
-                    est_min = round(sum(ests.values()) / 60)
+                    # FLOOR at one minute: a short file still carries a fixed
+                    # per-file overhead, and round() turned that into 0 -- which
+                    # every downstream truthiness check ("if est_min") reads as
+                    # NO estimate at all, so a running batch with only short
+                    # files pending reported no ETA anywhere on screen.
+                    est_min = max(1, round(sum(ests.values()) / 60))
                     # the split the total hides: transcription and speaker
                     # separation dominate and scale differently per file
                     est_detail = " · ".join(
@@ -974,8 +1004,14 @@ def _queue_and_dupes():
         d = dup_map.get(f["name"])
         if d:
             f["dup_of"] = d["base"]
-            f["dup_title"] = _titles.get(d["base"], d["base"])
             f["dup_reason"] = d["reason"]
+            if d["base"] in _titles:
+                f["dup_title"] = _titles[d["base"]]
+            else:
+                # the match is ARCHIVED: it has no row and no page in the live
+                # view, so the row must name it without linking to one
+                f["dup_title"] = _archived_title(d["base"])
+                f["dup_archived"] = True
             if d["reason"] == "identical":
                 # the fingerprint the match was made against, taken here and
                 # carried on the row, so the bulk delete can re-take it at
@@ -1226,6 +1262,48 @@ def _snippet_for(meeting: str, speaker_key: str, secs: float = 30.0):
     return out
 
 
+def _relabel_now(base: str) -> bool:
+    """Relabel ONE meeting here and now, synchronously, under the same
+    single-flight guard a spawned pass takes. True when this call did the work.
+
+    A meeting-local name spawns `relabel <base>`, which finishes in well under
+    one 2s poll -- so no poll ever observed relabel_running, the panel's
+    falling-edge rebuild never fired, and the transcript kept showing "Voice 1"
+    with its "?" chip after a save the server had already applied. Doing the
+    work inside the request lets the response mean "applied", and the client
+    reloads against the new roster.
+
+    False means another relabel already owns the guard. The caller then falls
+    back to spawning and SAYS so, rather than blocking the request behind a
+    library-wide pass.
+    """
+    import fcntl
+
+    try:
+        fd = open(control.relabel_lock_path(), "w")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            from relabel import relabel_one
+            with control.relabel_marker():
+                relabel_one(base)
+        except Exception:
+            # the NAME is already stored; a relabel that failed here is picked
+            # up by the next pass, and must never turn a successful save into
+            # a 500 carrying the server's own traceback
+            pass
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        fd.close()
+    return True
+
+
 def _spawn(args):
     # `with` so the parent releases its copy of the log fd once the child has
     # its own dup — the long-lived panel process otherwise leaks one fd per spawn.
@@ -1347,6 +1425,34 @@ class Handler(BaseHTTPRequestHandler):
             raise
         self._json({"ok": True, "name": target.name})
 
+    def _bulk_one(self, action, bs, value, confirmed) -> dict:
+        """ONE /api/bulk item. Split out of the loop so the loop can guard each
+        item on its own: every op below gates on live/archived MEMBERSHIP
+        internally before it builds a path, so an unknown or traversal base is
+        refused per item and never applied."""
+        from stt import archive, summarize
+        if action == "category":
+            return summarize.set_meeting_category(bs, value or "")
+        if action == "date":
+            return summarize.set_meeting_date(bs, value or "")
+        if action == "rename":
+            # each keeps its OWN date stamp, so renaming a run of recurring
+            # meetings to one name still leaves them distinct
+            return summarize.rename_meeting(bs, value or "")
+        if action == "accept":
+            return summarize.apply_meeting_edits(bs, reviewed=True)
+        if action == "archive":
+            return archive.archive_meeting(bs)
+        if action == "restore":
+            return archive.restore_meeting(bs)
+        if action in ("delete", "drop_audio") and not confirmed:
+            return {"ok": False, "error": "missing confirmation"}
+        if action == "delete":
+            return archive.delete_meeting(bs)
+        if action == "drop_audio":
+            return archive.drop_audio(bs)
+        return {"ok": False, "error": f"unknown action '{action}'"}
+
     def _require_base(self, base) -> bool:
         """Validate `base` against real meeting basenames; on failure, send the
         400 and tell the caller to stop. Every handler that turns a client-
@@ -1382,6 +1488,11 @@ class Handler(BaseHTTPRequestHandler):
                 # the 99% of polls where nobody is looking at it.
                 self._json({"pairs": _dupe_pair_rows(),
                             "scanning": bool(_dupe_worker["busy"]),
+                            # a cold cache and a scanned-and-empty library both
+                            # answer pairs:[]; only this tells them apart, so
+                            # the drawer stops asserting "no duplicates found"
+                            # about a comparison that never ran
+                            "scanned": dupes.cache_scanned(),
                             "truncated": dupes.cache_truncated(),
                             "threshold": dupes.THRESHOLD})
             elif u.path == "/api/snippet":
@@ -1448,12 +1559,19 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"clips": clips}
                 if refs and not clips:
                     archived = set(config.archived_bases())
-                    if not any(_known_base(m) or m in archived for m in refs):
+                    live = [m for m in refs if _known_base(m)]
+                    if not live and not any(m in archived for m in refs):
                         # every reference is DEAD — not live, not archived: the
                         # meetings this voice was heard in were deleted, so no
                         # audio exists to cut a clip from. Say WHY the list is
                         # empty instead of handing the dialog a blank player.
                         out["reason"] = "sources_deleted"
+                    elif not live:
+                        # every reference is ARCHIVED. The audio still exists,
+                        # but the clip endpoints gate on LIVE membership, so
+                        # the client's bare-audio fallback 404s and the user
+                        # sees a silently broken player. Name the way out.
+                        out["reason"] = "sources_archived"
                 self._json(out)
             elif u.path == "/api/voice_lines":
                 # WHAT this voice actually said, so the naming panel can be
@@ -1668,8 +1786,16 @@ class Handler(BaseHTTPRequestHandler):
                     _env_file_set({"STT_ASR_BACKEND": choice})
                 self._json({"ok": True, "model": current_model()})
             elif u.path == "/api/name":
-                name = b["name"].strip()
-                assert name
+                name = str(b.get("name") or "").strip()
+                # An empty name is the documented UNDO for a meeting-local
+                # label (set_local_name drops the entry). It means nothing
+                # anywhere else: an enrollment and a uid promotion have no
+                # entry to clear, so an empty name there is simply a mistake.
+                # The old bare `assert name` refused the undo outright, which
+                # left a meeting-local label removable only by a full Redo.
+                if not name and not (b.get("local") and not b.get("uid")):
+                    self._json({"ok": False, "error": "Type a name first."})
+                    return
                 confirm = bool(b.get("confirm"))
 
                 def _warn_payload(w):
@@ -1727,9 +1853,21 @@ class Handler(BaseHTTPRequestHandler):
                         if not res.get("ok"):
                             self._json(res)
                             return
-                        _spawn([str(RUN_SH), "relabel", b["meeting"]])
-                        self._json({"ok": True, "local": True,
-                                    "note": "renaming this meeting in background"})
+                        # ONE meeting rebuilds, and it rebuilds HERE: the pass
+                        # takes well under a poll interval, so a spawned one
+                        # started and finished between polls and the open page
+                        # never learned the name had landed.
+                        if _relabel_now(b["meeting"]):
+                            self._json({"ok": True, "local": True,
+                                        "applied": True,
+                                        "note": "this meeting has been relabeled"})
+                        else:
+                            _spawn([str(RUN_SH), "relabel", b["meeting"]])
+                            self._json({"ok": True, "local": True,
+                                        "applied": False,
+                                        "note": "another relabel is running -- "
+                                                "this meeting is renamed right "
+                                                "after it"})
                         return
                     from stt import diarcache
                     # the meeting can be renamed, restamped or archived in the
@@ -1751,6 +1889,17 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False,
                                     "error": "That speaker has no voice embedding "
                                              "in this meeting."})
+                        return
+                    # dismissed as "not a real speaker" HERE: a stale panel, a
+                    # second tab, or a direct POST would otherwise enroll a real
+                    # voiceprint for a voice the user just said is not a person,
+                    # leaving the meeting both dismissed and named at once
+                    if b["speaker"] in {str(x) for x
+                                        in (mj.get("dismissed_voices") or [])}:
+                        self._json({"ok": False,
+                                    "error": "That voice is dismissed as not a "
+                                             "real speaker in this meeting. "
+                                             "Restore it first, then name it."})
                         return
                     # quality floor: a cluster with seconds of speech cannot
                     # identify anyone — refuse ENROLLMENT outright (no confirm
@@ -1920,10 +2069,20 @@ class Handler(BaseHTTPRequestHandler):
                                 "error": "this file is being processed right now"})
                     return
                 mb = round(f.stat().st_size / 1e6, 1)
+                # A FAILED row's X deletes the file. The failure record it
+                # leaves behind is then history-only, so the very next poll
+                # re-emits it as a gone:true row demanding a SECOND, separate
+                # dismissal. Deleting the file is the whole answer to that
+                # failure: dismiss it in the same breath. Only when the name
+                # really is a live failure, so an ordinary queue delete never
+                # writes a dead entry into dismissed_failures.json.
+                was_failed = f.name in _failed_sources(status.read())
                 f.unlink()
                 # the recorder's channel-layout sidecar travels with its audio
                 f.with_suffix(".opts.json").unlink(missing_ok=True)
                 out = {"ok": True, "freed_mb": mb}
+                if was_failed and dismiss_failure(f.name):
+                    out["dismissed_failure"] = True
                 if len(found) > 1:
                     # the same name in the OTHER watched folder is a DIFFERENT
                     # recording. It takes this row's place immediately, and it
@@ -1950,6 +2109,15 @@ class Handler(BaseHTTPRequestHandler):
                 from stt import holds as _holds
                 held_now = _holds.items()
                 deleted, freed = [], 0.0
+                # every candidate the sweep DECLINED, with the server's own
+                # reason. A sweep that deleted nothing used to answer
+                # {ok:true, deleted:[]}, which reads as full success: no
+                # message, and a Delete button that silently no-ops on every
+                # click. The client says why, from these.
+                skipped = []
+
+                def _skip(nm, why):
+                    skipped.append({"name": nm, "reason": why})
                 # the PURE helper, never gather_state: gather_state kicks the
                 # next queued batch and the dupe scan as side effects, and a
                 # delete request must not be the thing that starts a run
@@ -1958,12 +2126,14 @@ class Handler(BaseHTTPRequestHandler):
                     if f.get("dup_reason") != "identical" or f["processed"]:
                         continue
                     if f["name"] in held_now:
+                        _skip(f["name"], "it is held")
                         continue          # parked on purpose
                     # active is re-read per file, immediately before its unlink:
                     # a run can start at any moment (another poll's kick), and a
                     # snapshot taken before the loop would happily delete a
                     # source mid-transcode
                     if f["name"] in (status.read().get("active") or {}):
+                        _skip(f["name"], "it is being processed right now")
                         continue
                     # the matched meeting is re-checked too: a concurrent
                     # delete_meeting between the snapshot above and this unlink
@@ -1971,15 +2141,19 @@ class Handler(BaseHTTPRequestHandler):
                     # the exact loss the liveness gate exists to prevent
                     if (f.get("dup_of") not in set(config.meeting_bases())
                             | set(config.archived_bases())):
+                        _skip(f["name"], "the meeting it copied is gone")
                         continue
                     # and the meeting must still HOLD that audio. A manifest
                     # fingerprint keeps matching after drop_audio removed the
                     # meeting's own copy, so the base reads live while the only
                     # remaining bytes of that recording are the file below.
                     if not _stored_audio(f.get("dup_of")):
+                        _skip(f["name"],
+                              "this is the last copy of that recording")
                         continue
                     p = _queue_file(f["name"])
                     if p is None:
+                        _skip(f["name"], "it is no longer in a watched folder")
                         continue
                     # identity is proven HERE, not in the snapshot: this file is
                     # re-resolved by NAME, and a recurring export name can point
@@ -1990,15 +2164,18 @@ class Handler(BaseHTTPRequestHandler):
                     # the fingerprint that earned the match.
                     snap = f.get("dup_fp")
                     if not snap or dupes.fingerprint(p) != snap:
+                        _skip(f["name"],
+                              "the file changed since it was flagged")
                         continue
                     try:
                         freed += p.stat().st_size / 1e6
                         p.unlink()
                         p.with_suffix(".opts.json").unlink(missing_ok=True)
                         deleted.append(f["name"])
-                    except OSError:
+                    except OSError as e:
+                        _skip(f["name"], f"it could not be deleted ({e.strerror})")
                         continue
-                self._json({"ok": True, "deleted": deleted,
+                self._json({"ok": True, "deleted": deleted, "skipped": skipped,
                             "freed_mb": round(freed, 1)})
             elif u.path == "/api/dupe_ignore":
                 # "keep both": this pair is two different meetings. Nothing is
@@ -2018,6 +2195,7 @@ class Handler(BaseHTTPRequestHandler):
                 ran = _force_dupe_scan()
                 self._json({"ok": True, "ran": ran, "pairs": _dupe_pair_rows(),
                             "scanning": bool(_dupe_worker["busy"]),
+                            "scanned": dupes.cache_scanned(),
                             "truncated": dupes.cache_truncated()})
             elif u.path == "/api/dismiss_failure":
                 # the X on a failed row whose source file no longer exists:
@@ -2065,39 +2243,35 @@ class Handler(BaseHTTPRequestHandler):
                 # multi-select actions. Every op below gates on live/archived
                 # MEMBERSHIP internally before it builds a path, so an unknown or
                 # traversal base is simply refused per-item — never applied.
-                from stt import archive, summarize
                 action = str(b.get("action") or "")
                 value, confirmed = b.get("value"), bool(b.get("confirm"))
                 results = []
-                for bs in [str(x) for x in (b.get("bases") or [])][:500]:
-                    if action == "category":
-                        r = summarize.set_meeting_category(bs, value or "")
-                    elif action == "date":
-                        r = summarize.set_meeting_date(bs, value or "")
-                    elif action == "rename":
-                        # each keeps its OWN date stamp, so renaming a run of
-                        # recurring meetings to one name still leaves them distinct
-                        r = summarize.rename_meeting(bs, value or "")
-                    elif action == "accept":
-                        r = summarize.apply_meeting_edits(bs, reviewed=True)
-                    elif action == "archive":
-                        r = archive.archive_meeting(bs)
-                    elif action == "restore":
-                        r = archive.restore_meeting(bs)
-                    elif action in ("delete", "drop_audio") and not confirmed:
-                        r = {"ok": False, "error": "missing confirmation"}
-                    elif action == "delete":
-                        r = archive.delete_meeting(bs)
-                    elif action == "drop_audio":
-                        r = archive.drop_audio(bs)
-                    else:
-                        r = {"ok": False, "error": f"unknown action '{action}'"}
+                # the cap is real, so the answer says so: a selection above it
+                # silently lost its tail and the client could not tell a
+                # dropped item from one that was never selected
+                asked = [str(x) for x in (b.get("bases") or [])]
+                dropped = max(0, len(asked) - 500)
+                for bs in asked[:500]:
+                    # PER ITEM: one meeting's OSError (an unwritable folder, a
+                    # vanished file) used to abort the loop, leaving the items
+                    # before it applied on disk, the items after it never
+                    # attempted, and the client a bare 500 with no results to
+                    # report. Every item is now tried, and every outcome told.
+                    try:
+                        r = self._bulk_one(action, bs, value, confirmed)
+                    except Exception as e:
+                        r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
                     results.append({"base": bs, **r})
-                self._json({"ok": all(r.get("ok") for r in results),
-                            "n_ok": sum(1 for r in results if r.get("ok")),
-                            "freed_mb": round(sum(r.get("freed_mb") or 0
-                                                  for r in results), 1),
-                            "results": results})
+                out = {"ok": all(r.get("ok") for r in results) and not dropped,
+                       "n_ok": sum(1 for r in results if r.get("ok")),
+                       "freed_mb": round(sum(r.get("freed_mb") or 0
+                                             for r in results), 1),
+                       "results": results}
+                if dropped:
+                    out["dropped"] = dropped
+                    out["error"] = (f"only the first 500 of {len(asked)} were "
+                                    f"done; {dropped} were not attempted")
+                self._json(out)
             elif u.path == "/api/archive_meeting":
                 if not self._require_base(b.get("base")):
                     return
