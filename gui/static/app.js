@@ -68,6 +68,72 @@ const PIN_ORDER={recording:0,processing:1,needs_name:2,failed:3,held:4,waiting:5
 const PINNED=new Set(Object.keys(PIN_ORDER));
 function dateKey(r){return r.date||((r.when||'').slice(0,10));}   // fall back to last-activity
 
+/* ==================== the year-to-month accordion ====================
+ * (DESIGN.md, Indigo Blueprint.) Month sections nest under YEAR sections
+ * only when the library spans two or more years -- a single-year library
+ * gets no year header, because there is nothing to fold it against. The
+ * pinned actionable cluster is never part of this: it sits above every
+ * section and never folds.
+ *
+ * Section ids are DATE-derived, not index-derived, so a persisted state
+ * survives a month arriving, a rename, or a re-sort:
+ *   y-2026        a year section
+ *   m-2026-07     a month section
+ *   m-today / m-yesterday / m-undated   the three special buckets
+ * Today and Yesterday leave their own month's bucket (dateBucket peels them
+ * off), so m-today can never collide with m-2026-09.
+ */
+function grpMonthId(g){
+  if(g.key==='Today')return 'm-today';
+  if(g.key==='Yesterday')return 'm-yesterday';
+  if(g.key==='Undated')return 'm-undated';
+  const k=dateKey(g.rows[0]||{})||'';
+  return 'm-'+(k.slice(0,7)||'x');
+}
+function grpYear(g){
+  if(g.key==='Undated')return '';            // undated belongs to no year
+  const k=dateKey(g.rows[0]||{})||'';
+  return k.slice(0,4)||((String(g.key).match(/\d{4}/)||[])[0]||'');
+}
+// stamp the accordion identity on every date group (the pinned cluster has none)
+function grpStamp(groups){
+  for(const g of groups){if(g.pinned)continue;g.id=grpMonthId(g);g.year=grpYear(g);}
+  return groups;
+}
+// year sections appear ONLY when the library spans two or more years: a single
+// year has nothing to fold against, so it gets month sections and no year line
+function grpNest(groups){
+  return new Set(groups.filter(g=>!g.pinned&&g.year).map(g=>g.year)).size>=2;
+}
+const CUR_YEAR=TODAY.slice(0,4);
+const CUR_MONTH=TODAY.slice(0,7);
+const PREV_MONTH=(()=>{const d=new Date(TODAY+'T12:00:00');
+  d.setDate(1);d.setMonth(d.getMonth()-1);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');})();
+// defaults: the current and previous month open, the current year open,
+// everything older folded. A month that has never been seen therefore opens
+// exactly when it is current, which is what "a new month opens by default"
+// means once the state is derived rather than stored.
+function grpDefaultOpen(id){
+  if(id.slice(0,2)==='y-')return id.slice(2)===CUR_YEAR;
+  if(id==='m-today'||id==='m-yesterday')return true;
+  if(id==='m-undated')return false;
+  const ym=id.slice(2);
+  return ym===CUR_MONTH||ym===PREV_MONTH;
+}
+const GRP_KEY='stt_groups';
+let GRP=(()=>{try{const v=JSON.parse(localStorage.getItem(GRP_KEY)||'{}');
+  return (v&&typeof v==='object')?v:{};}catch(e){return {};}})();
+function grpOpen(id){const v=GRP[id];
+  return v==='open'?true:v==='closed'?false:grpDefaultOpen(id);}
+function grpSet(id,open){GRP[id]=open?'open':'closed';
+  try{localStorage.setItem(GRP_KEY,JSON.stringify(GRP));}catch(e){}}
+// A search or the flagged filter FORCES every section open so a match is never
+// hidden behind a fold. The stored state is not touched, so clearing the
+// filter restores exactly the folds the user left.
+function grpForced(){return $('#search').value.trim().length>0||flaggedOnly;}
+function grpToggle(id){grpSet(id,!grpOpen(id));if(S)drawTimeline(S);}
+
 /* ============================ status pill ============================ *
  * The ONLY place pipeline state appears, one line, by priority:
  *   REC ticking  ->  transcribing N  ->  paused N waiting  ->  N waiting  ->  hidden
@@ -655,6 +721,7 @@ function drawTimeline(s){
   // by-date: the pinned actionable cluster first (one unlabeled group), then the
   // ready rows sorted AND grouped by the SAME key (meeting date, newest first).
   const groups=[];
+  let nest=false;                 // year sections only once the library spans 2+ years
   if(sort==='name'){
     const ordered=rows.slice().sort((a,b)=>
       (a.title||'').toLowerCase().localeCompare((b.title||'').toLowerCase())
@@ -676,11 +743,22 @@ function drawTimeline(s){
       if(!last||last.pinned||last.key!==key)groups.push({key,rows:[]});
       groups[groups.length-1].rows.push(r);
     }
+    // stamp each date group with its accordion identity, then decide whether
+    // the library spans two or more years -- the ONLY condition under which
+    // year sections appear at all
+    nest=grpNest(grpStamp(groups));
   }
+  LAST_GROUPS=groups;                 // the jump rail resolves its index here
 
+  const forced=grpForced();
   const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
+  // the fold state is part of the signature: a toggle changes what is in the
+  // DOM without changing a single row, and the poll must not undo it
+  const gsig=sort!=='date'?'':groups.map(g=>g.pinned?'P'
+    :g.id+':'+((forced||grpOpen(g.id))?1:0)
+      +':'+((!nest||!g.year||forced||grpOpen('y-'+g.year))?1:0)).join(',');
   const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly
-    +'|'+uploadsSig();
+    +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
   // never wipe a half-typed name in a needs_name field; a later unchanged poll
   // (or a blur) lets the rebuild happen. Only INPUT/SELECT focus blocks it, so
@@ -688,15 +766,58 @@ function drawTimeline(s){
   const ae=document.activeElement;
   if(ae&&tl.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName))return;
   tl.dataset.sig=sig;
-  tl.innerHTML=upHTML+groups.map((g,i)=>
-    (g.pinned?'':`<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`)
-    +g.rows.map(rowHTML).join('')).join('');
+  tl.innerHTML=upHTML+(sort==='date'
+    ?accordionHTML(groups,nest,forced)
+    :groups.map((g,i)=>
+      (g.pinned?'':`<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`)
+      +g.rows.map(rowHTML).join('')).join(''));
   drawRail(groups,q.length>0,sort);
+}
+
+/* One header LINE per section: chevron, eyebrow, hairline rule, count in mono.
+ * A collapsed section contributes its header and nothing else -- no rows in
+ * the DOM -- and a collapsed YEAR swallows its month headers too, so a
+ * five-year library reads as five lines. */
+function ghead(id,label,count,cls,domId,open){
+  return `<button class="ghead ${cls}" type="button" id="${esc(domId)}"
+    aria-expanded="${open?'true':'false'}" onclick="grpToggle('${escJs(id)}')"
+    ><span class="gchev" aria-hidden="true">${open?'&#9662;':'&#9656;'}</span
+    ><span class="glabel">${esc(label)}</span
+    ><span class="grule" aria-hidden="true"></span
+    ><span class="gcount mono">${count}</span></button>`;
+}
+function accordionHTML(groups,nest,forced){
+  let html='',lastYr=null;
+  for(let i=0;i<groups.length;i++){
+    const g=groups[i];
+    // the pinned actionable cluster: above every section, unlabeled, unfoldable
+    if(g.pinned){html+=g.rows.map(rowHTML).join('');continue;}
+    let yearOpen=true;
+    if(nest&&g.year){
+      if(g.year!==lastYr){
+        lastYr=g.year;
+        const yid='y-'+g.year;
+        const yOpen=forced||grpOpen(yid);
+        const yCount=groups.reduce((n,x)=>
+          n+((!x.pinned&&x.year===g.year)?x.rows.length:0),0);
+        html+=ghead(yid,g.year,yCount,'yhead','ysec-'+g.year,yOpen);
+      }
+      yearOpen=forced||grpOpen('y-'+g.year);
+    }
+    if(!yearOpen)continue;                 // a folded year hides its months too
+    const mOpen=forced||grpOpen(g.id);
+    html+=ghead(g.id,g.key,g.rows.length,
+      'mgroup'+(nest&&g.year?' inyear':''),'grp-'+i,mOpen);
+    if(mOpen)html+=g.rows.map(rowHTML).join('');
+  }
+  return html;
 }
 
 /* jump rail: regenerated from the ORDERED date groups (the pinned cluster has no
  * rail entry). By date: TODAY/YST first, then a year anchor before each year's
- * first month, months beneath. By name: the letter groups. 3+ groups, no search. */
+ * first month, months beneath. By name: the letter groups. 3+ groups, no search.
+ * The rail lists EVERY month, folded or not: railJump unfolds what it lands on. */
+let LAST_GROUPS=[];
 function _railBtn(i,g,short){
   return `<button class="railbtn" type="button" onclick="railJump(${i})"
     title="Jump to ${esc(g.key)} (${g.rows.length})">${esc(short)}</button>`;
@@ -721,8 +842,19 @@ function drawRail(groups,hasSearch,sort){
     return head+_railBtn(i,g,g.key.slice(0,3));
   }).join('');
 }
-function railJump(i){const el=document.getElementById('grp-'+i);
-  if(el)el.scrollIntoView({behavior:'smooth',block:'start'});}
+/* A rail click must land on rows, not on a folded header: it opens the target
+ * month AND the year holding it (persisting both, so the fold the user just
+ * asked for survives the next poll), rebuilds, and only then scrolls. */
+function railJump(i){
+  const g=LAST_GROUPS[i];
+  if(g&&!g.pinned&&g.id){
+    if(g.year)grpSet('y-'+g.year,true);
+    grpSet(g.id,true);
+    if(S)drawTimeline(S);
+  }
+  const el=document.getElementById('grp-'+i);
+  if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
+}
 
 /* ============================ render loop ============================ */
 // The relabel that a naming spawns rewrites every transcript in the background,

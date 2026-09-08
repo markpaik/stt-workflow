@@ -1558,39 +1558,108 @@ def test_stepper_orders_fabricated_out_of_order_flags_by_start_time():
         f"stepper order is not document order: {r.stdout.strip()}"
 
 
-def test_boardroom_tokens_shipped_and_signal_retired():
-    # DESIGN.md (2026-07-12): the Boardroom Wide colorway. Monday violet-blue
-    # accent on a cool gray ground; white cards; states in colored pills.
-    # Status/chip tokens are the COMPUTED-contrast pairs: ok and personal
-    # darkened hue-true from the spec's first draft (3.06:1 and 3.82:1 on
-    # their softs), and accent TEXT gets its own darker token (#6161FF is
-    # 4.21:1 as text on the ground) while #6161FF keeps fills/edges/focus.
-    for tok in ("#6161FF", "#F6F7FB", "#4B4FD9", "#1E7B45", "#E8F6EE",
-                "#2264D1", "#E8EFFC", "#A05E0C", "#FFF1E5", "#8F5F10",
-                "#CC3F38", "#BE3A33", "#131417", "#1B1D23", "#8F94FF"):
-        assert tok in NEW_CSS, f"Boardroom token missing: {tok}"
-    for old in ("#4F5DE5", "#7B87FF", "#FAFAFC", "#0F1114",
+def test_indigo_tokens_shipped_and_boardroom_retired():
+    # DESIGN.md (2026-09-08): the Indigo Blueprint colorway supersedes
+    # Boardroom Wide. Blueprint indigo on a pale cool ground; teal carries
+    # every attention state; the Personal chip is magenta. Status/chip tokens
+    # are the COMPUTED-contrast pairs (tools/token_contrast.py): the one that
+    # missed on the spec's first draft, light --rec-text #C2362F at 4.43:1 on
+    # its soft, is darkened hue-true to #BC342E (4.67:1) while --rec #C2362F
+    # keeps the record-light and destructive FILLS.
+    for tok in ("#2F4BD6", "#F4F6FB", "#101828", "#5D6B85", "#E1E6F2",
+                "#C7D0E4", "#EEF1F8", "#E6EAFB", "#1E7B45", "#E3F4EA",
+                "#0B7285", "#DDF2F6", "#C2362F", "#BC342E", "#FAE3E0",
+                "#A8327A", "#F8E4F0",
+                "#0F1320", "#161B2B", "#E8EBF5", "#8B9DFF", "#5FD0E3",
+                "#E58BC4"):
+        assert tok in NEW_CSS, f"Indigo token missing: {tok}"
+    for old in ("#6161FF", "#4B4FD9", "#F6F7FB", "#2264D1", "#E8EFFC",
+                "#A05E0C", "#FFF1E5", "#8F5F10", "#CC3F38", "#BE3A33",
+                "#131417", "#1B1D23", "#8F94FF", "#E0A94F",
+                "#4F5DE5", "#7B87FF", "#FAFAFC", "#0F1114",
                 "#1E6B50", "#43B28A", "#FBFBF9", "#121416"):
-        assert old not in NEW_CSS, f"retired Signal/Newsprint token: {old}"
-    # the Signal glow touches retired with their colorway: no glow shadows,
-    # no breathing pill; the focus ring is the plain accent outline
+        assert old not in NEW_CSS, f"retired Boardroom/Signal token: {old}"
+    # --attn is the attention hue, and --amber survives ONLY as its alias, so
+    # no rule that still says amber breaks
+    assert NEW_CSS.count("--attn:#") == 4 and NEW_CSS.count("--attn-soft:#") == 4
+    assert NEW_CSS.count("--amber:var(--attn); --amber-soft:var(--attn-soft);") == 4
+    # the Signal glow touches stay retired: no glow shadows, no breathing pill;
+    # the focus ring is the plain accent outline
     assert "0 0 0 3px color-mix" not in NEW_CSS
     assert "0 0 6px color-mix" not in NEW_CSS
     assert "pillbreathe" not in NEW_CSS
     assert "outline:2px solid var(--accent)" in NEW_CSS
-    # states speak in pills, categories in chips, and the primary button
-    # is pill-shaped under the soft accent shadow
+    # states speak in pills, categories in chips...
     for cls in (".spill{", ".spill.ok{", ".spill.busy{", ".spill.rec{",
                 ".catchip{", ".catchip.work{", ".catchip.personal{"):
-        assert cls in NEW_CSS, f"missing Boardroom class: {cls}"
-    assert "0 4px 14px color-mix(in srgb,var(--accent) 30%" in NEW_CSS
-    # rows are floating cards: 14px radius, 10px gaps, hover lift; attention
-    # items wear their colored left edge (amber tray, accent naming row)
-    assert re.search(r"(?m)^\.row\{[^}]*border-radius:14px", NEW_CSS)
+        assert cls in NEW_CSS, f"missing state/chip class: {cls}"
+    # ...and the primary button's Boardroom accent glow retired with the
+    # shadows: geometry, not lift, separates the surfaces now
+    assert "0 4px 14px color-mix(in srgb,var(--accent) 30%" not in NEW_CSS
+    assert "var(--cardsh" not in NEW_CSS, "the card-shadow tokens must be gone"
+    assert not re.search(r"--cardsh(?:-hov)?\s*:", NEW_CSS), \
+        "the card-shadow tokens are still declared"
+    # rows are bordered cards: 6px radius, 10px gaps, a border that FIRMS on
+    # hover instead of a lift; attention items wear their colored left edge
+    # (teal tray, accent naming row)
+    assert re.search(r"(?m)^\.row\{[^}]*border-radius:6px", NEW_CSS)
     assert re.search(r"(?m)^\.row\{[^}]*margin:0 0 10px", NEW_CSS)
-    assert ".row:hover{box-shadow:var(--cardsh-hov)}" in NEW_CSS
-    assert re.search(r"(?m)^\.tray\{[^}]*border-left:4px solid var\(--amber\)", NEW_CSS)
+    assert ".row:hover{border-color:var(--line)}" in NEW_CSS
+    assert re.search(r"(?m)^\.tray\{[^}]*border-left:4px solid var\(--attn\)", NEW_CSS)
     assert re.search(r'needs_name"\]\{[^}]*border-left:4px solid var\(--accent\)', NEW_CSS)
+
+
+def test_geometric_surfaces_carry_the_indigo_radii_and_no_stray_shadow():
+    """DESIGN.md (Indigo Blueprint), Surfaces: cards 6px, chips and pills 4px,
+    controls 6px, and shadows ONLY on the floating surfaces. Every radius in
+    the sheet has to land in that vocabulary."""
+    radii = set(re.findall(r"border(?:-\w+)*-radius:([\w.%]+)", NEW_CSS))
+    # 6px cards/controls, 4px chips/pills, plus the shapes the rules do not
+    # govern: circles (50%), the 99px switch track, the 2px progress hairline
+    # and bubble tails, and the 3px inline search highlight
+    assert radii <= {"6px", "4px", "2px", "3px", "50%", "99px"}, \
+        f"radius outside the Indigo vocabulary: {sorted(radii)}"
+    assert "6px" in radii and "4px" in radii
+    # the switch track is the one 99px survivor: a switch is not a chip
+    assert NEW_CSS.count("border-radius:99px") == 1
+    assert re.search(r"(?m)^\.dtog\{[^}]*border-radius:99px", NEW_CSS)
+    # the header's blueprint dot grid: --line dots, 1px on a 14px cell
+    assert re.search(r"(?m)^\.hdr\{[\s\S]*?background-image:radial-gradient", NEW_CSS)
+    assert "background-size:14px 14px" in NEW_CSS
+    # the progress hairline is 2px of ACCENT along the card's bottom edge
+    m = re.search(r'\.row\[data-state="processing"\] \.progress\{[^}]*\}', NEW_CSS)
+    assert m and "height:2px" in m.group(0) and "background:var(--accent)" in m.group(0)
+
+
+def test_no_shadow_rule_reaches_a_row_the_tray_or_a_card():
+    """The border does the separating. Shadows survive only on the popovers,
+    the drawer (and the naming slide-over, a drawer in all but name), the bulk
+    bar, and the two floating notices -- never on a row, the tray, or any of
+    the in-flow card surfaces."""
+    # every rule that casts a DROP shadow, by selector. The inset edge markers
+    # (.mseg.mnow / .mseg.mrev) are left edges drawn with box-shadow:inset,
+    # not lift, so they are excluded by the inset check below.
+    casters = []
+    for sel, decls in re.findall(r"([^{}]+)\{([^}]*)\}", NEW_CSS):
+        for decl in decls.split(";"):
+            if not decl.strip().startswith("box-shadow:"):
+                continue
+            value = decl.split(":", 1)[1].strip()
+            if value.startswith("inset") or value == "none":
+                continue
+            casters.append(sel.strip().splitlines()[-1].strip())
+    assert casters, "no shadow rules found -- the audit regex broke"
+    allowed = {".popover", ".bulkbar", ".npanel", ".npdd", ".drawer",
+               ".archhint", ".toast", ".dropveil .dv-t"}
+    assert set(casters) <= allowed, f"unexpected shadow caster: {sorted(set(casters) - allowed)}"
+    # named directly, so a future edit that re-adds a lift to any of the three
+    # surfaces the spec calls out fails here rather than by eye
+    for sel in (r"(?m)^\.row\{[^}]*\}", r"(?m)^\.row:hover\{[^}]*\}",
+                r"(?m)^\.tray\{[^}]*\}", r"(?m)^\.msection\{[^}]*\}",
+                r"(?m)^\.mcard\{[^}]*\}"):
+        m = re.search(sel, NEW_CSS)
+        assert m, f"rule missing: {sel}"
+        assert "box-shadow" not in m.group(0), f"shadow back on {m.group(0)[:40]!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1658,7 +1727,8 @@ def test_a_waiting_row_says_when_it_was_already_processed():
     # collision, so it lands a poll or two after the row first painted
     assert "r.dup_of,r.dup_reason" in _js_fn("sigOf")
     m = re.search(r"(?m)^\.dupflag\{[^}]*\}", NEW_CSS, re.S)
-    assert m and "var(--amber)" in m.group(0) and "13px" in m.group(0)
+    # the house colour for a decision that is not an error: teal since Indigo
+    assert m and "var(--attn)" in m.group(0) and "13px" in m.group(0)
 
 
 def test_the_duplicate_sweep_is_a_two_step_and_deletes_only_copies():
@@ -2489,3 +2559,298 @@ def test_a_failed_dupes_fetch_stops_the_poll_loop():
     assert out["calls"] == 2, \
         f"the poll refetched forever: {out['calls']} calls for one failure"
     assert out["errShown"] is True and "could not be loaded" in out["err"]
+
+
+# ---------------------------------------------------------------------------
+# Indigo Blueprint (2026-09-08): the year-to-month accordion. Ready meetings
+# still sort AND group by meeting date, but the month sections now fold, and
+# they nest under year sections once the library spans two or more years. The
+# pinned actionable cluster is above all of it and never folds.
+#
+# These drive the SHIPPED functions (grpStamp / grpNest / grpOpen / grpSet /
+# accordionHTML) under node, with a stubbed localStorage, so a persisted fold
+# can be carried from one process to the next exactly as a reload carries it.
+# ---------------------------------------------------------------------------
+ACC_TODAY = "2026-09-08"          # a fixed "today" so the defaults are stable
+
+
+def _js_region(start, end):
+    """The source between two comment markers, so a block of small helpers can
+    be loaded whole instead of named one at a time."""
+    i = NEW_JS.index(start)
+    j = NEW_JS.index(end, i)
+    return NEW_JS[i:j]
+
+
+def _acc_env(store="{}", search="", flagged="false", today=ACC_TODAY):
+    """The accordion's real source over a stubbed browser."""
+    return "\n".join([
+        "const STORE={v:" + json.dumps(store) + "};",
+        "const localStorage={getItem:k=>(k==='stt_groups'?STORE.v:null),"
+        "setItem:(k,v)=>{if(k==='stt_groups')STORE.v=v;}};",
+        "const SEARCH=" + json.dumps(search) + ";",
+        "function $(sel){return sel==='#search'?{value:SEARCH}:null;}",
+        "let flaggedOnly=" + flagged + ";",
+        "let S=null;let DRAWS=0;function drawTimeline(){DRAWS++;}",
+        "function esc(s){return (s??'').toString().replace(/[&<>\"]/g,"
+        "c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}",
+        "function escJs(s){return esc(s).replace(/\\\\/g,'\\\\\\\\')"
+        ".replace(/'/g,\"\\\\'\");}",
+        "function rowHTML(r){return '<div class=\"row\" data-id=\"'+r.id+'\"></div>';}",
+        "const TODAY=" + json.dumps(today) + ";",
+        "function dateKey(r){return r.date||((r.when||'').slice(0,10));}",
+        _js_region("/* ==================== the year-to-month accordion",
+                   "/* ============================ status pill "),
+        _js_fn("ghead"),
+        _js_fn("accordionHTML"),
+        # the driver's own scaffolding: build groups the way drawTimeline does
+        """
+function mk(key,dates){return {key,rows:dates.map((d,n)=>({id:key+'#'+n,date:d}))};}
+function build(groups){
+  grpStamp(groups);
+  const nest=grpNest(groups);
+  const forced=grpForced();
+  return {html:accordionHTML(groups,nest,forced),nest,forced};
+}
+function headers(html){return (html.match(/<button class="ghead [^"]*"/g)||[])
+  .map(s=>s.replace('<button class="ghead ','').replace('"',''));}
+function rowIds(html){return (html.match(/data-id="[^"]*"/g)||[])
+  .map(s=>s.slice(9,-1));}
+""",
+    ])
+
+
+def _run_node(js):
+    r = subprocess.run([NODE, "-e", js], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_single_year_library_gets_months_and_no_year_headers():
+    """A year with nothing to fold against earns no header line."""
+    out = _run_node(_acc_env() + """
+const g=build([mk('Today',['2026-09-08']),
+               mk('September 2026',['2026-09-02']),
+               mk('August 2026',['2026-08-14']),
+               mk('March 2026',['2026-03-02'])]);
+console.log(JSON.stringify({nest:g.nest,heads:headers(g.html),
+  hasYearLine:g.html.includes('yhead')}));
+""")
+    assert out["nest"] is False
+    assert out["hasYearLine"] is False, "a single-year library must show no year header"
+    assert out["heads"] == ["mgroup", "mgroup", "mgroup", "mgroup"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_two_years_nest_months_under_year_sections():
+    out = _run_node(_acc_env() + """
+const g=build([mk('Today',['2026-09-08']),
+               mk('August 2026',['2026-08-14']),
+               mk('November 2025',['2025-11-03']),
+               mk('May 2025',['2025-05-06'])]);
+console.log(JSON.stringify({nest:g.nest,heads:headers(g.html),
+  html:g.html}));
+""")
+    assert out["nest"] is True
+    # the current year opens (its months follow it, indented); 2025 is folded,
+    # so its month headers never render at all
+    assert out["heads"] == ["yhead", "mgroup inyear", "mgroup inyear", "yhead"]
+    assert "2025" in out["html"] and "NOVEMBER" not in out["html"].upper()
+    # the year count is the sum of the months it holds
+    assert '<span class="gcount mono">2</span>' in out["html"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_defaults_open_this_month_and_last_and_fold_the_rest():
+    """DESIGN.md: the current month and the previous month open, every older
+    month collapsed, the current year open, every prior year collapsed."""
+    out = _run_node(_acc_env() + """
+console.log(JSON.stringify({
+  today:grpOpen('m-today'),yesterday:grpOpen('m-yesterday'),
+  cur:grpOpen('m-2026-09'),prev:grpOpen('m-2026-08'),
+  older:grpOpen('m-2026-07'),undated:grpOpen('m-undated'),
+  curYear:grpOpen('y-2026'),priorYear:grpOpen('y-2025')}));
+""")
+    assert out == {"today": True, "yesterday": True, "cur": True, "prev": True,
+                   "older": False, "undated": False,
+                   "curYear": True, "priorYear": False}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_fold_persists_under_stt_groups_and_survives_a_rebuild():
+    """The state is written per SECTION ID (date-derived, never the render
+    index) under stt_groups, so it survives a poll, a reload, and a month
+    arriving above it."""
+    first = _run_node(_acc_env() + """
+grpToggle('m-2026-09');            // fold the current month
+grpToggle('m-2026-07');            // unfold an old one
+console.log(JSON.stringify({store:STORE.v,draws:DRAWS}));
+""")
+    assert json.loads(first["store"]) == {"m-2026-09": "closed", "m-2026-07": "open"}
+    assert first["draws"] == 0, "no S yet, so the toggle must not try to redraw"
+    # a NEW process reads that store back: the folds come back exactly
+    second = _run_node(_acc_env(store=first["store"]) + """
+const g=build([mk('September 2026',['2026-09-02']),
+               mk('August 2026',['2026-08-14']),
+               mk('July 2026',['2026-07-09'])]);
+console.log(JSON.stringify({open:{sep:grpOpen('m-2026-09'),
+  aug:grpOpen('m-2026-08'),jul:grpOpen('m-2026-07')},rows:rowIds(g.html)}));
+""")
+    assert second["open"] == {"sep": False, "aug": True, "jul": True}
+    # ...and the render obeys them: the folded month contributes no rows
+    assert second["rows"] == ["August 2026#0", "July 2026#0"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_collapsed_section_renders_its_header_and_nothing_else():
+    """The rows of a folded section are not in the DOM at all -- that is what
+    keeps a 400-meeting library cheap."""
+    out = _run_node(_acc_env(store='{"m-2026-03":"closed"}') + """
+const g=build([mk('March 2026',['2026-03-02','2026-03-11','2026-03-20'])]);
+console.log(JSON.stringify({heads:headers(g.html),rows:rowIds(g.html),
+  count:g.html.includes('>3</span>'),chev:g.html.includes('&#9656;')}));
+""")
+    assert out["rows"] == [], "a collapsed section put its rows in the DOM"
+    assert out["heads"] == ["mgroup"], "the header line must still render"
+    assert out["count"] is True, "the header keeps its count while folded"
+    assert out["chev"] is True, "a folded section shows the right-pointing chevron"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_search_and_the_flagged_filter_expand_every_section_then_restore():
+    """A match must never hide behind a fold -- and the folds the user left
+    must come back untouched when the filter clears."""
+    store = '{"m-2026-03":"closed","y-2025":"closed"}'
+    groups = """
+const g=build([mk('March 2026',['2026-03-02']),
+               mk('May 2025',['2025-05-06'])]);
+console.log(JSON.stringify({forced:g.forced,rows:rowIds(g.html),
+  heads:headers(g.html),store:STORE.v}));
+"""
+    folded = _run_node(_acc_env(store=store) + groups)
+    assert folded["forced"] is False
+    assert folded["rows"] == [], "both sections were folded"
+
+    searching = _run_node(_acc_env(store=store, search="rivera") + groups)
+    assert searching["forced"] is True
+    assert searching["rows"] == ["March 2026#0", "May 2025#0"]
+    assert searching["heads"] == ["yhead", "mgroup inyear", "yhead", "mgroup inyear"]
+    # the store is untouched while filtering, which is what makes the restore
+    # a restore rather than a re-guess
+    assert json.loads(searching["store"]) == json.loads(store)
+
+    flagging = _run_node(_acc_env(store=store, flagged="true") + groups)
+    assert flagging["forced"] is True
+    assert flagging["rows"] == ["March 2026#0", "May 2025#0"]
+
+    restored = _run_node(_acc_env(store=searching["store"]) + groups)
+    assert restored["forced"] is False and restored["rows"] == [], \
+        "clearing the filter must restore the persisted folds"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_rail_click_opens_the_target_month_and_its_year_before_scrolling():
+    """The rail must land on rows, not on a folded header."""
+    fixture = "\n".join([
+        _acc_env(store='{"m-2025-05":"closed","y-2025":"closed"}'),
+        "let scrolled=null;let redraws=0;",
+        "const document={getElementById:id=>({id,"
+        "scrollIntoView(){scrolled=id;}})};",
+        "S={};",
+        "const LAST_GROUPS=grpStamp([{key:'',pinned:true,rows:[{id:'p0'}]},"
+        "mk('March 2026',['2026-03-02']),mk('May 2025',['2025-05-06'])]);",
+        _js_fn("railJump"),
+        """
+railJump(2);
+console.log(JSON.stringify({scrolled,
+  month:grpOpen('m-2025-05'),year:grpOpen('y-2025'),
+  store:JSON.parse(STORE.v),drew:DRAWS>0}));
+""",
+    ])
+    out = _run_node(fixture)
+    assert out["month"] is True and out["year"] is True, \
+        "the rail must unfold the target month AND the year holding it"
+    assert out["store"] == {"m-2025-05": "open", "y-2025": "open"}, \
+        "the unfold the rail just performed has to survive the next poll"
+    assert out["drew"] is True, "the timeline must rebuild before the scroll"
+    assert out["scrolled"] == "grp-2"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_pinned_cluster_sits_above_every_section_and_never_folds():
+    """A failed April file belongs at the top, not inside a folded April."""
+    out = _run_node(_acc_env(store='{"m-2026-09":"closed","y-2025":"closed"}') + """
+const g=build([{key:'',pinned:true,rows:[{id:'FAILED-APRIL'},{id:'WAITING'}]},
+               mk('September 2026',['2026-09-02']),
+               mk('May 2025',['2025-05-06'])]);
+console.log(JSON.stringify({rows:rowIds(g.html),heads:headers(g.html),
+  firstIsRow:g.html.indexOf('data-id="FAILED-APRIL"')<g.html.indexOf('<button')}));
+""")
+    assert out["firstIsRow"] is True, "the pinned cluster must precede every header"
+    assert out["rows"] == ["FAILED-APRIL", "WAITING"], \
+        "the pinned rows render unfolded while both date sections stay folded"
+    # 2026 is open so its (folded) month line shows; 2025 is folded, so its
+    # month line does not. Neither header belongs to the pinned cluster.
+    assert out["heads"] == ["yhead", "mgroup inyear", "yhead"], \
+        "the pinned cluster contributes no header of its own"
+
+
+def test_the_accordion_keeps_the_sort_and_group_by_meeting_date_rule():
+    """Sorting by one key while grouping by another is what fragmented the
+    months; the accordion changes the presentation, never the ordering."""
+    body = _js_fn("drawTimeline")
+    assert "dateKey(b).localeCompare(dateKey(a))" in body
+    assert "const key=dateBucket(dateKey(r));" in body
+    # the fold state is part of the render signature, or a toggle would be
+    # undone by the very next 2s poll
+    assert "const gsig=" in body and "'|'+gsig" in body
+    # section ids are DATE-derived, never the render index
+    assert "'m-'+(k.slice(0,7)" in _js_fn("grpMonthId")
+    assert "'y-'+g.year" in _js_fn("accordionHTML")
+    # the persisted key the spec names
+    assert "const GRP_KEY='stt_groups'" in NEW_JS
+
+
+def test_the_section_header_line_carries_the_whole_anatomy():
+    """chevron, eyebrow, hairline rule, count -- and the whole line is the
+    click target (DESIGN.md, Indigo Blueprint)."""
+    head = _js_fn("ghead")
+    assert head.lstrip().startswith("function ghead(")
+    for part in ('class="gchev"', 'class="glabel"', 'class="grule"',
+                 'class="gcount mono"'):
+        assert part in head, f"missing header part: {part}"
+    assert "&#9662;" in head and "&#9656;" in head, "down / right chevrons"
+    assert 'aria-expanded="${open?' in head
+    # the whole line is one button, and the label is escaped
+    assert "<button class=" in head and "esc(label)" in head
+    assert "escJs(id)" in head
+    # the CSS: the rule fills the width, --line under a year and --hair under
+    # a month, and the year eyebrow is heavier and inked
+    assert re.search(r"(?m)^\.grule\{[^}]*flex:1[^}]*background:var\(--hair\)", NEW_CSS)
+    assert ".yhead .grule{background:var(--line)}" in NEW_CSS
+    assert re.search(r"\.yhead \.glabel\{font:700 14px[^}]*color:var\(--ink\)", NEW_CSS)
+    assert re.search(r"(?m)^\.mgroup\{font:600 13px[^}]*color:var\(--sub\)", NEW_CSS)
+
+
+# ---------------------------------------------------------------------------
+# The contrast gate. tools/token_contrast.py reads the four token blocks out
+# of the shipped sheet and measures every pair the design paints as text on a
+# ground. Running it here means a future token edit cannot quietly drop a pair
+# below 4.5:1 -- the promise every colorway round has made since Signal.
+# ---------------------------------------------------------------------------
+def test_every_token_text_pair_clears_4_5_to_1_in_both_themes():
+    from tools.token_contrast import AA, audit
+
+    rows = audit()
+    assert rows, "the contrast audit measured nothing -- its block regex broke"
+    # all four token blocks were found and measured
+    assert len({r.block for r in rows}) == 4
+    bad = [r.line() for r in rows if not r.ok]
+    assert not bad, "token pairs below %.1f:1:\n%s" % (AA, "\n".join(bad))
+    # the one pair that missed on the spec's first draft is recorded in the
+    # sheet as a hue-true darkening, not a hue swap
+    assert "hue-true" in NEW_CSS.lower()
+    light = [r for r in rows if r.block == "light :root"]
+    rec = next(r for r in light if (r.fg, r.bg) == ("rec-text", "rec-soft"))
+    assert rec.fg_hex == "#BC342E" and rec.ratio >= AA

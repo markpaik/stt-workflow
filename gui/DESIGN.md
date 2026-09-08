@@ -27,6 +27,11 @@ one popover (runs) and one drawer (settings).
 
 ## Newsprint tokens
 
+> Colour, surface, geometry, and grouping are now governed by "Indigo
+> Blueprint (approved 2026-09-08)" at the foot of this file; the palettes and
+> surface rules below are kept for the record and are superseded where the
+> two disagree.
+
 Type (revised again 2026-07-12: Mark approved the Boardroom Wide direction and
 asked to adopt Monday's font stylings). UI face: **Figtree**, Monday's own,
 vendored locally as the OFL-licensed variable woff2 in gui/static/ (its
@@ -36,15 +41,18 @@ titles 600, wordmark 700, body 400-500, letter-spacing -0.005em at 16px+.
 Sizes keep the calibrated middle landing: titles 17.5px, meta 13px, summary
 previews 14.5px at two clamped lines, floor 13px (test-enforced). Mono
 (`ui-monospace`, SF Mono) stays demoted to true data only: timestamps,
-durations, live clocks, the status pill. Nothing is serif.
+durations, live clocks, the status pill, and the group counts. Nothing is
+serif. Group eyebrows carry .08em tracking, not the .06em of the Boardroom
+round (Indigo).
 
-Color and surfaces: the "Boardroom Wide" restyle (approved 2026-07-12 from
-the Monday/Asana research and the revised mockup; supersedes Signal). Rows
-are floating white cards on a cool gray ground; Monday's violet-blue is the
-one interactive accent; states speak in colored pills; attention items wear
-a colored left edge.
+Color and surfaces: SUPERSEDED by Indigo Blueprint. The "Boardroom Wide"
+restyle (approved 2026-07-12 from the Monday/Asana research and the revised
+mockup; superseded Signal) put floating white cards on a cool gray ground
+with Monday's violet-blue as the one interactive accent. Indigo keeps the
+white-card-on-cool-ground idea and the colored left edge, and replaces the
+palette, the shadows, and the radii.
 
-Light theme:
+Light theme (Boardroom, superseded):
 
     --paper  #F6F7FB   page ground (cool gray)
     --card   #FFFFFF   cards, popovers, tray
@@ -61,19 +69,23 @@ Light theme:
     --rec    #CC3F38   record light ONLY   soft #FBE7E5
     Category chips: Work #4B4FD9 on #EEF0FF, Personal #B4690E on #FFF1E5.
 
-Dark theme: ground #131417, cards #1B1D23 keeping their lift (deeper
-shadows), ink #E9EAEE, sub #9AA0AB, accent #8F94FF (text on accent #10122E),
-accent-soft #23244A, status/chips shift to their dark-soft pairs; every text
-pair verified 4.5:1 programmatically, adjusting tokens hue-true when a pair
-misses (the Signal precedent).
+Dark theme (Boardroom, superseded): ground #131417, cards #1B1D23 keeping
+their lift (deeper shadows), ink #E9EAEE, sub #9AA0AB, accent #8F94FF (text
+on accent #10122E), accent-soft #23244A, status/chips shift to their
+dark-soft pairs. The verification rule itself is NOT superseded and carries
+into Indigo: every text pair is verified 4.5:1 programmatically
+(`tools/token_contrast.py`, gated by tests/test_new_shell.py), adjusting
+tokens hue-true when a pair misses (the Signal precedent).
 
-Surfaces: cards radius 14px with a soft shadow (0 1px 4px, hover deepens to
-0 4px 16px), 10px gaps between rows, tray as a white card with a 4px amber
-left edge, naming rows with a 4px accent left edge, primary buttons
-pill-shaped with a soft accent shadow (0 4px 14px accent at 30%). The old
-glow touches retire with Signal; the focus ring stays accent for
-accessibility. Progress hairline becomes the busy blue. Hairlines separate
-nothing on the gray ground; the cards themselves do the separating.
+Surfaces: SUPERSEDED by Indigo Blueprint, which is geometric: 6px cards with
+a 1px --hair border and no drop shadow, 4px chips and pills, 6px controls
+with a 1px --line border, shadows only on the popovers, the drawer, and the
+bulk bar. Boardroom's 14px radii and card shadows (0 1px 4px, hover 0 4px
+16px) and the primary button's accent glow are all retired. What carries
+forward unchanged: 10px gaps between rows, the tray's 4px attention left
+edge (teal now, not amber), the naming row's 4px accent left edge, the
+accent focus ring, and the rule that the cards do the separating rather than
+hairlines drawn between them. The progress hairline is 2px of accent.
 
 Layout, use-the-space rule (Mark, 2026-07-12): the column cap goes fluid,
 max-width min(1360px, 94vw). Card content spreads: the left block (title,
@@ -90,9 +102,10 @@ Theme plumbing: a pre-paint snippet and the `stt_theme` localStorage key, plus
 `prefers-color-scheme` default. Red appears nowhere except the recording
 state and destructive confirmation buttons.
 
-Rhythm: 8px grid. Layout and surfaces are governed by the Boardroom Wide
-section above (fluid min(1360px, 94vw) cap, card rows with 10px gaps, 14px
-card radius, soft shadows); type sizes by its Type section (titles 17.5px,
+Rhythm: 8px grid. Layout stays as this section sets it (fluid
+min(1360px, 94vw) cap, card rows with 10px gaps); surfaces are governed by
+Indigo Blueprint (6px card radius, 1px hairline borders, no card shadow);
+type sizes by its Type section (titles 17.5px,
 meta 13px, summaries 14.5px at two clamped lines, floor 13px,
 test-enforced). Superseded for the record: the 920px reading column and
 18.5px titles of the Newsprint/Signal era. Rows keep 15-16px vertical
@@ -301,3 +314,84 @@ only when it needs a decision.
 The 25-surface inventory in the proposal artifact (2026-07-11) is the parity
 checklist; each phase's gate walks the rows it absorbs. Everything tested
 against the seeded demo home (`tools/demo_seed.py`), never real data.
+
+## Indigo Blueprint (approved 2026-09-08; supersedes Boardroom Wide)
+
+Mark chose this direction from six on the design canvas
+(https://claude.ai/code/artifact/59bf675a-a2a6-4070-a13f-7d09b69b75e4): a
+tech-forward palette with an official register and geometric surfaces, and
+a two-level year-to-month accordion for a library past 100 meetings. Every
+anatomy rule above still holds; this section governs color, surface,
+geometry, and grouping where they disagree.
+
+Type stays Figtree at the calibrated sizes (titles 17.5px, meta 13px,
+summaries 14.5px at two clamped lines, floor 13px, test-enforced). Group
+eyebrows are uppercase with .08em tracking; counts are mono, tabular.
+
+Light theme tokens (text pairs verified 4.5:1 programmatically, adjusting
+hue-true when a pair misses, exactly as the Signal and Boardroom rounds did):
+
+    --paper   #F4F6FB   page ground (pale cool gray)
+    --card    #FFFFFF   cards, popovers, tray, drawer
+    --ink     #101828   text
+    --sub     #5D6B85   secondary text
+    --hair    #E1E6F2   card borders and month rules
+    --line    #C7D0E4   control borders and year rules
+    --inset   #EEF1F8   hover wells
+    --accent  #2F4BD6   blueprint indigo: buttons, links, focus, naming edge,
+                        the busy state (busy shares the accent hue)
+    --acc-ink #FFFFFF   --accent-soft #E6EAFB   --accent-text: the accent,
+                        darkened hue-true only if it misses 4.5:1 on ground
+    --ok      #1E7B45 on #E3F4EA      ready pill
+    --busy    = accent on accent-soft  transcribing pill and progress hairline
+    --attn    #0B7285 on #DDF2F6      attention: the Needs-you tray edge and
+                                       eyebrow, flagged counts, held state
+                                       (teal replaces every former amber use;
+                                       the --amber token name is kept as an
+                                       alias of --attn so no rule breaks)
+    --rec     #C2362F on #FAE3E0      record light and destructive buttons ONLY
+    Category chips: Work = accent on accent-soft; Personal #A8327A on #F8E4F0
+    (magenta replaces the former orange). Four hues, each owned by one
+    meaning: indigo acts, teal asks, green is done, red records or destroys.
+
+Dark theme: ground #0F1320, cards #161B2B, ink #E8EBF5, sub #98A2BF, hair
+#232A3D, line #33405A, accent #8B9DFF (text on accent #0E1330, accent-soft
+#232C55), ok #5BC98C on #16291E, attention #5FD0E3 on #0F2A33, personal
+#E58BC4 on #331A2A, rec #F0605A on #34191B. Verified the same way; adjust
+hue-true.
+
+Surfaces, geometric: cards are white with a 1px --hair border and a 6px
+radius, NO drop shadow (the border does the separating; shadows survive only
+on popovers, the drawer, and the bulk bar). Chips and pills carry a 4px
+radius. Controls carry the 6px radius and a 1px --line border. The sticky
+header keeps the paper ground and adds a faint dot grid behind it
+(radial-gradient of --line at 1px on a 14px cell, at reduced alpha so text
+contrast is untouched). The attention tray keeps its 4px left edge, now
+--attn; naming rows keep the 4px accent edge. Progress is a 2px accent
+hairline. Focus ring stays accent. Motion rules unchanged.
+
+Grouping, the year-to-month accordion (replaces flat month headers):
+- Ready meetings group by meeting date into MONTH sections, and month
+  sections nest under YEAR sections when the library spans two or more
+  years; a single-year library shows month sections only (no year header
+  for a year that has nothing to fold against).
+- Every section header is one line: chevron (right when collapsed, down
+  when open), the eyebrow (`2026` at 14px 700 ink for a year, `SEPTEMBER
+  2026` at 13px 600 sub for a month), a hairline rule filling the width
+  (--line under a year, --hair under a month), and the meeting count in
+  mono at the right edge. The whole line is the click target.
+- Defaults: the current month and the previous month open; every older
+  month collapsed; the current year open; every prior year collapsed with
+  its months hidden inside it. Collapsing a year hides its month headers
+  too, so a five-year library reads as five lines.
+- State persists per section in localStorage (`stt_groups`, keyed by the
+  section id, values open or closed), survives polls and reloads, and a
+  new month appearing opens by default.
+- Search or the flagged filter expands every section holding a match and
+  restores the persisted state when the filter clears. A jump-rail click
+  expands the target section and its year before scrolling.
+- The pinned actionable cluster (recording, processing, needs_name, failed,
+  held, waiting) stays above every group and never folds.
+- Collapsed sections render only their header line: the rows are not in
+  the DOM, so a 400-meeting library costs the browser only its open
+  months.

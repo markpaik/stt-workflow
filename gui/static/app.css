@@ -1,87 +1,103 @@
 /* ============================================================================
-   Boardroom Wide: the panel's token sheet and shell styling (supersedes
-   Signal, approved 2026-07-12). Floating white cards on a cool gray ground,
-   Monday's violet-blue as the ONE interactive accent, states speaking in
-   colored pills, attention items wearing a colored left edge. Light + dark
-   via prefers-color-scheme AND :root[data-theme=...] overrides, exactly like
-   the old page. Read gui/DESIGN.md; this implements it.
+   Indigo Blueprint: the panel's token sheet and shell styling (approved
+   2026-09-08; supersedes Boardroom Wide). A tech-forward palette in an
+   official register with geometric surfaces: white cards separated by a 1px
+   hairline border and a 6px radius instead of a drop shadow, blueprint indigo
+   as the ONE interactive accent, teal carrying every attention state, and a
+   faint dot grid behind the sticky header. Light + dark via
+   prefers-color-scheme AND :root[data-theme=...] overrides, exactly like the
+   old page. Read gui/DESIGN.md, "Indigo Blueprint"; this implements it.
 
-   Contrast, computed not eyeballed (every text pair >= 4.5:1):
-   - --accent #6161FF measures 4.21:1 as TEXT on the gray ground, so text
-     gets --accent-text #4B4FD9 (5.74:1 on ground, 6.14:1 on card) while
-     #6161FF keeps fills, edges, and the focus ring (white on it: 4.50:1).
-   - --ok darkened hue-true from the spec's #2E9E5B (3.06:1 on its soft)
-     to #1E7B45 (4.74:1). --personal darkened from #B4690E (3.82:1) to
-     #A05E0C (4.62:1). --rec-text #BE3A33 (4.60:1 on rec-soft) carries red
-     TEXT while --rec #CC3F38 stays the record-light fill.
+   Four hues, each owned by one meaning: indigo acts, teal asks, green is
+   done, red records or destroys. --busy and --work are the accent itself
+   (the busy state shares the accent hue), so no fifth hue enters by the
+   back door.
+
+   Contrast, computed not eyeballed by tools/token_contrast.py and pinned by
+   tests/test_new_shell.py (every text pair >= 4.5:1, both themes):
+   - one pair missed on the spec's first draft: light --rec-text #C2362F on
+     --rec-soft #FAE3E0 measures 4.43:1. It is darkened HUE-TRUE (HSV hue
+     2.86 deg and saturation held, value x0.97) to #BC342E, which measures
+     4.67:1 on rec-soft and 5.72:1 on card. --rec #C2362F is unchanged and
+     still carries the record light and destructive fills, where it is never
+     small text.
+   - the shadow tokens --cardsh / --cardsh-hov are GONE with Boardroom: the
+     hairline border does the separating, and only the popovers, the drawer,
+     and the bulk bar still cast --shadow.
    ============================================================================ */
 
 :root{
-  --paper:#F6F7FB; --card:#FFFFFF; --ink:#1C1E26; --sub:#6A6F7E;
-  --hair:#ECEDF4; --line:#E0E2EC; --inset:#F3F4F9;
-  --accent:#6161FF; --acc-ink:#FFFFFF; --accent-soft:#EEF0FF;
-  --accent-text:#4B4FD9;
-  --ok:#1E7B45; --ok-soft:#E8F6EE;
-  --busy:#2264D1; --busy-soft:#E8EFFC;
-  --amber:#8F5F10; --amber-soft:#FBF1DC;
-  --rec:#CC3F38; --rec-text:#BE3A33; --rec-soft:#FBE7E5;
-  --work:#4B4FD9; --work-soft:#EEF0FF;
-  --personal:#A05E0C; --personal-soft:#FFF1E5;
+  --paper:#F4F6FB; --card:#FFFFFF; --ink:#101828; --sub:#5D6B85;
+  --hair:#E1E6F2; --line:#C7D0E4; --inset:#EEF1F8;
+  --accent:#2F4BD6; --acc-ink:#FFFFFF; --accent-soft:#E6EAFB;
+  --accent-text:#2F4BD6;   /* 6.27:1 on ground, 6.78:1 on card: no darkening */
+  --ok:#1E7B45; --ok-soft:#E3F4EA;
+  --busy:var(--accent); --busy-soft:var(--accent-soft);
+  --attn:#0B7285; --attn-soft:#DDF2F6;
+  /* kept as aliases of the attention pair so no rule that still says amber
+     breaks; teal replaces every former amber use (DESIGN.md, Indigo) */
+  --amber:var(--attn); --amber-soft:var(--attn-soft);
+  --rec:#C2362F; --rec-soft:#FAE3E0;
+  /* the ONE pair that missed: the spec drafted rec TEXT as #C2362F, which
+     measures 4.43:1 on --rec-soft. Darkened HUE-TRUE (HSV hue 2.86 deg and
+     saturation held, value x0.97) to #BC342E: 4.67:1 on soft, 5.72:1 on card. */
+  --rec-text:#BC342E;
+  --work:var(--accent); --work-soft:var(--accent-soft);
+  --personal:#A8327A; --personal-soft:#F8E4F0;
   --sans:'Figtree',-apple-system,system-ui,"SF Pro Text","Segoe UI",sans-serif;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --shadow:0 1px 2px rgba(21,23,38,.07), 0 12px 36px rgba(21,23,38,.13);
-  --cardsh:0 1px 4px rgba(21,23,38,.07);
-  --cardsh-hov:0 4px 16px rgba(21,23,38,.12);
+  --shadow:0 1px 2px rgba(16,24,40,.08), 0 12px 36px rgba(16,24,40,.14);
   /* use-the-space rule (Mark, 2026-07-12): the column cap goes fluid. ONE
      shared cap for the timeline, the meeting page, and the pinned bars. */
   --colcap:min(1360px,94vw);
 }
 @media(prefers-color-scheme:dark){:root{
-  --paper:#131417; --card:#1B1D23; --ink:#E9EAEE; --sub:#9AA0AB;
-  --hair:#24262E; --line:#343845; --inset:#232630;
-  --accent:#8F94FF; --acc-ink:#10122E; --accent-soft:#23244A;
-  --accent-text:#8F94FF;
+  --paper:#0F1320; --card:#161B2B; --ink:#E8EBF5; --sub:#98A2BF;
+  --hair:#232A3D; --line:#33405A; --inset:#1D2437;
+  --accent:#8B9DFF; --acc-ink:#0E1330; --accent-soft:#232C55;
+  --accent-text:#8B9DFF;
   --ok:#5BC98C; --ok-soft:#16291E;
-  --busy:#7FB1F5; --busy-soft:#17233A;
-  --amber:#E0A94F; --amber-soft:#2B2415;
+  --busy:var(--accent); --busy-soft:var(--accent-soft);
+  --attn:#5FD0E3; --attn-soft:#0F2A33;
+  --amber:var(--attn); --amber-soft:var(--attn-soft);
   --rec:#F0605A; --rec-text:#F0605A; --rec-soft:#34191B;
-  --work:#A9ADFF; --work-soft:#232452;
-  --personal:#E3A455; --personal-soft:#2E2113;
+  --work:var(--accent); --work-soft:var(--accent-soft);
+  --personal:#E58BC4; --personal-soft:#331A2A;
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
-  --cardsh:0 1px 4px rgba(0,0,0,.4);
-  --cardsh-hov:0 6px 18px rgba(0,0,0,.55);
 }}
 /* manual override (theme dot) must win over the OS preference BOTH ways */
 :root[data-theme=dark]{
-  --paper:#131417; --card:#1B1D23; --ink:#E9EAEE; --sub:#9AA0AB;
-  --hair:#24262E; --line:#343845; --inset:#232630;
-  --accent:#8F94FF; --acc-ink:#10122E; --accent-soft:#23244A;
-  --accent-text:#8F94FF;
+  --paper:#0F1320; --card:#161B2B; --ink:#E8EBF5; --sub:#98A2BF;
+  --hair:#232A3D; --line:#33405A; --inset:#1D2437;
+  --accent:#8B9DFF; --acc-ink:#0E1330; --accent-soft:#232C55;
+  --accent-text:#8B9DFF;
   --ok:#5BC98C; --ok-soft:#16291E;
-  --busy:#7FB1F5; --busy-soft:#17233A;
-  --amber:#E0A94F; --amber-soft:#2B2415;
+  --busy:var(--accent); --busy-soft:var(--accent-soft);
+  --attn:#5FD0E3; --attn-soft:#0F2A33;
+  --amber:var(--attn); --amber-soft:var(--attn-soft);
   --rec:#F0605A; --rec-text:#F0605A; --rec-soft:#34191B;
-  --work:#A9ADFF; --work-soft:#232452;
-  --personal:#E3A455; --personal-soft:#2E2113;
+  --work:var(--accent); --work-soft:var(--accent-soft);
+  --personal:#E58BC4; --personal-soft:#331A2A;
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
-  --cardsh:0 1px 4px rgba(0,0,0,.4);
-  --cardsh-hov:0 6px 18px rgba(0,0,0,.55);
   color-scheme:dark;
 }
 :root[data-theme=light]{
-  --paper:#F6F7FB; --card:#FFFFFF; --ink:#1C1E26; --sub:#6A6F7E;
-  --hair:#ECEDF4; --line:#E0E2EC; --inset:#F3F4F9;
-  --accent:#6161FF; --acc-ink:#FFFFFF; --accent-soft:#EEF0FF;
-  --accent-text:#4B4FD9;
-  --ok:#1E7B45; --ok-soft:#E8F6EE;
-  --busy:#2264D1; --busy-soft:#E8EFFC;
-  --amber:#8F5F10; --amber-soft:#FBF1DC;
-  --rec:#CC3F38; --rec-text:#BE3A33; --rec-soft:#FBE7E5;
-  --work:#4B4FD9; --work-soft:#EEF0FF;
-  --personal:#A05E0C; --personal-soft:#FFF1E5;
-  --shadow:0 1px 2px rgba(21,23,38,.07), 0 12px 36px rgba(21,23,38,.13);
-  --cardsh:0 1px 4px rgba(21,23,38,.07);
-  --cardsh-hov:0 4px 16px rgba(21,23,38,.12);
+  --paper:#F4F6FB; --card:#FFFFFF; --ink:#101828; --sub:#5D6B85;
+  --hair:#E1E6F2; --line:#C7D0E4; --inset:#EEF1F8;
+  --accent:#2F4BD6; --acc-ink:#FFFFFF; --accent-soft:#E6EAFB;
+  --accent-text:#2F4BD6;
+  --ok:#1E7B45; --ok-soft:#E3F4EA;
+  --busy:var(--accent); --busy-soft:var(--accent-soft);
+  --attn:#0B7285; --attn-soft:#DDF2F6;
+  --amber:var(--attn); --amber-soft:var(--attn-soft);
+  --rec:#C2362F; --rec-soft:#FAE3E0;
+  /* the ONE pair that missed: the spec drafted rec TEXT as #C2362F, which
+     measures 4.43:1 on --rec-soft. Darkened HUE-TRUE (HSV hue 2.86 deg and
+     saturation held, value x0.97) to #BC342E: 4.67:1 on soft, 5.72:1 on card. */
+  --rec-text:#BC342E;
+  --work:var(--accent); --work-soft:var(--accent-soft);
+  --personal:#A8327A; --personal-soft:#F8E4F0;
+  --shadow:0 1px 2px rgba(16,24,40,.08), 0 12px 36px rgba(16,24,40,.14);
   color-scheme:light;
 }
 
@@ -117,9 +133,15 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
 /* -------------------------------------------------------------- header ---- */
+/* the blueprint dot grid: --line dots, 1px on a 14px cell, held at a low alpha
+   so the grid reads as paper texture and never touches the contrast of the
+   wordmark, the pill, or the search field sitting on it (DESIGN.md, Indigo) */
 .hdr{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
   flex-wrap:wrap;padding:16px 2px 12px;
-  background:color-mix(in srgb,var(--paper) 86%,transparent);
+  background-color:color-mix(in srgb,var(--paper) 86%,transparent);
+  background-image:radial-gradient(circle at 1px 1px,
+    color-mix(in srgb,var(--line) 45%,transparent) 1px,transparent 1px);
+  background-size:14px 14px;
   backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border-bottom:1px solid var(--hair)}
 .wordmark{font:700 22px/1.1 var(--sans);letter-spacing:-.005em;color:var(--ink)}
@@ -128,21 +150,21 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 /* status pill: mono, one at a time, colored by priority; hidden when idle */
 .pill{font:500 13px/1 var(--mono);font-variant-numeric:tabular-nums;
   letter-spacing:.01em;color:var(--sub);background:var(--inset);
-  border:1px solid var(--hair);border-radius:99px;padding:5px 11px;cursor:pointer;
+  border:1px solid var(--hair);border-radius:4px;padding:5px 11px;cursor:pointer;
   display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
 .pill:hover{border-color:var(--line)}
 .pill.rec{color:var(--rec-text);background:var(--rec-soft);border-color:transparent}
 .pill.accent{color:var(--accent-text);background:var(--accent-soft);border-color:transparent}
-.pill.amber{color:var(--amber);background:var(--amber-soft);border-color:transparent}
+.pill.amber{color:var(--attn);background:var(--attn-soft);border-color:transparent}
 .pill .recdot{width:8px;height:8px;border-radius:50%;background:var(--rec);
   flex:none;animation:pulse 1.3s infinite}
 
 /* filter + sort: borderless until hover; native search field */
 .ctl{font:500 13px/1 var(--sans);color:var(--sub);background:transparent;
-  border:1px solid transparent;border-radius:8px;padding:6px 8px;cursor:pointer}
+  border:1px solid transparent;border-radius:6px;padding:6px 8px;cursor:pointer}
 .ctl:hover{border-color:var(--line);color:var(--ink)}
 .search{font:400 13px/1.2 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:7px 11px;
+  border:1px solid var(--line);border-radius:6px;padding:7px 11px;
   width:clamp(140px,28vw,280px)}
 .search::placeholder{color:var(--sub)}
 
@@ -150,14 +172,15 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
    >8 flagged aggregate is filtering the library; clicking it clears the filter */
 .flagchip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
   font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;
-  color:var(--amber);background:var(--amber-soft);
-  border:1px solid color-mix(in srgb,var(--amber) 38%,var(--hair));
-  border-radius:99px;padding:6px 10px;cursor:pointer}
-.flagchip:hover{border-color:var(--amber)}
+  color:var(--attn);background:var(--attn-soft);
+  border:1px solid color-mix(in srgb,var(--attn) 38%,var(--hair));
+  border-radius:4px;padding:6px 10px;cursor:pointer}
+.flagchip:hover{border-color:var(--attn)}
 
-/* buttons; the primary is pill-shaped with the soft accent shadow */
+/* buttons: 6px, a 1px --line border, and no shadow anywhere. The primary is
+   the accent fill; its Boardroom accent glow retired with the shadows. */
 .btn{font:500 13px/1 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer;
+  border:1px solid var(--line);border-radius:6px;padding:7px 13px;cursor:pointer;
   display:inline-flex;align-items:center;gap:6px;
   transition:background .16s ease,border-color .16s ease}
 .btn:hover{background:var(--inset);border-color:var(--sub)}
@@ -166,20 +189,19 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .btn.process .caret{font-size:13px}
 .btn.gear{width:34px;height:34px;padding:0;justify-content:center;font-size:15px}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink);
-  font-weight:600;border-radius:99px;
-  box-shadow:0 4px 14px color-mix(in srgb,var(--accent) 30%,transparent)}
+  font-weight:600;border-radius:4px}
 .btn.primary:hover{background:color-mix(in srgb,var(--accent) 88%,#000);
   border-color:color-mix(in srgb,var(--accent) 88%,#000)}
 .btn.danger{background:transparent;color:var(--rec-text);
   border-color:color-mix(in srgb,var(--rec) 42%,transparent)}
 .btn.danger:hover{background:var(--rec-soft);border-color:var(--rec)}
-.btn.mini{padding:5px 10px;font-size:13px;border-radius:99px}
+.btn.mini{padding:5px 10px;font-size:13px;border-radius:4px}
 /* disabled buttons keep >= 3:1 (the disabled floor): an explicit quiet
    palette, never an opacity fade that can sink white-on-accent to 2:1 */
 .btn:disabled,.btn:disabled:hover,
 .btn.primary:disabled,.btn.primary:disabled:hover{
   background:var(--inset);border-color:var(--line);color:var(--sub);
-  box-shadow:none;cursor:default}
+  cursor:default}
 
 /* theme dot: a small round control that cycles auto / light / dark */
 .themedot{width:26px;height:26px;border-radius:50%;padding:0;flex:none;cursor:pointer;
@@ -195,16 +217,17 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   outline-offset:2px}
 
 /* the recorder's success note: a quiet sub line right under the header (good
-   news is an acknowledgement, not an ask: never amber, never a tray row) */
+   news is an acknowledgement, not an ask: never teal, never a tray row) */
 .recok{margin:14px 2px 0;color:var(--sub);font:400 13px/1.4 var(--sans)}
 
 /* --------------------------------------------------------------- tray ----- */
-/* a white card wearing the 4px amber attention edge */
+/* a white card wearing the 4px TEAL attention edge; no shadow, like every
+   other card -- the hairline border and the 4px edge do all the separating */
 .tray{margin:14px 0 10px;background:var(--card);
-  border:1px solid var(--hair);border-left:4px solid var(--amber);
-  border-radius:14px;box-shadow:var(--cardsh);padding:8px 16px 12px}
-.tray .trayhdr{font:600 13px/1.2 var(--sans);letter-spacing:.06em;
-  text-transform:uppercase;color:var(--amber);padding:6px 0 4px}
+  border:1px solid var(--hair);border-left:4px solid var(--attn);
+  border-radius:6px;padding:8px 16px 12px}
+.tray .trayhdr{font:600 13px/1.2 var(--sans);letter-spacing:.08em;
+  text-transform:uppercase;color:var(--attn);padding:6px 0 4px}
 .trayrow{display:flex;align-items:center;gap:10px;padding:8px 0;
   border-top:1px solid var(--hair)}
 .trayrow:first-of-type{border-top:0}
@@ -221,20 +244,20 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .trayrow .tw-acts .tw-verb{margin-left:0}
 /* >8 items: the aggregate line filters the LIBRARY instead of expanding; while
    the flagged-only filter is on, the line reads as active */
-.trayrow.active .tw-title{color:var(--amber);font-weight:600}
-.trayrow.active .tw-verb{color:var(--amber);background:var(--amber-soft);
-  border-color:color-mix(in srgb,var(--amber) 45%,var(--line))}
+.trayrow.active .tw-title{color:var(--attn);font-weight:600}
+.trayrow.active .tw-verb{color:var(--attn);background:var(--attn-soft);
+  border-color:color-mix(in srgb,var(--attn) 45%,var(--line))}
 /* expanded per-meeting / per-voice rows under an aggregate line (<=8 items).
    Library meta scale (13px, nothing under 13px), roomy padding:
    the tray must never read as a second, denser library. */
 .traysub{display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 4px 10px 18px;
   border-top:1px solid var(--hair)}
-.traysub:hover{background:var(--inset);border-radius:8px}
+.traysub:hover{background:var(--inset);border-radius:6px}
 .traysub .ts-title{font:600 14px/1.35 var(--sans);color:var(--ink);flex:none;
   max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .traysub .ts-meta{font:400 13px/1.3 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--sub);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.traysub .ts-count{margin-left:auto;flex:none;color:var(--amber);
+.traysub .ts-count{margin-left:auto;flex:none;color:var(--attn);
   font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums}
 
 /* ------------------------------------------------- timeline + rail -------- */
@@ -246,29 +269,54 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   position:sticky;top:74px;max-height:calc(100vh - 96px);overflow-y:auto;
   overscroll-behavior:contain}
 .rail .railyr{font:600 13px/1.2 var(--sans);font-variant-numeric:tabular-nums;
-  letter-spacing:.06em;color:var(--sub);padding:8px 8px 2px}
+  letter-spacing:.08em;color:var(--sub);padding:8px 8px 2px}
 .railbtn{border:0;background:none;color:var(--sub);text-align:left;cursor:pointer;
-  font:600 13px/1.2 var(--sans);letter-spacing:.06em;text-transform:uppercase;
+  font:600 13px/1.2 var(--sans);letter-spacing:.08em;text-transform:uppercase;
   padding:3px 8px;border-radius:6px}
 .railbtn:hover{background:var(--accent-soft);color:var(--accent-text)}
 
-/* month / Today / Yesterday group header: 13px semibold uppercase sans, +.06em
-   tracking. ~30px top margin so each month reads as a chapter; the cards do
-   the separating, so no hairline under the label on the gray ground. */
+/* ---- the year-to-month accordion (DESIGN.md, Indigo Blueprint) ------------
+   One clickable line per section: chevron, eyebrow, a hairline rule filling
+   the width, and the count in mono at the right edge. The whole line is the
+   button, so there is no small target to hunt for. A collapsed section
+   renders ONLY this line -- its rows never enter the DOM -- which is what
+   keeps a 400-meeting library cheap. */
+.ghead{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  font:600 13px/1.2 var(--sans);color:var(--sub);
+  background:none;border:0;cursor:pointer;
+  padding:8px 4px 7px;margin:30px 0 2px;scroll-margin-top:84px}
+.gchev{flex:none;width:11px;font-size:13px;line-height:1;color:var(--sub)}
+.glabel{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.grule{flex:1;min-width:12px;height:1px;background:var(--hair)}
+.gcount{flex:none;font-size:13px;color:var(--sub)}
+.ghead:hover .glabel,.ghead:hover .gcount,.ghead:hover .gchev{color:var(--ink)}
+/* the YEAR line: heavier and inked, over the stronger --line rule */
+.yhead{margin:34px 0 2px}
+.yhead .glabel{font:700 14px/1.2 var(--sans);letter-spacing:.08em;color:var(--ink)}
+.yhead .grule{background:var(--line)}
+/* months nested inside an open year sit one step in */
+.ghead.inyear{margin-left:16px;width:calc(100% - 16px)}
+
+/* month / Today / Yesterday group header: 13px semibold uppercase sans, +.08em
+   tracking. ~30px top margin so each month reads as a chapter. The by-name
+   letter groups reuse this rule as a plain, unfoldable label. */
 .mgroup{font:600 13px/1.2 var(--sans);font-variant-numeric:tabular-nums;
-  letter-spacing:.06em;text-transform:uppercase;color:var(--sub);
+  letter-spacing:.08em;text-transform:uppercase;color:var(--sub);
   padding:8px 4px 7px;margin:30px 0 2px;
   scroll-margin-top:84px}
-.mgroup:first-child{margin-top:8px}   /* no chapter gap at the very top */
+/* no chapter gap at the very top, whichever kind of header lands there */
+.timeline>.mgroup:first-child,.timeline>.ghead:first-child{margin-top:8px}
 
 /* ---------------------------------------------------------------- row ----- */
-/* every row is a floating white card: 14px radius, soft shadow, 10px gaps,
-   hover lift. The ground shows through the gaps; no hairlines between rows. */
+/* every row is a white card: 6px radius, a 1px hairline border, 10px gaps.
+   The border does the separating -- no drop shadow, and hover firms the
+   border instead of lifting the card (DESIGN.md, Indigo Blueprint). */
 .row{display:flex;align-items:center;gap:12px;min-height:52px;padding:15px 18px;
-  background:var(--card);border:1px solid var(--hair);border-radius:14px;
-  box-shadow:var(--cardsh);margin:0 0 10px;position:relative;
-  transition:box-shadow .18s ease}
-.row:hover{box-shadow:var(--cardsh-hov)}
+  background:var(--card);border:1px solid var(--hair);border-radius:6px;
+  margin:0 0 10px;position:relative;
+  transition:border-color .18s ease}
+.row:hover{border-color:var(--line)}
 
 /* bulk-select checkbox: hidden until row hover, or while any selection exists */
 .row .chk{flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer;
@@ -284,7 +332,7 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 
 /* category chips: soft colored pills once a row is tagged; click cycles */
 .catchip{display:inline-flex;align-items:center;white-space:nowrap;
-  font:600 13px/1 var(--sans);border:0;border-radius:99px;padding:4px 10px;
+  font:600 13px/1 var(--sans);border:0;border-radius:4px;padding:4px 10px;
   cursor:pointer}
 .catchip.work{color:var(--work);background:var(--work-soft)}
 .catchip.personal{color:var(--personal);background:var(--personal-soft)}
@@ -295,8 +343,8 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rmeta{font:400 13px/1.4 var(--sans);font-variant-numeric:tabular-nums;color:var(--sub);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* the review count: plain amber TEXT (no chip), in the card's right rail */
-.rev{color:var(--amber);cursor:pointer;
+/* the review count: plain teal TEXT (no chip), in the card's right rail */
+.rev{color:var(--attn);cursor:pointer;
   font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;white-space:nowrap}
 .rev.minor{color:var(--sub)}
 .rev:hover{text-decoration:underline;text-underline-offset:2px}
@@ -310,8 +358,8 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
    minutes of transcription. Amber, the house colour for a decision that is not
    an error, and the matched meeting is a link straight out of the row. */
 .dupnote{display:flex;align-items:baseline;gap:6px;white-space:normal}
-.dupflag{flex:none;font:600 13px/1.3 var(--sans);color:var(--amber);
-  background:var(--amber-soft);border-radius:99px;padding:1px 8px}
+.dupflag{flex:none;font:600 13px/1.3 var(--sans);color:var(--attn);
+  background:var(--attn-soft);border-radius:4px;padding:1px 8px}
 .dupnote .dlink{padding:0}
 /* an ARCHIVED match: named, never linked (the meeting view renders live
    meetings only, so a link there is a permanent loading spinner) */
@@ -321,7 +369,7 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .estdetail{font:500 13px/1.3 var(--sans);color:var(--sub)}
 .dateinput{font:500 13px/1.3 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--ink);background:var(--card);border:1px solid var(--accent);
-  border-radius:7px;padding:2px 7px;color-scheme:inherit}
+  border-radius:6px;padding:2px 7px;color-scheme:inherit}
 /* summary preview: two full lines running the card's width, then clip.
    -webkit-line-clamp with a max-height fallback for engines that ignore it. */
 .rsummary{font:400 14.5px/1.5 var(--sans);color:var(--sub);
@@ -353,7 +401,7 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row.open .rslot{margin-top:1px}
 
 /* right rail: the state pill on top, the category chip (or hollow dot) and
-   the amber check-count beneath it, all right-aligned -- so no dead zone
+   the teal check-count beneath it, all right-aligned -- so no dead zone
    opens between the text block and the state. Buttons appear on hover/focus
    (or while the row's menu is open: .acting) and JOIN THE FLOW in the pill's
    place, so they can never sit on top of row text (DESIGN.md hover rule):
@@ -367,11 +415,11 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
    recording clock), quiet by default, colored by state */
 .spill{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
   font:600 13px/1 var(--sans);font-variant-numeric:tabular-nums;
-  color:var(--sub);background:var(--inset);border-radius:99px;padding:5px 11px}
+  color:var(--sub);background:var(--inset);border-radius:4px;padding:5px 11px}
 .spill.ok{color:var(--ok);background:var(--ok-soft)}
 .spill.busy{color:var(--busy);background:var(--busy-soft)}
 .spill.rec{color:var(--rec-text);background:var(--rec-soft)}
-.spill.amber{color:var(--amber);background:var(--amber-soft)}
+.spill.amber{color:var(--attn);background:var(--attn-soft)}
 /* held and waiting stay QUIET (the design's explicit call): the default
    sub-on-inset pill, no color raising them above the ready/busy states */
 .row[data-state="waiting"] .spill,.row[data-state="held"] .spill{
@@ -391,9 +439,10 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   border-radius:50%;background:var(--rec);animation:pulse 1.3s infinite}
 /* held rows carry no opacity fade: the quiet pill and the meta line say
    held, and a fade would drag their text below 4.5:1 (measured 3.92) */
-/* processing: a 2px busy-blue hairline along the card's bottom edge */
+/* processing: a 2px ACCENT hairline along the card's bottom edge (Indigo:
+   the busy state shares the accent hue, so progress is the accent itself) */
 .row[data-state="processing"] .progress{position:absolute;left:14px;bottom:0;height:2px;
-  background:var(--busy);border-radius:2px;transition:width .5s ease;
+  background:var(--accent);border-radius:2px;transition:width .5s ease;
   max-width:calc(100% - 28px)}
 /* the naming row wears the 4px accent attention edge; the row IS the form */
 .row[data-state="needs_name"]{border-left:4px solid var(--accent);
@@ -403,10 +452,10 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 /* needs_name inline form: the title input flexes to ALL available width */
 .nameform{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
 .nameform .ntitle{font:600 14.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:7px 10px;
+  border:1px solid var(--line);border-radius:6px;padding:7px 10px;
   flex:1 1 240px;min-width:180px}
 .nameform input[type=date]{font:inherit;font-size:13px;color:var(--ink);
-  background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 9px;
+  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 9px;
   color-scheme:inherit}
 .nameform input:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
@@ -427,10 +476,10 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .nchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .nchip{display:inline-flex;align-items:center;font:500 13px/1.2 var(--sans);
   color:var(--sub);padding:2px 2px}
-button.nchip{background:none;border:1px solid var(--line);border-radius:99px;
+button.nchip{background:none;border:1px solid var(--line);border-radius:4px;
   padding:2px 9px;cursor:pointer}
-button.nchip:hover{border-color:var(--amber);color:var(--amber)}
-.nchip .nchipq{color:var(--amber);font-weight:700;margin-left:3px}
+button.nchip:hover{border-color:var(--attn);color:var(--attn)}
+.nchip .nchipq{color:var(--attn);font-weight:700;margin-left:3px}
 /* the summary the local model wrote, clamped to two lines like a ready row */
 .nsum{font:400 13.5px/1.5 var(--sans);color:var(--sub);
   display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
@@ -438,7 +487,7 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
 
 /* small icon action buttons inside rows */
 .iact{font:500 13px/1 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:5px 9px;cursor:pointer}
+  border:1px solid var(--line);border-radius:6px;padding:5px 9px;cursor:pointer}
 .iact:hover{background:var(--inset);border-color:var(--sub)}
 .iact.play{width:28px;padding:5px 0;text-align:center}
 
@@ -447,11 +496,15 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
   padding:56px 16px}
 
 /* ---------------------------------------- floating surfaces (shadow) ------ */
+/* the ONLY three shadow-casting surfaces in the shell, plus the drawer and
+   the naming slide-over below (both are drawers) and the two floating
+   notices, which are popovers in every way but name. Cards, rows, and the
+   tray cast nothing at all. */
 .popover{position:absolute;z-index:50;background:var(--card);border:1px solid var(--hair);
-  border-radius:14px;box-shadow:var(--shadow);padding:8px}
+  border-radius:6px;box-shadow:var(--shadow);padding:8px}
 .bulkbar{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:45;
   display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--card);
-  border:1px solid var(--hair);border-radius:14px;box-shadow:var(--shadow);
+  border:1px solid var(--hair);border-radius:6px;box-shadow:var(--shadow);
   padding:9px 13px;max-width:min(var(--colcap),94vw)}
 
 @keyframes pulse{50%{opacity:.3}}
@@ -481,16 +534,16 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
 /* popover menu items, shared by the Process popover and the per-row menu */
 .ppitem{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
   font:500 13px/1.2 var(--sans);color:var(--ink);background:none;border:0;
-  border-radius:8px;padding:8px 10px;cursor:pointer}
+  border-radius:6px;padding:8px 10px;cursor:pointer}
 .ppitem:hover:not(:disabled){background:var(--inset)}
 .ppitem:disabled{opacity:.55;cursor:default}  /* >= 3:1 disabled floor */
 .ppitem.danger{color:var(--rec-text)}
 .ppitem.danger:hover:not(:disabled){background:var(--rec-soft)}
 .ppitem .ppc{margin-left:auto;font:500 13px/1 var(--sans);
   font-variant-numeric:tabular-nums;color:var(--sub);
-  background:var(--inset);border-radius:99px;padding:2px 7px}
+  background:var(--inset);border-radius:4px;padding:2px 7px}
 .ppsep{height:1px;background:var(--hair);margin:5px 4px}
-.pphdr{font:600 13px/1.2 var(--sans);letter-spacing:.06em;text-transform:uppercase;
+.pphdr{font:600 13px/1.2 var(--sans);letter-spacing:.08em;text-transform:uppercase;
   color:var(--sub);padding:7px 10px 3px}
 
 /* queued panel runs (a run requested while another is active): one quiet row
@@ -505,7 +558,7 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
 
 /* run-option / redo checkbox rows: label above a one-line explanation */
 .ppopt{display:flex;gap:9px;align-items:flex-start;padding:7px 10px;cursor:pointer;
-  border-radius:8px}
+  border-radius:6px}
 .ppopt:hover{background:var(--inset)}
 .ppopt>input{margin-top:2px;accent-color:var(--accent);flex:none}
 .ppopt-l{display:block;font:500 13px/1.3 var(--sans);color:var(--ink)}
@@ -515,13 +568,13 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
 .ppconfirm{padding:4px 6px}
 .ppctitle{font:600 14.5px/1.3 var(--sans);color:var(--ink);padding:4px 6px 2px}
 .ppcnote{font:400 13px/1.4 var(--sans);color:var(--sub);padding:2px 6px}
-.ppcnote.warn{color:var(--amber)}
+.ppcnote.warn{color:var(--attn)}
 .ppcnote.err{color:var(--rec-text)}
 .ppcrow{display:flex;gap:6px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
 /* text/date input inside a confirm popover (bulk rename, bulk date) */
 .ppinput{display:block;box-sizing:border-box;width:100%;margin:8px 0 2px;
   font:500 13px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:7px 10px;color-scheme:inherit}
+  border:1px solid var(--line);border-radius:6px;padding:7px 10px;color-scheme:inherit}
 .ppinput:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
 
@@ -531,27 +584,26 @@ button.nchip:hover{border-color:var(--amber);color:var(--amber)}
 
 /* inline clip player, mounted as a sibling under the listening row */
 .clipplayer{display:flex;align-items:center;gap:9px;padding:8px 12px;margin:0 0 10px;
-  background:var(--card);border:1px solid var(--hair);border-radius:12px;
-  box-shadow:var(--cardsh)}
+  background:var(--card);border:1px solid var(--hair);border-radius:6px}
 .clipplayer .clip-t{font-size:13px;color:var(--sub);min-width:34px;text-align:center}
 .clipplayer input[type=range]{flex:1;min-width:0;accent-color:var(--accent);height:4px;cursor:pointer}
 .clipplayer .iact.play{border-color:var(--line)}
 
 /* inline rename field that replaces a row's title */
 .renameinput{font:600 14.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--accent);border-radius:7px;padding:4px 8px;width:min(420px,60vw)}
+  border:1px solid var(--accent);border-radius:6px;padding:4px 8px;width:min(420px,60vw)}
 
 /* inline error surfaced on a needs_name row when Accept fails (no banner) */
 .nameerr{flex-basis:100%;color:var(--rec-text);
   font:400 13px/1.35 var(--sans);margin-top:2px}
 
 /* full-text search hits under the search field */
-.searchhits .hitshdr{font:600 13px/1.2 var(--sans);letter-spacing:.06em;
+.searchhits .hitshdr{font:600 13px/1.2 var(--sans);letter-spacing:.08em;
   text-transform:uppercase;color:var(--sub);padding:8px 2px 4px}
 .searchhits .hit{display:flex;gap:10px;align-items:baseline;padding:8px 12px;
-  border-radius:10px;cursor:pointer;background:var(--card);
+  border-radius:6px;cursor:pointer;background:var(--card);
   border:1px solid var(--hair);margin-bottom:6px}
-.searchhits .hit:hover{box-shadow:var(--cardsh-hov)}
+.searchhits .hit:hover{border-color:var(--line)}
 .searchhits .hit-t{color:var(--accent-text);flex:none;min-width:40px;font-size:13px}
 .searchhits .hit-w{font:500 13px/1.4 var(--sans);color:var(--ink);flex:none;
   max-width:22%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -592,19 +644,19 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
   border:1.5px solid var(--line);background:transparent}
 /* tagged, the header dot grows into the same chip as the rows */
 .mmeta .mcat.work,.mmeta .mcat.personal{width:auto;height:auto;border:0;
-  font:600 13px/1 var(--sans);border-radius:99px;padding:4px 10px}
+  font:600 13px/1 var(--sans);border-radius:4px;padding:4px 10px}
 .mmeta .mcat.work{color:var(--work);background:var(--work-soft)}
 .mmeta .mcat.personal{color:var(--personal);background:var(--personal-soft)}
-.mmeta .mchip{font:500 13px/1 var(--sans);letter-spacing:.06em;text-transform:uppercase;
-  color:var(--amber);background:var(--amber-soft);border-radius:99px;padding:3px 8px}
-.mmeta .mflagnote{color:var(--amber)}
+.mmeta .mchip{font:500 13px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--attn);background:var(--attn-soft);border-radius:4px;padding:3px 8px}
+.mmeta .mflagnote{color:var(--attn)}
 
 /* ------------------------------------------------------ docked audio ------- */
 .maudio{position:sticky;top:56px;z-index:15;display:flex;align-items:center;gap:10px;
-  padding:9px 12px;margin:6px 0 8px;border-radius:14px;
+  padding:9px 12px;margin:6px 0 8px;border-radius:6px;
   background:color-mix(in srgb,var(--card) 92%,transparent);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border:1px solid var(--hair);box-shadow:var(--cardsh)}
+  border:1px solid var(--hair)}
 .maudio .mpp{flex:none}
 .maudio .mt{color:var(--sub);min-width:40px;text-align:center;font-size:13px}
 .maudio .meta{color:var(--sub);min-width:46px;text-align:right;font-size:13px}
@@ -616,11 +668,11 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
   cursor:pointer;background:transparent}
 .mrate{font:600 13px/1 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--sub);background:var(--card);
-  border:1px solid var(--line);border-radius:7px;padding:5px 8px;cursor:pointer;flex:none;
+  border:1px solid var(--line);border-radius:6px;padding:5px 8px;cursor:pointer;flex:none;
   min-width:46px;text-align:center}
 .mrate:hover{border-color:var(--sub);color:var(--ink)}
 .mfollow{font:500 13px/1 var(--sans);color:var(--sub);background:var(--card);
-  border:1px solid var(--line);border-radius:7px;padding:5px 9px;cursor:pointer;flex:none}
+  border:1px solid var(--line);border-radius:6px;padding:5px 9px;cursor:pointer;flex:none}
 .mfollow:hover{border-color:var(--sub);color:var(--ink)}
 .mfollow.on{color:var(--accent-text);background:var(--accent-soft);
   border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
@@ -628,8 +680,8 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 /* -------------------------------------------------- section scaffolding ---- */
 /* each section is a white card on the gray ground */
 .msection{padding:16px 20px;margin:12px 0;background:var(--card);
-  border:1px solid var(--hair);border-radius:14px;box-shadow:var(--cardsh)}
-.mseclabel{font:600 13px/1.2 var(--sans);letter-spacing:.06em;text-transform:uppercase;
+  border:1px solid var(--hair);border-radius:6px}
+.mseclabel{font:600 13px/1.2 var(--sans);letter-spacing:.08em;text-transform:uppercase;
   color:var(--sub)}
 .msechead{display:flex;align-items:baseline;gap:12px;justify-content:space-between;
   flex-wrap:wrap;margin-bottom:8px}
@@ -646,10 +698,10 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 
 /* flagged strip */
 .mflagged{display:inline-flex;align-items:center;gap:7px;margin:2px 2px 0;
-  font:500 13.5px/1 var(--sans);color:var(--amber);background:var(--amber-soft);
-  border:1px solid color-mix(in srgb,var(--amber) 32%,var(--hair));
-  border-radius:99px;padding:7px 13px;cursor:pointer}
-.mflagged:hover{border-color:var(--amber)}
+  font:500 13.5px/1 var(--sans);color:var(--attn);background:var(--attn-soft);
+  border:1px solid color-mix(in srgb,var(--attn) 32%,var(--hair));
+  border-radius:4px;padding:7px 13px;cursor:pointer}
+.mflagged:hover{border-color:var(--attn)}
 
 /* transcript legend + find */
 .mlegend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0}
@@ -658,7 +710,7 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .msdot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
 .mfindbar{display:flex;align-items:center;gap:7px;margin-bottom:10px}
 .mfind{flex:1;min-width:0;font:400 13.5px/1.3 var(--sans);color:var(--ink);
-  background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:7px 11px}
 .mfind::placeholder{color:var(--sub)}
 .mfind:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
@@ -667,17 +719,17 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 /* transcript body: time | speaker | text, aligned in a grid */
 .mtbody{margin-top:2px}
 .mseg{display:grid;grid-template-columns:54px 132px 1fr;gap:12px;align-items:baseline;
-  padding:8px;border-radius:8px;border-bottom:1px solid var(--hair);
+  padding:8px;border-radius:6px;border-bottom:1px solid var(--hair);
   scroll-margin-top:120px;transition:background .12s ease}
 .mseg:last-child{border-bottom:0}
 .mseg[onclick]{cursor:pointer}
 .mseg[onclick]:hover{background:var(--inset)}
-.mseg.flagged{background:var(--amber-soft)}
+.mseg.flagged{background:var(--attn-soft)}
 .mseg.mnow{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
 .mtime{color:var(--accent-text);font-size:13px;white-space:nowrap}
 .mspk{font:600 14.5px/1.5 var(--sans);color:var(--ink);display:flex;align-items:center;
   gap:7px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mstar{color:var(--amber);font-weight:700}
+.mstar{color:var(--attn);font-weight:700}
 .mtext{font:400 15.5px/1.6 var(--sans);color:var(--ink);min-width:0}
 .mtext mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;padding:0 1px}
 .mtext mark.cur{background:var(--accent);color:var(--acc-ink)}
@@ -687,21 +739,21 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .maskpriv{margin-top:8px;font:400 13px/1.5 var(--sans);color:var(--sub)}
 .maskthread{margin-top:12px;display:flex;flex-direction:column}
 .maskempty{color:var(--sub);font:400 13.5px/1.5 var(--sans);padding:14px 2px}
-.mbub{max-width:82%;padding:9px 13px;border-radius:14px;margin:6px 0;
+.mbub{max-width:82%;padding:9px 13px;border-radius:6px;margin:6px 0;
   font:400 15px/1.5 var(--sans);white-space:pre-wrap;overflow-wrap:anywhere}
 .mbub.q{align-self:flex-end;background:var(--accent);color:var(--acc-ink);
-  border-bottom-right-radius:5px}
+  border-bottom-right-radius:2px}
 .mbub.a{align-self:flex-start;background:var(--inset);color:var(--ink);
-  border-bottom-left-radius:5px}
+  border-bottom-left-radius:2px}
 .mbub.a.err{background:var(--rec-soft);color:var(--rec-text)}
-.masknote{margin-top:8px;color:var(--amber);font-size:13px}
+.masknote{margin-top:8px;color:var(--attn);font-size:13px}
 .maskbar{position:fixed;left:50%;transform:translateX(-50%);bottom:0;z-index:18;
   width:min(var(--colcap),100vw);display:flex;gap:8px;align-items:center;padding:12px 24px;
   background:color-mix(in srgb,var(--card) 90%,transparent);
   backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
   border-top:1px solid var(--hair)}
 .maskq{flex:1;min-width:0;font:400 14.5px/1.3 var(--sans);color:var(--ink);
-  background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:9px 12px}
 .maskq::placeholder{color:var(--sub)}
 .maskq:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
@@ -749,28 +801,27 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 /* the sticky verdict bar: docks under the audio bar (under the header when
    audioless; mStickyTop sets the inline top from the live heights) so the
    stepping controls never move while the transcript scrolls beneath. A white
-   card wearing the amber attention tint. */
+   card wearing the teal attention tint. */
 .mrevbar{position:sticky;z-index:14;display:flex;align-items:center;gap:8px;
-  flex-wrap:wrap;padding:8px 12px;margin:0 0 8px;border-radius:14px;
+  flex-wrap:wrap;padding:8px 12px;margin:0 0 8px;border-radius:6px;
   background:color-mix(in srgb,var(--card) 94%,transparent);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border:1px solid color-mix(in srgb,var(--amber) 32%,var(--hair));
-  box-shadow:var(--cardsh)}
+  border:1px solid color-mix(in srgb,var(--attn) 32%,var(--hair))}
 .mrevbar .mrbcount{font:600 13px/1 var(--sans);font-variant-numeric:tabular-nums;
-  color:var(--amber);white-space:nowrap}
+  color:var(--attn);white-space:nowrap}
 .mrevbar .mrbdone{color:var(--sub)}
 
 /* the quiet pencil on every segment; the row keeps its grid, the button floats */
 .mseg{position:relative}
 .msegedit{position:absolute;top:5px;right:6px;opacity:0;visibility:hidden;
   font:500 13px/1 var(--sans);color:var(--sub);background:var(--card);
-  border:1px solid var(--line);border-radius:7px;padding:4px 8px;cursor:pointer;
+  border:1px solid var(--line);border-radius:6px;padding:4px 8px;cursor:pointer;
   transition:opacity .15s ease}
 .mseg:hover .msegedit,.mseg:focus-within .msegedit{opacity:1;visibility:visible}
 .msegedit:hover{color:var(--ink);border-color:var(--sub)}
 .mseg.editing{opacity:.65}  /* inert while its card is open; >= 3:1 floor */
-/* stepper emphasis: the focused flagged line reads amber, over .mnow if both */
-.mseg.mrev{background:var(--amber-soft);box-shadow:inset 3px 0 0 var(--amber)}
+/* stepper emphasis: the focused flagged line reads teal, over .mnow if both */
+.mseg.mrev{background:var(--attn-soft);box-shadow:inset 3px 0 0 var(--attn)}
 .mspk .medited{color:var(--sub);font-weight:400}
 
 /* gap affordance: zero-height at rest (negative margins overlay the borders),
@@ -783,19 +834,19 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 
 /* the inline card (review + edit + insert share it) */
 .mcard{margin:6px 0 10px;padding:12px 14px;background:var(--card);
-  border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
-.mcard.mrevcard{border-color:color-mix(in srgb,var(--amber) 45%,var(--line))}
+  border:1px solid var(--hair);border-radius:6px}
+.mcard.mrevcard{border-color:color-mix(in srgb,var(--attn) 45%,var(--line))}
 .mcrow{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;margin-top:8px}
 .mcrow:first-child{margin-top:0}
 .mchead{align-items:center}
-.mcflag{font:600 13px/1.3 var(--sans);color:var(--amber)}
+.mcflag{font:600 13px/1.3 var(--sans);color:var(--attn)}
 .mcpos{margin-left:auto;font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--sub);white-space:nowrap}
 .mcsel{font:500 13px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-width:100%}
+  border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-width:100%}
 .mctext{flex:1 1 260px;min-width:0;min-height:60px;width:100%;resize:vertical;
   font:400 14.5px/1.5 var(--sans);color:var(--ink);background:var(--inset);
-  border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+  border:1px solid var(--line);border-radius:6px;padding:8px 10px}
 .mctext:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent);background:var(--card)}
 .mcrow .mctext{width:auto}
@@ -807,7 +858,7 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .mcerr{margin-top:8px;font:400 13px/1.45 var(--sans);color:var(--rec-text);
   display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .mnewspk{font:500 13px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--accent);border-radius:8px;padding:6px 8px;width:170px}
+  border:1px solid var(--accent);border-radius:6px;padding:6px 8px;width:170px}
 .mcat-t{width:58px;text-align:center;font:500 13px/1.2 var(--sans);
   font-variant-numeric:tabular-nums;color:var(--ink);background:var(--card);
   border:1px solid var(--line);border-radius:6px;padding:4px 6px}
@@ -824,7 +875,7 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .npnote{margin-top:10px;font:400 13px/1.55 var(--sans);color:var(--sub)}
 .npnote.muted{padding:8px 0}
 .npclips{margin-top:12px;display:flex;flex-direction:column;gap:12px}
-.npclip{border:1px solid var(--hair);border-radius:12px;padding:10px 12px;
+.npclip{border:1px solid var(--hair);border-radius:6px;padding:10px 12px;
   background:var(--inset)}
 .npclip-m{font:600 14px/1.35 var(--sans);color:var(--ink);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -838,7 +889,7 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
    (it sits between the player and the name box), timestamps in the mono/--sub
    treatment the clip lines already use. Empty when there is nothing to show. */
 .nplines:empty{display:none}
-.nplines{margin-top:12px;border:1px solid var(--hair);border-radius:12px;
+.nplines{margin-top:12px;border:1px solid var(--hair);border-radius:6px;
   padding:10px 12px;background:var(--inset)}
 .nplhead{font:600 13px/1.35 var(--sans);color:var(--sub);
   letter-spacing:.02em;margin-bottom:6px}
@@ -850,12 +901,12 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
   font:400 13px/1.4 var(--sans);font-variant-numeric:tabular-nums;color:var(--sub)}
 .npfield{position:relative;margin-top:14px}
 .npfield input{width:100%;font:400 14.5px/1.3 var(--sans);color:var(--ink);
-  background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:9px 12px}
 .npfield input:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
 .npdd{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:5;
   max-height:180px;overflow-y:auto;background:var(--card);
-  border:1px solid var(--hair);border-radius:12px;box-shadow:var(--shadow);padding:4px}
+  border:1px solid var(--hair);border-radius:6px;box-shadow:var(--shadow);padding:4px}
 .pnitem{font:400 13.5px/1.4 var(--sans);color:var(--ink);padding:7px 9px;
   border-radius:6px;cursor:pointer}
 .pnitem:hover,.pnitem.cur{background:var(--inset)}
@@ -863,11 +914,11 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .npbtns{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
 
 /* the unknown-voice legend chip: same quiet chip, plus the "?" invitation */
-button.mlg{background:none;border:1px solid var(--line);border-radius:99px;
+button.mlg{background:none;border:1px solid var(--line);border-radius:4px;
   padding:4px 10px;cursor:pointer}
-button.mlg:hover{border-color:var(--amber);color:var(--amber)}
-.mlg .mlgq{color:var(--amber);font-weight:700;margin-left:2px}
-/* the undo glyph on a dismissed voice's chip: quiet, never the amber nag --
+button.mlg:hover{border-color:var(--attn);color:var(--attn)}
+.mlg .mlgq{color:var(--attn);font-weight:700;margin-left:2px}
+/* the undo glyph on a dismissed voice's chip: quiet, never the teal nag --
    the voice stopped asking to be named, the chip only offers the way back */
 .mlg .mlgr{color:var(--sub);font-weight:700;margin-left:2px}
 
@@ -895,7 +946,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 .dnav{display:flex;gap:4px;flex:1;min-width:0;flex-wrap:wrap}
 .dtab{font:600 13px/1 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--sub);background:none;border:1px solid transparent;
-  border-radius:99px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+  border-radius:4px;padding:8px 12px;cursor:pointer;white-space:nowrap}
 .dtab:hover{color:var(--ink);background:var(--inset)}
 .dtab.on{color:var(--accent-text);background:var(--accent-soft)}
 
@@ -904,7 +955,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
   padding:2px 18px 32px}
 
 /* section scaffolding (rows mirror the timeline's quiet hairline rhythm) */
-.dgroup{font:600 13px/1.2 var(--sans);letter-spacing:.06em;text-transform:uppercase;
+.dgroup{font:600 13px/1.2 var(--sans);letter-spacing:.08em;text-transform:uppercase;
   color:var(--sub);padding:8px 2px 5px;border-bottom:1px solid var(--hair);
   margin:22px 0 2px}
 .dbody section>.dgroup:first-child{margin-top:12px}
@@ -926,9 +977,9 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 
 /* the duplicate-transcript review pair: one card, both meetings shown the same
    way (neither is "the original"), the match strength stated plainly on top */
-.dupepair{border:1px solid var(--hair);border-radius:12px;padding:10px 12px;
+.dupepair{border:1px solid var(--hair);border-radius:6px;padding:10px 12px;
   margin-top:12px;background:var(--inset)}
-.dupehdr{font:600 13px/1.35 var(--sans);color:var(--amber);
+.dupehdr{font:600 13px/1.35 var(--sans);color:var(--attn);
   font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .dupside{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
   padding:10px 0;border-bottom:1px solid var(--hair)}
@@ -942,9 +993,9 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 
 /* selects and text inputs inside the drawer */
 .dsel{font:500 13px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:6px 8px;max-width:230px}
+  border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-width:230px}
 .dinput{font:400 13px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:8px;padding:7px 10px;min-width:0}
+  border:1px solid var(--line);border-radius:6px;padding:7px 10px;min-width:0}
 .dinput:focus,.dsel:focus{outline:2px solid var(--accent);
   outline-offset:1px;border-color:var(--accent)}
 
@@ -963,7 +1014,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
    visibly inert while automatic runs are paused */
 .dindent{margin-left:12px;padding-left:14px;border-left:2px solid var(--hair)}
 .dindent.inert{opacity:.75}  /* visibly inert, still >= 3:1 (disabled floor) */
-.dinert-note{font:500 13px/1.4 var(--sans);color:var(--amber);padding:10px 2px 0}
+.dinert-note{font:500 13px/1.4 var(--sans);color:var(--attn);padding:10px 2px 0}
 
 /* nightly time picker subview */
 .dtimegrid{display:flex;align-items:center;gap:8px;margin-top:12px}
@@ -977,17 +1028,18 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 .dcktick{width:16px;flex:none;text-align:center;color:var(--accent-text);font-size:13px}
 /* the house two-step confirm, inline in the drawer (never a native dialog) */
 .dckconfirm{font:400 13px/1.5 var(--sans);color:var(--ink);background:var(--inset);
-  border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin:8px 0 2px;
+  border:1px solid var(--line);border-radius:6px;padding:9px 11px;margin:8px 0 2px;
   display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 
 /* recorder stall strip (mirrors the tray's urgency, scoped to the drawer) */
 .dstall{font:400 13px/1.5 var(--sans);color:var(--ink);background:var(--rec-soft);
-  border:1px solid color-mix(in srgb,var(--rec) 35%,var(--hair));border-radius:8px;
+  border:1px solid color-mix(in srgb,var(--rec) 35%,var(--hair));border-radius:6px;
   padding:10px 12px;margin:10px 0 2px;display:flex;gap:8px;align-items:center;
   flex-wrap:wrap}
 
 /* speakers: per-sample rows + the expandable management panel */
-.dpanel{background:var(--inset);border-radius:10px;padding:10px 12px;margin:4px 0 10px}
+.dpanel{background:var(--inset);border:1px solid var(--hair);border-radius:6px;
+  padding:10px 12px;margin:4px 0 10px}
 .dpanel-h{font-weight:600;color:var(--ink)}
 .dpanel-n{margin:2px 0 6px}
 .dsamp{display:flex;align-items:center;gap:8px;padding:7px 0;flex-wrap:wrap;
@@ -996,7 +1048,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 .dsamp-b{width:28px;flex:none}
 .dinline{flex-basis:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;
   padding:6px 0 2px}
-.drelnote{color:var(--amber)}
+.drelnote{color:var(--attn)}
 .dlink{font:500 13px/1.3 var(--sans);color:var(--accent-text);background:none;border:0;
   padding:0;cursor:pointer}
 .dlink:hover{text-decoration:underline;text-underline-offset:2px}
@@ -1007,7 +1059,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
 /* history rows */
 .dhfilter{display:flex;gap:8px;margin:12px 0 6px}
 .dhfilter .dinput{flex:1}
-.dchip{font:500 13px/1 var(--sans);border-radius:99px;padding:4px 9px;flex:none}
+.dchip{font:500 13px/1 var(--sans);border-radius:4px;padding:4px 9px;flex:none}
 .dchip.ok{color:var(--ok);background:var(--ok-soft)}
 .dchip.bad{color:var(--rec-text);background:var(--rec-soft)}
 .dhsum{word-break:break-word;white-space:normal}
@@ -1017,7 +1069,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
    on its own; the link opens the drawer's Archive section */
 .archhint{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:46;
   font:500 13px/1 var(--sans);color:var(--sub);background:var(--card);
-  border:1px solid var(--hair);border-radius:99px;padding:9px 14px;
+  border:1px solid var(--hair);border-radius:4px;padding:9px 14px;
   box-shadow:var(--shadow);display:flex;gap:6px;align-items:center}
 .archhint .dlink{font-size:13px}
 
@@ -1025,7 +1077,7 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
    can appear over the naming slide-over, so it sits above it in the stack */
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:70;
   max-width:min(420px,92vw);font:500 13px/1.35 var(--sans);color:var(--ink);
-  background:var(--card);border:1px solid var(--hair);border-radius:99px;
+  background:var(--card);border:1px solid var(--hair);border-radius:4px;
   padding:9px 14px;box-shadow:var(--shadow);text-align:center}
 .toast[hidden]{display:none}
 
@@ -1047,17 +1099,17 @@ button.mlg:hover{border-color:var(--amber);color:var(--amber)}
    drop itself lands on the window handler underneath. */
 .dropveil{position:fixed;inset:10px;z-index:80;pointer-events:none;
   display:flex;align-items:center;justify-content:center;
-  border:1.5px dashed var(--accent);border-radius:14px;
+  border:1.5px dashed var(--accent);border-radius:6px;
   background:color-mix(in srgb,var(--accent) 7%,transparent)}
 .dropveil .dv-t{font:600 15.5px/1.2 var(--sans);letter-spacing:-.005em;
   color:var(--accent-text);background:var(--card);border:1px solid var(--accent-soft);
-  border-radius:99px;padding:11px 20px;box-shadow:var(--shadow)}
+  border-radius:4px;padding:11px 20px;box-shadow:var(--shadow)}
 
 /* inline non-audio rejection note: quiet, dismissible, above the timeline */
 .dropnote{display:flex;align-items:center;gap:10px;margin:10px 0 2px;
   font:400 13px/1.45 var(--sans);color:var(--sub);
-  background:var(--card);border:1px solid var(--hair);border-radius:12px;
-  box-shadow:var(--cardsh);padding:9px 12px}
+  background:var(--card);border:1px solid var(--hair);border-radius:6px;
+  padding:9px 12px}
 .dropnote .grow{min-width:0;word-break:break-word}
 
 /* synthetic upload row: state-styled like waiting; the spinner is the
