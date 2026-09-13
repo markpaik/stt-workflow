@@ -1003,10 +1003,10 @@ def test_slash_focuses_search_and_escape_clears_back_to_the_list():
 
 
 def test_jk_walk_rows_with_a_ring_that_survives_polls():
-    # rows are already tabindex=0 (the ring reuses :focus-visible); group
-    # headers are skipped by construction -- only .row[tabindex] is collected,
-    # so synthetic upload rows (no tabindex) are skipped too
-    assert "querySelectorAll('#timeline .row[tabindex]')" in NEW_JS
+    # rows are already tabindex=0 (the ring reuses :focus-visible); section
+    # headers are buttons and ride the ring with them, so a folded month is
+    # reachable. Synthetic upload rows (no tabindex) are still skipped.
+    assert "'#timeline .row[tabindex], #timeline .ghead'" in NEW_JS
     assert re.search(r"function\s+kbMove\s*\(", NEW_JS)
     # the focused row scrolls into view through the page's own scroll-behavior
     # convention (html smooth, auto under reduced motion): no explicit
@@ -1633,9 +1633,9 @@ def test_geometric_surfaces_carry_the_indigo_radii_and_no_stray_shadow():
 
 def test_no_shadow_rule_reaches_a_row_the_tray_or_a_card():
     """The border does the separating. Shadows survive only on the popovers,
-    the drawer (and the naming slide-over, a drawer in all but name), the bulk
-    bar, and the two floating notices -- never on a row, the tray, or any of
-    the in-flow card surfaces."""
+    the drawer (and the naming slide-over, a drawer in all but name), and the
+    bulk bar -- never on a row, the tray, or any of the in-flow card
+    surfaces."""
     # every rule that casts a DROP shadow, by selector. The inset edge markers
     # (.mseg.mnow / .mseg.mrev) are left edges drawn with box-shadow:inset,
     # not lift, so they are excluded by the inset check below.
@@ -1650,7 +1650,7 @@ def test_no_shadow_rule_reaches_a_row_the_tray_or_a_card():
             casters.append(sel.strip().splitlines()[-1].strip())
     assert casters, "no shadow rules found -- the audit regex broke"
     allowed = {".popover", ".bulkbar", ".npanel", ".npdd", ".drawer",
-               ".archhint", ".toast", ".dropveil .dv-t"}
+               ".dropveil .dv-t"}
     assert set(casters) <= allowed, f"unexpected shadow caster: {sorted(set(casters) - allowed)}"
     # named directly, so a future edit that re-adds a lift to any of the three
     # surfaces the spec calls out fails here rather than by eye
@@ -2597,7 +2597,13 @@ def _acc_env(store="{}", search="", flagged="false", today=ACC_TODAY):
         "function escJs(s){return esc(s).replace(/\\\\/g,'\\\\\\\\')"
         ".replace(/'/g,\"\\\\'\");}",
         "function rowHTML(r){return '<div class=\"row\" data-id=\"'+r.id+'\"></div>';}",
+        "function afterRender(){}",
         "const TODAY=" + json.dumps(today) + ";",
+        # curMonths() derives the current month from _isoLocal(new Date());
+        # freezing _isoLocal at the stubbed TODAY freezes the whole default
+        # rule, whatever day the suite runs on
+        "function _isoLocal(d){return TODAY;}",
+        "const BUCKET={today:'Today',yesterday:'Yesterday',undated:'Undated'};",
         "function dateKey(r){return r.date||((r.when||'').slice(0,10));}",
         _js_region("/* ==================== the year-to-month accordion",
                    "/* ============================ status pill "),
@@ -2760,6 +2766,7 @@ def test_a_rail_click_opens_the_target_month_and_its_year_before_scrolling():
         "S={};",
         "const LAST_GROUPS=grpStamp([{key:'',pinned:true,rows:[{id:'p0'}]},"
         "mk('March 2026',['2026-03-02']),mk('May 2025',['2025-05-06'])]);",
+        "let LAST_NEST=true;",       # this fixture spans two years, so it nests
         _js_fn("railJump"),
         """
 railJump(2);
@@ -2775,6 +2782,69 @@ console.log(JSON.stringify({scrolled,
         "the unfold the rail just performed has to survive the next poll"
     assert out["drew"] is True, "the timeline must rebuild before the scroll"
     assert out["scrolled"] == "grp-2"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_rail_click_plants_no_year_key_without_year_sections():
+    """A single-year library has no year headers, so a y-2026 key would be a
+    fold nobody can ever see or undo."""
+    out = _run_node("\n".join([
+        _acc_env(),
+        "let scrolled=null;",
+        "const document={getElementById:id=>({id,scrollIntoView(){scrolled=id;}})};",
+        "S={};",
+        "const LAST_GROUPS=grpStamp([mk('March 2026',['2026-03-02']),"
+        "mk('February 2026',['2026-02-04'])]);",
+        "let LAST_NEST=false;",
+        _js_fn("railJump"),
+        "railJump(0);console.log(JSON.stringify({store:JSON.parse(STORE.v)}));",
+    ]))
+    assert out["store"] == {"m-2026-03": "open"}, \
+        "with no year sections on screen, only the month key may be written"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_folded_prior_year_never_swallows_last_month_or_yesterday():
+    """On the fifth of January the previous month lives in the PREVIOUS year.
+    A year that defaults closed would hide December and Yesterday with it, so
+    a year opens by default when it is current OR when it holds last month."""
+    out = _run_node(_acc_env(today="2026-01-05") + """
+const g=build([mk('Today',['2026-01-05']),mk('Yesterday',['2026-01-04']),
+               mk('December 2025',['2025-12-18']),
+               mk('November 2025',['2025-11-03'])]);
+console.log(JSON.stringify({rows:rowIds(g.html),heads:headers(g.html),
+  yearPrior:grpOpen('y-2025'),dec:grpOpen('m-2025-12'),
+  nov:grpOpen('m-2025-11')}));
+""")
+    assert out["yearPrior"] is True, "2025 holds last month, so it opens"
+    assert out["dec"] is True and out["nov"] is False
+    assert out["rows"] == ["Today#0", "Yesterday#0", "December 2025#0"], \
+        "December and Yesterday must be on screen; November stays folded"
+    assert out["heads"].count("mgroup inyear") == 4, \
+        "November keeps its header line while folded"
+
+    # ...and Yesterday itself can sit in the prior year: Jan 1st
+    out2 = _run_node(_acc_env(today="2026-01-01") + """
+const g=build([mk('Today',['2026-01-01']),mk('Yesterday',['2025-12-31'])]);
+console.log(JSON.stringify({rows:rowIds(g.html)}));
+""")
+    assert out2["rows"] == ["Today#0", "Yesterday#0"], \
+        "a Yesterday dated into the prior year must still render"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_click_on_a_filter_forced_header_stores_nothing():
+    """Every section is open under a search, so the click has nothing to
+    change on screen -- and must not quietly rewrite the folds underneath."""
+    out = _run_node(_acc_env(search="rivera") + """
+S={};
+grpToggle('m-2026-09');
+grpToggle('y-2026');
+console.log(JSON.stringify({store:STORE.v,draws:DRAWS}));
+""")
+    assert json.loads(out["store"]) == {}, \
+        "a forced-open header must write nothing to stt_groups"
+    assert out["draws"] == 0, "nothing changed on screen, so nothing redraws"
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -2810,6 +2880,96 @@ def test_the_accordion_keeps_the_sort_and_group_by_meeting_date_rule():
     assert "'y-'+g.year" in _js_fn("accordionHTML")
     # the persisted key the spec names
     assert "const GRP_KEY='stt_groups'" in NEW_JS
+
+
+def test_a_fold_takes_its_orphans_with_it():
+    """Folding a section removes rows from the DOM. Whatever was hanging off
+    one of those rows -- the clip player, the selection, the focus ring --
+    has to be reconciled in the same breath, so both fold paths run the
+    post-render hook and a homeless clip stops instead of playing on blind."""
+    for name in ("grpToggle", "railJump"):
+        body = _js_fn(name)
+        assert "drawTimeline(S);afterRender();" in body, \
+            f"{name} rebuilt the list without afterRender()"
+    mount = _js_fn("mountClip")
+    assert "if(!row){stopClip();return;}" in mount, \
+        "a clip whose row is gone must stop, not linger"
+
+
+def test_the_selection_never_reaches_a_row_a_fold_hides():
+    """"N selected" has to equal the checked boxes a user can see, and a bulk
+    delete must not reach a row hidden inside a folded month. A search or
+    category filter is NOT a fold: the selection survives it, as before."""
+    out = _run_node("\n".join([
+        "let S={timeline:[{id:'a',state:'ready'},{id:'b',state:'ready'},"
+        "{id:'c',state:'ready'},{id:'d',state:'ready'}]};",
+        "const SELECTABLE=new Set(['ready']);",
+        "let SEL=new Set(['a','b','c','d']);",
+        # a (open month), b (folded month), c (open month in a folded year),
+        # d (filtered out of the DOM by a search, but its group is open)
+        "let LAST_GROUPS=[{pinned:true,rows:[]},"
+        "{id:'m-1',open:true,yearOpen:true,rows:[{id:'a'}]},"
+        "{id:'m-2',open:false,yearOpen:true,rows:[{id:'b'}]},"
+        "{id:'m-3',open:true,yearOpen:false,rows:[{id:'c'}]},"
+        "{id:'m-4',open:true,yearOpen:true,rows:[{id:'d'}]}];",
+        "const document={querySelectorAll:()=>[],body:{classList:{toggle(){}}}};",
+        "function drawBulkBar(){}",
+        _js_fn("applySel"),
+        "applySel();console.log(JSON.stringify([...SEL].sort()));",
+    ]))
+    assert out == ["a", "d"], "folded rows leave the selection; filtered rows stay"
+    # the shift-click range is DOM-based ON PURPOSE, and says so
+    assert "folded" in _js_fn("toggleSel").lower()
+    # "select all shown" is DOM-based and its label already promises only that
+    assert "querySelectorAll('#timeline .row[data-state=\"ready\"] .chk')" \
+        in _js_fn("selAllShown")
+
+
+def test_the_ring_reaches_a_folded_section_header():
+    """j/k must be able to land on a section header, or a folded month is
+    unreachable without the mouse. Enter there is the button's own click."""
+    i = NEW_JS.index("function kbRows(")
+    rows = NEW_JS[i:NEW_JS.index("function ", i + 10)]
+    assert ".ghead" in rows, "kbRows must collect the section headers too"
+    assert ".row[tabindex]" in rows, "and the rows it always collected"
+    body = _kb_body()
+    # the header branch returns BEFORE the row handling and never preventDefaults
+    head = body[body.index("matches('#timeline .ghead')"):]
+    assert head.startswith("matches('#timeline .ghead'))return;"), \
+        "Enter on a header must return early, so the native click fires"
+    assert body.index(".ghead") < body.index("e.target.matches('#timeline .row[tabindex]')")
+
+
+def test_the_bucket_labels_are_named_once():
+    """dateBucket produces the three special labels and the accordion matches
+    on them; two copies of the literal is how they drift apart."""
+    assert "const BUCKET={today:'Today',yesterday:'Yesterday',undated:'Undated'};" \
+        in NEW_JS
+    month = _js_fn("grpMonthId")
+    assert "'Today'" not in month and "'Yesterday'" not in month \
+        and "'Undated'" not in month, "grpMonthId still compares a literal label"
+    assert "BUCKET.today" in month and "BUCKET.undated" in month
+    assert "BUCKET.undated" in _js_fn("grpYear")
+    assert "BUCKET.today" in _js_fn("drawRail")
+    # ...and the rail reads the stamped year instead of re-parsing the label
+    assert "const yr=g.year||''" in _js_fn("drawRail")
+
+
+def test_the_open_state_is_computed_once_per_render():
+    """The open rule lived in five places; it now lives in grpStates, and both
+    the render signature and the markup read the two flags it stamps."""
+    states = _js_fn("grpStates")
+    assert "g.open=forced||grpOpen(g.id)" in states
+    assert "g.yearOpen=" in states and "'y-'+g.year" in states
+    draw = _js_fn("drawTimeline")
+    assert "grpStates(groups,nest,forced)" in draw
+    assert "g.id+':'+(g.open?1:0)+':'+(g.yearOpen?1:0)" in draw, \
+        "the signature must read the stamped flags, not re-derive the rule"
+    acc = _js_fn("accordionHTML")
+    assert "grpOpen(" not in acc, "accordionHTML must not re-derive the open rule"
+    assert "g.open" in acc and "g.yearOpen" in acc
+    # a direct caller (the node harness, and any future one) still works
+    assert "g.open===undefined" in acc
 
 
 def test_the_section_header_line_carries_the_whole_anatomy():
@@ -2854,3 +3014,37 @@ def test_every_token_text_pair_clears_4_5_to_1_in_both_themes():
     light = [r for r in rows if r.block == "light :root"]
     rec = next(r for r in light if (r.fg, r.bg) == ("rec-text", "rec-soft"))
     assert rec.fg_hex == "#BC342E" and rec.ratio >= AA
+
+
+def test_the_audit_measures_the_pairs_the_sheet_actually_paints():
+    """The hand-written PAIRS list had drifted: two pairs the stylesheet
+    paints as text on a ground were never measured. The audit now scans the
+    sheet for them, so a new rule cannot add an unmeasured pair."""
+    from tools.token_contrast import audit, painted_pairs
+
+    painted = painted_pairs(NEW_CSS)
+    assert ("accent-text", "accent-soft") in painted
+    assert ("ink", "rec-soft") in painted
+
+    measured = {(r.fg, r.bg) for r in audit()}
+    assert ("accent-text", "accent-soft") in measured, \
+        "a painted pair the hand list missed is still unmeasured"
+    assert ("ink", "rec-soft") in measured
+    # every block measures the same set, and nothing is measured twice
+    per_block = {}
+    for r in audit():
+        per_block.setdefault(r.block, []).append((r.fg, r.bg))
+    for block, pairs in per_block.items():
+        assert len(pairs) == len(set(pairs)), f"{block} measured a pair twice"
+
+
+def test_the_dark_token_block_stops_at_its_own_closing_brace():
+    """The @media pattern opens TWO braces. Counting from the start of the
+    match closed the @media wrapper instead of the :root inside it, so every
+    later rule in that media query was read as a token declaration."""
+    from tools.token_contrast import read_tokens
+
+    css = "@media(prefers-color-scheme:dark){:root{--a:#000;} .x{--b:#fff;}}"
+    tokens = read_tokens(css, r"(?m)^@media\(prefers-color-scheme:dark\)\{:root\{")
+    assert tokens == {"a": "#000"}, \
+        "the slice must end at :root's brace, not the media query's"

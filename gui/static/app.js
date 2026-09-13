@@ -51,10 +51,13 @@ function _isoLocal(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart
   +'-'+String(d.getDate()).padStart(2,'0');}
 const TODAY=_isoLocal(new Date());
 const YESTERDAY=(()=>{const d=new Date();d.setDate(d.getDate()-1);return _isoLocal(d);})();
+// the three special date buckets, named once: dateBucket produces them and
+// the accordion (grpMonthId / grpYear) and the rail match on them
+const BUCKET={today:'Today',yesterday:'Yesterday',undated:'Undated'};
 function dateBucket(iso){
-  if(!iso)return'Undated';
-  if(iso===TODAY)return'Today';
-  if(iso===YESTERDAY)return'Yesterday';
+  if(!iso)return BUCKET.undated;
+  if(iso===TODAY)return BUCKET.today;
+  if(iso===YESTERDAY)return BUCKET.yesterday;
   return new Date(iso+'T12:00:00').toLocaleDateString([],{month:'long',year:'numeric'});}
 function nameBucket(title){const t=(title||'').trim();
   return /^[a-z]/i.test(t)?t[0].toUpperCase():'#';}
@@ -84,14 +87,14 @@ function dateKey(r){return r.date||((r.when||'').slice(0,10));}   // fall back t
  * off), so m-today can never collide with m-2026-09.
  */
 function grpMonthId(g){
-  if(g.key==='Today')return 'm-today';
-  if(g.key==='Yesterday')return 'm-yesterday';
-  if(g.key==='Undated')return 'm-undated';
+  if(g.key===BUCKET.today)return 'm-today';
+  if(g.key===BUCKET.yesterday)return 'm-yesterday';
+  if(g.key===BUCKET.undated)return 'm-undated';
   const k=dateKey(g.rows[0]||{})||'';
   return 'm-'+(k.slice(0,7)||'x');
 }
 function grpYear(g){
-  if(g.key==='Undated')return '';            // undated belongs to no year
+  if(g.key===BUCKET.undated)return '';       // undated belongs to no year
   const k=dateKey(g.rows[0]||{})||'';
   return k.slice(0,4)||((String(g.key).match(/\d{4}/)||[])[0]||'');
 }
@@ -105,21 +108,29 @@ function grpStamp(groups){
 function grpNest(groups){
   return new Set(groups.filter(g=>!g.pinned&&g.year).map(g=>g.year)).size>=2;
 }
-const CUR_YEAR=TODAY.slice(0,4);
-const CUR_MONTH=TODAY.slice(0,7);
-const PREV_MONTH=(()=>{const d=new Date(TODAY+'T12:00:00');
-  d.setDate(1);d.setMonth(d.getMonth()-1);
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');})();
+// the current year / month / previous month, read at CALL time: the panel
+// polls forever, so a load-time constant would still name last month after
+// the page sat open across midnight on the first.
+function curMonths(){
+  const t=_isoLocal(new Date());
+  const d=new Date(t+'T12:00:00');d.setDate(1);d.setMonth(d.getMonth()-1);
+  return {year:t.slice(0,4),month:t.slice(0,7),
+    prev:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')};
+}
 // defaults: the current and previous month open, the current year open,
 // everything older folded. A month that has never been seen therefore opens
 // exactly when it is current, which is what "a new month opens by default"
-// means once the state is derived rather than stored.
+// means once the state is derived rather than stored. A year also opens when
+// it HOLDS the previous month -- otherwise, every January, a folded prior
+// year would swallow December and Yesterday with it.
 function grpDefaultOpen(id){
-  if(id.slice(0,2)==='y-')return id.slice(2)===CUR_YEAR;
+  const cm=curMonths();
+  if(id.slice(0,2)==='y-'){const y=id.slice(2);
+    return y===cm.year||y===cm.prev.slice(0,4);}
   if(id==='m-today'||id==='m-yesterday')return true;
   if(id==='m-undated')return false;
   const ym=id.slice(2);
-  return ym===CUR_MONTH||ym===PREV_MONTH;
+  return ym===cm.month||ym===cm.prev;
 }
 const GRP_KEY='stt_groups';
 let GRP=(()=>{try{const v=JSON.parse(localStorage.getItem(GRP_KEY)||'{}');
@@ -129,10 +140,26 @@ function grpOpen(id){const v=GRP[id];
 function grpSet(id,open){GRP[id]=open?'open':'closed';
   try{localStorage.setItem(GRP_KEY,JSON.stringify(GRP));}catch(e){}}
 // A search or the flagged filter FORCES every section open so a match is never
-// hidden behind a fold. The stored state is not touched, so clearing the
-// filter restores exactly the folds the user left.
+// hidden behind a fold. The stored state is not touched -- neither by the
+// filter nor by a click on a header WHILE it is on -- so clearing the filter
+// restores exactly the folds the user left.
 function grpForced(){return $('#search').value.trim().length>0||flaggedOnly;}
-function grpToggle(id){grpSet(id,!grpOpen(id));if(S)drawTimeline(S);}
+function grpToggle(id){
+  if(grpForced())return;      // already open by the filter: store nothing, redraw nothing
+  grpSet(id,!grpOpen(id));
+  if(S){drawTimeline(S);afterRender();}
+}
+// the open state of every date section, computed ONCE per render: the render
+// signature and the markup then read the same two flags instead of each
+// re-deriving the rule (they disagreed once, and the fold flickered).
+function grpStates(groups,nest,forced){
+  for(const g of groups){
+    if(g.pinned)continue;
+    g.open=forced||grpOpen(g.id);
+    g.yearOpen=(!nest||!g.year)?true:(forced||grpOpen('y-'+g.year));
+  }
+  return groups;
+}
 
 /* ============================ status pill ============================ *
  * The ONLY place pipeline state appears, one line, by priority:
@@ -749,14 +776,15 @@ function drawTimeline(s){
     nest=grpNest(grpStamp(groups));
   }
   LAST_GROUPS=groups;                 // the jump rail resolves its index here
+  LAST_NEST=nest;                     // ...and plants a year key only when years exist
 
   const forced=grpForced();
+  if(sort==='date')grpStates(groups,nest,forced);      // g.open / g.yearOpen, once
   const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
   // the fold state is part of the signature: a toggle changes what is in the
   // DOM without changing a single row, and the poll must not undo it
   const gsig=sort!=='date'?'':groups.map(g=>g.pinned?'P'
-    :g.id+':'+((forced||grpOpen(g.id))?1:0)
-      +':'+((!nest||!g.year||forced||grpOpen('y-'+g.year))?1:0)).join(',');
+    :g.id+':'+(g.open?1:0)+':'+(g.yearOpen?1:0)).join(',');
   const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly
     +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
@@ -788,27 +816,22 @@ function ghead(id,label,count,cls,domId,open){
 }
 function accordionHTML(groups,nest,forced){
   let html='',lastYr=null;
+  // drawTimeline stamps the open state; a direct caller gets it stamped here
+  if(groups.some(g=>!g.pinned&&g.open===undefined))grpStates(groups,nest,forced);
   for(let i=0;i<groups.length;i++){
     const g=groups[i];
     // the pinned actionable cluster: above every section, unlabeled, unfoldable
     if(g.pinned){html+=g.rows.map(rowHTML).join('');continue;}
-    let yearOpen=true;
-    if(nest&&g.year){
-      if(g.year!==lastYr){
-        lastYr=g.year;
-        const yid='y-'+g.year;
-        const yOpen=forced||grpOpen(yid);
-        const yCount=groups.reduce((n,x)=>
-          n+((!x.pinned&&x.year===g.year)?x.rows.length:0),0);
-        html+=ghead(yid,g.year,yCount,'yhead','ysec-'+g.year,yOpen);
-      }
-      yearOpen=forced||grpOpen('y-'+g.year);
+    if(nest&&g.year&&g.year!==lastYr){
+      lastYr=g.year;
+      const yCount=groups.reduce((n,x)=>
+        n+((!x.pinned&&x.year===g.year)?x.rows.length:0),0);
+      html+=ghead('y-'+g.year,g.year,yCount,'yhead','ysec-'+g.year,g.yearOpen);
     }
-    if(!yearOpen)continue;                 // a folded year hides its months too
-    const mOpen=forced||grpOpen(g.id);
+    if(!g.yearOpen)continue;               // a folded year hides its months too
     html+=ghead(g.id,g.key,g.rows.length,
-      'mgroup'+(nest&&g.year?' inyear':''),'grp-'+i,mOpen);
-    if(mOpen)html+=g.rows.map(rowHTML).join('');
+      'mgroup'+(nest&&g.year?' inyear':''),'grp-'+i,g.open);
+    if(g.open)html+=g.rows.map(rowHTML).join('');
   }
   return html;
 }
@@ -817,7 +840,7 @@ function accordionHTML(groups,nest,forced){
  * rail entry). By date: TODAY/YST first, then a year anchor before each year's
  * first month, months beneath. By name: the letter groups. 3+ groups, no search.
  * The rail lists EVERY month, folded or not: railJump unfolds what it lands on. */
-let LAST_GROUPS=[];
+let LAST_GROUPS=[],LAST_NEST=false;
 function _railBtn(i,g,short){
   return `<button class="railbtn" type="button" onclick="railJump(${i})"
     title="Jump to ${esc(g.key)} (${g.rows.length})">${esc(short)}</button>`;
@@ -831,12 +854,12 @@ function drawRail(groups,hasSearch,sort){
   rail.innerHTML=groups.map((g,i)=>{
     if(g.pinned)return '';
     if(sort!=='date')return _railBtn(i,g,g.key);
-    if(g.key==='Today')return _railBtn(i,g,'TDY');
-    if(g.key==='Yesterday')return _railBtn(i,g,'YST');
-    if(g.key==='Undated')return _railBtn(i,g,'NA');
-    // a month group: anchor its year the first time that year appears
-    const yr=(g.key.match(/\d{4}/)||[])[0]
-      ||(g.rows[0]&&g.rows[0].date?g.rows[0].date.slice(0,4):'');
+    if(g.key===BUCKET.today)return _railBtn(i,g,'TDY');
+    if(g.key===BUCKET.yesterday)return _railBtn(i,g,'YST');
+    if(g.key===BUCKET.undated)return _railBtn(i,g,'NA');
+    // a month group: anchor its year the first time that year appears. The
+    // year is the one grpStamp already resolved, never re-parsed from the label
+    const yr=g.year||'';
     let head='';
     if(yr&&yr!==lastYr){head=`<div class="railyr">${yr}</div>`;lastYr=yr;}
     return head+_railBtn(i,g,g.key.slice(0,3));
@@ -844,13 +867,17 @@ function drawRail(groups,hasSearch,sort){
 }
 /* A rail click must land on rows, not on a folded header: it opens the target
  * month AND the year holding it (persisting both, so the fold the user just
- * asked for survives the next poll), rebuilds, and only then scrolls. */
+ * asked for survives the next poll), rebuilds, and only then scrolls. Under a
+ * filter every section is open already, so nothing is stored; and a year key
+ * is stored only when the library actually HAS year sections. */
 function railJump(i){
   const g=LAST_GROUPS[i];
   if(g&&!g.pinned&&g.id){
-    if(g.year)grpSet('y-'+g.year,true);
-    grpSet(g.id,true);
-    if(S)drawTimeline(S);
+    if(!grpForced()){
+      if(LAST_NEST&&g.year)grpSet('y-'+g.year,true);
+      grpSet(g.id,true);
+    }
+    if(S){drawTimeline(S);afterRender();}
   }
   const el=document.getElementById('grp-'+i);
   if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
@@ -1190,7 +1217,8 @@ function stopClip(){
 function mountClip(){
   if(!clipKey)return;
   const row=document.querySelector('.row[data-id="'+CSS.escape(clipKey)+'"]');
-  if(!row)return;                                   // its row is gone / scrolled out
+  if(!row){stopClip();return;}                      // its row left the list, or folded
+                                                    // away: stop, never play on blind
   const box=_clipBoxEl();
   if(row.nextElementSibling!==box)row.insertAdjacentElement('afterend',box);
   _clipTick();_clipSync();
@@ -1523,7 +1551,9 @@ async function rmDeleteGo(id){
 let SEL=new Set(),selAnchor=null;
 function toggleSel(id,on){
   const ev=window.event;
-  if(ev&&ev.shiftKey&&selAnchor&&selAnchor!==id){   // shift-click range in DOM order
+  // shift-click range in DOM order. Rows inside a folded section are not in
+  // the DOM, so the range excludes them BY DESIGN: they are not shown.
+  if(ev&&ev.shiftKey&&selAnchor&&selAnchor!==id){
     const ids=[...document.querySelectorAll('#timeline .row .chk')].map(c=>c.closest('.row').dataset.id);
     const a=ids.indexOf(selAnchor),b=ids.indexOf(id);
     if(a>=0&&b>=0)for(let i=Math.min(a,b);i<=Math.max(a,b);i++)SEL.add(ids[i]);
@@ -1534,7 +1564,15 @@ function toggleSel(id,on){
 }
 function applySel(){                       // reapply after any rebuild; prune stale ids
   const live=new Set((S&&S.timeline||[]).filter(r=>SELECTABLE.has(r.state)).map(r=>r.id));
-  [...SEL].forEach(id=>{if(!live.has(id))SEL.delete(id);});
+  // ...and prune what a FOLD hides. A row inside a collapsed month or year is
+  // not in the DOM at all, so keeping it selected would make "N selected"
+  // disagree with the checked boxes and let a bulk delete reach a row nobody
+  // can see. A search or category filter is different: it narrows the view on
+  // purpose and the selection survives it, as it always has.
+  const folded=new Set();
+  for(const g of LAST_GROUPS){if(g.pinned)continue;
+    if(g.open===false||g.yearOpen===false)g.rows.forEach(r=>folded.add(r.id));}
+  [...SEL].forEach(id=>{if(!live.has(id)||folded.has(id))SEL.delete(id);});
   document.querySelectorAll('#timeline .row .chk').forEach(c=>{
     c.checked=SEL.has(c.closest('.row').dataset.id);});
   document.body.classList.toggle('has-sel',SEL.size>0);
@@ -4461,19 +4499,21 @@ function archHint(){
    ============================================================================ */
 
 /* ------------------------------------------------------- keyboard layer ---- *
- * j/k walk a visible focus ring down/up the timeline rows (the rows are
- * already tabindex=0 and :focus-visible styled; group headers are divs, so
- * they are skipped by construction). Enter acts by row state, e peeks a ready
- * row, / focuses search, Escape in search clears it back to the list, and
- * Escape on the meeting page (with nothing else open) returns to the list.
+ * j/k walk a visible focus ring down/up the timeline (the rows are already
+ * tabindex=0 and :focus-visible styled). Section headers are BUTTONS and ride
+ * the ring too: a folded month is otherwise unreachable from the keyboard, and
+ * Enter on a header is its own native click. Enter acts by row state, e peeks
+ * a ready row, / focuses search, Escape in search clears it back to the list,
+ * and Escape on the meeting page (with nothing else open) returns to the list.
  * html{scroll-behavior:smooth} owns the scroll feel and the reduced-motion
  * block flips it to auto, so plain scrollIntoView honors both. */
 let kbLast=null;             // the row id that last held the ring
-function kbRows(){return [...document.querySelectorAll('#timeline .row[tabindex]')];}
+function kbRows(){return [...document.querySelectorAll(
+  '#timeline .row[tabindex], #timeline .ghead')];}
 function kbFocusRow(el){
   if(!el)return;
   el.focus({preventScroll:true});
-  kbLast=el.dataset.id||null;
+  kbLast=el.dataset.id||null;     // a header carries no id: the ring is not restored to it
   el.scrollIntoView({block:'nearest'});
 }
 // a 2s rebuild wipes the DOM (and the ring with it): put the ring back on the
@@ -4489,7 +4529,8 @@ document.addEventListener('mousedown',()=>{kbLast=null;});
 function kbMove(d){
   const rows=kbRows();if(!rows.length)return;
   const ae=document.activeElement;
-  let i=rows.indexOf(ae&&ae.closest?ae.closest('#timeline .row[tabindex]'):null);
+  let i=rows.indexOf(ae&&ae.closest
+    ?ae.closest('#timeline .row[tabindex], #timeline .ghead'):null);
   if(i<0&&kbLast)i=rows.findIndex(r=>r.dataset.id===kbLast);
   if(i<0){
     // nothing holds the ring yet: land on the first row in view, so j
@@ -4524,6 +4565,10 @@ function kbKey(e){
   }
   if(e.key==='/'){e.preventDefault();se.focus();return;}
   if(e.key==='j'||e.key==='k'){e.preventDefault();kbMove(e.key==='j'?1:-1);return;}
+  // a section header holds the ring too: Enter on one is the button's own
+  // click (grpToggle), so stand back and let the browser fire it
+  if(e.key==='Enter'&&e.target instanceof Element
+     &&e.target.matches('#timeline .ghead'))return;
   // Enter / e act on the focused row itself, never on a focused button in it
   const row=(e.target instanceof Element&&e.target.matches('#timeline .row[tabindex]'))
     ?e.target:null;

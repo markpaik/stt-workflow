@@ -36,8 +36,12 @@ BLOCKS = (
     ("light data-theme=light", r"(?m)^:root\[data-theme=light\]\{"),
 )
 
-# Every pair the stylesheet actually paints as TEXT on a ground. Foreground
-# first, background second; both are token names without the leading dashes.
+# The BASE pairs: the ones the design promises by name, measured in every
+# block whether or not a rule still paints them. Foreground first, background
+# second; both are token names without the leading dashes. Everything else the
+# sheet paints is found by painted_pairs() below, so a new rule cannot add an
+# unmeasured pair (the hand list had already drifted: accent-text on
+# accent-soft and ink on rec-soft were painted and never measured).
 PAIRS = (
     ("ink", "paper"), ("ink", "card"), ("ink", "inset"),
     ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
@@ -72,11 +76,16 @@ class Result(NamedTuple):
 
 
 def _slice_block(css: str, pattern: str) -> str:
-    """The declarations inside one token block, brace-matched from its head."""
+    """The declarations inside one token block, brace-matched from its head.
+
+    Counting starts AFTER the match, at depth 1, because every pattern above
+    already consumes the brace that opens :root. Counting from the start of
+    the match instead closed the @media block rather than the :root inside it,
+    so the dark block was read with a later rule's tokens folded into it."""
     m = re.search(pattern, css)
     if not m:
         raise AssertionError(f"token block not found: {pattern}")
-    depth, i = 0, m.start()
+    depth, i = 1, m.end()
     while i < len(css):
         if css[i] == "{":
             depth += 1
@@ -114,6 +123,32 @@ def read_tokens(css: str, pattern: str) -> dict[str, str]:
     return out
 
 
+_RULE = re.compile(r"([^{}]*)\{([^{}]*)\}")
+_FG = re.compile(r"(?:^|;)\s*color\s*:\s*var\(--([a-z0-9-]+)\)")
+_BG = re.compile(r"(?:^|;)\s*background(?:-color)?\s*:\s*var\(--([a-z0-9-]+)\)")
+
+
+def painted_pairs(css: str) -> set[tuple[str, str]]:
+    """Every (text token, ground token) the sheet paints in ONE rule block.
+
+    A rule that sets both color:var(--X) and background:var(--Y) is painting X
+    on Y, and that pair has to clear AA whether or not anyone remembered to
+    add it to PAIRS."""
+    out: set[tuple[str, str]] = set()
+    for _sel, decls in _RULE.findall(_strip_comments(css)):
+        fg, bg = _FG.search(decls), _BG.search(decls)
+        if fg and bg:
+            out.add((fg.group(1), bg.group(1)))
+    return out
+
+
+def _is_colour(value: str) -> bool:
+    """A resolved token value that is a hex colour. A scanned pair whose token
+    holds something else (a gradient, a length, an rgba() alpha wash) is not a
+    contrast pair at all."""
+    return bool(re.fullmatch(r"#[0-9a-fA-F]{3,8}", value.strip()))
+
+
 def _lin(channel: int) -> float:
     c = channel / 255
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
@@ -134,17 +169,34 @@ def contrast(fg: str, bg: str) -> float:
 
 
 def audit(css_path: Path = CSS_PATH) -> list[Result]:
-    """Measure every PAIR in every token block. Missing tokens are an error:
-    a block that has stopped defining a token the sheet paints is a bug, not
-    a pass."""
+    """Measure the union of PAIRS and the pairs the sheet actually paints, in
+    every token block. A PAIRS token that a block no longer defines is an
+    error: a block that has stopped defining a token the sheet paints is a
+    bug, not a pass. A SCANNED pair is skipped when either token is not a
+    colour in that block -- the rule is painting something the contrast
+    arithmetic has no opinion about."""
     css = Path(css_path).read_text(encoding="utf-8")
+    scanned = sorted(painted_pairs(css))          # stable order, base pairs first
     rows: list[Result] = []
     for label, pattern in BLOCKS:
         tokens = read_tokens(css, pattern)
+        seen: set[tuple[str, str]] = set()
         for fg, bg in PAIRS:
             missing = [n for n in (fg, bg) if n not in tokens]
             if missing:
                 raise AssertionError(f"{label}: token(s) not defined: {missing}")
+            seen.add((fg, bg))
+            rows.append(Result(label, fg, bg,
+                               tokens[fg], tokens[bg],
+                               contrast(tokens[fg], tokens[bg])))
+        for fg, bg in scanned:
+            if (fg, bg) in seen:
+                continue
+            if fg not in tokens or bg not in tokens:
+                continue
+            if not _is_colour(tokens[fg]) or not _is_colour(tokens[bg]):
+                continue
+            seen.add((fg, bg))
             rows.append(Result(label, fg, bg,
                                tokens[fg], tokens[bg],
                                contrast(tokens[fg], tokens[bg])))

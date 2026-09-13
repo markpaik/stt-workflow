@@ -382,14 +382,18 @@ Grouping, the year-to-month accordion (replaces flat month headers):
   mono at the right edge. The whole line is the click target.
 - Defaults: the current month and the previous month open; every older
   month collapsed; the current year open; every prior year collapsed with
-  its months hidden inside it. Collapsing a year hides its month headers
-  too, so a five-year library reads as five lines.
+  its months hidden inside it. A prior year ALSO opens when it holds the
+  previous month, so that on the fifth of January December and Yesterday
+  are not swallowed by a folded 2025. Collapsing a year hides its month
+  headers too, so a five-year library reads as five lines.
 - State persists per section in localStorage (`stt_groups`, keyed by the
   section id, values open or closed), survives polls and reloads, and a
   new month appearing opens by default.
 - Search or the flagged filter expands every section holding a match and
-  restores the persisted state when the filter clears. A jump-rail click
-  expands the target section and its year before scrolling.
+  restores the persisted state when the filter clears. Nothing is written
+  to that state while a filter is on, including a click on a header the
+  filter forced open. A jump-rail click expands the target section and its
+  year before scrolling.
 - The pinned actionable cluster (recording, processing, needs_name, failed,
   held, waiting) stays above every group and never folds.
 - Collapsed sections render only their header line: the rows are not in
