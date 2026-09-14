@@ -315,8 +315,12 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row{display:flex;align-items:center;gap:12px;min-height:52px;padding:15px 18px;
   background:var(--card);border:1px solid var(--hair);border-radius:6px;
   margin:0 0 10px;position:relative;
-  transition:border-color .18s ease}
+  transition:border-color .18s ease,background-color .5s ease}
 .row:hover{border-color:var(--line)}
+/* a meeting whose transcript was just rewritten (a relabel landed a name): a
+   two-second tint in the existing accent-soft, fading in and back out through
+   the row's own transition. No new colour, no motion under reduced-motion. */
+.row.updated{background:var(--accent-soft)}
 
 /* bulk-select checkbox: hidden until row hover, or while any selection exists */
 .row .chk{flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer;
@@ -513,7 +517,7 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 @media(prefers-reduced-motion:reduce){
   *{scroll-behavior:auto!important}
   .pill .recdot,.row[data-state="recording"] .capdot{animation:none}
-  .row,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
+  .row,.row.updated,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
   .row[data-state="processing"] .progress{transition:none}
 }
 
@@ -912,6 +916,12 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .pnitem:hover,.pnitem.cur{background:var(--inset)}
 .pnitem mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;padding:0 1px}
 .npbtns{display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap}
+/* the naming preview: one quiet line saying what Save reaches, and under it the
+   looks-like chips (the ordinary .nchip, no new form). The whole block is
+   hidden until the preview lands, and stays hidden if it never does. */
+.nppreview{margin-top:10px}
+.nppline{font:400 13px/1.5 var(--sans);color:var(--sub)}
+.nppchips{margin-top:8px}
 
 /* the unknown-voice legend chip: same quiet chip, plus the "?" invitation */
 button.mlg{background:none;border:1px solid var(--line);border-radius:4px;
@@ -961,6 +971,12 @@ button.mlg:hover{border-color:var(--attn);color:var(--attn)}
 .dbody section>.dgroup:first-child{margin-top:12px}
 .drow{display:flex;align-items:center;gap:10px;padding:12px 2px;
   border-bottom:1px solid var(--hair);flex-wrap:wrap}
+/* a suggestion line belongs to the row above it, so that row drops its rule */
+.drow:has(+.dsugg){border-bottom:0}
+.dsugg{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 10px 8px 34px;margin:0 0 8px;
+  background:var(--inset);border-radius:6px;
+  font:400 13px/1.45 var(--sans);font-variant-numeric:tabular-nums;color:var(--sub)}
 .dname{font:600 14.5px/1.35 var(--sans);color:var(--ink)}
 .dsub{font:400 13px/1.45 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--sub);margin-top:1px}

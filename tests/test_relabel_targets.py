@@ -352,3 +352,179 @@ def test_relabel_targets_always_applies_the_requested_meeting(
     res = srv._relabel_targets(vector=[1.0], first="Alpha Mtg")
     assert done == ["Alpha Mtg"]
     assert res["applied"] == "Alpha Mtg" and res["targets"] == ["Bravo Mtg"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: the preview a naming panel reads BEFORE the save, and the two
+# suggestion fields every unknown carries in /api/state. Same endpoints, same
+# sandbox library; the question here is what the panel is told.
+# ---------------------------------------------------------------------------
+
+def _at_cos(v, c, seed):
+    """A unit vector whose cosine against `v` is exactly `c`."""
+    u = _unit(seed)
+    u = u - np.dot(u, v) * v
+    u = u / np.linalg.norm(u)
+    w = c * np.asarray(v, float) + np.sqrt(1.0 - c * c) * u
+    return w / np.linalg.norm(w)
+
+
+def test_name_preview_for_a_meeting_cluster_names_here_and_the_others(
+        running_server, sandbox):
+    """The meeting in hand is always part of its own naming, and the preview
+    says which OTHER meetings the same voice reaches."""
+    v = _unit(1)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v, "SPEAKER_01": _unit(5)})
+    _meeting("Bravo Mtg", {"SPEAKER_00": v})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(6)})
+
+    status, body = _post(running_server, "/api/name_preview",
+                         {"meeting": "Alpha Mtg", "speaker": "SPEAKER_00"})
+    assert status == 200
+    assert body["here"] == "Alpha Mtg"
+    assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"]
+    assert body["looks_like"] == [], "nobody is enrolled yet"
+
+
+def test_name_preview_keeps_the_meeting_even_with_no_embedding(
+        running_server, sandbox):
+    """A cluster the diarizer left no centroid for scores against nothing, so
+    the index returns nothing. The meeting the user is looking at is still the
+    meeting this save names."""
+    _meeting("Alpha Mtg", {"SPEAKER_00": _unit(1)})
+    status, body = _post(running_server, "/api/name_preview",
+                         {"meeting": "Alpha Mtg", "speaker": "SPEAKER_99"})
+    assert status == 200
+    assert body == {"targets": ["Alpha Mtg"], "here": "Alpha Mtg",
+                    "looks_like": []}
+
+
+def test_name_preview_refuses_a_meeting_that_is_not_in_the_library(
+        running_server, sandbox):
+    status, _ = _post(running_server, "/api/name_preview",
+                      {"meeting": "../../etc/passwd", "speaker": "SPEAKER_00"})
+    assert status == 400
+
+
+def test_name_preview_for_a_uid_lists_the_meetings_it_was_heard_in(
+        running_server, sandbox):
+    v = _unit(3)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(7)})
+    uid = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                          "Alpha Mtg")["SPEAKER_00"]
+
+    status, body = _post(running_server, "/api/name_preview", {"uid": uid})
+    assert status == 200
+    assert body["here"] is None, "a uid naming has no single meeting in hand"
+    assert body["targets"] == ["Alpha Mtg"]
+
+
+def test_name_preview_for_a_uid_that_is_already_named_says_nothing(
+        running_server, sandbox):
+    """A stale chip. The SAVE explains itself; a preview must not say it twice,
+    and it must not 500 on a uid the registry no longer holds."""
+    status, body = _post(running_server, "/api/name_preview", {"uid": "U404"})
+    assert status == 200
+    assert body == {"targets": [], "here": None, "looks_like": []}
+
+
+def test_name_preview_looks_like_is_best_first_and_cut_at_match_min(
+        running_server, sandbox):
+    """The audit's nineteen clusters: at or above MATCH_MIN, under the naming
+    margin. The preview ranks them best first, keeps three, and drops anyone
+    below the floor."""
+    v = _unit(11)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    identify.enroll("Ada Vance", _at_cos(v, 0.95, 21), source="Alpha Mtg")
+    identify.enroll("Bo Nash", _at_cos(v, 0.80, 22), source="Alpha Mtg")
+    identify.enroll("Cy Frame", _at_cos(v, 0.70, 23), source="Alpha Mtg")
+    identify.enroll("Dee Ward", _at_cos(v, 0.40, 24), source="Alpha Mtg")
+
+    status, body = _post(running_server, "/api/name_preview",
+                         {"meeting": "Alpha Mtg", "speaker": "SPEAKER_00"})
+    assert status == 200
+    assert [x["name"] for x in body["looks_like"]] == [
+        "Ada Vance", "Bo Nash", "Cy Frame"], \
+        "best first, at most three, and nobody under MATCH_MIN"
+    assert [round(x["score"], 2) for x in body["looks_like"]] == [0.95, 0.80, 0.70]
+    assert all(x["score"] >= unknowns.MATCH_MIN for x in body["looks_like"])
+
+
+# ---------- the two suggestion fields in /api/state ----------
+
+def _unknown_state(uid):
+    return next(u for u in srv.gather_state()["unknowns"] if u["uid"] == uid)
+
+
+def test_state_unknowns_carry_resolved_suggestions_and_looks_like(sandbox):
+    """Phase 4 records a near miss as `suggested: [{uid, score}]`. The panel
+    needs a display name to render and a uid that still exists to Link to."""
+    v = _unit(31)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": _unit(32)})
+    a = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                        "Alpha Mtg")["SPEAKER_00"]
+    b = unknowns.assign({"SPEAKER_00": _unit(32)}, {"SPEAKER_00": None},
+                        "Bravo Mtg")["SPEAKER_00"]
+    identify.enroll("Ada Vance", _at_cos(v, 0.84, 41), source="Bravo Mtg")
+    identify.enroll("Dee Ward", _at_cos(v, 0.40, 42), source="Bravo Mtg")
+    reg = unknowns.load()
+    reg["speakers"][a]["suggested"] = [{"uid": b, "score": 0.72},
+                                       {"uid": "U404", "score": 0.99}]
+    unknowns.save(reg)
+
+    ent = _unknown_state(a)
+    assert ent["suggested"] == [{"uid": b, "display": unknowns.display(b),
+                                 "score": 0.72}], \
+        "resolved to a display name, and a uid that no longer exists is dropped"
+    assert [x["name"] for x in ent["looks_like"]] == ["Ada Vance"], \
+        "an enrolled near miss above MATCH_MIN; the 0.40 one is not a guess"
+    assert round(ent["looks_like"][0]["score"], 2) == 0.84
+    # an unknown with neither still carries both keys, as empty lists
+    other = _unknown_state(b)
+    assert other["suggested"] == [] and isinstance(other["looks_like"], list)
+
+
+def test_a_dropped_suggestion_is_never_offered(sandbox):
+    """A tombstoned voice ("not a real speaker") must not come back as a Link
+    the user can click."""
+    v = _unit(33)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": _unit(34)})
+    a = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                        "Alpha Mtg")["SPEAKER_00"]
+    b = unknowns.assign({"SPEAKER_00": _unit(34)}, {"SPEAKER_00": None},
+                        "Bravo Mtg")["SPEAKER_00"]
+    reg = unknowns.load()
+    reg["speakers"][a]["suggested"] = [{"uid": b, "score": 0.72}]
+    reg["speakers"][b]["dropped"] = True
+    unknowns.save(reg)
+    assert _unknown_state(a)["suggested"] == []
+
+
+def test_looks_like_is_not_rescored_while_the_registries_stand_still(
+        sandbox, monkeypatch):
+    """The panel polls every 2 seconds and the score is an all-vs-all against
+    every enrolled print. The cache keys on the sample file's mtime and the
+    registry's, so an unchanged library costs nothing after the first poll."""
+    v = _unit(51)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None}, "Alpha Mtg")
+    identify.enroll("Ada Vance", _at_cos(v, 0.84, 61), source="Alpha Mtg")
+
+    calls = []
+    real = identify.score_against
+    monkeypatch.setattr(identify, "score_against",
+                        lambda vec, samples: calls.append(1) or real(vec, samples))
+
+    srv.gather_state()
+    first = len(calls)
+    assert first > 0, "the first poll has to score something"
+    srv.gather_state()
+    assert len(calls) == first, "an unchanged registry must not be rescored"
+
+    # a new enrollment moves registry.json, and the answer is computed again
+    identify.enroll("Bo Nash", _at_cos(v, 0.70, 62), source="Alpha Mtg")
+    srv.gather_state()
+    assert len(calls) > first, "a changed registry must invalidate the cache"

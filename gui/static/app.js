@@ -924,7 +924,43 @@ function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawTray
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
   if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
   drawTimeline(S);afterRender();}
-async function refresh(){try{S=await api('/api/state');render();}catch(e){}}
+/* The row flash. A relabel rewrites transcripts the user is not looking at, and
+ * in a list of a hundred rows a name quietly changing three cards down is
+ * invisible. Every row carries its own save stamp (generated_at), so a poll can
+ * name exactly which meetings were rewritten since the last one and tint those
+ * cards for two seconds.
+ * It reads the PREVIOUS state object and applies a class AFTER the rebuild, so
+ * it never enters drawTimeline's change signature: a flash must not be able to
+ * force a rebuild, and a row that merely appeared (no previous stamp to move
+ * from) is not an update. */
+const FLASH_MS=2000;
+function stampsMoved(prev,next){
+  if(!prev)return [];
+  const was=new Map((prev.timeline||[]).map(r=>[r.id,r.generated_at]));
+  const out=[];
+  for(const r of (next&&next.timeline)||[]){
+    const before=was.get(r.id);
+    if(before&&r.generated_at&&r.generated_at!==before)out.push(r.id);
+  }
+  return out;
+}
+function flashRows(ids){
+  if(!ids||!ids.length)return;
+  const want=new Set(ids);
+  document.querySelectorAll('.row[data-id]').forEach(el=>{
+    if(!want.has(el.dataset.id))return;
+    el.classList.add('updated');
+    setTimeout(()=>{el.classList.remove('updated');},FLASH_MS);
+  });
+}
+async function refresh(){try{
+  const prev=S;
+  S=await api('/api/state');
+  render();
+  // the list view only: the meeting page answers a moved stamp by reloading
+  // itself (relabelWatch), which is a louder signal than a tint
+  if(!route||route.view!=='meeting')flashRows(stampsMoved(prev,S));
+}catch(e){}}
 
 /* ============================ theme (reused convention) ============================ *
  * Same stt_theme localStorage key and auto/light/dark cycle as the old panel.
@@ -3257,6 +3293,7 @@ async function openNamePanel(uid,display,cluster,base){
         oninput="pnFilter()" onfocus="pnFilter()" onblur="setTimeout(pnClose,150)" onkeydown="pnKey(event)">
       <div id="npdd" class="npdd" hidden></div>
     </div>
+    <div id="nppreview" class="nppreview" hidden></div>
     <div class="npbtns">
       ${cluster
         ?(cluster.local
@@ -3282,6 +3319,10 @@ async function openNamePanel(uid,display,cluster,base){
     <div id="npclips" class="npclips"><span class="spin"></span></div>
     <div id="nplines" class="nplines"></div>`;
   $('#npname').focus();
+  // what this save would reach, and who the voice already resembles. Fired and
+  // forgotten: the panel is usable the instant it opens, the line appears when
+  // the answer lands, and a preview that fails shows nothing at all.
+  npPreview();
   if(cluster){
     // one clip, cut from THIS meeting's cluster (no registry entry to walk)
     const box0=$('#npclips');
@@ -3370,6 +3411,52 @@ async function npLines(base,speaker){
         class="npltext">${esc(l.text)}</span></div>`;
     }).join('')
     +`<div class="npltot">${n} segment${n!==1?'s':''}, ${secs}s of speech</div>`;
+}
+/* ------------------------------------------------- the naming preview ----- *
+ * One quiet line under the name box saying what Save will actually reach, and
+ * -- when this voice already resembles somebody enrolled -- a row of chips
+ * carrying that evidence. Before this, a save said what it had done only after
+ * it was done, and the nineteen clusters the margin rule refuses (0.61 to 0.84
+ * against an enrolled print, audit of 2026-09-13) were invisible: the panel
+ * showed a stranger where the server already held a strong guess.
+ * NON-BLOCKING by construction: the panel renders and focuses first, this
+ * fills in behind it, and a failed preview paints nothing rather than an
+ * apology where the evidence goes. */
+function npPreviewLine(p){
+  const here=(p&&p.here)||null;
+  const n=(((p&&p.targets)||[]).filter(t=>t!==here)).length;
+  return n?`Names this voice here and in ${n} other meeting${n!==1?'s':''}`
+          :'Names this voice here only';
+}
+function npPreviewHTML(p){
+  const chips=((p&&p.looks_like)||[]).map(x=>
+    `<button class="nchip" type="button" onclick="npUseName('${escJs(x.name)}')"
+      title="Fill the name box with this match; nothing is saved until you press Save name"
+      >Looks like ${esc(x.name)} &middot; <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('');
+  return `<div class="nppline">${esc(npPreviewLine(p))}</div>`
+    +(chips?`<div class="nchips nppchips">${chips}</div>`:'');
+}
+// a chip fills the box and leaves the save to the human: this is a guess the
+// margin rule already refused to act on by itself
+function npUseName(name){
+  const i=$('#npname');
+  if(!i)return;
+  i.value=name;
+  i.focus();
+  pnClose();
+}
+async function npPreview(){
+  if(!NP)return;
+  const tok=npToken();
+  const payload=NP.uid?{uid:NP.uid}:{meeting:NP.meeting,speaker:NP.speaker};
+  let r;
+  try{r=await api('/api/name_preview',payload);}
+  catch(e){return;}
+  const box=$('#nppreview');
+  // closed, or reopened for another voice, or the server said no: paint nothing
+  if(!box||!NP||npToken()!==tok||!r||r.error||!Array.isArray(r.targets))return;
+  box.innerHTML=npPreviewHTML(r);
+  box.hidden=false;
 }
 function npOpenAt(meeting,t){closeNamePanel();openHit(meeting,t);}
 function closeNamePanel(){
@@ -4005,7 +4092,12 @@ function dConfirmClear(){
 function dSpeakersSig(s){
   return JSON.stringify([
     (s.enrolled||[]).map(e=>[e.name,e.samples,(e.sources||[]).join('|')]),
-    (s.unknowns||[]).map(u=>[u.uid,u.display,!!u.archived,(u.meetings||[]).length]),
+    // the two suggestion lines ride the signature: they land a poll or two
+    // after the row first painted (a relabel writes them), so without this the
+    // "possibly the same voice" line never appears on a row already on screen
+    (s.unknowns||[]).map(u=>[u.uid,u.display,!!u.archived,(u.meetings||[]).length,
+      (u.suggested||[]).map(x=>x.uid+':'+x.score).join('|'),
+      (u.looks_like||[]).map(x=>x.name+':'+x.score).join('|')]),
     s.max_samples,!!s.relabel_pending,
     DRAWER.spkOpen,DRAWER.showHidden,DRAWER.dconfirm,DRAWER.spkErr,
     DRAWER.reassign&&(DRAWER.reassign.name+':'+DRAWER.reassign.idx)]);
@@ -4066,7 +4158,7 @@ function dSpeakersHTML(s){
       <button class="iact" type="button"
         title="One-time voice (focus group): keep it matchable but out of the way; restore any time"
         onclick="dHideUnknown('${escJs(u.uid)}',true)">Hide</button>
-    </div>`;
+    </div>${dSuggHTML(u)}`;
   }).join('')||`<div class="dempty">No unidentified voices right now.</div>`;
   if(hid.length){
     h+=`<div class="drow dhiddenhdr"><button class="dlink" type="button"
@@ -4084,6 +4176,55 @@ function dSpeakersHTML(s){
     }).join('');
   }
   return h;
+}
+/* Under an unknown row: what the system already suspects about that voice, and
+ * the one click that acts on it. Two kinds, one line each, best candidate only
+ * -- a list of five guesses is a decision, and this is meant to be a glance.
+ *   - "Possibly the same voice as Speaker 12" : phase 4 wrote this when the
+ *     cluster missed the link bar and minted its own number. Link merges them.
+ *   - "Looks like Riley Stone"             : an enrolled person this voice
+ *     resembles above MATCH_MIN but under the automatic margin (the audit's
+ *     nineteen). Name opens the panel with the name already typed, so the
+ *     human confirms rather than the machine guessing. */
+function dSuggHTML(u){
+  const sug=((u&&u.suggested)||[])[0];
+  const look=((u&&u.looks_like)||[])[0];
+  if(!sug&&!look)return '';
+  let h='';
+  if(sug)h+=`<div class="dsugg"><span class="grow">Possibly the same voice as
+    ${esc(sug.display||sug.uid)} &middot; <span class="mono">${(+sug.score).toFixed(2)}</span></span>
+    <button class="btn mini" type="button"
+      title="Treat these as one voice: this number folds into that one everywhere"
+      onclick="dLinkUnknown('${escJs(u.uid)}','${escJs(sug.uid)}')">Link</button></div>`;
+  if(look)h+=`<div class="dsugg"><span class="grow">Looks like ${esc(look.name)}
+    &middot; <span class="mono">${(+look.score).toFixed(2)}</span></span>
+    <button class="btn mini" type="button"
+      title="Open the naming panel with this name filled in; nothing is saved until you press Save name"
+      onclick="dNameUnknownAs('${escJs(u.uid)}','${escJs(look.name)}')">Name</button></div>`;
+  return h;
+}
+// the same merge endpoint the drawer's people section uses, both sides by uid
+async function dLinkUnknown(src,dst){
+  DRAWER.spkErr=null;
+  let r;
+  try{r=await api('/api/merge_speakers',{src:'uid:'+src,dst:'uid:'+dst});}
+  catch(e){r=null;}
+  if(!r||!r.ok){
+    DRAWER.spkErr='Could not link those voices. They may have been named already.';
+    dSpeakersForce();
+    return;
+  }
+  // the same sentence a save gets, from the same field of the same response:
+  // the link relabels exactly the meetings it can reach
+  const n=(r.targets||[]).length;
+  toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
+  refresh();
+}
+// the panel, prefilled. openNamePanel paints its markup before its first await,
+// so the box exists by the time this line runs.
+function dNameUnknownAs(uid,name){
+  openNamePanelByUid(uid);
+  npUseName(name);
 }
 // the expandable management panel under ONE enrolled person at a time
 function dSpkPanel(s,e,cap){

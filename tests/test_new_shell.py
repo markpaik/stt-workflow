@@ -3151,3 +3151,220 @@ def test_save_says_how_many_other_meetings_are_updating():
         "Named here. Updating 3 other meetings.",
         "Named here.",
     ], "an empty list says only that this meeting is done; no list says nothing"
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 (docs/relabel-redesign.md): the naming preview, the drawer's
+# suggestion lines, and the per-row flash when a relabel lands. Same
+# regex-over-the-files style, plus node for the behavior.
+# ---------------------------------------------------------------------------
+
+def test_the_naming_panel_asks_for_a_preview_without_waiting_for_it():
+    """The box is focused and typeable in the same tick the panel opens; the
+    line arrives behind it. A preview that never answers must leave a working
+    panel, not a blocked one."""
+    panel = _js_fn("openNamePanel")
+    assert '<div id="nppreview" class="nppreview" hidden></div>' in panel
+    # the field comes first, then the fire-and-forget call: NOT awaited
+    assert panel.index('id="npname"') < panel.index('id="nppreview"')
+    assert re.search(r"\$\('#npname'\)\.focus\(\);\s*\n(?:\s*//[^\n]*\n)*\s*npPreview\(\);",
+                     panel), "npPreview must be called, unawaited, after focus"
+    assert "await npPreview()" not in NEW_JS
+    prev = _js_fn("npPreview")
+    assert "'/api/name_preview'" in prev
+    assert "{uid:NP.uid}" in prev and "{meeting:NP.meeting,speaker:NP.speaker}" in prev
+    # the same identity guard every other async block in this panel carries
+    assert "npToken()!==tok" in prev
+    # a failure paints NOTHING: no catch branch writes into the box
+    assert "catch(e){return;}" in prev
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_preview_line_counts_the_other_meetings_not_this_one():
+    """"here" is not an "other meeting", and a voice heard nowhere else says so
+    plainly rather than counting to zero."""
+    out = _run_node("\n".join([
+        _js_fn("npPreviewLine"),
+        """
+const lines=[
+  npPreviewLine({here:'A',targets:['A']}),
+  npPreviewLine({here:'A',targets:[]}),
+  npPreviewLine({here:'A',targets:['A','B']}),
+  npPreviewLine({here:'A',targets:['A','B','C','D','E']}),
+  npPreviewLine({here:null,targets:['A','B']}),
+];
+console.log(JSON.stringify(lines));
+"""]))
+    assert out == [
+        "Names this voice here only",
+        "Names this voice here only",
+        "Names this voice here and in 1 other meeting",
+        "Names this voice here and in 4 other meetings",
+        "Names this voice here and in 2 other meetings",
+    ]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_looks_like_chip_fills_the_name_box_and_saves_nothing():
+    """The margin rule refused to name these clusters automatically, and that
+    is right. The chip hands the guess to the human and stops there."""
+    out = _run_node("\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        "let box={value:'',focused:0,focus(){this.focused++;}};",
+        "let closed=0;",
+        "const $=q=>(q==='#npname'?box:null);",
+        "function pnClose(){closed++;}",
+        "let posted=[];",
+        "async function api(p,b){posted.push([p,b]);return {};}",
+        _js_fn("npPreviewLine"), _js_fn("npPreviewHTML"), _js_fn("npUseName"),
+        """
+const html=npPreviewHTML({here:'A',targets:['A','B'],
+  looks_like:[{name:'Riley Stone',score:0.8412},{name:"O'Hara",score:0.63}]});
+npUseName('Riley Stone');
+console.log(JSON.stringify({html,value:box.value,focused:box.focused,
+  closed,posted}));
+"""]))
+    # the chip carries the name and the score, in the existing chip class
+    assert 'class="nchip"' in out["html"]
+    assert "Looks like Riley Stone &middot; " in out["html"]
+    assert '<span class="mono">0.84</span>' in out["html"]
+    assert 'class="nchips nppchips"' in out["html"]
+    # an apostrophe in a name must not break out of the onclick attribute
+    assert "npUseName('O\\'Hara')" in out["html"]
+    # the click fills the box, focuses it, closes the autocomplete, posts NOTHING
+    assert out["value"] == "Riley Stone"
+    assert out["focused"] == 1 and out["closed"] == 1
+    assert out["posted"] == [], "a chip is evidence, never a save"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_link_merges_the_two_unknown_ids_and_says_what_it_reached():
+    """The drawer's "possibly the same voice" line, clicked: one merge by uid
+    on each side, and the save's own sentence from the response's targets."""
+    out = _run_node("\n".join([
+        "let posted=[],toasts=[],refreshes=0;",
+        "let DRAWER={spkErr:'old error'};",
+        "function dSpeakersForce(){}",
+        "function toast(m){toasts.push(m);}",
+        "function refresh(){refreshes++;}",
+        "async function api(p,b){posted.push([p,b]);"
+        "return {ok:true,targets:['B','C','D']};}",
+        _js_fn("dLinkUnknown"),
+        """
+dLinkUnknown('U050','U012').then(()=>{
+  console.log(JSON.stringify({posted,toasts,refreshes,err:DRAWER.spkErr}));
+});
+"""]))
+    assert out["posted"] == [["/api/merge_speakers",
+                              {"src": "uid:U050", "dst": "uid:U012"}]]
+    assert out["toasts"] == ["Named here. Updating 3 other meetings."], \
+        "the same sentence a save gets, from the same field"
+    assert out["refreshes"] == 1
+    assert out["err"] is None
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_link_that_fails_says_so_in_the_drawer_and_toasts_nothing():
+    out = _run_node("\n".join([
+        "let toasts=[],refreshes=0,redraws=0;",
+        "let DRAWER={spkErr:null};",
+        "function dSpeakersForce(){redraws++;}",
+        "function toast(m){toasts.push(m);}",
+        "function refresh(){refreshes++;}",
+        "async function api(p,b){return {ok:false};}",
+        _js_fn("dLinkUnknown"),
+        """
+dLinkUnknown('U050','U012').then(()=>{
+  console.log(JSON.stringify({toasts,refreshes,redraws,err:DRAWER.spkErr}));
+});
+"""]))
+    assert out["toasts"] == [] and out["refreshes"] == 0
+    assert out["redraws"] == 1
+    assert "Could not link" in out["err"]
+
+
+def test_the_drawer_suggestion_lines_render_one_candidate_each():
+    """One line per kind, best candidate only: a wall of guesses is a decision,
+    and this is a glance."""
+    sugg = _js_fn("dSuggHTML")
+    assert "Possibly the same voice as" in sugg and "Looks like" in sugg
+    assert ">Link</button>" in sugg and ">Name</button>" in sugg
+    assert "dLinkUnknown(" in sugg and "dNameUnknownAs(" in sugg
+    assert "[0];" in sugg, "best candidate only, both kinds"
+    # a row with neither renders nothing at all
+    assert "if(!sug&&!look)return '';" in sugg
+    # the Name button opens the panel with the name already in the box
+    name = _js_fn("dNameUnknownAs")
+    assert "openNamePanelByUid(uid);" in name and "npUseName(name);" in name
+    # and both fields ride the drawer's change signature, or a suggestion that
+    # lands a poll later never appears on a row already on screen
+    sig = _js_fn("dSpeakersSig")
+    assert "u.suggested" in sig and "u.looks_like" in sig
+    # the unknown row renders its suggestions right under itself
+    assert "</div>${dSuggHTML(u)}`" in _js_fn("dSpeakersHTML")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_row_flashes_only_when_its_own_stamp_moved():
+    """A relabel rewrites transcripts nobody is looking at, and in a hundred
+    rows a name changing three cards down is invisible. The flash marks exactly
+    the meetings whose bytes moved between two polls: not a row that merely
+    appeared, not a row that stood still, and not a row that lost its stamp."""
+    out = _run_node("\n".join([
+        "let FLASH_MS=15;",     # the real 2000 is asserted against the source below
+        "const rows=['A','B','C','NEW'].map(id=>({dataset:{id},cls:[],"
+        "classList:{add(c){this.__o.cls.push('+'+c);},"
+        "remove(c){this.__o.cls.push('-'+c);}}}));",
+        "rows.forEach(r=>{r.classList.__o=r;});",
+        "const document={querySelectorAll:()=>rows};",
+        _js_fn("stampsMoved"), _js_fn("flashRows"),
+        """
+const prev={timeline:[{id:'A',generated_at:'S1'},{id:'B',generated_at:'S1'},
+                      {id:'C',generated_at:null}]};
+const next={timeline:[{id:'A',generated_at:'S2'},{id:'B',generated_at:'S1'},
+                      {id:'C',generated_at:'S9'},{id:'NEW',generated_at:'S9'}]};
+const moved=stampsMoved(prev,next);
+const firstPoll=stampsMoved(null,next);
+flashRows(moved);
+const added=rows.map(r=>r.cls.join(''));
+setTimeout(()=>{
+  console.log(JSON.stringify({moved,firstPoll,added,
+    after:rows.map(r=>r.cls.join(''))}));
+},60);
+"""]))
+    assert out["moved"] == ["A"], \
+        "B stood still, C had no stamp to move from, NEW was not there before"
+    assert out["firstPoll"] == [], "the first poll of a session flashes nothing"
+    assert out["added"] == ["+updated", "", "", ""]
+    assert out["after"] == ["+updated-updated", "", "", ""], \
+        "the class comes off on its own"
+
+
+def test_the_flash_reads_the_previous_state_and_never_the_signature():
+    """It must not be possible for a flash to force a list rebuild: the stamps
+    are diffed against the state object being REPLACED, and the class goes on
+    after render() has already run."""
+    src = _js_fn("refresh")
+    assert "const prev=S;" in src
+    assert src.index("render();") < src.index("flashRows(stampsMoved(prev,S))")
+    # the meeting page answers a moved stamp by reloading itself instead
+    assert "route.view!=='meeting'" in src
+    # generated_at is NOT in the row change signature (sigOf), and must not be:
+    # every relabel would rebuild the whole list
+    assert "generated_at" not in _js_fn("sigOf")
+    assert re.search(r"(?m)^const FLASH_MS=2000;", NEW_JS), "two seconds"
+
+
+def test_the_updated_row_tint_uses_an_existing_token_and_honors_reduced_motion():
+    m = re.search(r"(?m)^\.row\.updated\{[^}]*\}", NEW_CSS)
+    assert m, "no .row.updated rule"
+    assert "var(--accent-soft)" in m.group(0), "no new colors (DESIGN.md Indigo)"
+    # the tint fades through the row's own transition...
+    row = re.search(r"(?m)^\.row\{[^}]*\}", NEW_CSS)
+    assert row and "background-color" in row.group(0)
+    # ...and there is no fade at all under reduced motion
+    blocks = re.findall(r"@media\(prefers-reduced-motion:reduce\)\{[^}]*\{[^}]*\}[\s\S]*?\n\}",
+                        NEW_CSS)
+    covering = [b for b in blocks if ".row.updated" in b]
+    assert covering, "the reduced-motion block must name .row.updated"
+    assert "transition:none" in covering[0]

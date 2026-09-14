@@ -295,6 +295,30 @@ for the owner of the registry, not for a build.
   one-click link.
 - DESIGN.md gains the naming section. Node tests cover the three flows.
 
+Shipped 2026-09-14. Three notes on what the spec left open:
+
+- **The preview is a separate read, not a field on the save.** `/api/name_preview`
+  takes `{uid}` or `{meeting, speaker}` and answers `{targets, here,
+  looks_like}` from the same `centroids.targets` the save uses, plus the
+  meeting itself. It is fired when the panel opens and it is never awaited: the
+  box is focused and typeable in the same tick, the line appears when the
+  answer lands, and every failure — a missing diar cache, an unbuildable index,
+  a uid that was named a second ago — paints nothing rather than an apology
+  where the evidence goes.
+- **`looks_like` is cached on two mtimes, not on a clock.** The panel polls
+  every two seconds and the answer is an all-vs-all of one sample stack against
+  every enrolled print, so `gather_state` would otherwise rescore the whole
+  registry thirty times a minute. `gui/server._unknown_looks_like` keys the
+  cache on the unknown's own `.npy` mtime and `registry.json`'s, which are the
+  only two files that can change the answer, and the enrolled prints are loaded
+  lazily so a poll where every unknown is cached reads no voiceprint file at
+  all.
+- **The flash reads the previous state, never the signature.** `drawTimeline`'s
+  change signature is untouched: `refresh` keeps the state object it is about
+  to replace, diffs the rows' `generated_at`, and adds the `updated` class
+  after `render()` has run. A flash therefore cannot force a rebuild, and a row
+  that merely appeared (no previous stamp to move from) is not an update.
+
 ## Open items carried from the audit of 2026-09-13
 
 - 262 lock files under `.locks` against 101 meetings. Phase 3 cleans them:
@@ -303,4 +327,9 @@ for the owner of the registry, not for a build.
 - Two PSSP meetings have no `.diar.npz`, so relabel can never update them.
   They need a Redo.
 - Nineteen unnamed clusters score above threshold but under the margin. Phase
-  5 surfaces them as suggestions.
+  5 surfaces them as suggestions. ADDRESSED 2026-09-14 by the looks-like chips:
+  every one of them now reads as "Looks like <name> · 0.84" in the naming panel
+  and as a [Name] line under its voice in the drawer, both of which fill the
+  name box and stop there. The margin rule itself is unchanged — it still
+  refuses to name them automatically, which is right; what changed is that the
+  human can now see what it refused.

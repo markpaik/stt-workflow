@@ -1048,6 +1048,14 @@ def gather_state():
     src_dir, dst_dir = config.source_dir(), config.meetings_dir()
     reg = unknowns.load()
     unknown_list = []
+    # the enrolled voiceprints, loaded at most ONCE per poll and only when some
+    # unknown's looks-like answer is actually stale (see _unknown_looks_like)
+    _prints = {}
+
+    def _prints_once():
+        if "v" not in _prints:
+            _prints["v"] = identify.load_voiceprints()
+        return _prints["v"]
     # "heard in N meetings" may only count meetings that still EXIST — live
     # (the same membership the clip endpoints gate on) or archived (restorable,
     # so their refs deliberately survive). Deletes scrub refs at the source,
@@ -1069,7 +1077,16 @@ def gather_state():
             continue
         unknown_list.append({"uid": uid, "display": unknowns.display(uid),
                              "archived": bool(meta.get("archived")),
-                             "meetings": mts})
+                             "meetings": mts,
+                             # two kinds of "this may already be someone": a
+                             # near miss against another unknown (phase 4 wrote
+                             # it when the cluster minted) and a near miss
+                             # against an enrolled person (the margin rule's
+                             # nineteen). The drawer offers a Link for the
+                             # first and a prefilled Name for the second.
+                             "suggested": _suggested(meta, reg["speakers"]),
+                             "looks_like": _unknown_looks_like(
+                                 uid, meta, _prints_once)})
     # sources resolved through each sample's meeting id: a rename whose
     # registry chase failed used to leave a source naming a folder that no
     # longer exists, and its ▶ dead. The id still points at the meeting.
@@ -1418,6 +1435,93 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None,
     if rest:
         _relabel_bases_background(rest, reason)
     return {"applied": applied, "targets": rest}
+
+
+# ---------- who a voice already looks like ----------
+
+# The audit of 2026-09-13 found nineteen unnamed clusters scoring 0.61 to 0.84
+# against an enrolled print and sitting under the automatic margin -- Riley
+# Stone at 0.84 in an Enrollment Data Review meeting among them. Refusing them
+# automatically is right: a margin that narrow is how a voiceprint learns the
+# wrong person. Showing the human nothing is not, and the same cluster came back
+# unnamed every week. These two helpers are that evidence, and nothing more:
+# they fill the name box, they never save.
+LOOKS_LIKE_MAX = 3
+_LOOKS_CACHE = {}
+
+
+def _rows_of(vector):
+    """One embedding or a stack of them, as a list of rows."""
+    if vector is None:
+        return []
+    if getattr(vector, "ndim", 1) > 1:
+        return list(vector)
+    return [vector]
+
+
+def _looks_like(vector, prints=None, limit=LOOKS_LIKE_MAX) -> list:
+    """[{name, score}] for the enrolled people this voice resembles at or above
+    unknowns.MATCH_MIN, best first, at most `limit` of them."""
+    rows = _rows_of(vector)
+    if not rows:
+        return []
+    if prints is None:
+        prints = identify.load_voiceprints()
+    out = []
+    for name, stack in prints.items():
+        best = max((identify.score_against(r, stack) for r in rows), default=-1.0)
+        if best >= unknowns.MATCH_MIN:
+            out.append({"name": name, "score": round(float(best), 3)})
+    # best first, then by name: two equal scores must not swap places between
+    # two polls of a list the user is reading
+    out.sort(key=lambda d: (-d["score"], d["name"]))
+    return out[:limit]
+
+
+def _unknown_looks_like(uid, meta, prints) -> list:
+    """`_looks_like` for one unknown voice, cached on the two files that can
+    change the answer: its own sample stack and the enrolled registry.
+
+    The score is an all-vs-all over every enrolled print, and the panel polls
+    every two seconds, so recomputing per poll is the entire cost of this
+    feature. The mtimes make it once per actual change instead. `prints` is a
+    zero-argument callable so a poll where every unknown is cached reads no
+    voiceprint files at all."""
+    sample = config.VOICEPRINTS_DIR / str(meta.get("file") or "")
+    try:
+        key = (str(sample), sample.stat().st_mtime,
+               identify._registry_path().stat().st_mtime)
+    except OSError:
+        return []   # no sample stack, or nobody enrolled: nothing to resemble
+    hit = _LOOKS_CACHE.get(uid)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    out = _looks_like(unknowns.samples_of(uid), prints())
+    _LOOKS_CACHE[uid] = (key, out)
+    return out
+
+
+def _suggested(meta, speakers) -> list:
+    """This unknown's near-miss candidates, as the drawer renders them.
+
+    Phase 4 writes `suggested: [{uid, score}]` when a cluster misses the link
+    bar and mints its own number instead. A uid that has since been named,
+    merged or dropped is gone from the registry, and offering a Link that
+    cannot land is worse than offering nothing."""
+    out = []
+    for s in (meta.get("suggested") or []):
+        if not isinstance(s, dict):
+            continue
+        uid = str(s.get("uid") or "")
+        ent = speakers.get(uid)
+        if not isinstance(ent, dict) or ent.get("dropped"):
+            continue
+        try:
+            score = round(float(s.get("score") or 0.0), 3)
+        except (TypeError, ValueError):
+            continue
+        out.append({"uid": uid, "display": unknowns.display(uid), "score": score})
+    return out
 
 
 # ---------- HTTP ----------
@@ -1895,6 +1999,46 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     _env_file_set({"STT_ASR_BACKEND": choice})
                 self._json({"ok": True, "model": current_model()})
+            elif u.path == "/api/name_preview":
+                # What a save from the naming panel would DO, before it does
+                # it: the meetings it reaches, and who this voice already
+                # resembles. Read-only and best-effort -- the panel opens
+                # without it and fills its quiet line in when this lands, so
+                # every failure here answers with an empty preview, never an
+                # error the user has to read.
+                vec, uids, here = None, (), None
+                if b.get("uid"):
+                    vec = unknowns.samples_of(b["uid"])
+                    if vec is None:
+                        # already named, merged or forgotten: the save itself
+                        # says so plainly, and a preview must not say it twice
+                        self._json({"targets": [], "here": None, "looks_like": []})
+                        return
+                    uids = [b["uid"]]
+                else:
+                    if not self._require_base(b.get("meeting")):
+                        return
+                    from stt import diarcache
+                    try:
+                        _, _, cent_emb, _ = diarcache.load(
+                            config.meeting_file(b["meeting"], ".diar.npz"))
+                    except (OSError, ValueError, KeyError):
+                        cent_emb = {}
+                    vec = cent_emb.get(b.get("speaker"))
+                    here = b["meeting"]
+                try:
+                    from stt import centroids
+                    tgts = list(centroids.targets(vector=vec, uids=uids))
+                except Exception:
+                    # the index is a cache: a preview it cannot build is a
+                    # missing line, never a blocked save
+                    tgts = []
+                # the meeting in hand is always a target of its own naming,
+                # whatever the index says about its centroids
+                if here and here not in tgts:
+                    tgts = sorted(tgts + [here])
+                self._json({"targets": tgts, "here": here,
+                            "looks_like": _looks_like(vec)})
             elif u.path == "/api/name":
                 name = str(b.get("name") or "").strip()
                 # An empty name is the documented UNDO for a meeting-local

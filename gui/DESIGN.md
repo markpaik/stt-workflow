@@ -300,6 +300,46 @@ select, day groups, failures keep full error text (same /api/history).
 Archive section: archived meetings with Restore and Delete… (two-step,
 in-drawer confirm; same endpoints).
 
+## Naming a voice
+
+One slide-over (the naming panel, z 60/61, above the drawer) is where every
+voice gets its name, opened from the drawer's Speakers section, a timeline
+row's "?" chip, or the transcript legend. Anatomy, top to bottom, form before
+evidence:
+
+- **The preview line.** One quiet sub line directly under the name box:
+  "Names this voice here and in 4 other meetings", or "Names this voice here
+  only". It is the answer to "what does Save actually touch", asked before the
+  save rather than reported after it, and it comes from `/api/name_preview`
+  (the same centroid targeting the save itself uses). The panel opens and
+  focuses the box FIRST; the line fills in when the response lands. A preview
+  that fails paints nothing. A save is never blocked on it.
+- **The looks-like chips.** Under the line, when the voice already resembles
+  somebody enrolled: ordinary `.nchip` buttons reading "Looks like Riley Stone · 0.84", best first, at most three, score in mono. Clicking one fills
+  the name box and nothing else. These are the clusters the automatic margin
+  rule refuses on purpose (at or above MATCH_MIN, under the margin) — a machine
+  must not name them, and a human should not have to rediscover them. Evidence,
+  never an action.
+- **The after-save toast.** "Named here. Updating 4 other meetings." from the
+  response's own `targets`, or "Named here." when there are none. The one
+  sentence a save is allowed to say; the panel then closes.
+- **The pill.** The naming's own progress, lowest priority in the status pill:
+  `naming: 3 of 7` while the relabel queue knows its total, `applying names…`
+  while it does not (a whole-library pass re-lists as it goes). Gone on its own
+  when the queue empties. No banner, ever.
+- **The row flash.** A meeting rewritten by that relabel tints for two seconds
+  in `--accent-soft` (class `updated`, the row's own transition, none under
+  reduced motion). The list's rows carry `generated_at`, so the flash marks
+  exactly the meetings whose bytes moved between two polls. It never enters the
+  list's change signature: a flash may not cause a rebuild.
+- **The suggestion lines.** In the drawer's Speakers section, under an unknown
+  voice that has one: "Possibly the same voice as Speaker 12 · 0.72" with a
+  [Link] button (one `/api/merge_speakers` by uid, toasted with the save's own
+  sentence), and "Looks like Riley Stone · 0.84" with a [Name] button that
+  opens this panel with the name already typed. Best candidate only, one line
+  each, inset ground, no chips — a wall of guesses is a decision, and this is a
+  glance.
+
 ## What deliberately does not exist in the new shell
 
 No Queue card, Processing card, Recent results, or naming inbox (row states
