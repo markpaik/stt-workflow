@@ -1,10 +1,15 @@
-"""Targeted relabel: every endpoint that changes an identity spawns the short
-list of meetings the change can reach, never `relabel --all`.
+"""Targeted relabel: every endpoint that changes an identity hands the short
+list of meetings the change can reach to the relabel queue, never `relabel
+--all`.
 
 Before this, naming one person walked 99 meetings at ~7s each — seven minutes,
 in alphabetical order, with the meeting the user was looking at somewhere in the
 middle. Each test here drives the real endpoint against a real running server
-and reads the basename file the spawned command carries.
+and reads the base list the queue was handed.
+
+The queue (gui/jobqueue.RelabelQueue) is started by start_server, so a process
+that never called it — the CLI-only panel mode, and these tests when they ask
+for it — still has the temp-file spawn path it used before. Both are covered.
 """
 import http.client
 import json
@@ -14,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from gui import jobqueue
 from gui import server as srv
 from stt import config, diarcache, identify, unknowns
 from conftest import mfile
@@ -30,10 +36,44 @@ def running_server(sandbox):
     t.join(timeout=2)
 
 
+class _FakeQueue:
+    """The queue's submission surface, recording instead of relabeling. The
+    real class is exercised in tests/test_jobqueue.py; here the question is
+    only WHAT each endpoint hands it."""
+
+    def __init__(self):
+        self.submits = []     # [(bases, reason)]
+        self.alls = []        # [reason]
+
+    def submit(self, bases, reason=""):
+        self.submits.append(([str(b) for b in bases], reason))
+        return True
+
+    def submit_all(self, reason=""):
+        self.alls.append(reason)
+        return True
+
+    def snapshot(self):
+        return jobqueue.empty_snapshot()
+
+
+@pytest.fixture
+def queued(monkeypatch):
+    """A panel WITH a queue: nothing may be spawned."""
+    q = _FakeQueue()
+    monkeypatch.setattr(srv, "RELABEL_QUEUE", q)
+    monkeypatch.setattr(srv, "_spawn",
+                        lambda cmd: pytest.fail(f"nothing may be spawned: {cmd}"))
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    return q
+
+
 @pytest.fixture
 def spawned(monkeypatch):
-    """Every spawned command, with the relabel subprocess itself stubbed out."""
+    """A panel with NO queue (start_server was never called): the fallback
+    spawn path. Every spawned command, with the subprocess itself stubbed."""
     seen = []
+    monkeypatch.setattr(srv, "RELABEL_QUEUE", None)
     monkeypatch.setattr(srv, "_spawn", lambda cmd: seen.append([str(a) for a in cmd]))
     monkeypatch.setattr(config, "PUNCTUATE", False)
     return seen
@@ -84,8 +124,25 @@ def _bases(cmd):
 
 # ---------- the helper itself ----------
 
-def test_relabel_targets_applies_the_first_meeting_here_and_spawns_the_rest(
+def test_relabel_targets_applies_the_first_meeting_here_and_queues_the_rest(
+        sandbox, queued):
+    v = _unit(1)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": v})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(2)})
+
+    res = srv._relabel_targets(vector=v, first="Bravo Mtg")
+    assert res == {"applied": "Bravo Mtg", "targets": ["Alpha Mtg"]}
+    assert queued.submits == [(["Alpha Mtg"], "identity change")]
+    assert queued.alls == []
+
+
+def test_relabel_targets_falls_back_to_a_spawned_pass_with_no_queue(
         sandbox, spawned):
+    """THE fallback: a panel process that never started a queue (the CLI-only
+    `python -m gui.server` mode) still has to apply the change, so it writes
+    the target list to a temp file and spawns `relabel --bases-from` exactly
+    as it did before the queue existed."""
     v = _unit(1)
     _meeting("Alpha Mtg", {"SPEAKER_00": v})
     _meeting("Bravo Mtg", {"SPEAKER_00": v})
@@ -96,10 +153,10 @@ def test_relabel_targets_applies_the_first_meeting_here_and_spawns_the_rest(
     assert len(spawned) == 1 and _bases(spawned[0]) == ["Alpha Mtg"]
 
 
-def test_relabel_targets_spawns_the_first_meeting_when_the_lock_is_busy(
-        sandbox, spawned, monkeypatch):
+def test_relabel_targets_queues_the_first_meeting_when_the_lock_is_busy(
+        sandbox, queued, monkeypatch):
     """_relabel_now says False when another pass owns the relabel lock. The
-    meeting must then join the spawned list, not be silently dropped."""
+    meeting must then join the queued list, not be silently dropped."""
     v = _unit(1)
     _meeting("Alpha Mtg", {"SPEAKER_00": v})
     _meeting("Bravo Mtg", {"SPEAKER_00": v})
@@ -108,20 +165,20 @@ def test_relabel_targets_spawns_the_first_meeting_when_the_lock_is_busy(
     res = srv._relabel_targets(vector=v, first="Bravo Mtg")
     assert res["applied"] is None
     assert res["targets"] == ["Bravo Mtg", "Alpha Mtg"], \
-        "the meeting in the request goes FIRST in the spawned list"
-    assert _bases(spawned[0]) == ["Bravo Mtg", "Alpha Mtg"]
+        "the meeting in the request goes FIRST in the queued list"
+    assert queued.submits == [(["Bravo Mtg", "Alpha Mtg"], "identity change")]
 
 
-def test_relabel_targets_spawns_nothing_when_there_is_nothing_to_do(sandbox, spawned):
+def test_relabel_targets_queues_nothing_when_there_is_nothing_to_do(sandbox, queued):
     _meeting("Alpha Mtg", {"SPEAKER_00": _unit(1)})
     assert srv._relabel_targets(vector=_unit(99)) == {"applied": None, "targets": []}
-    assert spawned == []
+    assert queued.submits == [] and queued.alls == []
 
 
 # ---------- one test per endpoint ----------
 
 def test_name_applies_the_open_meeting_here_and_targets_the_others(
-        running_server, spawned):
+        running_server, queued):
     """The whole point of the phase: the meeting being named is relabeled
     INSIDE the request, so the panel's "?" chip stops asking on the next poll,
     and only the meetings that voice appears in are spawned."""
@@ -136,7 +193,7 @@ def test_name_applies_the_open_meeting_here_and_targets_the_others(
     assert status == 200 and body["ok"] is True
     assert body["applied"] == "Alpha Mtg"
     assert body["targets"] == ["Bravo Mtg"]
-    assert len(spawned) == 1 and _bases(spawned[0]) == ["Bravo Mtg"]
+    assert queued.submits == [(["Bravo Mtg"], "identity change")]
     # applied means applied: the name is in the transcript already
     names = {s.get("name") for s in json.loads(
         mfile("Alpha Mtg", ".json").read_text())["speakers"]}
@@ -144,7 +201,7 @@ def test_name_applies_the_open_meeting_here_and_targets_the_others(
 
 
 def test_name_on_an_unknown_targets_the_meetings_that_voice_was_heard_in(
-        running_server, spawned):
+        running_server, queued):
     v = _unit(3)
     _meeting("Alpha Mtg", {"SPEAKER_00": v})
     _meeting("Charlie Mtg", {"SPEAKER_00": _unit(7)})
@@ -156,11 +213,11 @@ def test_name_on_an_unknown_targets_the_meetings_that_voice_was_heard_in(
     assert status == 200 and body["ok"] is True
     assert body["applied"] is None, "a uid naming names no single meeting"
     assert body["targets"] == ["Alpha Mtg"]
-    assert _bases(spawned[0]) == ["Alpha Mtg"]
+    assert queued.submits == [(["Alpha Mtg"], "identity change")]
 
 
 def test_rename_speaker_targets_both_the_old_and_the_new_name(
-        running_server, spawned):
+        running_server, queued):
     v = _unit(1)
     identify.enroll("Dana Cole", v, source="Alpha Mtg")
     _meeting("Alpha Mtg", {"SPEAKER_00": v},
@@ -176,11 +233,11 @@ def test_rename_speaker_targets_both_the_old_and_the_new_name(
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"], \
         "the meetings carrying the OLD label and the ones already carrying the new one"
-    assert _bases(spawned[0]) == ["Alpha Mtg", "Bravo Mtg"]
+    assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
 
 
 def test_remove_speaker_targets_only_the_meetings_carrying_that_name(
-        running_server, spawned):
+        running_server, queued):
     identify.enroll("Dana Cole", _unit(1), source="Alpha Mtg")
     _meeting("Alpha Mtg", {"SPEAKER_00": _unit(1)},
              speakers=[{"id": "SPEAKER_00", "name": "Dana Cole",
@@ -191,10 +248,10 @@ def test_remove_speaker_targets_only_the_meetings_carrying_that_name(
                          {"name": "Dana Cole"})
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg"]
-    assert _bases(spawned[0]) == ["Alpha Mtg"]
+    assert queued.submits == [(["Alpha Mtg"], "identity change")]
 
 
-def test_merge_speakers_targets_both_sides(running_server, spawned):
+def test_merge_speakers_targets_both_sides(running_server, queued):
     """A uid merged into a name: the destination's meetings by name, and the
     retired unknown's meetings through the samples it brought with it."""
     va, vb = _unit(1), _unit(2)
@@ -211,10 +268,10 @@ def test_merge_speakers_targets_both_sides(running_server, spawned):
                          {"src": f"uid:{uid}", "dst": "name:Dana Cole"})
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"]
-    assert _bases(spawned[0]) == ["Alpha Mtg", "Bravo Mtg"]
+    assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
 
 
-def test_remove_sample_targets_the_remaining_profile(running_server, spawned):
+def test_remove_sample_targets_the_remaining_profile(running_server, queued):
     keep, drop = _unit(1), _unit(2)
     identify.enroll("Dana Cole", drop, source="Bravo Mtg")
     identify.enroll("Dana Cole", keep, source="Alpha Mtg")
@@ -227,10 +284,10 @@ def test_remove_sample_targets_the_remaining_profile(running_server, spawned):
     assert body["note"] == "re-identifying all meetings in background", \
         "the existing fields survive the merge"
     assert body["targets"] == ["Alpha Mtg"]
-    assert _bases(spawned[0]) == ["Alpha Mtg"]
+    assert queued.submits == [(["Alpha Mtg"], "identity change")]
 
 
-def test_reassign_sample_targets_both_profiles(running_server, spawned):
+def test_reassign_sample_targets_both_profiles(running_server, queued):
     mine, theirs = _unit(1), _unit(2)
     identify.enroll("Dana Cole", mine, source="Alpha Mtg")
     identify.enroll("Dana Cole", theirs, source="Bravo Mtg")
@@ -245,16 +302,17 @@ def test_reassign_sample_targets_both_profiles(running_server, spawned):
                          {"name": "Dana Cole", "index": 1, "to": "Sam Reed"})
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"]
-    assert _bases(spawned[0]) == ["Alpha Mtg", "Bravo Mtg"]
+    assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
 
 
-def test_api_relabel_still_walks_the_whole_library(running_server, spawned):
+def test_api_relabel_still_walks_the_whole_library(running_server, queued):
     """The explicit "re-identify everything" button is the one place --all is
     still right — it is the user asking for exactly that."""
     _meeting("Alpha Mtg", {"SPEAKER_00": _unit(1)})
     status, body = _post(running_server, "/api/relabel", {})
     assert status == 200 and body["ok"] is True
-    assert spawned == [[str(srv.RUN_SH), "relabel", "--all"]]
+    assert queued.alls == ["re-identify everything"]
+    assert queued.submits == []
 
 
 def test_relabel_targets_falls_back_to_a_full_pass_when_the_index_breaks(
@@ -268,6 +326,19 @@ def test_relabel_targets_falls_back_to_a_full_pass_when_the_index_breaks(
     res = srv._relabel_targets(vector=[1.0], first="Alpha Mtg")
     assert res == {"applied": "Alpha Mtg", "targets": ["--all"]}
     assert spawned and spawned[-1][-2:] == ["relabel", "--all"]
+
+
+def test_a_broken_index_queues_a_full_pass_when_there_is_a_queue(
+        sandbox, queued, monkeypatch):
+    """Same fallback, on a panel that HAS a queue: a full pass as a job, never
+    a spawned child that reloads the models this process already holds."""
+    from stt import centroids
+    monkeypatch.setattr(centroids, "targets",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(srv, "_relabel_now", lambda base: True)
+    res = srv._relabel_targets(vector=[1.0], first="Alpha Mtg")
+    assert res == {"applied": "Alpha Mtg", "targets": ["--all"]}
+    assert queued.alls == ["identity change"] and queued.submits == []
 
 
 def test_relabel_targets_always_applies_the_requested_meeting(

@@ -16,10 +16,16 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from gui import jobqueue
 from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
                  rates, recorder, review, search, status, unknowns)
 
 PORT = 8737
+# The one relabel worker for this panel process, started by start_server(). None
+# means "no queue in this process" -- the CLI-only headless mode and the tests
+# that drive Handler directly -- and every caller falls back to the spawn path
+# it used before the queue existed. See gui/jobqueue.py.
+RELABEL_QUEUE = None
 # The batch agent's launchd plist. Sandboxed like every other state path: under
 # an STT_HOME override (demo/QA homes, tools/demo_seed.py) it resolves to
 # $STT_HOME/LaunchAgents/... so /api/schedule and /api/automation from a QA
@@ -242,7 +248,6 @@ def _est_duration(p: Path):
 
 
 _meet_cache = {}
-_relabel_kicked = {"at": 0.0}
 _jobs_kicked = {"at": 0.0}
 
 
@@ -565,6 +570,12 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "processed_at": (d.get("processed_at") or d.get("generated_at")
                                  or _dt.fromtimestamp(
                                      j.stat().st_mtime).isoformat(timespec="seconds")),
+                # the SAVE clock, re-stamped by output.write_json on every
+                # write — a relabel, a review edit, a summary. processed_at
+                # deliberately does not move for those, so this is the one
+                # field that says "this transcript changed". The open meeting
+                # page watches its own row's copy and reloads when it moves.
+                "generated_at": d.get("generated_at"),
                 # the originating filename, so the One Timeline can morph a
                 # queued source row into this meeting's row in place (the source
                 # gained an announced base mid-run) instead of flickering
@@ -735,7 +746,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
     if rec:
         cap = Path(rec.get("caf", "recording")).stem or "recording"
         timeline.append({
-            "id": f"rec:{cap}", "state": "recording",
+            "id": f"rec:{cap}", "state": "recording", "generated_at": None,
             "title": "Recording", "date": (rec.get("started_at") or "")[:10] or None,
             "when": rec.get("started_at") or status._now(),
             "elapsed_secs": rec.get("elapsed_secs", 0),
@@ -750,6 +761,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
         emitted.add(name)
         timeline.append({
             "id": base or f"src:{name}", "state": "processing",
+            "generated_at": None,
             "source_file": name, "prev_id": f"src:{name}",
             "title": _display_title(base) if base else name,
             "date": dates.meeting_date(base or name),
@@ -773,7 +785,11 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
             emitted.add(meta["source_file"])
         row = {"source_file": meta.get("source_file"),
                "title": meta["title"], "date": meta["date"],
-               "when": meta["processed_at"]}
+               "when": meta["processed_at"],
+               # the transcript's own save stamp: the open meeting page reloads
+               # itself when ITS row's stamp moves, instead of guessing from a
+               # library-wide "a relabel is running" boolean
+               "generated_at": meta.get("generated_at")}
         if meta["needs_review"]:
             # the naming row is a review card, not a bare text box: the same
             # evidence the ready row shows (length, who was heard, what the
@@ -805,7 +821,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
         if f["processed"] or name in emitted:
             continue
         emitted.add(name)
-        row = {"id": f"src:{name}", "source_file": name,
+        row = {"id": f"src:{name}", "source_file": name, "generated_at": None,
                "title": name, "date": dates.meeting_date(name),
                "when": _dt.fromtimestamp(f["mtime"]).isoformat(timespec="seconds"),
                "size_mb": f["size_mb"], "est_minutes": f.get("est_min"),
@@ -836,6 +852,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
             continue
         emitted.add(name)
         row = {"id": f"src:{name}", "state": "failed", "source_file": name,
+               "generated_at": None,
                "title": name, "date": dates.meeting_date(name),
                "when": _failed_at(st, name) or status._now(),
                "error": err, "gone": True,
@@ -1069,14 +1086,17 @@ def gather_state():
         pass
     procs = control.snapshot()
     running = bool(procs["pids"])
-    # a queued relabel (another one was mid-flight when requested): kick it
-    # with a cooldown so a failed kick is retried rather than dropped forever
+    # a queued relabel: `relabel.py` writes this flag when a CLI pass loses the
+    # lock to another one, and run_batch's end-of-run pass can leave it too. The
+    # poll used to respawn `relabel --all` on a 60s cooldown and hope. Now the
+    # flag is CONSUMED once -- unlinked, then handed to the queue, which
+    # coalesces it with anything already waiting -- so the follow-up can neither
+    # be dropped nor run twice. With no queue (CLI-only mode) the flag is left
+    # exactly where it is, for a panel that does have one.
     pending = config.PROJECT_DIR / "relabel_pending.flag"
-    if pending.exists():
-        import time as _time
-        if _time.monotonic() - _relabel_kicked.get("at", 0) > 60:
-            _relabel_kicked["at"] = _time.monotonic()
-            _spawn([str(RUN_SH), "relabel", "--all"])
+    if RELABEL_QUEUE is not None and pending.exists():
+        pending.unlink(missing_ok=True)
+        RELABEL_QUEUE.submit_all("queued follow-up")
     if not running:
         _kick_jobs()  # self-heal: idle with queued jobs -> start the next one
         # the duplicate-transcript scan reads the whole library, so it waits for
@@ -1107,6 +1127,8 @@ def gather_state():
         overall_eta = round((active_eta_sum + pend_secs) / n_active) if (active_eta_sum or pend_secs) else None
     rec_state = _recording_state()  # resolved once: reused by the live banner AND the timeline
     timeline, tray = _timeline_tray(st, queue, meetings, active_out, unknown_list, rec_state)
+    relabel_jobs = (RELABEL_QUEUE.snapshot() if RELABEL_QUEUE is not None
+                    else jobqueue.empty_snapshot())
     return {"running": running,
             "mem_mb": procs["mem_mb"],
             "active": active_out,
@@ -1143,12 +1165,18 @@ def gather_state():
             "recorder_ready": recorder.available(),
             "rates": rates.summary(),
             "relabel_pending": (config.PROJECT_DIR / "relabel_pending.flag").exists(),
-            # a relabel ACTUALLY running right now (naming a voice spawns one).
+            # the relabel queue: what is running, what is waiting behind it, and
+            # how the last job ended. The pill reads jobs.running for
+            # "naming: 3 of 7"; see gui/jobqueue.py for the shape.
+            "jobs": relabel_jobs,
+            # a relabel ACTUALLY running right now (naming a voice starts one).
             # relabel_pending only ever meant "a second pass is queued behind a
             # first", so an unblocked relabel -- the normal case after a save --
             # gave the panel no signal at all and the names appeared out of
-            # nowhere minutes later. Read-only probe: see control.relabel_running.
-            "relabel_running": control.relabel_running(),
+            # nowhere minutes later. Read-only probe (see control.relabel_running)
+            # OR our own worker, which is in-process and therefore does not have
+            # to be discovered through the marker at all.
+            "relabel_running": control.relabel_running() or bool(relabel_jobs["running"]),
             "llm_available": summarize.available(),
             "llm_backend": summarize.llm_backend(),
             "llm_backends": {b: summarize.backend_available(b)
@@ -1314,7 +1342,40 @@ def _spawn(args):
                          stdout=log, stderr=log, start_new_session=True)
 
 
-def _relabel_targets(vector=None, names=(), uids=(), first=None) -> dict:
+def _relabel_all_background(reason: str):
+    """A whole-library pass, on the queue when there is one and as a spawned
+    `relabel --all` when there is not (the CLI-only panel mode)."""
+    if RELABEL_QUEUE is not None:
+        RELABEL_QUEUE.submit_all(reason)
+    else:
+        _spawn([str(RUN_SH), "relabel", "--all"])
+
+
+def _relabel_bases_background(bases, reason: str):
+    """A targeted pass over `bases`.
+
+    The queue owns this now: one worker thread inside this process, with the
+    models already warm, coalescing back-to-back identity changes into one job
+    (see gui/jobqueue.py). The spawn below is the FALLBACK for a process with
+    no queue -- `python -m gui.server` without start_server, and tests that
+    drive Handler directly -- where dropping the work would mean a save that
+    silently never applied."""
+    if RELABEL_QUEUE is not None:
+        RELABEL_QUEUE.submit(bases, reason)
+        return
+    d = config.PROJECT_DIR / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    # a file, not argv: a rename or a merge can legitimately target most of
+    # the library, and meeting names are long
+    fd, path = tempfile.mkstemp(prefix="relabel_targets_", suffix=".txt",
+                                dir=str(d))
+    with os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(bases) + "\n")
+    _spawn([str(RUN_SH), "relabel", "--bases-from", path])
+
+
+def _relabel_targets(vector=None, names=(), uids=(), first=None,
+                     reason="identity change") -> dict:
     """Apply an identity change to exactly the meetings it can affect.
 
     Every naming, rename, merge and sample edit used to spawn `relabel --all`:
@@ -1322,10 +1383,10 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None) -> dict:
     done first. stt.centroids.targets resolves the change to a short list; the
     meeting in the request (`first`) relabels HERE, inside the response, so the
     panel can reload against the new roster on its very next poll, and the rest
-    go to one spawned `relabel --bases-from` pass.
+    go to the relabel queue as one job.
 
     Returns {"applied": the base done synchronously or None,
-             "targets": the bases handed to the spawned pass}."""
+             "targets": the bases handed to the background pass}."""
     try:
         from stt import centroids
         rest = list(centroids.targets(vector=vector, names=names, uids=uids))
@@ -1335,9 +1396,9 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None) -> dict:
         # fall back to the full pass this helper replaced -- never to silence
         # after a save that SUCCEEDED
         if first and _relabel_now(first):
-            _spawn([str(RUN_SH), "relabel", "--all"])
+            _relabel_all_background(reason)
             return {"applied": first, "targets": ["--all"]}
-        _spawn([str(RUN_SH), "relabel", "--all"])
+        _relabel_all_background(reason)
         return {"applied": None, "targets": ["--all"]}
     applied = None
     if first:
@@ -1352,15 +1413,7 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None) -> dict:
             # spawned list instead of blocking the request behind it
             rest.insert(0, first)
     if rest:
-        d = config.PROJECT_DIR / "logs"
-        d.mkdir(parents=True, exist_ok=True)
-        # a file, not argv: a rename or a merge can legitimately target most of
-        # the library, and meeting names are long
-        fd, path = tempfile.mkstemp(prefix="relabel_targets_", suffix=".txt",
-                                    dir=str(d))
-        with os.fdopen(fd, "w") as fh:
-            fh.write("\n".join(rest) + "\n")
-        _spawn([str(RUN_SH), "relabel", "--bases-from", path])
+        _relabel_bases_background(rest, reason)
     return {"applied": applied, "targets": rest}
 
 
@@ -1676,6 +1729,10 @@ class Handler(BaseHTTPRequestHandler):
                         for i, s in enumerate(d.get("segments", []))
                         if s.get("text", "").strip()]
                 self._json({"base": base, "strict": d.get("strict", False),
+                            # the save stamp of exactly these bytes: the meeting
+                            # page records it so the next poll's row stamp is
+                            # compared against what is really on screen
+                            "generated_at": d.get("generated_at"),
                             "duration_sec": d.get("duration_sec", 0),
                             "speakers": [s["display"] for s in d.get("speakers", [])],
                             # `dismissed` is what lets the legend drop the "?"
@@ -1921,7 +1978,10 @@ class Handler(BaseHTTPRequestHandler):
                                         "applied": True,
                                         "note": "this meeting has been relabeled"})
                         else:
-                            _spawn([str(RUN_SH), "relabel", b["meeting"]])
+                            # the lock is held right now: the queue runs this
+                            # one meeting as soon as the pass in front frees it
+                            _relabel_bases_background([b["meeting"]],
+                                                      "meeting-local name")
                             self._json({"ok": True, "local": True,
                                         "applied": False,
                                         "note": "another relabel is running -- "
@@ -2468,7 +2528,9 @@ class Handler(BaseHTTPRequestHandler):
                     _env_file_set({}, remove=("STT_MIC_SPEAKER",))
                 self._json({"ok": True, "mic_speaker": name or None})
             elif u.path == "/api/relabel":
-                _spawn([str(RUN_SH), "relabel", "--all"])
+                # the explicit "re-identify everything" button: one `all` job
+                # on the queue, which absorbs any targeted job waiting behind it
+                _relabel_all_background("re-identify everything")
                 self._json({"ok": True})
             else:
                 self._json({"error": "not found"}, 404)
@@ -2504,11 +2566,18 @@ def check_updates():
 
 
 def start_server():
+    global RELABEL_QUEUE
     try:
         # one-time flat->folder layout migration + date backfill (idempotent)
         config.migrate_flat_meetings()
     except Exception:
         pass  # the panel must still start; the batch retries the migration
+    # the one relabel worker for this process. Every naming, rename, merge and
+    # queued follow-up goes through it from here on, instead of spawning a
+    # child that reloads the models this process already has warm.
+    if RELABEL_QUEUE is None:
+        RELABEL_QUEUE = jobqueue.RelabelQueue()
+    RELABEL_QUEUE.start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()

@@ -670,55 +670,125 @@ console.log(JSON.stringify({stale,after,opened}));
     assert out["opened"] == [["U050", "Speaker 50", "B"]]
 
 
-@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
-def test_a_finished_relabel_rebuilds_the_open_transcript():
-    """The relabel a naming spawns rewrites every transcript in the background,
-    so the page being stared at is the LAST place the new name shows up. The
-    watcher fires on the falling edge, and it runs before render()'s meeting-view
-    early return -- the meeting view is the only place this matters."""
-    fixture = "\n".join([
-        "let refreshes=0,reloads=0;",
-        "function refresh(){refreshes++;}",
+def _stamp_watch_fixture(body):
+    """The real relabelWatch over a fake DOM and one open meeting page ('B').
+    `body` drives the polls."""
+    return "\n".join([
+        "let reloads=0;",
         "function mReloadSegs(){reloads++;}",
         "let NP=null,route={view:'meeting',base:'B'};",
-        "let card=null,inline=null;",
-        "const document={getElementById:()=>card,querySelector:()=>inline};",
-        "let RELABEL_WAS=false;",
+        "let MP={base:'B',built:true,stamp:'S1'};",
+        "let card=null,inline=null,find=null;",
+        "const document={getElementById:id=>(id==='mfind'?find:card),"
+        "querySelector:()=>inline};",
+        "const poll=(id,at)=>({timeline:[{id:id,generated_at:at}]});",
         _js_fn("relabelWatch"),
-        """
-relabelWatch({relabel_running:true});
-relabelWatch({relabel_running:true});
-const during={refreshes,reloads};
-relabelWatch({relabel_running:false});
-const done={refreshes,reloads};
-// a second poll after the edge must NOT reload again
-relabelWatch({relabel_running:false});
-const settled={refreshes,reloads};
-// mid-edit: the transition is held, not lost -- a later tick does the reload
-relabelWatch({relabel_running:true});
+        body])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_finished_relabel_rebuilds_the_open_transcript():
+    """A relabel rewrites the transcript being stared at, so that page is the
+    LAST place the new name shows up. The watcher compares the open meeting's
+    OWN row stamp against the one recorded when the page was built -- not a
+    library-wide "a relabel is running" edge, which back-to-back passes kept
+    high and which said nothing about whether this meeting had changed. It runs
+    before render()'s meeting-view early return, the only place this matters."""
+    fixture = _stamp_watch_fixture("""
+// same stamp, poll after poll: nothing changed, nothing reloads
+relabelWatch(poll('B','S1'));
+relabelWatch(poll('B','S1'));
+const quiet={reloads};
+// ANOTHER meeting's row moved: not ours, still nothing
+relabelWatch({timeline:[{id:'B',generated_at:'S1'},
+                        {id:'C',generated_at:'S9'}]});
+const other={reloads};
+// our own stamp moved: reload once, and record it so the next poll is quiet
+relabelWatch(poll('B','S2'));
+const moved={reloads,stamp:MP.stamp};
+relabelWatch(poll('B','S2'));
+const settled={reloads};
+// mid-edit: the change is HELD, not lost -- the stamp is not recorded, so a
+// later tick does the reload
 NP={uid:'U1'};
-relabelWatch({relabel_running:false});
-const held={refreshes,reloads};
+relabelWatch(poll('B','S3'));
+const held={reloads,stamp:MP.stamp};
 NP=null;
-relabelWatch({relabel_running:false});
-const later={refreshes,reloads};
-// the pending flag counts as running too (a follow-up pass is queued)
-relabelWatch({relabel_pending:true});
-relabelWatch({});
-console.log(JSON.stringify({during,done,settled,held,later,
-  final:{refreshes,reloads}}));
-"""])
+relabelWatch(poll('B','S3'));
+const later={reloads,stamp:MP.stamp};
+// a row with no stamp at all (an older transcript) never forces a reload
+relabelWatch(poll('B',null));
+relabelWatch({timeline:[]});
+const missing={reloads};
+console.log(JSON.stringify({quiet,other,moved,settled,held,later,missing}));
+""")
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["during"] == {"refreshes": 0, "reloads": 0}
-    assert out["done"] == {"refreshes": 1, "reloads": 1}
-    assert out["settled"] == {"refreshes": 1, "reloads": 1}
-    assert out["held"] == {"refreshes": 1, "reloads": 1}, \
+    assert out["quiet"] == {"reloads": 0}
+    assert out["other"] == {"reloads": 0}, \
+        "another meeting's relabel must not rebuild the open page"
+    assert out["moved"] == {"reloads": 1, "stamp": "S2"}
+    assert out["settled"] == {"reloads": 1}, \
+        "the recorded stamp stops the very next poll from reloading again"
+    assert out["held"] == {"reloads": 1, "stamp": "S2"}, \
         "a reload must not blow away an open naming panel"
-    assert out["later"] == {"refreshes": 2, "reloads": 2}, \
-        "the held transition must fire on a later tick, not be dropped"
-    assert out["final"] == {"refreshes": 3, "reloads": 3}
+    assert out["later"] == {"reloads": 2, "stamp": "S3"}, \
+        "the held change must fire on a later tick, not be dropped"
+    assert out["missing"] == {"reloads": 2}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_stamp_watcher_ignores_a_page_that_is_not_open():
+    """render() calls the watcher on every poll, including from the timeline.
+    With no meeting page built there is nothing to reload, and reading MP would
+    throw -- which would take the whole render down with it."""
+    fixture = "\n".join([
+        "let reloads=0;",
+        "function mReloadSegs(){reloads++;}",
+        "let NP=null,route={view:'timeline'};",
+        "let MP=null;",
+        "const document={getElementById:()=>null,querySelector:()=>null};",
+        _js_fn("relabelWatch"),
+        """
+relabelWatch({timeline:[{id:'B',generated_at:'S2'}]});
+route={view:'meeting',base:'B'};            // deep link, page not built yet
+MP={base:'B',pending:true};
+relabelWatch({timeline:[{id:'B',generated_at:'S2'}]});
+console.log(JSON.stringify({reloads}));
+"""]) 
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"reloads": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_pill_counts_the_meetings_a_naming_is_walking():
+    """The queue knows the target list, so the pill says how far along it is
+    instead of an open-ended "applying names". A whole-library pass re-lists as
+    it goes and reports no total -- that one keeps the old wording."""
+    src = _js_fn("drawPill")
+    i = src.index("}else if(s.relabel_running||s.relabel_pending){")
+    branch = src[i:src.index("}else{show=false;}", i)]
+    fixture = "\n".join([
+        "function run(s){let cls='',html='';" + branch[len("}else if(s.relabel_running||s.relabel_pending){"):]
+        + "return html;}",
+        """
+console.log(JSON.stringify([
+  run({jobs:{running:{kind:'relabel',total:7,done:2}}}),
+  run({jobs:{running:{kind:'relabel',total:7,done:7}}}),
+  run({jobs:{running:{kind:'all',total:null,done:0}}}),
+  run({jobs:{running:null}}),
+  run({})]));
+"""])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == [
+        "naming: 3 of 7",
+        "naming: 7 of 7",          # the last meeting, never "8 of 7"
+        "applying names&#8230;",
+        "applying names&#8230;",
+        "applying names&#8230;"]
 
 
 def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
@@ -2160,40 +2230,40 @@ console.log(JSON.stringify({
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_a_relabel_never_wipes_a_half_typed_transcript_search():
-    """W30: relabelWatch's falling-edge guard covered the naming panel, an open
-    edit card, and a rename or date field -- but not the find box, which
-    mReloadSegs clears. A background relabel finishing mid-typing wiped the
-    query with no warning."""
+    """W30: relabelWatch's guard covers the naming panel, an open edit card,
+    and a rename or date field -- and the find box, which mReloadSegs clears. A
+    background relabel landing mid-typing used to wipe the query with no
+    warning. The guard list survived the move from the falling edge to the
+    per-meeting stamp."""
     fixture = "\n".join([
-        "let refreshes=0,reloads=0;",
-        "function refresh(){refreshes++;}",
+        "let reloads=0;",
         "function mReloadSegs(){reloads++;}",
         "let NP=null,route={view:'meeting',base:'B'};",
+        "let MP={base:'B',built:true,stamp:'S1'};",
         "const find={value:''};",
         "const document={getElementById:id=>(id==='mfind'?find:null),"
         "querySelector:()=>null};",
-        "let RELABEL_WAS=false;",
+        "const poll=at=>({timeline:[{id:'B',generated_at:at}]});",
         _js_fn("relabelWatch"),
         """
-relabelWatch({relabel_running:true});
 find.value='budget';                     // mid-typing an unsaved query
-relabelWatch({relabel_running:false});
-const held={refreshes,reloads,query:find.value};
+relabelWatch(poll('S2'));
+const held={reloads,query:find.value,stamp:MP.stamp};
 find.value='   ';                        // whitespace is not a query
-relabelWatch({relabel_running:false});
-const blank={refreshes,reloads};
+relabelWatch(poll('S2'));
+const blank={reloads};
 find.value='';
-relabelWatch({relabel_running:false});
-console.log(JSON.stringify({held,blank,after:{refreshes,reloads}}));
+relabelWatch(poll('S2'));
+console.log(JSON.stringify({held,blank,after:{reloads}}));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["held"] == {"refreshes": 0, "reloads": 0, "query": "budget"}, \
+    assert out["held"] == {"reloads": 0, "query": "budget", "stamp": "S1"}, \
         "a finished relabel must not rebuild over a half-typed search"
-    assert out["blank"] == {"refreshes": 1, "reloads": 1}, \
+    assert out["blank"] == {"reloads": 1}, \
         "whitespace alone is not a query worth holding the rebuild for"
-    assert out["after"] == {"refreshes": 1, "reloads": 1}
+    assert out["after"] == {"reloads": 1}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")

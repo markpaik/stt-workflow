@@ -30,12 +30,13 @@ Five changes, in the order they ship.
    request. A full pass re-lists basenames per step so a rename mid-pass is
    picked up, not skipped.
 2. One job queue. A queue thread inside the panel process owns every relabel.
-   Jobs carry a list of meeting ids, coalesce, and report progress in state.
-   The work runs in one long-lived child worker that keeps the models warm and
-   exits when idle, so the panel process never holds them. The pending flag,
-   the sixty-second kick, and the falling-edge watcher go away. Each timeline
-   row carries its `generated_at`, and the open meeting reloads when its own
-   stamp changes.
+   Jobs carry a list of meeting names, coalesce, and report progress in state.
+   The work runs on one daemon worker THREAD in the panel process, where the
+   models are already warm because the in-request relabel loaded them there.
+   The sixty-second kick and the falling-edge watcher go away, and the pending
+   flag becomes something the poll consumes once instead of something it
+   respawns against. Each timeline row carries its `generated_at`, and the open
+   meeting reloads when its own stamp changes.
 3. Stable meeting id. Every meeting json carries an immutable `meeting_id`.
    An index maps id to basename. Registries, review decisions, locks, and job
    payloads reference the id. Rename becomes a folder move plus one index
@@ -97,23 +98,75 @@ model, and `HF_HUB_OFFLINE` is on, so the pass makes no network requests.
 
 ### Phase 2: one job queue
 
-- `gui/jobqueue.py` (new): a queue thread started by `start_server`. Job
-  kinds: `relabel(bases)`, `relabel_all`. Coalescing: a new relabel unions
-  its bases into a queued relabel; a queued `relabel_all` absorbs everything.
-  Progress: `{kind, total, done, current, started}`.
-- `stt/relabel_worker.py` (new): a child process the queue starts on demand
-  with `.venv/bin/python -m stt.relabel_worker`. It reads JSON lines on stdin
-  (`{"bases": [...]}`), relabels each, writes one JSON line per meeting on
-  stdout, and exits after five idle minutes. It takes `relabel.lock` for the
-  life of a job, so `run_batch` and the CLI still exclude it.
-- `/api/state` gains `jobs`. Timeline rows gain `generated_at`. The pending
-  flag, `_relabel_kicked`, `relabel_running.json`, and `relabelWatch` are
-  removed. `run_batch` drops its end-of-run `relabel_all`.
-- `app.js`: the open meeting reloads when its row's `generated_at` changes
-  and no edit is in progress. The pill reads the job progress.
-- Tests: coalescing; the worker protocol with a fake worker; a job that dies
-  mid-way leaves the queue consistent; the meeting page reloads on its own
-  stamp and not on another meeting's.
+The worker is an IN-PROCESS THREAD, not the child process this plan first
+called for. `gui/server._relabel_now` already imports `relabel` and runs
+`relabel_one` inside the request, so the punctuator and the speaker models are
+already resident in the panel process. A child would load a second copy of them
+(~1 GB) to do work this process can do warm, and would need a pipe protocol to
+report progress that a thread reports by reading an attribute. `relabel.lock`
+still does all the excluding, so nothing outside the panel can tell the
+difference.
+
+- `gui/jobqueue.py` (new): `RelabelQueue` with `submit(bases, reason)`,
+  `submit_all(reason)`, `snapshot()`, `start()`, `stop(timeout)`, and one
+  daemon worker thread. Coalescing: a queued `relabel` job unions the bases of
+  later relabel submits for as long as it has not started; a queued `all` job
+  absorbs every queued and every later relabel. A RUNNING job is never mutated,
+  so its progress can never run backwards or past its own total. Each job holds
+  `control.relabel_lock_path()` with a BLOCKING `fcntl.flock` for its whole run
+  and publishes `control.relabel_marker()` inside it, so the CLI `relabel.py`,
+  `run_batch`'s end-of-run pass, and the panel's own `_relabel_now` still
+  exclude it and each other. A `relabel` job calls `relabel.relabel_one` per
+  base through `relabel._safe_one` (the same per-meeting boundary a CLI pass
+  uses, now returning the exception it swallowed so the job can name the
+  meetings that did not take); an `all` job calls
+  `relabel._pass_over_everything()`. The worker catches every exception per
+  job, records it in `last`, and goes on to the next one.
+  `snapshot()` returns `{"running": {kind, reason, total, done, current,
+  started} | None, "queued": [{kind, reason, n}], "last": {kind, reason, done,
+  finished, failed: [bases], error} | None}`. An `all` job's `total` is None:
+  the pass re-lists the library before every step, so its length is not known
+  in advance and must not be guessed.
+- `gui/server.py`: `start_server` creates and starts the queue into the module
+  global `RELABEL_QUEUE`. `_relabel_targets` submits the remaining bases to it;
+  `/api/relabel` submits `all`; a meeting-local name that loses the lock
+  submits its one meeting. The temp-file `relabel --bases-from` spawn survives
+  as the FALLBACK for a process with no queue (`python -m gui.server` without
+  `start_server`, and tests that drive `Handler` directly), where dropping the
+  work would mean a save that silently never applied.
+- The pending flag stays where it is: `relabel.py` still writes it when a CLI
+  pass loses the lock, and `run_batch` keeps its end-of-run pass. What changes
+  is the panel's side. `gather_state` no longer respawns `relabel --all` on a
+  60-second cooldown and hopes; it CONSUMES the flag once — unlink, then
+  `submit_all("queued follow-up")` — so the follow-up can neither be dropped
+  nor run twice. `_relabel_kicked` is gone.
+- `/api/state` gains `jobs` (the snapshot), and `relabel_running` becomes
+  `control.relabel_running() or bool(jobs["running"])`: an in-process job has
+  no child to discover. `relabel_running.json` stays — it is how a CLI pass
+  and a `run_batch` pass announce themselves to the panel.
+- Timeline rows gain `generated_at`, the save clock `output.write_json` stamps
+  on every transcript write. `/api/transcript` returns it too, so a reload
+  records the stamp of exactly the bytes it rendered.
+- `app.js`: `relabelWatch` stops watching the falling edge of a library-wide
+  boolean (back-to-back passes kept it high, and it said nothing about whether
+  THIS meeting had changed) and watches the open meeting's own row stamp
+  instead, reloading when it moves and no edit is in progress — the same guard
+  list as before: `NP`, `#mcard`, a non-empty `#mfind`, `.renameinput,
+  .dateinput`. A held change is not lost: the stamp is only recorded when the
+  reload actually happens. The pill reads `jobs.running`: `naming: 3 of 7` when
+  a total is known, `applying names…` when it is not.
+- Tests (`tests/test_jobqueue.py`, plus the updated
+  `tests/test_relabel_targets.py`, `tests/test_new_shell.py`,
+  `tests/test_timeline_feed.py`): coalescing into one job; an `all` submit
+  absorbing queued relabels; a running job never mutated; progress moving
+  mid-job; one raising meeting not abandoning the rest and landing in `last`;
+  a job that blows up recorded without killing the worker; the lock and marker
+  held for the life of a job; the pending flag consumed into one queued `all`;
+  the `jobs` shape in `/api/state`; every timeline row carrying its stamp; and
+  the node tests for the watcher — same stamp no reload, another meeting's
+  stamp no reload, changed stamp reloads, changed stamp mid-edit holds.
+
+Shipped 2026-09-14.
 
 ### Phase 3: stable meeting id
 

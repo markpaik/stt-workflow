@@ -1719,12 +1719,16 @@ def test_a_local_name_falls_back_to_a_spawn_while_a_relabel_holds_the_guard(
         running_server, monkeypatch):
     """R4: the local save relabels its one meeting INSIDE the request, so the
     answer means "applied" and the client's reload sees the new roster. When
-    another pass already owns the single-flight guard it spawns instead, and
-    SAYS so rather than blocking the request behind a library-wide pass."""
+    another pass already owns the single-flight guard it hands the meeting to
+    the background instead, and SAYS so rather than blocking the request behind
+    a library-wide pass. With no queue in this process that background is the
+    temp-file spawn -- one meeting in the list, never `--all`."""
     import fcntl
+    from pathlib import Path
 
     from stt import control
     spawned = []
+    monkeypatch.setattr(srv, "RELABEL_QUEUE", None)
     monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(cmd))
     base = _thin_local_meeting("Busy Guard Mtg")
 
@@ -1736,7 +1740,10 @@ def test_a_local_name_falls_back_to_a_spawn_while_a_relabel_holds_the_guard(
         assert st == 200 and body["ok"] is True
         assert body["applied"] is False
         assert "another relabel is running" in body["note"]
-        assert len(spawned) == 1 and spawned[0][-1] == base
+        assert len(spawned) == 1
+        assert [str(a) for a in spawned[0][:3]] == \
+            [str(srv.RUN_SH), "relabel", "--bases-from"]
+        assert Path(spawned[0][3]).read_text().split("\n")[0] == base
         assert "--all" not in spawned[0], \
             "a local label must never relabel the library"
         fcntl.flock(held, fcntl.LOCK_UN)

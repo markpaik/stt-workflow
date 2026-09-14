@@ -532,9 +532,13 @@ def test_additive_keys(sandbox):
     # every pre-existing top-level key still present, unchanged type
     assert BASELINE_KEYS <= set(st)
     # relabel_running joined them later (the honest "a relabel is happening
-    # right now" signal next to the queued-behind-another relabel_pending)
-    assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running"}
+    # right now" signal next to the queued-behind-another relabel_pending),
+    # and `jobs` after it (the relabel queue's own running/queued/last report)
+    assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running",
+                                       "jobs"}
     assert isinstance(st["relabel_running"], bool)
+    assert st["jobs"] == {"running": None, "queued": [], "last": None}, \
+        "no queue in this process: the empty shape, never a missing key"
     assert isinstance(st["running"], bool)
     assert isinstance(st["meetings"], list) and isinstance(st["queue"], list)
     assert isinstance(st["active"], dict) and isinstance(st["unknowns"], list)

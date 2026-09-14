@@ -207,11 +207,17 @@ def all_bases():
 
 def _safe_one(base, strict=None, allowed_names=None):
     """relabel_one with the per-meeting failure boundary every pass wants: one
-    unreadable meeting must never abandon the rest of the library."""
+    unreadable meeting must never abandon the rest of the library.
+
+    Returns the exception it swallowed, or None. Every pass in this file
+    ignores that (the print IS the report for a CLI run); the panel's job
+    queue reads it, so a job can say WHICH meetings did not take."""
     try:
         relabel_one(base, strict=strict, allowed_names=allowed_names)
     except Exception as e:
         print(f"  FAILED {base}: {e}", file=sys.stderr)
+        return e
+    return None
 
 
 def _pass_over_everything(strict=None, allowed_names=None):

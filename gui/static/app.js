@@ -196,7 +196,12 @@ function drawPill(s){
     // relabel_pending only means a second pass is QUEUED behind a first, so the
     // ordinary unblocked relabel showed nothing at all.
     cls='pill';
-    html='applying names&#8230;';
+    // the queue knows how many meetings this naming touches, so say so. A
+    // whole-library pass re-lists as it goes and has no total -- that one
+    // keeps the old wording rather than inventing a denominator.
+    const j=(s.jobs||{}).running;
+    html=(j&&j.total)?`naming: ${Math.min(j.done+1,j.total)} of ${j.total}`
+      :'applying names&#8230;';
   }else{show=false;}
   pill.hidden=!show;
   if(show){pill.className=cls;pill.innerHTML=html;}
@@ -884,33 +889,36 @@ function railJump(i){
 }
 
 /* ============================ render loop ============================ */
-// The relabel that a naming spawns rewrites every transcript in the background,
-// so the page a user is STARING AT is the last thing to show the new name. Watch
-// the running flag across polls and rebuild once, on the falling edge.
-let RELABEL_WAS=false;
+// A relabel rewrites the transcript the user is STARING AT, so that page is the
+// last place a new name shows up. This used to watch the falling edge of one
+// library-wide "a relabel is running" boolean: back-to-back passes kept it high
+// so the edge never came, and even when it did the flag said nothing about
+// whether THIS meeting had changed -- every finished pass rebuilt the page.
+// Each timeline row now carries its own save stamp (generated_at, re-written by
+// every transcript write), so the open page watches only its own row and
+// reloads exactly when its own bytes moved.
 function relabelWatch(s){
-  const now=!!(s.relabel_running||s.relabel_pending);
-  if(RELABEL_WAS&&!now){
-    // mid-edit: a rebuild here would throw away an open naming panel, an
-    // inline edit card, a half-typed rename, or an unsaved transcript search
-    // query (mReloadSegs clears the find box). Hold the flag up and let a
-    // later tick do it (this runs every 2s, so "later" is 2 seconds).
-    const fb=document.getElementById('mfind');
-    if(NP||document.getElementById('mcard')
-      ||(fb&&fb.value&&fb.value.trim())
-      ||document.querySelector('.renameinput,.dateinput'))return;
-    RELABEL_WAS=false;
-    refresh();
-    if(route&&route.view==='meeting')mReloadSegs();
-    return;
-  }
-  RELABEL_WAS=now;
+  if(!MP||!MP.built||!route||route.view!=='meeting'||route.base!==MP.base)return;
+  const r=(s.timeline||[]).find(x=>x.id===MP.base);
+  const st=r&&r.generated_at;
+  if(!st||st===MP.stamp)return;
+  // mid-edit: a rebuild here would throw away an open naming panel, an
+  // inline edit card, a half-typed rename, or an unsaved transcript search
+  // query (mReloadSegs clears the find box). The stamp is deliberately NOT
+  // recorded, so the change is held, not lost: a later tick does the reload
+  // (this runs every 2s, so "later" is 2 seconds).
+  const fb=document.getElementById('mfind');
+  if(NP||document.getElementById('mcard')
+    ||(fb&&fb.value&&fb.value.trim())
+    ||document.querySelector('.renameinput,.dateinput'))return;
+  MP.stamp=st;
+  mReloadSegs();
 }
 // While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
 // live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
 // relabelWatch runs FIRST, before that early return: the meeting view is the
-// one place the finished relabel has to be picked up.
+// one place a finished relabel has to be picked up.
 function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawTray(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
@@ -1884,7 +1892,10 @@ async function buildMeeting(base){
   teardownMeeting();
   MP={base,built:true,audio:null,segs:[],color:{},follow:true,rate:1,
       hasAudio:!!m.audio,tick:null,autoScroll:false,nowIdx:null,
-      spkOpts:[],people:[],spanStop:null,pendingReview:false};
+      spkOpts:[],people:[],spanStop:null,pendingReview:false,
+      // the save stamp of the bytes on screen; relabelWatch compares the
+      // polled row against it. Filled in from the transcript response below.
+      stamp:null};
 
   page.innerHTML=
     _mHeader(m,base)
@@ -1921,6 +1932,7 @@ async function buildMeeting(base){
   MP.segs=d.segments||[];
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
+  MP.stamp=d.generated_at||null;
   (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   body.innerHTML=mBodyHTML();
   mLegend(d);
@@ -2590,6 +2602,7 @@ async function mReloadSegs(target){
   MP.segs=d.segments||[];
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
+  if(d.generated_at)MP.stamp=d.generated_at;
   MP.color={};(d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   MP.nowIdx=null;
   body.innerHTML=mBodyHTML();
