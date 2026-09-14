@@ -236,6 +236,55 @@ reload the open meeting page.
 - Tests: no reuse after a merge; a 0.48 link is refused and recorded as a
   suggestion; the doctor repairs a seeded duplicate.
 
+Shipped 2026-09-14. Four notes on what the spec left open:
+
+- **The 0.48 refusal is a STACK refusal, not a score refusal.** 0.48 is below
+  MATCH_MIN, so no cluster ever scored 0.48 against U050 and linked — the score
+  that carried each link was fine. The 0.48 is between two SAMPLES, arrived at
+  by drift: a link appends a centroid, so a chain of barely-passing matches
+  walks the stack off the voice it started on. The refusal that reproduces the
+  audit is therefore a cluster at 0.72 against one stored sample and 0.48
+  against another: past the link bar, refused by the stack floor, minted, and
+  the 0.72 kept as the suggestion. That is what
+  `test_a_link_that_would_split_the_stack_is_refused_and_suggested` asserts.
+- **A relabel that adds no sample is measured against the stack as it stands.**
+  The append happens once per meeting, so a second pass over the same meeting
+  has nothing to append; the stack floor still runs, against the stored stack.
+  A cluster that loses its link this way mints its own number, matches that
+  number at 1.000 on the next pass, and stays there — the unlink converges
+  instead of minting forever.
+- **`suggested` is refreshed, never accumulated.** It is written when a
+  cluster mints, and recomputed on any later link to a number that already
+  carries one (the same meeting, relabelled, against a registry that has moved
+  on). An empty recomputation removes the key.
+- **The doctor's kinds are the spec's five plus `invalid`.** The hygiene
+  invariants that moved out of `tests/test_profile_hygiene.py` include
+  structural ones — a missing `.npy`, an `n_samples` that disagrees with the
+  rows on disk, a row that is not a finite unit vector, a `sources` list that
+  does not align with the samples — and none of the five kinds describes
+  those. They are `invalid` and never fixable. `hygiene_errors` is now a
+  formatting wrapper over `check`, so the test and the tool cannot drift.
+  Two further judgement calls: `dangling` stays silent when the meeting store
+  holds nothing at all (an empty store makes every reference look dead, which
+  is a statement about the store), and a dead `sources` entry on a NAMED
+  profile is blanked to `"?"` rather than removed, because that list is
+  index-aligned with the sample rows.
+
+The report on the live registry, read-only, on the day this shipped:
+
+```
+Registry check:
+  [fixable] dangling    Morgan Vale: sample source 'Evaluation Process and District Questions 07232026' names no meeting on disk
+  [fixable] stale_next  unknowns.json: next=6 is below max+1=57, so a number already handed out would be handed out again
+  [fixable] split       U050: stack spans two voices (min pairwise cosine 0.481 < 0.6)
+  dangling: 1, split: 1, stale_next: 1
+```
+
+No duplicate pair survives at the new 0.95 bar — phase 0 already merged
+U028/U040. `tests/test_profile_hygiene.py::test_real_registry_satisfies_the_hygiene_invariants`
+fails on exactly these three until somebody runs `--fix`, which is a decision
+for the owner of the registry, not for a build.
+
 ### Phase 5: panel feedback
 
 - The naming panel previews targets before save: "This names Speaker 3 here

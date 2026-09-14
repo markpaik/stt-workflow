@@ -527,36 +527,55 @@ def lock_key(base: str) -> str:
     return id_of(base) or id_of(base, archive_dir()) or base
 
 
-def prune_lock_files(dest_dir=None) -> int:
-    """Remove lock files that name nothing live.
+def _dead_lock_files(dest_dir=None) -> list:
+    """Lock files whose stem names nothing live, WITHOUT the held test.
 
     What is live is what lock_key would ask for today: the id of every live
     meeting that has one, and the BASE of every live meeting that does not (a
     legacy meeting still locks on its name). A base-named lock belonging to a
-    meeting that now carries an id is therefore removed too — lock_key can
-    never ask for it again, so it is as dead as the ones a rename left behind.
-    That is how the live library gets from 262 lock files back to one per
-    meeting.
+    meeting that now carries an id is therefore dead too — lock_key can never
+    ask for it again, so it is as dead as the ones a rename left behind."""
+    d = Path(dest_dir or meetings_dir()) / ".locks"
+    if not d.is_dir():
+        return []
+    keep = set()
+    for b in meeting_bases(Path(dest_dir) if dest_dir else None):
+        keep.add(id_of(b, dest_dir) or b)
+    return [f for f in sorted(d.iterdir())
+            if f.is_file() and f.suffix == ".lock" and f.stem not in keep]
+
+
+def orphan_lock_files(dest_dir=None) -> list:
+    """The dead lock files nobody is holding right now — exactly what
+    prune_lock_files would remove, by path, so the registry doctor can name
+    them in a report instead of only counting them."""
+    out = []
+    for f in _dead_lock_files(dest_dir):
+        try:
+            with open(f, "r+") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)   # held? leave it
+                out.append(f)
+        except OSError:
+            continue
+    return out
+
+
+def prune_lock_files(dest_dir=None, dry_run=False) -> int:
+    """Remove lock files that name nothing live. That is how the live library
+    gets from 262 lock files back to one per meeting.
 
     A lock another process is actually holding is never touched: we take it
     non-blocking first, so a concurrent relabel can never have its lock file
     unlinked out from under it (the next caller would create a fresh file and
     both would think they had exclusive access). Returns how many were
-    removed."""
-    d = Path(dest_dir or meetings_dir()) / ".locks"
-    if not d.is_dir():
-        return 0
-    keep = set()
-    for b in meeting_bases(Path(dest_dir) if dest_dir else None):
-        keep.add(id_of(b, dest_dir) or b)
+    removed — or, with dry_run, how many WOULD be removed, nothing unlinked."""
     n = 0
-    for f in sorted(d.iterdir()):
-        if not f.is_file() or f.suffix != ".lock" or f.stem in keep:
-            continue
+    for f in _dead_lock_files(dest_dir):
         try:
             with open(f, "r+") as fh:
                 fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)   # held? leave it
-                f.unlink()
+                if not dry_run:
+                    f.unlink()
                 n += 1
         except OSError:
             continue

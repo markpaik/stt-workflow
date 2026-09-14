@@ -14,7 +14,7 @@ import json
 import numpy as np
 import pytest
 
-from stt import config, identify, unknowns
+from stt import config, identify, registry_doctor, unknowns
 
 
 def _unit(seed, dim=256):
@@ -43,63 +43,15 @@ THIN_STATS = {"talk_secs": 6.0, "reliable_turns": 2}
 
 def hygiene_errors(vp_dir) -> list:
     """Every invariant the registries must satisfy, as human-readable
-    violations. Empty list = clean. Checks BOTH files:
+    violations. Empty list = clean.
 
-    registry.json — each entry's .npy exists; n_samples matches the rows;
-    sources stay aligned; every sample is a finite unit vector; no two
-    samples within one stack are duplicates (cosine > 0.999 adds nothing
-    to max-cosine matching and squeezes out a diverse sample at the cap).
-
-    unknowns.json — each entry's .npy exists with finite unit rows; no two
-    NON-dropped unknowns are the same voice (max cross cosine > 0.999):
-    that is one stranger holding two global numbers, the unbounded-mint bug.
+    The invariants themselves now live in stt.registry_doctor.check, so the
+    test and the `tools/registry_doctor.py` command can never disagree about
+    what "clean" means. This is the formatting wrapper: one line per finding,
+    in the "subject: detail" shape every assertion below was written against.
     """
-    errs = []
-    reg_p = vp_dir / "registry.json"
-    if reg_p.exists():
-        for name, meta in json.loads(reg_p.read_text()).items():
-            f = vp_dir / meta["file"]
-            if not f.exists():
-                errs.append(f"{name}: voiceprint file {meta['file']} missing")
-                continue
-            arr = np.load(f)
-            arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
-            if meta.get("n_samples") not in (None, arr.shape[0]):
-                errs.append(f"{name}: n_samples={meta['n_samples']} but "
-                            f"{arr.shape[0]} rows on disk")
-            srcs = meta.get("sources")
-            if srcs is not None and len(srcs) != arr.shape[0]:
-                errs.append(f"{name}: {len(srcs)} sources for {arr.shape[0]} samples")
-            for i, row in enumerate(arr):
-                if not np.isfinite(row).all() or abs(np.linalg.norm(row) - 1.0) > 1e-3:
-                    errs.append(f"{name}[{i}]: not a finite unit vector")
-            for i in range(arr.shape[0]):
-                for j in range(i + 1, arr.shape[0]):
-                    if _cos(arr[i], arr[j]) > 0.999:
-                        errs.append(f"{name}: samples {i} and {j} are duplicates")
-    unk_p = vp_dir / "unknowns.json"
-    if unk_p.exists():
-        stacks = {}
-        for uid, meta in json.loads(unk_p.read_text())["speakers"].items():
-            f = vp_dir / meta["file"]
-            if not f.exists():
-                errs.append(f"{uid}: sample file {meta['file']} missing")
-                continue
-            arr = np.load(f)
-            arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
-            for i, row in enumerate(arr):
-                if not np.isfinite(row).all() or abs(np.linalg.norm(row) - 1.0) > 1e-3:
-                    errs.append(f"{uid}[{i}]: not a finite unit vector")
-            if not meta.get("dropped"):
-                stacks[uid] = arr
-        uids = sorted(stacks)
-        for i, a in enumerate(uids):
-            for b in uids[i + 1:]:
-                worst = max(_cos(x, y) for x in stacks[a] for y in stacks[b])
-                if worst > 0.999:
-                    errs.append(f"{a}/{b}: one voice under two global numbers "
-                                f"(cross cosine {worst:.3f})")
-    return errs
+    return [registry_doctor.format_finding(f)
+            for f in registry_doctor.check(vp_dir)]
 
 
 def test_hygiene_checker_passes_on_a_registry_built_by_the_app(sandbox):

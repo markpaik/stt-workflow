@@ -189,9 +189,12 @@ def test_relabel_same_meeting_does_not_stack_duplicate_samples(sandbox):
     assert samples.shape[0] == 1
 
 
-def test_unknown_numbers_restart_after_naming(sandbox):
-    """Freed Speaker numbers are reused: name Speaker 1, and the next new voice
-    becomes Speaker 1 again instead of counting up forever."""
+def test_unknown_numbers_never_reuse_a_freed_one(sandbox):
+    """Phase 4: a freed Speaker number is gone for good. Numbering used to
+    restart at the lowest free slot, so naming Speaker 1 handed "Speaker 1" to
+    the next stranger — and every reference to Speaker 1 anywhere else in the
+    library quietly changed meaning. `next` is the counter and only moves
+    forward."""
     v1 = np.random.default_rng(1).normal(size=256)
     v2 = np.random.default_rng(2).normal(size=256)
     v3 = np.random.default_rng(3).normal(size=256)
@@ -200,10 +203,9 @@ def test_unknown_numbers_restart_after_naming(sandbox):
     assert (u1, u2) == ("U001", "U002")
     assert unknowns.promote(u1, "Jane")          # Speaker 1 gets named
     u3 = unknowns.assign({"S2": v3}, {"S2": None}, "M2")["S2"]
-    assert u3 == "U001"                          # the freed number is reused
-    assert unknowns.display(u3) == "Speaker 1"
-    # numbering is driven by the free-slot scan; the old dead 'next' key is gone
-    assert "next" not in unknowns.load()
+    assert u3 == "U003"                          # NOT the freed U001
+    assert unknowns.display(u3) == "Speaker 3"
+    assert unknowns.load()["next"] == 4
 
 
 def _orthonormal(v, rng):

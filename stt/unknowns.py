@@ -9,8 +9,35 @@ is relabeled.
 
 Registry: voiceprints/unknowns.json + voiceprints/U###.npy sample stacks.
 Open-set matching mirrors identify.py (threshold + margin, max-cosine over samples).
+
+The linking rules, in one place:
+
+* A global number is MONOTONIC. `next` is the true counter, healed on load to
+  max(existing) + 1 whenever it reads lower, and a number freed by a naming, a
+  merge or a deletion is never handed to the next stranger. Reuse made two
+  different people share one number across the library's history, and made a
+  stale reference in any other store silently point at somebody else.
+* A returning unknown LINKS only on strong evidence: best at or above
+  SPLIT_SIM, or best at or above LINK_MIN with the usual margin over the
+  runner-up — AND, after tentatively appending this centroid, the minimum
+  pairwise cosine over the stored stack stays at or above LINK_STACK_MIN.
+  Sample drift is what the stack floor stops: every link appends a centroid,
+  so a chain of barely-passing 0.62 matches walks the stack away from the
+  voice it started on until one id spans two people (U050 did, at 0.48
+  between its two clusters).
+* Every link records its evidence in `links`: the meeting, its id, the
+  cluster, and the score that carried it. One entry per meeting-cluster pair,
+  rewritten in place on a relabel.
+* A near miss is not thrown away. A cluster that scored at or above MATCH_MIN
+  against some unknown and still did not link mints its own number and carries
+  `suggested` — the top three candidates by score — for the panel to offer as
+  "possibly the same voice". It is refreshed on every relabel of that meeting.
+
+The floor, the enrolled-fragment gate, the dropped tombstones and the
+one-cluster-per-id claimed guard are unchanged by any of this.
 """
 import json
+import os
 import sys
 from datetime import datetime
 
@@ -20,8 +47,18 @@ from . import config
 from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
                        lock_registry, score_against)
 
-MATCH_MIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
-MATCH_MARGIN = float(__import__("os").environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
+MATCH_MIN = float(os.environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
+MATCH_MARGIN = float(os.environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
+# the bar a RETURNING unknown must clear to claim an existing global number.
+# Higher than MATCH_MIN on purpose: MATCH_MIN is now only the bar for being
+# WORTH SUGGESTING, and a 0.60-0.70 match is exactly the band that drifted
+# U050's stack across two people one appended centroid at a time.
+LINK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_MIN", "0.70"))
+# after the append, every pair inside the stack must still be this close. A
+# stack that no longer agrees with itself is not one voice.
+LINK_STACK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_STACK_MIN", "0.60"))
+# how many near misses a freshly minted unknown carries for the panel
+MAX_SUGGESTED = 3
 MAX_SAMPLES = 5
 # two clusters in one meeting may only share a global "Speaker N" when their own
 # centroids are this close — i.e. one person over-segmented into two clusters, not
@@ -34,18 +71,107 @@ def _path():
     return config.VOICEPRINTS_DIR / "unknowns.json"
 
 
+def uid_num(uid) -> int:
+    """The number inside a global id ('U007' -> 7), or 0 for anything else."""
+    try:
+        return int(str(uid)[1:]) if str(uid)[:1] == "U" else 0
+    except ValueError:
+        return 0
+
+
+def next_floor(reg: dict) -> int:
+    """The lowest number `next` may legally hold: one past the highest id the
+    registry actually contains."""
+    nums = [uid_num(u) for u in reg.get("speakers", {})]
+    return max(nums, default=0) + 1
+
+
+def heal_next(reg: dict) -> dict:
+    """Make `next` the true monotonic counter, in place.
+
+    It reads 6 on the live registry while ids run to U058 — nothing has
+    maintained it since the numbering moved to a lowest-free-number scan. A
+    counter below the high-water mark would hand out a number that is already
+    taken, so every load lifts it back to max + 1 and minting only ever moves
+    it forward."""
+    if not isinstance(reg.get("speakers"), dict):
+        reg["speakers"] = {}
+    try:
+        nxt = int(reg.get("next", 1))
+    except (TypeError, ValueError):
+        nxt = 1
+    reg["next"] = max(nxt, next_floor(reg))
+    return reg
+
+
 def load() -> dict:
     p = _path()
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            return heal_next(json.loads(p.read_text()))
         except json.JSONDecodeError as e:
             # loud, not a silent reset — every "Speaker N" would otherwise
             # renumber from scratch with no warning that it just happened
             print(f"WARNING: {p} is corrupt ({e}) — treating as empty. "
                   "Sample files on disk are untouched; fix or restore before "
                   "naming any unknown speaker.", file=sys.stderr)
-    return {"speakers": {}}
+    return {"next": 1, "speakers": {}}
+
+
+def mint_uid(reg: dict) -> str:
+    """The next global id, and the counter moved past it. Never a number this
+    registry has ever handed out: a freed U003 stays freed forever, so a
+    dangling 'Speaker 3' in any other store can never come back as a
+    different person."""
+    n = max(int(reg.get("next", 1)), next_floor(reg))
+    reg["next"] = n + 1
+    return f"U{n:03d}"
+
+
+def min_pairwise(samples) -> float:
+    """The worst cosine between any two rows of a sample stack. A stack of one
+    row has no pairs and scores 1.0 — nothing disagrees with itself."""
+    arr = np.asarray(samples, float)
+    arr = arr.reshape(1, -1) if arr.ndim == 1 else arr
+    if arr.shape[0] < 2:
+        return 1.0
+    return min(cosine(arr[i], arr[j])
+               for i in range(arr.shape[0])
+               for j in range(i + 1, arr.shape[0]))
+
+
+def record_link(meta: dict, meeting: str, meeting_id, cluster: str, score: float):
+    """Write this link's evidence onto the unknown, one entry per
+    meeting-cluster pair. A relabel of the same meeting rewrites the entry in
+    place instead of stacking another copy of it."""
+    links = meta.setdefault("links", [])
+    row = {"meeting": meeting, "meeting_id": meeting_id,
+           "cluster": cluster, "score": float(score)}
+    for i, ln in enumerate(links):
+        if ln.get("cluster") != cluster:
+            continue
+        if ln.get("meeting") == meeting or (meeting_id
+                                            and ln.get("meeting_id") == meeting_id):
+            links[i] = row
+            return
+    links.append(row)
+
+
+def near_misses(reg: dict, scored, exclude=None) -> list:
+    """The top MAX_SUGGESTED unknowns this centroid resembles (at or above
+    MATCH_MIN) without linking to them — what the panel offers as "possibly
+    the same voice". `scored` is already best-first. A tombstone is never
+    suggested: the user already said that voice is not a speaker."""
+    out = []
+    for s, u in scored:
+        if u == exclude or s < MATCH_MIN:
+            continue
+        if reg["speakers"].get(u, {}).get("dropped"):
+            continue
+        out.append({"uid": u, "score": float(s)})
+        if len(out) >= MAX_SUGGESTED:
+            break
+    return out
 
 
 def save(reg: dict):
@@ -91,6 +217,7 @@ def rename_meeting_refs(old_base: str, new_base: str) -> int:
         reg = load()
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
+            touched = False
             if old_base in mts:
                 ids = aligned_meeting_ids(meta)
                 # heal while we are here: a ref with no id yet picks up the id
@@ -98,6 +225,13 @@ def rename_meeting_refs(old_base: str, new_base: str) -> int:
                 meta["meeting_ids"] = [new_id if (m == old_base and i is None) else i
                                        for m, i in zip(mts, ids)]
                 meta["meetings"] = [new_base if m == old_base else m for m in mts]
+                touched = True
+            for ln in meta.get("links", []):
+                if ln.get("meeting") == old_base:
+                    ln["meeting"] = new_base
+                    ln["meeting_id"] = ln.get("meeting_id") or new_id
+                    touched = True
+            if touched:
                 n += 1
         if n:
             save(reg)
@@ -121,10 +255,17 @@ def forget_meeting_refs(base: str) -> int:
         reg = load()
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
+            touched = False
             if base in mts:
                 ids = aligned_meeting_ids(meta)
                 meta["meeting_ids"] = [i for m, i in zip(mts, ids) if m != base]
                 meta["meetings"] = [m for m in mts if m != base]
+                touched = True
+            links = meta.get("links")
+            if links and any(ln.get("meeting") == base for ln in links):
+                meta["links"] = [ln for ln in links if ln.get("meeting") != base]
+                touched = True
+            if touched:
                 n += 1
         if n:
             save(reg)
@@ -301,9 +442,12 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
             # voice minted identical twins unboundedly on every relabel (the
             # twins scored 1.000 each, margin 0.000, so each pass registered
             # yet another copy).
+            # the score gate. LINK_MIN, not MATCH_MIN: claiming an existing
+            # global number now takes 0.70, and the 0.60 band survives only as
+            # a SUGGESTION on the number this cluster mints for itself.
             matched = uid is not None and (
                 best >= SPLIT_SIM
-                or (best >= MATCH_MIN and (best - second) >= MATCH_MARGIN))
+                or (best >= LINK_MIN and (best - second) >= MATCH_MARGIN))
             if matched and uid in claimed and cosine(v, claimed[uid]) < SPLIT_SIM:
                 # a different cluster in THIS meeting already took this unknown, and
                 # the two centroids are not close — these are two distinct strangers,
@@ -311,18 +455,41 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 # register this one as a new unknown instead (mirrors the greedy
                 # each-id-used-once rule in identify.name_speakers).
                 matched = False
+            # the stack gate. A link appends this centroid to the stored stack,
+            # and every append moves the stack: U050's two clusters score 0.48
+            # against each other because a chain of barely-passing matches
+            # walked it from one person to another. Try the append first and
+            # refuse the link when the stack would stop agreeing with itself.
+            # A relabel that adds no sample (this meeting is already stored) is
+            # measured against the stack exactly as it stands.
+            stack_after = None
+            if matched:
+                s = _samples(reg, uid)
+                already = meeting in (reg["speakers"][uid].get("meetings") or [])
+                stack_after = s if already else np.vstack([s, _l2(v)])[-MAX_SAMPLES:]
+                if min_pairwise(stack_after) < LINK_STACK_MIN:
+                    matched = False
             if matched:
                 claimed.setdefault(uid, v)
                 # returning unknown: add this meeting's sample ONCE (a relabel of the
                 # same meeting must not stack duplicate centroids)
                 mts = reg["speakers"][uid].setdefault("meetings", [])
                 if meeting not in mts:
-                    s = _samples(reg, uid)
-                    arr = np.vstack([s, _l2(v)])[-MAX_SAMPLES:]
-                    np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"], arr)
+                    np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"],
+                            stack_after)
                     ids = aligned_meeting_ids(reg["speakers"][uid])
                     mts.append(meeting)
                     reg["speakers"][uid]["meeting_ids"] = ids + [meeting_id]
+                record_link(reg["speakers"][uid], meeting, meeting_id, label, best)
+                # a number that already carries near misses keeps them current:
+                # this is the same meeting that minted it, relabelled, and the
+                # registry it was measured against has moved on since.
+                if "suggested" in reg["speakers"][uid]:
+                    sugg = near_misses(reg, scored, exclude=uid)
+                    if sugg:
+                        reg["speakers"][uid]["suggested"] = sugg
+                    else:
+                        reg["speakers"][uid].pop("suggested", None)
                 if reg["speakers"][uid].get("dropped"):
                     # the tombstone did its job: recognized, suppressed — the
                     # cluster keeps its transcript-local label and never
@@ -361,18 +528,22 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                         label, cent_emb, stats,
                         [l for l in cent_emb if not cluster_names.get(l)])):
                     continue
-                # lowest free number: after unknowns get named, new voices start
-                # back at Speaker 1 instead of counting up forever
-                taken = {int(u[1:]) for u in reg["speakers"] if u[1:].isdigit()}
-                n = 1
-                while n in taken:
-                    n += 1
-                uid = f"U{n:03d}"
+                # a number nobody has ever held. Numbers used to restart at the
+                # lowest free slot, so a freed U003 came back as a different
+                # person and every stale reference to "Speaker 3" quietly
+                # changed meaning.
+                near = near_misses(reg, scored)
+                uid = mint_uid(reg)
                 fname = f"{uid}.npy"
                 np.save(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
                                         "meeting_ids": [meeting_id],
                                         "created": datetime.now().isoformat(timespec="seconds")}
+                # the near miss that did not clear the link bar is evidence,
+                # not noise: the panel offers it as "possibly the same voice"
+                # and the user decides.
+                if near:
+                    reg["speakers"][uid]["suggested"] = near
             out[label] = uid
         # prune ghosts: an unknown whose ONLY evidence is THIS meeting, whose
         # own voice a NAMED cluster in this pass now matches — the person got
@@ -492,6 +663,13 @@ def merge(uid_src: str, uid_dst: str) -> bool:
                 mts.append(m)
                 ids.append(i)
         reg["speakers"][uid_dst]["meeting_ids"] = ids
+        # link evidence follows the voice: the merged number is gone, and its
+        # record of which meeting and cluster carried each link is the only
+        # account of how this stack was built.
+        for ln in reg["speakers"][uid_src].get("links", []) or []:
+            record_link(reg["speakers"][uid_dst], ln.get("meeting"),
+                        ln.get("meeting_id"), ln.get("cluster"),
+                        ln.get("score") or 0.0)
         (config.VOICEPRINTS_DIR / reg["speakers"][uid_src]["file"]).unlink(missing_ok=True)
         del reg["speakers"][uid_src]
         save(reg)
