@@ -37,7 +37,7 @@ import fcntl
 import threading
 from datetime import datetime
 
-from stt import control
+from stt import config, control
 
 RELABEL = "relabel"     # a targeted pass over an explicit base list
 ALL = "all"             # the whole library, re-listed as it goes
@@ -52,13 +52,28 @@ def empty_snapshot() -> dict:
 
 
 def _clean(bases) -> list:
-    """The submitted bases as an ordered, de-duplicated list of real names."""
+    """The submitted bases as an ordered, de-duplicated list of
+    `{"id": meeting_id or None, "base": name}` targets.
+
+    The id is read HERE, at submit time, while the name the caller handed us
+    still resolves. A job can sit in the queue behind a long pass, and the
+    meeting can be renamed in the meantime: the name in the payload would then
+    name nothing, and the naming the user just made would silently never apply
+    to it. The id does not move. The base is kept beside it as the fallback for
+    a meeting that has no id yet (a legacy one the backfill has not reached).
+
+    Accepts either plain names (what every caller passes) or already-shaped
+    targets, so a re-submit of a job's own list is idempotent."""
     out, seen = [], set()
     for b in bases or ():
-        b = str(b).strip()
-        if b and b not in seen:
-            seen.add(b)
-            out.append(b)
+        if isinstance(b, dict):
+            base, mid = str(b.get("base") or "").strip(), b.get("id")
+        else:
+            base, mid = str(b).strip(), None
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        out.append({"id": mid or config.id_of(base), "base": base})
     return out
 
 
@@ -143,8 +158,8 @@ class RelabelQueue:
                 if j.kind == RELABEL:
                     # union, order-preserving: the queued job has not started,
                     # so growing its list is safe and saves a whole second pass
-                    have = set(j.bases)
-                    added = [b for b in bases if b not in have]
+                    have = {t["base"] for t in j.bases}
+                    added = [t for t in bases if t["base"] not in have]
                     j.bases.extend(added)
                     return bool(added)
             self._queued.append(_Job(RELABEL, reason, bases))
@@ -232,8 +247,36 @@ class RelabelQueue:
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
 
+    @staticmethod
+    def _resolve(target) -> str:
+        """Where this target lives RIGHT NOW, or None.
+
+        The id wins when the index can answer it — that is the point of
+        carrying one, and it is what makes a rename between submit and
+        processing a non-event. The stored base is the fallback for a meeting
+        with no id, and for an id the index cannot place; a base that names no
+        transcript at all is the "neither exists" case the caller records as a
+        failure rather than quietly dropping."""
+        mid, base = target.get("id"), target.get("base")
+        if mid:
+            found = config.base_of(mid)
+            if found:
+                return found
+        if base and config.meeting_file(base, ".json").exists():
+            return base
+        return None
+
     def _run_bases(self, job, relabel):
-        for base in job.bases:
+        for target in job.bases:
+            base = self._resolve(target)
+            if base is None:
+                # neither the id nor the stored name resolves: the meeting was
+                # deleted (or archived) between submit and here. Count it and
+                # name it in `last` — never silently.
+                with self._cv:
+                    job.done += 1
+                    job.failed.append(target["base"])
+                continue
             with self._cv:
                 job.current = base
             # _safe_one is relabel.py's own per-meeting boundary: one

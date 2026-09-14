@@ -212,6 +212,8 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     shutil.copy2(src, config.meeting_file("Team Sync 05012026", ".m4a"))
     d0 = json.loads(config.meeting_file("Team Sync 05012026", ".json").read_text())
     assert d0["date"] == "2026-05-01"  # stamped from the filename convention
+    meeting_id = d0["meeting_id"]      # minted once, by this first run
+    assert meeting_id and config.base_of(meeting_id) == "Team Sync 05012026"
 
     # 2. rename + human date correction, exactly as the panel does. Correcting
     #    the date RE-STAMPS the folder, so the meeting ends up under the date the
@@ -242,6 +244,11 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     # the human's corrected date survives the reprocess (it is NOT re-derived
     # from the filename — which now happens to agree, and must keep agreeing)
     assert d["date"] == "2026-06-15"
+    # and so does the meeting's identity: a Redo re-transcribes the SAME
+    # meeting, so it keeps its id. Minting a new one here would orphan every
+    # registry reference, lock and queued job that names this meeting.
+    assert d["meeting_id"] == meeting_id
+    assert config.base_of(meeting_id) == final
 
 
 def test_rename_refused_while_meeting_is_being_processed(sandbox):

@@ -32,28 +32,38 @@ def lock_meeting(base: str):
 
     Re-entrant WITHIN one thread, per meeting (mirrors identify.lock_registry):
     flock isn't re-entrant, so a nested lock_meeting(base) on the same thread
-    would deadlock against itself. A per-base depth counter makes only the
+    would deadlock against itself. A per-key depth counter makes only the
     outermost call take the real OS lock; another process/thread still
-    genuinely waits."""
+    genuinely waits.
+
+    The lock FILE is named for the meeting's stable id, not its basename
+    (config.lock_key). Both a rename and a relabel can hold this lock across a
+    rename, and the key must not change mid-hold: the id does not change when
+    the folder moves, so the holder and a second caller who knows only the new
+    name still queue on the same file. It is also why a rename no longer leaves
+    an orphan lock behind — the live library had 262 of them against 101
+    meetings. A meeting with no id yet (a legacy one the backfill has not
+    reached) locks on its base exactly as before."""
+    key = config.lock_key(base)
     held = getattr(_meeting_lock_depth, "held", None)
     if held is None:
         held = _meeting_lock_depth.held = {}
-    if held.get(base, 0) > 0:
-        held[base] += 1
+    if held.get(key, 0) > 0:
+        held[key] += 1
         try:
             yield
         finally:
-            held[base] -= 1
+            held[key] -= 1
         return
     lock_dir = config.meetings_dir() / ".locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    with open(lock_dir / f"{base}.lock", "w") as fh:
+    with open(lock_dir / f"{key}.lock", "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        held[base] = 1
+        held[key] = 1
         try:
             yield
         finally:
-            held[base] = 0
+            held[key] = 0
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
@@ -702,7 +712,10 @@ def find_voice_clips(key: str, meeting: str = None, n: int = 3):
     samples = identify.load_voiceprints().get(key)
     if samples is None:
         return None
-    sources = [s for s in reg[key].get("sources", []) if s and s != "?"]
+    # resolved, not raw: a sample whose source meeting was RENAMED still
+    # carries that meeting's id, so the clip search follows it to wherever the
+    # folder is now instead of skipping a source that "does not exist"
+    sources = [s for s in identify.resolved_sources(reg[key]) if s and s != "?"]
     for base in (sources[::-1] or all_bases):
         dcache = config.meeting_file(base, ".diar.npz")
         jf = config.meeting_file(base, ".json")

@@ -67,6 +67,15 @@ def _record(monkeypatch):
     return seen
 
 
+def _seed(*bases):
+    """Put these meetings on disk. A queued job resolves its targets before it
+    runs them (by id, else by the stored name), so a target that names nothing
+    at all is reported as a failure instead of being handed to relabel — which
+    means a test about the QUEUE has to queue meetings that exist."""
+    for b in bases:
+        _meeting(b)
+
+
 # ---------- coalescing ----------
 
 def test_two_submits_before_the_worker_starts_become_one_job(sandbox, queue,
@@ -74,6 +83,7 @@ def test_two_submits_before_the_worker_starts_become_one_job(sandbox, queue,
     """Naming two voices in quick succession used to spawn two full passes that
     blocked on each other's lock. A queued job has not started, so the second
     submit unions into it: one job, one lock acquisition, no meeting twice."""
+    _seed("Alpha Mtg", "Bravo Mtg", "Charlie Mtg")
     seen = _record(monkeypatch)
     queue.submit(["Alpha Mtg", "Bravo Mtg"], "named Dana")
     queue.submit(["Bravo Mtg", "Charlie Mtg"], "named Sam")
@@ -87,6 +97,45 @@ def test_two_submits_before_the_worker_starts_become_one_job(sandbox, queue,
     _drain(queue)
     assert seen == ["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"], \
         "the union keeps submission order and drops the repeat"
+
+
+def test_a_queued_job_follows_a_meeting_renamed_before_the_worker_ran(
+        sandbox, queue, monkeypatch):
+    """A job carries each target's meeting id, resolved at submit time. The
+    meeting can be renamed while the job waits — the payload's NAME would then
+    name nothing, and the naming the user just made would silently never apply
+    to it. The id does not move, so the worker finds the meeting under its new
+    name, once."""
+    from stt import config, summarize
+    _seed("Alpha Mtg 05012026")
+    config.backfill_meeting_ids()
+    mid = config.id_of("Alpha Mtg 05012026")
+    seen = _record(monkeypatch)
+
+    queue.submit(["Alpha Mtg 05012026"], "named Dana")   # the worker is not started
+    r = summarize.rename_meeting("Alpha Mtg 05012026", "Focus Group")
+    assert r["ok"] and r["base"] == "Focus Group 05012026"
+    assert config.base_of(mid) == "Focus Group 05012026"
+
+    queue.start()
+    snap = _drain(queue)
+    assert seen == ["Focus Group 05012026"], \
+        "relabelled under the new name, exactly once"
+    assert snap["last"]["done"] == 1 and snap["last"]["failed"] == []
+
+
+def test_a_target_that_no_longer_exists_is_reported_not_dropped(
+        sandbox, queue, monkeypatch):
+    """When neither the id nor the stored name resolves, the meeting was
+    deleted between submit and here. Say so in `last` rather than counting it
+    as work done."""
+    _seed("Alpha Mtg 05012026")
+    seen = _record(monkeypatch)
+    queue.submit(["Alpha Mtg 05012026", "Gone Mtg 04012026"], "named Dana")
+    queue.start()
+    snap = _drain(queue)
+    assert seen == ["Alpha Mtg 05012026"]
+    assert snap["last"]["failed"] == ["Gone Mtg 04012026"]
 
 
 def test_a_full_pass_absorbs_every_queued_relabel(sandbox, queue, monkeypatch):
@@ -119,6 +168,7 @@ def test_a_full_pass_absorbs_every_queued_relabel(sandbox, queue, monkeypatch):
 def test_a_running_job_is_never_mutated(sandbox, queue, monkeypatch):
     """Progress can only be trusted if the list it counts against is frozen.
     A submit that lands mid-job starts a NEW job behind it."""
+    _seed("Alpha Mtg", "Bravo Mtg")
     gate = threading.Event()
     seen = []
 
@@ -147,6 +197,7 @@ def test_a_running_job_is_never_mutated(sandbox, queue, monkeypatch):
 def test_snapshot_progress_moves_as_meetings_finish(sandbox, queue, monkeypatch):
     """"naming: 3 of 7" comes from here, so done/current/total have to move
     while the job runs, not only at the end."""
+    _seed("Alpha Mtg", "Bravo Mtg", "Charlie Mtg")
     gate = threading.Event()
 
     def fake(base, **kw):
@@ -191,6 +242,7 @@ def test_one_unreadable_meeting_never_abandons_the_rest_of_the_job(
     """relabel._safe_one is the per-meeting boundary a CLI pass uses. The queue
     uses the same one AND names the meetings that did not take, so a failure is
     reported instead of only printed into a log nobody reads."""
+    _seed("Alpha Mtg", "Bravo Mtg", "Charlie Mtg")
     seen = []
 
     def fake(base, **kw):
@@ -222,6 +274,7 @@ def test_a_job_that_blows_up_is_recorded_and_the_worker_keeps_going(
         calls.append(1)
         raise RuntimeError("the library is gone")
     monkeypatch.setattr(relabel, "_pass_over_everything", boom)
+    _seed("Alpha Mtg")
     seen = _record(monkeypatch)
 
     queue.start()
@@ -243,6 +296,7 @@ def test_a_running_job_holds_the_relabel_lock_and_publishes_the_marker(
     """The CLI (`relabel.py`), run_batch's end-of-run pass and the panel's own
     `_relabel_now` all exclude each other through this flock. The queue is just
     another taker of it — nothing about that changed."""
+    _seed("Alpha Mtg")
     gate = threading.Event()
     monkeypatch.setattr(relabel, "relabel_one", lambda base, **kw: gate.wait(10))
 

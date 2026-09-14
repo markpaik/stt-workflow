@@ -1,5 +1,10 @@
 """Central configuration. Override most values via environment variables."""
+import contextlib
+import fcntl
 import os
+import re
+import threading
+import uuid
 from pathlib import Path
 
 HOME = Path.home()
@@ -359,6 +364,244 @@ def meeting_audio(base: str, dest_dir=None):
         if p.exists():
             return p
     return None
+
+
+# --- Stable meeting id -----------------------------------------------------
+# A basename is a meeting's NAME, not its identity: a title edit or a date
+# correction renames the folder, and six stores keyed on that basename then had
+# to be chased by hand on every rename (best-effort, inside one swallowing try).
+# meeting_id is minted once — by the pipeline for a new meeting, by
+# backfill_meeting_ids for every meeting that predates this — written into the
+# meeting json, and never changed again. A rename becomes a folder move plus
+# one index update; a lock file, a registry reference or a queued job can name
+# a meeting that is being renamed underneath it and still land on the right one.
+MEETINGS_INDEX_PATH = PROJECT_DIR / "meetings_index.json"
+
+# "meeting_id" as it appears in a json's head. A transcript could in principle
+# SAY the words "meeting_id": the negative lookbehind makes the escaped quotes
+# of json string content ( \"meeting_id\" ) fail to match, so only a real key
+# can. The head read exists because a rebuild parses every meeting in the
+# library and a transcript json runs to megabytes; the id is written as the
+# FIRST key precisely so this bounded read finds it.
+_ID_HEAD_BYTES = 65536
+_ID_RE = re.compile(rb'(?<!\\)"meeting_id"\s*:\s*"([^"\\]{1,64})"')
+
+_index_lock_depth = threading.local()
+
+
+def new_meeting_id() -> str:
+    """16 hex chars of a uuid4 — short enough to read inside a lock filename,
+    wide enough (64 bits) that two meetings never collide."""
+    return uuid.uuid4().hex[:16]
+
+
+def id_of(base: str, dest_dir=None):
+    """This meeting's immutable id, or None when its json carries none (a
+    legacy meeting the backfill has not reached, or no meeting at all)."""
+    j = meeting_file(base, ".json", dest_dir)
+    try:
+        with open(j, "rb") as fh:
+            head = fh.read(_ID_HEAD_BYTES)
+    except OSError:
+        return None
+    m = _ID_RE.search(head)
+    if m:
+        return m.group(1).decode("utf-8", "replace") or None
+    if len(head) < _ID_HEAD_BYTES:
+        return None                      # whole file read: there is no id
+    try:                                 # a big json that buried it — pay full price
+        import json as _json
+        return _json.loads(j.read_text()).get("meeting_id") or None
+    except (OSError, ValueError):
+        return None
+
+
+@contextlib.contextmanager
+def _index_locked():
+    """Serialize read-modify-write of the id index across processes (the panel,
+    a CLI relabel, the batch). Re-entrant within one thread, like
+    review.lock_meeting and identify.lock_registry."""
+    depth = getattr(_index_lock_depth, "n", 0)
+    if depth:
+        _index_lock_depth.n = depth + 1
+        try:
+            yield
+        finally:
+            _index_lock_depth.n = depth
+        return
+    p = Path(str(MEETINGS_INDEX_PATH) + ".lock")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        _index_lock_depth.n = 1
+        try:
+            yield
+        finally:
+            _index_lock_depth.n = 0
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def load_meetings_index() -> dict:
+    """{"ids": {meeting_id: base}} — always that shape, even when the file is
+    missing or corrupt. The index is a CACHE of what the meeting jsons say, so
+    an unreadable one is rebuilt from a scan, never mourned."""
+    import json as _json
+    try:
+        data = _json.loads(MEETINGS_INDEX_PATH.read_text())
+    except (OSError, ValueError):
+        return {"ids": {}}
+    ids = data.get("ids")
+    return {"ids": ids if isinstance(ids, dict) else {}}
+
+
+def _save_meetings_index(ids: dict):
+    import json as _json
+    MEETINGS_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MEETINGS_INDEX_PATH.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps({"ids": ids}, indent=2, ensure_ascii=False))
+    os.replace(tmp, MEETINGS_INDEX_PATH)
+
+
+def rebuild_meetings_index(dest_dir=None) -> dict:
+    """Rescan the LIVE library and rewrite the index from what the jsons say.
+    Archived meetings are deliberately absent: they are not resolvable targets,
+    and restore_meeting puts the id back on the way in."""
+    ids = {}
+    for base in meeting_bases(dest_dir):
+        mid = id_of(base, dest_dir)
+        if mid:
+            ids[mid] = base
+    with _index_locked():
+        _save_meetings_index(ids)
+    return ids
+
+
+def base_of(meeting_id: str):
+    """The live basename of a meeting id, or None.
+
+    The index is checked against the meeting it names — a mapping whose json is
+    gone, or now carries a different id, is stale — and one rebuild answers a
+    miss, so an index deleted or left behind by an out-of-band move heals
+    itself on the first lookup instead of failing until someone notices."""
+    if not meeting_id:
+        return None
+    base = load_meetings_index()["ids"].get(meeting_id)
+    if base and id_of(base) == meeting_id:
+        return base
+    return rebuild_meetings_index().get(meeting_id)
+
+
+def index_set(meeting_id: str, base: str) -> bool:
+    """Point an id at the base it now lives under. Called by every move: the
+    rename in summarize._move_folder, a restore, and the pipeline's own write."""
+    if not meeting_id or not base:
+        return False
+    with _index_locked():
+        ids = load_meetings_index()["ids"]
+        if ids.get(meeting_id) == base:
+            return False
+        ids[meeting_id] = base
+        _save_meetings_index(ids)
+    return True
+
+
+def index_drop(meeting_id: str) -> bool:
+    """Forget an id: the meeting was archived (no longer live) or deleted."""
+    if not meeting_id:
+        return False
+    with _index_locked():
+        ids = load_meetings_index()["ids"]
+        if ids.pop(meeting_id, None) is None:
+            return False
+        _save_meetings_index(ids)
+    return True
+
+
+def lock_key(base: str) -> str:
+    """The lock-file stem for a meeting: its id when it has one, else its base.
+
+    Keying on the id is what lets a lock be HELD ACROSS a rename — the holder
+    and a second caller who only knows the new name still queue on the same
+    file — and it is why a rename no longer strews orphan lock files (the live
+    library had 262 of them against 101 meetings)."""
+    return id_of(base) or id_of(base, archive_dir()) or base
+
+
+def prune_lock_files(dest_dir=None) -> int:
+    """Remove lock files that name nothing live.
+
+    What is live is what lock_key would ask for today: the id of every live
+    meeting that has one, and the BASE of every live meeting that does not (a
+    legacy meeting still locks on its name). A base-named lock belonging to a
+    meeting that now carries an id is therefore removed too — lock_key can
+    never ask for it again, so it is as dead as the ones a rename left behind.
+    That is how the live library gets from 262 lock files back to one per
+    meeting.
+
+    A lock another process is actually holding is never touched: we take it
+    non-blocking first, so a concurrent relabel can never have its lock file
+    unlinked out from under it (the next caller would create a fresh file and
+    both would think they had exclusive access). Returns how many were
+    removed."""
+    d = Path(dest_dir or meetings_dir()) / ".locks"
+    if not d.is_dir():
+        return 0
+    keep = set()
+    for b in meeting_bases(Path(dest_dir) if dest_dir else None):
+        keep.add(id_of(b, dest_dir) or b)
+    n = 0
+    for f in sorted(d.iterdir()):
+        if not f.is_file() or f.suffix != ".lock" or f.stem in keep:
+            continue
+        try:
+            with open(f, "r+") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)   # held? leave it
+                f.unlink()
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def backfill_meeting_ids(dest_dir=None) -> int:
+    """Stamp a meeting_id into every meeting json in `dest_dir` that lacks one.
+
+    Idempotent (a meeting with an id is skipped), atomic per meeting, and taken
+    under that meeting's own lock so a relabel or a panel edit mid-backfill is
+    serialized rather than clobbered. Every other field is preserved with its
+    value untouched — generated_at above all: the panel reloads the open
+    meeting when that stamp moves, so a migration that re-stamped it would
+    yank the page out from under whoever was reading. The id is written as the
+    FIRST key so id_of can find it in a bounded read of a megabyte transcript.
+
+    Run over the archive too (dest_dir=config.archive_dir()): a restore has to
+    bring the id back with the meeting. Only a live pass touches the index.
+    Returns the number of meetings stamped."""
+    import json as _json
+
+    from . import review
+    d = Path(dest_dir) if dest_dir else meetings_dir()
+    n = 0
+    for base in meeting_bases(d):
+        j = meeting_file(base, ".json", d)
+        if id_of(base, d):
+            continue
+        with review.lock_meeting(base):
+            try:                          # re-read UNDER the lock
+                data = _json.loads(j.read_text())
+            except (OSError, ValueError):
+                continue
+            if data.get("meeting_id"):
+                continue
+            data = {"meeting_id": new_meeting_id(), **data}
+            tmp = j.with_suffix(".json.tmp")
+            tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False))
+            os.replace(tmp, j)
+            n += 1
+    if dest_dir is None or Path(dest_dir).resolve() == meetings_dir().resolve():
+        rebuild_meetings_index(dest_dir)
+        prune_lock_files(dest_dir)
+    return n
 
 
 def migrate_flat_meetings(dest_dir=None) -> int:

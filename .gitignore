@@ -66,6 +66,8 @@ holds.lock
 dupes_cache.json
 dupes_ignored.json
 relabel_running.json
+meetings_index.json
+meetings_index.json.lock
 dismissed_failures.json
 *.json.tmp
 

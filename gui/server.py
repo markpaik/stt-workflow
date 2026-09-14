@@ -1057,7 +1057,7 @@ def gather_state():
     for uid, meta in sorted(reg["speakers"].items()):
         if meta.get("dropped"):
             continue  # tombstoned "not a real speaker" — never surfaces again
-        mts = [m for m in meta.get("meetings", []) if m in resolvable]
+        mts = [m for m in unknowns.resolved_meetings(meta) if m in resolvable]
         if not mts:
             # zero live/archived refs: nothing to play, nothing to name against
             # — hide it rather than nag "heard in 0 meetings" forever. NOT
@@ -1070,8 +1070,11 @@ def gather_state():
         unknown_list.append({"uid": uid, "display": unknowns.display(uid),
                              "archived": bool(meta.get("archived")),
                              "meetings": mts})
+    # sources resolved through each sample's meeting id: a rename whose
+    # registry chase failed used to leave a source naming a folder that no
+    # longer exists, and its ▶ dead. The id still points at the meeting.
     enrolled = [{"name": n, "samples": meta.get("n_samples", 1),
-                 "sources": [s for s in meta.get("sources", []) if s and s != "?"]}
+                 "sources": [s for s in identify.resolved_sources(meta) if s and s != "?"]}
                 for n, meta in sorted(identify.load_registry().items(),
                                       key=lambda t: t[0].lower())]  # by first name;
     # unknowns render in their own section below, so they stay at the bottom
@@ -1649,8 +1652,8 @@ class Handler(BaseHTTPRequestHandler):
                 # EACH meeting it was heard in — meeting names come from the
                 # SERVER's registry, never the client, so no base gate needed
                 uid = q.get("speaker", "")
-                refs = (unknowns.load()["speakers"]
-                        .get(uid, {}).get("meetings", []))
+                refs = unknowns.resolved_meetings(
+                    unknowns.load()["speakers"].get(uid, {}))
                 clips = []
                 for m in [m for m in refs if _known_base(m)][:5]:
                     cs = review.find_voice_clips(uid, m, n=1)
@@ -2572,6 +2575,15 @@ def start_server():
         config.migrate_flat_meetings()
     except Exception:
         pass  # the panel must still start; the batch retries the migration
+    try:
+        # stamp a stable meeting_id into anything that predates it, rebuild the
+        # id index, and sweep orphan lock files (idempotent, and a no-op once
+        # every meeting carries an id). The ARCHIVE is stamped too: a restore
+        # has to bring the meeting's id back with it.
+        config.backfill_meeting_ids()
+        config.backfill_meeting_ids(config.archive_dir())
+    except Exception:
+        pass  # same contract: never block the panel on a migration
     # the one relabel worker for this process. Every naming, rename, merge and
     # queued follow-up goes through it from here on, instead of spawning a
     # child that reloads the models this process already has warm.

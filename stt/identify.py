@@ -307,16 +307,57 @@ def _merge_budget(n_d, n_s, cap):
     return keep_d, keep_s
 
 
+def aligned_source_ids(meta: dict) -> list:
+    """`meta["source_ids"]` padded (or truncated) to exactly len(sources).
+
+    An entry enrolled before meeting ids existed has no `source_ids` at all,
+    and one written by an older build can be short. Every reader and writer
+    goes through here, so the two lists are index-aligned by construction and a
+    legacy entry simply reads as "no id for any sample" — base-only, exactly
+    the behaviour it had before."""
+    srcs = meta.get("sources", []) or []
+    ids = meta.get("source_ids") or []
+    ids = list(ids)[:len(srcs)]
+    return ids + [None] * (len(srcs) - len(ids))
+
+
+def resolved_sources(meta: dict) -> list:
+    """This profile's sample sources as LIVE basenames where that is knowable.
+
+    The stored base is the answer while it exists. When it does not — the
+    meeting was renamed and a chase failed, or a rename happened while this
+    process was not looking — the id resolves through the index to wherever the
+    meeting actually is. That is the whole point of carrying the id: a ▶ button
+    that used to go dead on a rename now survives one."""
+    out = []
+    for base, mid in zip(meta.get("sources", []) or [], aligned_source_ids(meta)):
+        if mid and base and base != "?" and not config.meeting_file(base, ".json").exists():
+            base = config.base_of(mid) or base
+        out.append(base)
+    return out
+
+
 def rename_source_refs(old_base: str, new_base: str) -> int:
     """A meeting rename must follow into enrolled profiles too: each sample's
     `sources` entry names the meeting it came from, and the speaker dialog's
-    per-sample ▶ plays from exactly that meeting. Returns people touched."""
+    per-sample ▶ plays from exactly that meeting. Returns people touched.
+
+    This chase stays (it keeps the stored name honest and readable), but it is
+    no longer the only thing standing between a rename and a dead play button:
+    the aligned `source_ids` survive it failing, and resolved_sources reads
+    through them."""
     n = 0
+    new_id = config.id_of(new_base)
     with lock_registry():
         reg = load_registry()
         for meta in reg.values():
             srcs = meta.get("sources", [])
             if old_base in srcs:
+                ids = aligned_source_ids(meta)
+                # heal while we are here: a sample whose source we are renaming
+                # and which carries no id yet gets the id of where it landed
+                meta["source_ids"] = [new_id if (s == old_base and i is None) else i
+                                      for s, i in zip(srcs, ids)]
                 meta["sources"] = [new_base if s == old_base else s for s in srcs]
                 n += 1
         if n:
@@ -342,17 +383,22 @@ def merge_people(src: str, dst: str) -> bool:
         d = d.reshape(1, -1) if d.ndim == 1 else d
         src_sources = reg[src].get("sources", ["?"] * s.shape[0])
         dst_sources = reg[dst].get("sources", ["?"] * d.shape[0])
+        src_ids = aligned_source_ids(reg[src]) or [None] * s.shape[0]
+        dst_ids = aligned_source_ids(reg[dst]) or [None] * d.shape[0]
         keep_d, keep_s = _merge_budget(d.shape[0], s.shape[0], MAX_SAMPLES)
         # most-recent within each side; explicit positive indices so a 0 keep
         # slices to empty, never to the whole list the way [-0:] would
         arr = np.vstack([d[d.shape[0] - keep_d:], s[s.shape[0] - keep_s:]])
         sources = (dst_sources[len(dst_sources) - keep_d:]
                    + src_sources[len(src_sources) - keep_s:])
+        source_ids = (dst_ids[len(dst_ids) - keep_d:]
+                      + src_ids[len(src_ids) - keep_s:])
         np.save(df, arr)
         sf.unlink(missing_ok=True)
         del reg[src]
         reg[dst]["n_samples"] = int(arr.shape[0])
         reg[dst]["sources"] = sources
+        reg[dst]["source_ids"] = source_ids   # same slice, same order, aligned
         save_registry(reg)
         return True
 
@@ -372,10 +418,12 @@ def remove_sample(name: str, index: int) -> bool:
         if not (0 <= index < arr.shape[0]) or arr.shape[0] <= 1:
             return False
         sources = reg[name].get("sources", ["?"] * arr.shape[0])
+        ids = aligned_source_ids(reg[name]) or [None] * arr.shape[0]
         keep = [i for i in range(arr.shape[0]) if i != index]
         np.save(f, arr[keep])
         reg[name]["n_samples"] = len(keep)
         reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
+        reg[name]["source_ids"] = [m for i, m in enumerate(ids) if i != index]
         save_registry(reg)
         return True
 
@@ -405,18 +453,24 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
             return {"ok": False, "error": "no such sample"}
         vec = arr[index]
         sources = reg[name].get("sources", ["?"] * arr.shape[0])
+        ids = aligned_source_ids(reg[name]) or [None] * arr.shape[0]
         src = sources[index] if index < len(sources) else None
+        src_id = ids[index] if index < len(ids) else None
         keep = [i for i in range(arr.shape[0]) if i != index]
         if keep:
             np.save(f, arr[keep])
             reg[name]["n_samples"] = len(keep)
             reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
+            reg[name]["source_ids"] = [m for i, m in enumerate(ids) if i != index]
         else:  # that was the source's only sample — the profile was wrong wholesale
             f.unlink(missing_ok=True)
             del reg[name]
         save_registry(reg)  # commit the removal BEFORE enroll re-reads the registry
-        # enroll re-locks (reentrant) and re-normalizes; vec is already unit-norm
-        enroll(to_name, vec, source=src)
+        # enroll re-locks (reentrant) and re-normalizes; vec is already unit-norm.
+        # The id travels WITH the sample: the source meeting may have been
+        # renamed since, in which case the stored base no longer resolves and
+        # re-deriving the id from it would silently drop the provenance.
+        enroll(to_name, vec, source=src, source_id=src_id)
         return {"ok": True, "to": to_name, "source_emptied": name not in reg}
 
 
@@ -432,7 +486,7 @@ def remove_person(name: str) -> bool:
         return True
 
 
-def _cap_keeping_newest_and_diverse(arr, sources, cap):
+def _cap_keeping_newest_and_diverse(arr, sources, source_ids, cap):
     """Enforce the per-person sample cap by dropping the MOST REDUNDANT older
     sample (the one whose cosine to any other retained sample is highest), never
     the freshest one (arr[-1]). A profile then keeps a spread across rooms, mics,
@@ -445,16 +499,32 @@ def _cap_keeping_newest_and_diverse(arr, sources, cap):
                    key=lambda i: max(cosine(arr[i], arr[j])
                                      for j in range(n) if j != i))
         keep = [k for k in range(n) if k != drop]
-        arr, sources = arr[keep], [sources[k] for k in keep]
-    return arr, sources
+        arr = arr[keep]
+        sources = [sources[k] for k in keep]
+        source_ids = [source_ids[k] for k in keep]   # aligned through the drop
+    return arr, sources, source_ids
 
 
-def enroll(name: str, vector, replace: bool = False, source: str = None):
+def enroll(name: str, vector, replace: bool = False, source: str = None,
+           source_id: str = None):
     """Add a voiceprint sample. Keeps up to MAX_SAMPLES L2-normalized samples per
     person, evicting the most redundant one so the set stays diverse (scored by
     max cosine at match time). `source` records which recording the sample came
     from — kept as a rolling list aligned with the samples, so the GUI can show
-    provenance and locate playable audio."""
+    provenance and locate playable audio.
+
+    `source_ids` runs beside `sources`, one entry per sample, holding that
+    meeting's immutable id (or None when it has none). The NAME can go stale —
+    a rename chase is best-effort and a meeting can move while nothing is
+    watching — and then the ▶ button dies; the id cannot. Callers who already
+    hold the id (a sample being reassigned between people) pass `source_id`
+    rather than have it re-derived from a base that may no longer resolve.
+
+    Two parallel lists, not a list of {id, base} pairs: every existing registry
+    on disk carries plain-string `sources`, several readers index straight into
+    it, and a shape change would have to be migrated everywhere at once. A
+    parallel list is additive — an entry without one reads exactly as it did.
+    """
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     with lock_registry():
         reg = load_registry()
@@ -467,6 +537,8 @@ def enroll(name: str, vector, replace: bool = False, source: str = None):
             name.replace("/", "_"), reg)
         fpath = config.VOICEPRINTS_DIR / fname
         vector = _l2(vector)  # raises on zero/non-finite
+        if source_id is None and source and source != "?":
+            source_id = config.id_of(source)
 
         if name in reg and fpath.exists() and not replace:
             arr = np.load(fpath)
@@ -475,15 +547,20 @@ def enroll(name: str, vector, replace: bool = False, source: str = None):
             if any(cosine(vector, row) > 0.999 for row in arr):
                 return fpath  # same sample again (e.g. re-promote after a relabel) — skip
             prev_sources = reg[name].get("sources", ["?"] * arr.shape[0])
+            prev_ids = aligned_source_ids(reg[name]) or [None] * arr.shape[0]
             arr = np.vstack([arr, vector])
             sources = prev_sources + [source or "?"]
-            arr, sources = _cap_keeping_newest_and_diverse(arr, sources, MAX_SAMPLES)
+            source_ids = prev_ids + [source_id]
+            arr, sources, source_ids = _cap_keeping_newest_and_diverse(
+                arr, sources, source_ids, MAX_SAMPLES)
         else:
             arr = vector.reshape(1, -1)
             sources = [source or "?"]
+            source_ids = [source_id]
 
         reg[name] = {"file": fname, "dim": int(vector.shape[0]),
-                     "n_samples": int(arr.shape[0]), "sources": sources}
+                     "n_samples": int(arr.shape[0]), "sources": sources,
+                     "source_ids": source_ids}
         np.save(fpath, arr)
         save_registry(reg)
         return fpath

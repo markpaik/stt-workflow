@@ -373,15 +373,23 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # unannounced into a list of a hundred. (Meetings processed before this
         # existed carry NO reviewed key at all, and the panel treats a missing key
         # as already-reviewed — so nothing retroactively floods the inbox.)
-        category, reviewed = None, False
+        category, reviewed, meeting_id = None, False, None
         try:
             import json as _json
             prev = _json.loads(json_path.read_text())
             category = prev.get("category")
             reviewed = prev.get("reviewed", True)  # an existing meeting stays put
+            # a Redo re-transcribes the SAME meeting: it keeps its id, or every
+            # registry reference, lock and queued job pointing at this meeting
+            # would be orphaned by a reprocess
+            meeting_id = prev.get("meeting_id") or None
         except (OSError, ValueError):
             pass
         meta = {
+            # immutable identity: minted once here, never rewritten, and FIRST
+            # in the file so config.id_of finds it in a bounded read of a
+            # transcript that may run to megabytes
+            "meeting_id": meeting_id or config.new_meeting_id(),
             "source_file": src.name,
             # identity, not display: resolve_base matches (name, mtime) to tell
             # "this exact recording, reprocessed" from "a different recording
@@ -423,6 +431,16 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
 
         output.write_txt(txt_path, segments, header=header)
         output.write_json(json_path, meta, speakers, segments, labeled_words)
+        # the id index follows the write, under the same lock: from here on a
+        # rename, a queued relabel or a registry reference can resolve this
+        # meeting by id. Only the LIVE store is indexed — a run writing into
+        # some other folder (a demo home, a test dest) has no business
+        # rewriting the library's map.
+        try:
+            if Path(dest_dir).resolve() == config.meetings_dir().resolve():
+                config.index_set(meta["meeting_id"], base)
+        except OSError:
+            pass
         if verify_regions is not None:
             # sidecar: relabel rebuilds segments from the diar cache and re-flags from this
             verify.save_sidecar(base, verify_regions, verify_engine, dest_dir=dest_dir)

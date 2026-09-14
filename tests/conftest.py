@@ -22,6 +22,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PROJECT_DIR", d)
     monkeypatch.setattr(config, "VOICEPRINTS_DIR", d / "voiceprints")
     monkeypatch.setattr(config, "MANIFEST_PATH", d / "manifest.json")
+    # the meeting-id index binds its path at import like MANIFEST_PATH, so
+    # without this every test that renames, archives or backfills a sandbox
+    # meeting would write the id map of REAL meeting names into the checkout
+    monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", d / "meetings_index.json")
     monkeypatch.setattr(config, "CALIBRATION_LOG", d / "calibration.jsonl")
     monkeypatch.setattr(config, "WORK_DIR", d / "work")
     monkeypatch.setattr(config, "MEETINGS_DIR", d / "meetings")

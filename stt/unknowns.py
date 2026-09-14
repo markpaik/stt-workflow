@@ -53,17 +53,50 @@ def save(reg: dict):
     _atomic_write(_path(), json.dumps(reg, indent=2))
 
 
+def aligned_meeting_ids(meta: dict) -> list:
+    """`meta["meeting_ids"]` padded (or truncated) to exactly len(meetings).
+
+    Mirrors identify.aligned_source_ids: an entry written before meeting ids
+    existed has no list at all and reads as "no id for any meeting", which is
+    precisely the base-only behaviour it had before."""
+    mts = meta.get("meetings", []) or []
+    ids = list(meta.get("meeting_ids") or [])[:len(mts)]
+    return ids + [None] * (len(mts) - len(ids))
+
+
+def resolved_meetings(meta: dict) -> list:
+    """This unknown's meetings as LIVE basenames where that is knowable: the
+    stored name while it exists, else whatever the id resolves to now. A
+    rename that outran the chase below no longer kills the ▶ clip."""
+    out = []
+    for base, mid in zip(meta.get("meetings", []) or [], aligned_meeting_ids(meta)):
+        if mid and base and not config.meeting_file(base, ".json").exists():
+            base = config.base_of(mid) or base
+        out.append(base)
+    return out
+
+
 def rename_meeting_refs(old_base: str, new_base: str) -> int:
     """A meeting rename must follow into this registry: each unknown's
     `meetings` list drives its ▶ voice playback and 'heard in N meetings'
     line, so a stale name means a dead play button. Returns how many
-    speakers were touched."""
+    speakers were touched.
+
+    Still best-effort, and no longer the only line of defence: the aligned
+    `meeting_ids` survive this failing, and resolved_meetings reads through
+    them."""
     n = 0
+    new_id = config.id_of(new_base)
     with lock_registry():
         reg = load()
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             if old_base in mts:
+                ids = aligned_meeting_ids(meta)
+                # heal while we are here: a ref with no id yet picks up the id
+                # of the meeting it just followed
+                meta["meeting_ids"] = [new_id if (m == old_base and i is None) else i
+                                       for m, i in zip(mts, ids)]
                 meta["meetings"] = [new_base if m == old_base else m for m in mts]
                 n += 1
         if n:
@@ -89,6 +122,8 @@ def forget_meeting_refs(base: str) -> int:
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             if base in mts:
+                ids = aligned_meeting_ids(meta)
+                meta["meeting_ids"] = [i for m, i in zip(mts, ids) if m != base]
                 meta["meetings"] = [m for m in mts if m != base]
                 n += 1
         if n:
@@ -220,6 +255,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
     given, a cluster below the minting floor (UNKNOWN_MIN_TALK_SECS /
     UNKNOWN_MIN_RELIABLE_TURNS) never registers a NEW unknown — noise floors
     are not people. Matching an EXISTING unknown stays unrestricted."""
+    meeting_id = config.id_of(meeting)   # resolved once, outside the cluster loop
     with lock_registry():
         reg = load()
         out = {}
@@ -284,7 +320,9 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                     s = _samples(reg, uid)
                     arr = np.vstack([s, _l2(v)])[-MAX_SAMPLES:]
                     np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"], arr)
+                    ids = aligned_meeting_ids(reg["speakers"][uid])
                     mts.append(meeting)
+                    reg["speakers"][uid]["meeting_ids"] = ids + [meeting_id]
                 if reg["speakers"][uid].get("dropped"):
                     # the tombstone did its job: recognized, suppressed — the
                     # cluster keeps its transcript-local label and never
@@ -333,6 +371,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 fname = f"{uid}.npy"
                 np.save(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
+                                        "meeting_ids": [meeting_id],
                                         "created": datetime.now().isoformat(timespec="seconds")}
             out[label] = uid
         # prune ghosts: an unknown whose ONLY evidence is THIS meeting, whose
@@ -446,9 +485,13 @@ def merge(uid_src: str, uid_dst: str) -> bool:
             arr = np.vstack([d, s])[-MAX_SAMPLES:]
             np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)
         mts = reg["speakers"][uid_dst].setdefault("meetings", [])
-        for m in reg["speakers"][uid_src].get("meetings", []):
+        ids = aligned_meeting_ids(reg["speakers"][uid_dst])
+        src_ids = aligned_meeting_ids(reg["speakers"][uid_src])
+        for m, i in zip(reg["speakers"][uid_src].get("meetings", []), src_ids):
             if m not in mts:
                 mts.append(m)
+                ids.append(i)
+        reg["speakers"][uid_dst]["meeting_ids"] = ids
         (config.VOICEPRINTS_DIR / reg["speakers"][uid_src]["file"]).unlink(missing_ok=True)
         del reg["speakers"][uid_src]
         save(reg)

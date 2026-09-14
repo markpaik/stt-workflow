@@ -31,7 +31,12 @@ def purge_meeting_dir(path: Path):
     playable clips behind the claim. The scrub is best-effort: the folder is
     already gone, so a registry hiccup must not turn the delete into an error
     (the panel re-derives liveness per poll and hides dead refs anyway)."""
+    # read the id BEFORE the folder goes: it is the only place it is written,
+    # and a stale index entry would resolve a live id to a folder that no
+    # longer exists
+    mid = config.id_of(path.name, path.parent)
     shutil.rmtree(path)
+    config.index_drop(mid)
     try:
         from . import unknowns
         unknowns.forget_meeting_refs(path.name)
@@ -83,10 +88,15 @@ def archive_meeting(base: str) -> dict:
         return {"ok": False,
                 "error": "this meeting is being processed right now — try again in a moment"}
     old_dir = config.meeting_dir(base)
+    mid = config.id_of(base)  # read while the meeting is still live
     with review.lock_meeting(base):  # serialize with relabel/review/rename
         if not old_dir.is_dir():
             return {"ok": False, "error": f"no meeting folder for '{base}'"}
         new_base = _move(base, old_dir, config.archive_dir())
+    # the index maps LIVE meetings only: an archived one is not a relabel
+    # target, and leaving it in would resolve its id to a folder the live
+    # store no longer holds. restore_meeting puts it back.
+    config.index_drop(mid)
     manifest.retarget(old_dir, config.archive_dir() / new_base, base, new_base)
     if new_base != base:
         # a collision renamed the folder, so every registry that keys meetings
@@ -117,6 +127,10 @@ def restore_meeting(base: str) -> dict:
     src_dir = config.archive_dir() / base
     with review.lock_meeting(base):
         new_base = _move(base, src_dir, config.meetings_dir())
+    # live again: the id resolves to this folder from here on (the meeting
+    # kept its id through the archive — that is the whole point of stamping
+    # the archive in the backfill)
+    config.index_set(config.id_of(new_base), new_base)
     manifest.retarget(src_dir, config.meeting_dir(new_base), base, new_base)
     if new_base != base:
         from . import dupes, identify, unknowns

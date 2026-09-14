@@ -477,6 +477,16 @@ def main():
         n = config.migrate_flat_meetings(dest)
         if n:
             print(f"migrated {n} file(s) into per-meeting folders")
+        # stable meeting ids: stamp anything that predates them, rebuild the id
+        # index, sweep orphan locks. Idempotent and cheap once every meeting
+        # carries one. The archive is stamped too so a restore keeps its id.
+        try:
+            k = config.backfill_meeting_ids(dest)
+            k += config.backfill_meeting_ids(config.archive_dir(dest))
+            if k:
+                print(f"stamped {k} meeting(s) with a stable id")
+        except Exception as e:
+            print(f"meeting-id backfill skipped ({e})", file=sys.stderr)
         warn_if_registry_lost(dest)
 
     if not args.dry_run and not args.no_diarize and not config.resolve_hf_token():

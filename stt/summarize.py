@@ -431,6 +431,12 @@ def _move_folder(base: str, new_base: str) -> list:
             _write_json(j, d)
         except (OSError, ValueError):
             pass
+    # the one reference that is NOT best-effort chasing: the id index. The
+    # chase above follows the NAME into each store; this records where the
+    # meeting actually went, so anything holding the id (a queued relabel, a
+    # registry source, a lock) resolves to the new folder even when a chase
+    # above failed. Last, because it must describe the move that happened.
+    config.index_set(config.id_of(new_base), new_base)
     return renamed
 
 

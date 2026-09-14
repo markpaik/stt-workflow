@@ -183,6 +183,44 @@ Shipped 2026-09-14.
 - Tests: rename with a running relabel job still relabels the meeting once;
   registry references survive two renames; the index rebuilds from a scan.
 
+Shipped 2026-09-14. Two design choices are worth stating, because both were
+the cheaper of two honest options:
+
+- **Parallel id lists, not a new entry shape.** The plan said registries store
+  `{id, base}` pairs. They store `source_ids` beside `sources`
+  (`voiceprints/registry.json`) and `meeting_ids` beside `meetings`
+  (`voiceprints/unknowns.json`), index-aligned, written through one padding
+  helper per file (`identify.aligned_source_ids`, `unknowns.aligned_meeting_ids`).
+  Every registry on disk carries plain-string lists and several readers index
+  straight into them, so a pair shape would have had to be migrated everywhere
+  at once; a parallel list is additive, and an entry with no id list reads
+  exactly as it did — base-only. Readers that turn a reference into a path or a
+  clip (`review.find_voice_clips`, the panel's enrolled and unknown lists,
+  `/api/voice_clips`) go through `identify.resolved_sources` /
+  `unknowns.resolved_meetings`, which fall back to `config.base_of(id)` only
+  when the stored base no longer exists. The name-chase stays: it keeps the
+  stored name readable. It is simply no longer the only thing between a rename
+  and a dead ▶ button.
+- **Locks key on the id.** `review.lock_meeting` names its file
+  `config.lock_key(base)` — the id when the meeting has one, the base when it
+  does not. A rename runs UNDER this lock, so the key must not change mid-hold;
+  the id does not change when the folder moves, and a second caller who knows
+  only the new name still queues on the same file. A rename therefore leaves no
+  orphan lock behind, which is what the 262-files-for-101-meetings item below
+  was. `config.prune_lock_files` (run by the backfill, so at every panel start
+  and every batch) removes any lock whose stem is not the live key of a live
+  meeting — including a base-named lock belonging to a meeting that now has an
+  id, since `lock_key` can never ask for that name again. A lock somebody is
+  holding is never unlinked: it is taken non-blocking first.
+
+Also: `meetings_index.json` maps id to base and is rebuilt by a scan whenever a
+lookup misses, so an index deleted or left behind by an out-of-band move heals
+itself. `config.id_of` finds the id in a bounded 64 KB head read, which is why
+the id is written as the FIRST key of the json — a full parse of every
+transcript in the library would make a rebuild cost seconds. The backfill
+preserves every other field, `generated_at` included, so the migration does not
+reload the open meeting page.
+
 ### Phase 4: unknown-voice linkage
 
 - `unknowns.json` `next` becomes the true monotonic counter. Freed numbers
@@ -210,7 +248,9 @@ Shipped 2026-09-14.
 
 ## Open items carried from the audit of 2026-09-13
 
-- 262 lock files under `.locks` against 101 meetings. Phase 3 cleans them.
+- 262 lock files under `.locks` against 101 meetings. Phase 3 cleans them:
+  `config.prune_lock_files` runs at the end of the id backfill, which
+  `start_server` and `run_batch` call at startup.
 - Two PSSP meetings have no `.diar.npz`, so relabel can never update them.
   They need a Redo.
 - Nineteen unnamed clusters score above threshold but under the margin. Phase
