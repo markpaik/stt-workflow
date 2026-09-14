@@ -3048,3 +3048,36 @@ def test_the_dark_token_block_stops_at_its_own_closing_brace():
     tokens = read_tokens(css, r"(?m)^@media\(prefers-color-scheme:dark\)\{:root\{")
     assert tokens == {"a": "#000"}, \
         "the slice must end at :root's brace, not the media query's"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_save_says_how_many_other_meetings_are_updating():
+    """A naming used to answer with a note the panel threw away, and the user
+    watched a spinner for seven minutes with no idea what was happening. The
+    response now carries the target list, and the save says what it did and
+    where. Driven through node against the real tail of npSave."""
+    src = _js_fn("npSave")
+    i = src.index("  // the response says what it did and WHERE")
+    tail = src[i:].rstrip()
+    assert tail.endswith("}")
+    tail = tail[:-1]            # drop npSave's own closing brace
+
+    fixture = "\n".join([
+        "let MP=null,out=[];",
+        "function npToken(){return 'tok';}",
+        "function closeNamePanel(){}",
+        "function refresh(){}",
+        "function mReloadSegs(){}",
+        "function toast(m){out.push(m);}",
+        "function tail(r,meeting,tok){" + tail + "}",
+        "tail({ok:true,applied:'A',targets:['B','C','D']},'A','tok');",
+        "tail({ok:true,applied:'A',targets:[]},'A','tok');",
+        "tail({ok:true},'A','tok');",
+        "console.log(JSON.stringify(out));",
+    ])
+    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == [
+        "Named here. Updating 3 other meetings.",
+        "Named here.",
+    ], "an empty list says only that this meeting is done; no list says nothing"

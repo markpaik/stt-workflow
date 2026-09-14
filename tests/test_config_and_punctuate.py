@@ -89,3 +89,120 @@ def test_punctuator_unk_repaired_from_original():
     # untouched when counts mismatch (safety check rejects later anyway)
     assert punctuate._repair_unk("<unk> b c", "one two") == "<unk> b c"
     assert punctuate._repair_unk("clean text", norm) == "clean text"
+
+
+# ---------------------------------------------------------------------------
+# Batched restoration. Measured 2026-09-13: 4.0s of a 7.1s relabel was the
+# punctuator reloading its SentencePiece tokenizer once per infer() call, 273
+# times. One call over the whole list takes 0.73s. Batching may change how the
+# model is CALLED and nothing about what is allowed through, so these compare
+# the batched result against the per-segment result it replaces.
+# ---------------------------------------------------------------------------
+class _Fake:
+    """Truecases the first word and ends with a period, INDEPENDENTLY per
+    input — so a batch of five behaves exactly like five calls of one, and any
+    difference the test finds is the batching, not the fake."""
+
+    def __init__(self, swap=None, fail_batches=False):
+        self.swap = swap or {}
+        self.fail_batches = fail_batches
+        self.calls = []
+
+    def infer(self, xs):
+        self.calls.append(list(xs))
+        if self.fail_batches and len(xs) > 1:
+            raise RuntimeError("batched inference exploded")
+        out = []
+        for x in xs:
+            toks = [self.swap.get(t, t) for t in x.split()]
+            out.append([" ".join([toks[0].capitalize()] + toks[1:]) + "."])
+        return out
+
+
+_FIVE = ["hello world how are you",
+         "the board meets on tuesday",
+         "we reviewed the attendance data",
+         "",
+         "that is all for today"]
+
+
+def test_batched_punctuation_equals_per_segment_output(sandbox, monkeypatch):
+    monkeypatch.setattr(punctuate, "_model", _Fake())
+    one_by_one = [punctuate.restore(t) for t in _FIVE]
+
+    fake = _Fake()
+    monkeypatch.setattr(punctuate, "_model", fake)
+    segs = [{"text": t} for t in _FIVE]
+    changed = punctuate.restore_segments(segs)
+
+    assert [s["text"] for s in segs] == one_by_one
+    assert changed == 4, "the empty segment is not a change"
+    assert len(fake.calls) == 1, \
+        "the whole meeting must go through the model in ONE call"
+    assert fake.calls[0] == [punctuate._normalize_for_model(t)
+                             for t in _FIVE if t.strip()]
+
+
+def test_batched_word_change_only_costs_its_own_segment(sandbox, monkeypatch):
+    """The word-identity check is PER SEGMENT. A batch where the model
+    substituted a word in one line must keep that line's original text and
+    still punctuate its neighbours — refusing the whole batch would silently
+    leave a meeting unpunctuated, and accepting it would ship an altered word
+    into a possibly sensitive transcript."""
+    fake = _Fake(swap={"settlement": "disagreement"})
+    monkeypatch.setattr(punctuate, "_model", fake)
+    segs = [{"text": "hello world"},
+            {"text": "yes we agreed to the settlement"},
+            {"text": "how are you"}]
+    changed = punctuate.restore_segments(segs)
+
+    assert segs[1]["text"] == "yes we agreed to the settlement", \
+        "a substituted word must be refused, exactly as in the single path"
+    assert segs[0]["text"] == "Hello world."
+    assert segs[2]["text"] == "How are you."
+    assert changed == 2
+
+
+def test_batched_failure_falls_back_to_the_per_segment_loop(sandbox, monkeypatch):
+    """Fails open, then fails SLOW: a batched call that raises must not leave
+    every segment unpunctuated when the one-at-a-time path still works."""
+    fake = _Fake(fail_batches=True)
+    monkeypatch.setattr(punctuate, "_model", fake)
+    segs = [{"text": "hello world"}, {"text": "how are you"}]
+    changed = punctuate.restore_segments(segs)
+
+    assert changed == 2
+    assert [s["text"] for s in segs] == ["Hello world.", "How are you."]
+    assert len(fake.calls) == 3, "one batched attempt, then one call per segment"
+
+
+def test_batched_result_of_the_wrong_length_is_refused(sandbox, monkeypatch):
+    """Zipping a short result list onto the segments would land one line's text
+    on another speaker's line. That is worse than no punctuation."""
+    class Short:
+        def infer(self, xs):
+            return [["Hello world."]]
+    monkeypatch.setattr(punctuate, "_model", Short())
+    segs = [{"text": "hello world"}, {"text": "how are you"}]
+    punctuate.restore_segments(segs)
+    # the fallback loop re-ran each segment ALONE, where a 1-long result is the
+    # right shape: segment 1 punctuates, segment 2's word-identity check refuses
+    # the first segment's text and keeps its own. Neither line got the other's.
+    assert [s["text"] for s in segs] == ["Hello world.", "how are you"]
+
+
+def test_offline_gate_needs_both_cached_files(sandbox, monkeypatch):
+    """HF_HUB_OFFLINE is set only when the model is provably on disk: setting
+    it blind would turn a first run into a permanent failure."""
+    root = sandbox / "hfcache"
+    monkeypatch.setenv("HF_HUB_CACHE", str(root))
+    assert punctuate._model_files_cached() is False
+
+    snap = (root / ("models--" + punctuate._HF_REPO.replace("/", "--"))
+            / "snapshots" / "abc123")
+    snap.mkdir(parents=True)
+    (snap / punctuate._SPE_FILENAME).write_bytes(b"x")
+    assert punctuate._model_files_cached() is False, \
+        "one of the two files is not enough"
+    (snap / punctuate._ONNX_FILENAME).write_bytes(b"x")
+    assert punctuate._model_files_cached() is True

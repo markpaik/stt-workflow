@@ -3442,6 +3442,14 @@ async function npSave(force,local){
     if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
     return;
   }
+  // the response says what it did and WHERE: this meeting is already relabeled,
+  // and the naming resolved to a short list of other meetings it can touch
+  // instead of the whole library. Say so, so a save no longer reads as a
+  // silent seven-minute wait.
+  if(r.targets){
+    const n=r.targets.length;
+    toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
+  }
   const onIt=MP&&MP.base===meeting;
   // close ONLY if the panel still shows the voice this save acted on. A slow
   // request used to force-close whatever panel happened to be open when it

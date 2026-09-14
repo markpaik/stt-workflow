@@ -598,3 +598,117 @@ def test_a_dismissed_cluster_cannot_be_named_locally(sandbox):
     # restore it, and naming works again
     assert summarize.restore_voice("Mtg", "SPEAKER_01")["ok"]
     assert summarize.set_local_name("Mtg", "SPEAKER_01", "Jordan Lee")["ok"]
+
+
+def test_a_rename_mid_pass_is_processed_under_its_new_name(sandbox, monkeypatch):
+    """A full pass used to snapshot every basename at the start. Renaming a
+    meeting while the pass ran therefore meant the pass reached a name that no
+    longer existed ("missing .json") and never saw the new one — the meeting
+    kept its stale speaker labels until some later pass happened to run. The
+    pass now re-lists before each step, so the renamed meeting is picked up in
+    THIS pass, under its new name, exactly once."""
+    import os
+
+    import relabel
+
+    for base in ("A Mtg", "B Mtg", "C Mtg"):
+        _seed_meeting(base)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    touched = []
+
+    def renaming_one(base, **kw):
+        touched.append(base)
+        if base == "A Mtg":
+            # a rename lands while the pass is running: folder AND files carry
+            # the meeting name, exactly as summarize.rename_meeting moves them
+            old, new = config.meeting_dir("B Mtg"), config.meeting_dir("Z Mtg")
+            os.rename(old, new)
+            for f in list(new.iterdir()):
+                os.rename(f, new / f.name.replace("B Mtg", "Z Mtg", 1))
+        return True
+
+    monkeypatch.setattr(relabel, "relabel_one", renaming_one)
+    relabel.relabel_all()
+
+    assert "Z Mtg" in touched, "the renamed meeting must be processed under its new name"
+    assert "B Mtg" not in touched, "the name that no longer exists is never attempted"
+    assert sorted(touched) == ["A Mtg", "C Mtg", "Z Mtg"], \
+        "every meeting exactly once, the renamed one included"
+
+
+def test_a_raising_meeting_cannot_spin_the_re_listing_pass(sandbox, monkeypatch):
+    """The pass loops until nothing is left to do. A meeting marked done only
+    on SUCCESS would be retried forever the moment one meeting raises."""
+    import relabel
+
+    for base in ("A Mtg", "B Mtg"):
+        _seed_meeting(base)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    touched = []
+
+    def boom(base, **kw):
+        touched.append(base)
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(relabel, "relabel_one", boom)
+    relabel.relabel_all()
+    assert sorted(touched) == ["A Mtg", "B Mtg"]
+
+
+def test_bases_from_reads_one_name_per_line_in_order(sandbox, monkeypatch):
+    """The panel's targeted pass: a file of basenames, because a merge can
+    legitimately target most of the library and meeting names are long."""
+    import sys as _sys
+
+    import relabel
+
+    for base in ("A Mtg", "B Mtg", "C Mtg"):
+        _seed_meeting(base)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    touched = []
+    monkeypatch.setattr(relabel, "relabel_one",
+                        lambda base, **kw: touched.append(base) or True)
+
+    f = config.PROJECT_DIR / "targets.txt"
+    f.write_text("C Mtg\n\nA Mtg\nGone Mtg\n")
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "--bases-from", str(f)])
+    assert relabel.main() == 0
+    assert touched == ["C Mtg", "A Mtg", "Gone Mtg"], \
+        "in file order, blank lines dropped; a missing meeting is skipped by relabel_one"
+
+    # an empty list is a legitimate answer, not a usage error
+    touched.clear()
+    f.write_text("\n \n")
+    assert relabel.main() == 0
+    assert touched == []
+
+
+def test_bases_from_still_queues_a_follow_up_when_another_pass_holds_the_lock(
+        sandbox, monkeypatch):
+    """The non-blocking lock and the pending flag are unchanged by targeting:
+    a targeted pass that loses the lock must still leave the follow-up marker
+    the panel kicks."""
+    import fcntl
+    import sys as _sys
+
+    import relabel
+    from stt import control
+
+    _seed_meeting("A Mtg")
+    f = config.PROJECT_DIR / "targets.txt"
+    f.write_text("A Mtg\n")
+    touched = []
+    monkeypatch.setattr(relabel, "relabel_one",
+                        lambda base, **kw: touched.append(base) or True)
+
+    holder = open(control.relabel_lock_path(), "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        monkeypatch.setattr(_sys, "argv", ["relabel.py", "--bases-from", str(f)])
+        assert relabel.main() == 0
+        assert touched == []
+        assert (config.PROJECT_DIR / relabel.PENDING_FLAG_NAME).exists()
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()

@@ -55,6 +55,30 @@ def _make_meeting(base):
     (mfile(base, ".txt")).write_text("stub")
 
 
+def _make_cached_meeting(base, cents, speakers=None):
+    """A meeting the targeted relabel can actually reach: a roster plus the
+    .diar.npz holding its cluster centroids."""
+    from stt import diarcache
+    (mfile(base, ".json")).write_text(json.dumps({
+        "source_file": f"{base}.m4a", "duration_sec": 10.0, "strict": False,
+        "speakers": speakers or [{"id": k, "name": None, "display": f"Speaker {i+1}"}
+                                 for i, k in enumerate(cents)],
+        "segments": [], "words": []}))
+    (mfile(base, ".txt")).write_text("stub")
+    diarcache.save(mfile(base, ".diar.npz"),
+                   [{"start": 0.0, "end": 5.0, "cluster": k} for k in cents],
+                   [None] * len(cents), cents)
+
+
+def _spawned_bases(cmd):
+    """The meeting list a spawned `relabel --bases-from FILE` carries."""
+    cmd = [str(a) for a in cmd]
+    assert "--all" not in cmd, f"a targeted pass must not spawn --all: {cmd}"
+    assert "--bases-from" in cmd, f"not a targeted relabel: {cmd}"
+    path = Path(cmd[cmd.index("--bases-from") + 1])
+    return [ln for ln in path.read_text().splitlines() if ln.strip()]
+
+
 def test_kick_jobs_suppressed_right_after_a_stop(sandbox, monkeypatch):
     """The panel's idle self-heal must not respawn a job in the window right
     after a Stop — a killed run may have re-queued it, and re-kicking it is the
@@ -76,24 +100,33 @@ def test_kick_jobs_suppressed_right_after_a_stop(sandbox, monkeypatch):
     assert len(spawned) == 1, "once the stop window clears, the queue drains normally"
 
 
-def test_remove_sample_re_identifies_all_meetings(running_server, monkeypatch):
+def test_remove_sample_re_identifies_the_meetings_it_can_affect(running_server,
+                                                                monkeypatch):
     """Removing a sample changes who a profile matches, so it must re-run
     identification like every other registry edit — otherwise a misattributed
     voice stays wrong in past transcripts until some unrelated relabel. A prior
-    version skipped the relabel spawn only for this one action."""
+    version skipped the relabel spawn only for this one action. It now names
+    the meetings it can affect instead of walking the whole library."""
     import numpy as np
 
     from stt import identify
-    identify.enroll("Alex Rivera", np.ones(8), source="M1")
-    identify.enroll("Alex Rivera", np.arange(1, 9, dtype=float), source="M2")
+    keep = np.ones(8) / np.sqrt(8)
+    drop = np.arange(1, 9, dtype=float)
+    identify.enroll("Alex Rivera", drop, source="M1")
+    identify.enroll("Alex Rivera", keep, source="M2")
+    _make_cached_meeting("Hers Mtg", {"SPEAKER_00": keep})
+    _make_cached_meeting("Unrelated Mtg", {"SPEAKER_00": np.array(
+        [1.0, -1, 1, -1, 1, -1, 1, -1]) / np.sqrt(8)})
     spawned = []
     monkeypatch.setattr(srv, "_spawn", lambda cmd: spawned.append(list(map(str, cmd))))
 
     status, body = _post(running_server, "/api/remove_sample",
                          {"name": "Alex Rivera", "index": 0})
     assert body["ok"]
-    assert any("relabel" in " ".join(c) for c in spawned), \
+    assert len(spawned) == 1, \
         "removing a sample must spawn a relabel to re-identify meetings"
+    assert _spawned_bases(spawned[0]) == ["Hers Mtg"]
+    assert body["targets"] == ["Hers Mtg"] and body["applied"] is None
 
 
 # ---------- _known_base ----------
@@ -291,7 +324,10 @@ def test_name_endpoint_requires_confirm_for_a_suspect_sample(running_server, mon
                           "name": "Priya Shah", "confirm": True})
     assert status == 200 and body["ok"] is True
     assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
-    assert spawned, "a confirmed enrollment must still spawn the relabel"
+    # the meeting in the request is the ONLY one this naming can touch, and it
+    # was relabeled inside the request — so there is nothing left to spawn
+    assert body["applied"] == "Pair Mtg" and body["targets"] == []
+    assert spawned == [], "nothing to spawn once the one target is applied here"
 
 
 def test_name_endpoint_is_honest_when_the_uid_is_already_gone(running_server, monkeypatch):
@@ -316,14 +352,19 @@ def test_name_endpoint_is_honest_when_the_uid_is_already_gone(running_server, mo
     assert spawned == [], "a failed save must not spawn a relabel"
 
     # and the same call on a REAL unknown still succeeds, still promises (and
-    # starts) the relabel that applies the name to every past transcript
+    # starts) the relabel that applies the name to the transcripts it can reach
     v = np.random.default_rng(11).normal(size=256)
+    _make_cached_meeting("Some Mtg", {"S0": v})
+    _make_cached_meeting("Other Mtg", {"S0": np.random.default_rng(12).normal(size=256)})
     uid = unknowns.assign({"S0": v}, {"S0": None}, "Some Mtg")["S0"]
     status, body = _post(running_server, "/api/name",
                          {"uid": uid, "name": "Priya Shah"})
     assert status == 200 and body["ok"] is True
-    assert body["note"] == "relabeling all meetings in background"
-    assert len(spawned) == 1 and "relabel" in spawned[0]
+    assert body["note"] == "relabeling the meetings this voice appears in"
+    assert len(spawned) == 1
+    assert _spawned_bases(spawned[0]) == ["Some Mtg"], \
+        "the meetings that voice was heard in, not the whole library"
+    assert body["targets"] == ["Some Mtg"]
     assert "Priya Shah" in identify.load_registry()
 
     # naming it a SECOND time is the stale-chip case for real: the uid is gone

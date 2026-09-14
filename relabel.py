@@ -205,6 +205,35 @@ def all_bases():
             if config.meeting_file(b, ".diar.npz").exists()]
 
 
+def _safe_one(base, strict=None, allowed_names=None):
+    """relabel_one with the per-meeting failure boundary every pass wants: one
+    unreadable meeting must never abandon the rest of the library."""
+    try:
+        relabel_one(base, strict=strict, allowed_names=allowed_names)
+    except Exception as e:
+        print(f"  FAILED {base}: {e}", file=sys.stderr)
+
+
+def _pass_over_everything(strict=None, allowed_names=None):
+    """Every cached meeting, RE-LISTED before each step.
+
+    A pass that snapshots basenames at the start skips any meeting renamed while
+    it runs: the old name is gone, so relabel_one prints "missing .json", and the
+    meeting keeps its stale speaker labels until some later pass. Re-listing
+    means the renamed meeting is picked up under its NEW name in the same pass,
+    and `done` (which holds the names actually processed) keeps it from being
+    done twice. A meeting is marked done BEFORE the attempt, so a raising
+    meeting cannot spin the loop forever."""
+    done = set()
+    while True:
+        todo = [b for b in all_bases() if b not in done]
+        if not todo:
+            break
+        base = todo[0]
+        done.add(base)
+        _safe_one(base, strict=strict, allowed_names=allowed_names)
+
+
 def relabel_all():
     """Relabel every cached meeting. Caller must already hold the batch lock
     (run_batch calls this at the end of a run to apply names given mid-run).
@@ -220,11 +249,7 @@ def relabel_all():
             # the marker rides INSIDE the lock: it says "a pass is running", and
             # the panel's "applying names" pill reads it (see stt.control)
             with control.relabel_marker():
-                for base in all_bases():
-                    try:
-                        relabel_one(base)
-                    except Exception as e:
-                        print(f"  FAILED {base}: {e}", file=sys.stderr)
+                _pass_over_everything()
         finally:
             fcntl.flock(lockfd, fcntl.LOCK_UN)
 
@@ -234,6 +259,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("meetings", nargs="*", help="meeting basenames")
     ap.add_argument("--all", action="store_true", help="relabel every cached meeting")
+    ap.add_argument("--bases-from", metavar="FILE",
+                    help="read meeting basenames from FILE, one per line "
+                         "(for target lists too long for a command line)")
     ap.add_argument("--strict", action="store_true",
                     help="no smoothing/open-set reassignment; flag instead")
     ap.add_argument("--speakers", help="comma-separated attendee names to allow")
@@ -263,23 +291,39 @@ def main():
         # mid-pass never applied. (A single-meeting relabel must not consume
         # a queued relabel-all either way, hence inside `if args.all`.)
         (config.PROJECT_DIR / PENDING_FLAG_NAME).unlink(missing_ok=True)
-        bases = all_bases()
+        # None means "the whole library, re-listed as we go" — see
+        # _pass_over_everything. A snapshot here would skip a mid-pass rename.
+        bases = None
+    elif args.bases_from:
+        # a targeted pass: the panel computed which meetings this identity
+        # change can touch and wrote them here. An empty or missing file is a
+        # no-op, not a usage error — nothing to do is a legitimate answer.
+        try:
+            bases = [ln.strip() for ln in
+                     Path(args.bases_from).read_text().splitlines() if ln.strip()]
+        except OSError as e:
+            print(f"cannot read {args.bases_from}: {e}", file=sys.stderr)
+            return 0
+        if not bases:
+            return 0
     else:
         bases = args.meetings
-    if not bases:
-        raise SystemExit("pass one or more meeting basenames, or --all")
+        if not bases:
+            raise SystemExit("pass one or more meeting basenames, "
+                             "--bases-from FILE, or --all")
 
     allowed = [s.strip() for s in args.speakers.split(",")] if args.speakers else None
+    strict = args.strict or None
     # marker up for the whole pass (single meeting or --all), so the panel can
     # say "applying names" for exactly as long as this is really happening. Only
     # a pass that WON the lock publishes it: the queue-a-follow-up path above
     # returned before this and must not claim to be running.
     with control.relabel_marker():
-        for base in bases:
-            try:
-                relabel_one(base, strict=args.strict or None, allowed_names=allowed)
-            except Exception as e:
-                print(f"  FAILED {base}: {e}", file=sys.stderr)
+        if bases is None:
+            _pass_over_everything(strict=strict, allowed_names=allowed)
+        else:
+            for base in bases:
+                _safe_one(base, strict=strict, allowed_names=allowed)
     return 0
 
 

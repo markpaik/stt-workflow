@@ -1314,6 +1314,56 @@ def _spawn(args):
                          stdout=log, stderr=log, start_new_session=True)
 
 
+def _relabel_targets(vector=None, names=(), uids=(), first=None) -> dict:
+    """Apply an identity change to exactly the meetings it can affect.
+
+    Every naming, rename, merge and sample edit used to spawn `relabel --all`:
+    99 meetings at ~7s each, and the meeting the user was looking at was not
+    done first. stt.centroids.targets resolves the change to a short list; the
+    meeting in the request (`first`) relabels HERE, inside the response, so the
+    panel can reload against the new roster on its very next poll, and the rest
+    go to one spawned `relabel --bases-from` pass.
+
+    Returns {"applied": the base done synchronously or None,
+             "targets": the bases handed to the spawned pass}."""
+    try:
+        from stt import centroids
+        rest = list(centroids.targets(vector=vector, names=names, uids=uids))
+    except Exception:
+        # the index is a cache, never the source of truth: if it cannot be
+        # built, the change still has to land everywhere it might matter, so
+        # fall back to the full pass this helper replaced -- never to silence
+        # after a save that SUCCEEDED
+        if first and _relabel_now(first):
+            _spawn([str(RUN_SH), "relabel", "--all"])
+            return {"applied": first, "targets": ["--all"]}
+        _spawn([str(RUN_SH), "relabel", "--all"])
+        return {"applied": None, "targets": ["--all"]}
+    applied = None
+    if first:
+        # the meeting in the request is ALWAYS done, index or no index: the
+        # user is looking at it, and its own cluster is the one that changed
+        if first in rest:
+            rest.remove(first)
+        if _relabel_now(first):
+            applied = first
+        else:
+            # another pass owns the relabel lock: this meeting joins the
+            # spawned list instead of blocking the request behind it
+            rest.insert(0, first)
+    if rest:
+        d = config.PROJECT_DIR / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        # a file, not argv: a rename or a merge can legitimately target most of
+        # the library, and meeting names are long
+        fd, path = tempfile.mkstemp(prefix="relabel_targets_", suffix=".txt",
+                                    dir=str(d))
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(rest) + "\n")
+        _spawn([str(RUN_SH), "relabel", "--bases-from", path])
+    return {"applied": applied, "targets": rest}
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -1809,6 +1859,9 @@ class Handler(BaseHTTPRequestHandler):
                     msg += ". It may be the wrong person. Confirm to save anyway."
                     return {"ok": False, "warn": "suspect_sample",
                             "need_confirm": True, "error": msg, **w}
+                # which meetings this naming can touch. Each branch below fills
+                # in what it knows before falling through to the shared tail.
+                tgt = {"vector": None, "names": [name], "uids": (), "first": None}
                 if b.get("uid"):
                     # the uid is GONE (already named, merged, or forgotten —
                     # a stale legend chip is the usual way this arrives). Say
@@ -1838,6 +1891,12 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": "Could not save this voice. It may "
                                              "have been renamed already."})
                         return
+                    # promote() RETIRES the uid, so its meetings list is gone by
+                    # now. The samples it carried are this person's voiceprint
+                    # as of this instant, and they came from exactly those
+                    # meetings' clusters — so the stack finds them all by score.
+                    tgt["vector"] = identify.load_voiceprints().get(name)
+                    tgt["uids"] = [b["uid"]]
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
@@ -1922,11 +1981,17 @@ class Handler(BaseHTTPRequestHandler):
                             self._json(_warn_payload(w))
                             return
                     identify.enroll(name, cent_emb[b["speaker"]], source=b["meeting"])
+                    # the cluster just enrolled, and the meeting it came from:
+                    # that meeting relabels inside this request, so the open
+                    # page stops showing "Voice 1" on its very next poll.
+                    tgt["vector"] = cent_emb[b["speaker"]]
+                    tgt["first"] = b["meeting"]
                 # reaching here IS the success: every failure above answered with
                 # an `error` and NO note and returned. The note promises a
                 # relabel, so only a save that actually spawns one may carry it.
-                _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": True, "note": "relabeling all meetings in background"})
+                res = _relabel_targets(**tgt)
+                self._json({"ok": True, "note": "relabeling the meetings this voice appears in",
+                            **res})
             elif u.path == "/api/forget":
                 self._json({"ok": unknowns.drop(b["uid"])})
             elif u.path == "/api/dismiss_voice":
@@ -1942,14 +2007,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(fn(b["base"], b.get("speaker", "")))
             elif u.path == "/api/rename_speaker":
                 ok = identify.rename_person(b["name"], b["new"])
-                if ok:
-                    _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": ok})
+                if not ok:
+                    self._json({"ok": ok})
+                    return
+                # BOTH names: the meetings carrying the old label are the ones
+                # that must be rewritten, and any already carrying the new one
+                # (a rename onto an existing person) has to agree with them.
+                self._json({"ok": ok, **_relabel_targets(
+                    names=[b["name"], b["new"]],
+                    vector=identify.load_voiceprints().get(b["new"]))})
             elif u.path == "/api/remove_speaker":
                 ok = identify.remove_person(b["name"])
-                if ok:
-                    _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": ok})
+                if not ok:
+                    self._json({"ok": ok})
+                    return
+                # the voiceprint is gone, so only the meetings that already
+                # carry the name can change — no vector left to score with
+                self._json({"ok": ok, **_relabel_targets(names=[b["name"]])})
             elif u.path == "/api/merge_speakers":
                 # src/dst are "uid:U003" or "name:Jordan"
                 st_, sv = b["src"].split(":", 1)
@@ -1962,9 +2036,20 @@ class Handler(BaseHTTPRequestHandler):
                     ok = identify.merge_people(sv, dv)
                 else:
                     ok = False  # merging a named person INTO an unknown is nonsense
-                if ok:
-                    _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": ok})
+                if not ok:
+                    self._json({"ok": ok})
+                    return
+                # both sides of the merge, by whichever handle each one has.
+                # A retired src uid resolves to nothing (merge folded its
+                # meetings into dst, promote consumed it entirely), so the
+                # destination's post-merge samples carry the rest.
+                pairs = ((st_, sv), (dt_, dv))
+                vec = (identify.load_voiceprints().get(dv) if dt_ == "name"
+                       else unknowns.samples_of(dv))
+                self._json({"ok": ok, **_relabel_targets(
+                    vector=vec,
+                    names=[v for t, v in pairs if t == "name"],
+                    uids=[v for t, v in pairs if t == "uid"])})
             elif u.path == "/api/rename":
                 if not self._require_base(b.get("base")):
                     return
@@ -2344,21 +2429,31 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": (r.stderr or "re-transcription failed")[-300:]}, 500)
             elif u.path == "/api/remove_sample":
                 ok = identify.remove_sample(b["name"], int(b["index"]))
-                if ok:
-                    # a removed sample changes who this profile matches — re-run
-                    # identification like every other registry edit, so a
-                    # misattributed voice drops out of past transcripts (and
-                    # resurfaces as an unknown to name) instead of the correction
-                    # only taking effect on the next unrelated relabel
-                    _spawn([str(RUN_SH), "relabel", "--all"])
-                self._json({"ok": ok, "note": "re-identifying all meetings in background"} if ok else
-                           {"ok": False,
-                            "error": "Can't remove the only sample — remove the person instead."})
+                if not ok:
+                    self._json({"ok": False,
+                                "error": "Can't remove the only sample — remove the person instead."})
+                    return
+                # a removed sample changes who this profile matches — re-run
+                # identification like every other registry edit, so a
+                # misattributed voice drops out of past transcripts (and
+                # resurfaces as an unknown to name) instead of the correction
+                # only taking effect on the next unrelated relabel. The
+                # REMAINING stack says who that still is; the name catches the
+                # meetings the removed sample had already labeled.
+                self._json({"ok": ok, "note": "re-identifying all meetings in background",
+                            **_relabel_targets(
+                                names=[b["name"]],
+                                vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/reassign_sample":
                 r = identify.reassign_sample(b["name"], int(b["index"]), b.get("to", ""))
-                if r.get("ok"):
-                    _spawn([str(RUN_SH), "relabel", "--all"])  # moved voice, re-identify
-                self._json(r)
+                if not r.get("ok"):
+                    self._json(r)
+                    return
+                # a moved voice changes BOTH profiles, so both names count
+                to = str(b.get("to") or "").strip()
+                self._json({**r, **_relabel_targets(
+                    names=[n for n in (b["name"], to) if n],
+                    vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/punctuate":
                 _env_file_set({"STT_PUNCTUATE": "1" if b.get("on") else "0"})
                 self._json({"ok": True})
