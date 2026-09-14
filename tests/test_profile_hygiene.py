@@ -209,6 +209,38 @@ def test_assign_margin_rule_still_separates_distinct_strangers(sandbox):
     assert out["S2"] == "U003"
 
 
+def test_assign_gives_an_unknown_to_its_best_match_not_its_first(sandbox):
+    """The U028/U040 regression, from 'Enrollment Data Review Meeting
+    08282026': SPEAKER_08 scores 0.69 against U040 and, in label order,
+    claimed it first. SPEAKER_09 — whose own centroid IS U040's stored
+    sample, cosine 1.000 — then found the id taken, read as a distinct
+    stranger (0.69 to SPEAKER_08, below SPLIT_SIM) and minted an identical
+    copy of U040. Every relabel recreated the twin. Confidence order gives
+    the id to the cluster that actually owns the voice."""
+    owner = _unit(40)                                # U040's stored sample
+    other = _at_cosine(owner, 0.69, seed=41)         # resembles it, not it
+    unknowns.save({"speakers": {
+        "U040": {"file": "U040.npy", "meetings": ["Mtg A"]},
+    }})
+    np.save(config.VOICEPRINTS_DIR / "U040.npy", owner.reshape(1, -1))
+
+    out = unknowns.assign({"SPEAKER_08": other, "SPEAKER_09": owner},
+                          {"SPEAKER_08": None, "SPEAKER_09": None},
+                          "Enrollment Data Review Meeting 08282026",
+                          stats={"SPEAKER_08": GOOD_STATS,
+                                 "SPEAKER_09": GOOD_STATS})
+    assert out["SPEAKER_09"] == "U040", "the owning voice lost its own number"
+    assert out["SPEAKER_08"] != "U040"
+    # and the loser's fresh number is a DIFFERENT voice, not a copy of U040
+    minted = out["SPEAKER_08"]
+    rows = np.load(config.VOICEPRINTS_DIR
+                   / unknowns.load()["speakers"][minted]["file"])
+    rows = rows.reshape(1, -1) if rows.ndim == 1 else rows
+    assert max(_cos(r, owner) for r in rows) < 0.99, \
+        f"{minted} is an identical copy of U040"
+    assert hygiene_errors(config.VOICEPRINTS_DIR) == []
+
+
 # ---------- assign(): minting quality floor ----------
 
 def test_assign_floor_refuses_to_mint_a_thin_cluster(sandbox):

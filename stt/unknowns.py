@@ -225,18 +225,38 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
         out = {}
         claimed = {}  # uid -> centroid of the first cluster that claimed it this pass
         enrolled = load_voiceprints()  # gate below: enrolled voices never mint
+
+        def _scored(v):
+            """This centroid's registry matches, best first, against the
+            registry AS IT STANDS NOW (a mint earlier in this pass counts)."""
+            rows = []
+            for uid in reg["speakers"]:
+                s = _samples(reg, uid)
+                if s is not None:
+                    rows.append((score_against(v, s), uid))
+            rows.sort(reverse=True)
+            return rows
+
+        # Confidence order, not label order: the cluster with the STRONGEST
+        # match claims its unknown first. In label order a weak 0.69 match
+        # took an id before the 1.000 cluster whose own centroid IS that id's
+        # stored sample got its turn; the true owner then read as a distinct
+        # stranger and minted an identical copy of the id it should have
+        # reused (the U028/U040 pair, remade by every relabel). The initial
+        # ordering is measured against the registry as loaded; each cluster
+        # is rescored at its turn. Ties keep label order (stable sort).
+        pending = []
         for label, vec in cent_emb.items():
             if cluster_names.get(label):
                 continue  # named person, not an unknown
             v = np.asarray(vec, float)
             if not np.isfinite(v).all() or np.linalg.norm(v) == 0:
                 continue
-            scored = []
-            for uid in reg["speakers"]:
-                s = _samples(reg, uid)
-                if s is not None:
-                    scored.append((score_against(v, s), uid))
-            scored.sort(reverse=True)
+            initial = _scored(v)
+            pending.append((label, v, initial[0][0] if initial else -1.0))
+        pending.sort(key=lambda p: -p[2])
+        for label, v, _initial_best in pending:
+            scored = _scored(v)
             best, uid = scored[0] if scored else (-1.0, None)
             second = scored[1][0] if len(scored) > 1 else -1.0
             # duplicate guard: at split-fragment similarity the cluster IS the
