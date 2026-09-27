@@ -433,17 +433,26 @@ end, each only when it applies. The eyebrow stays for them even when no row
 is waiting, in either sort and under a search, so neither ever becomes
 unreachable.
 
-- **Name N voices** (N = unknown voices waiting, the tray's count). It opens
-  the meeting holding the unnamed voice with the most talk time (the row's
-  `finish.voice_secs`) straight into its Voices step, the voice with the
-  most talk time first, never the Title or Flags steps. After that meeting's last voice
-  the flow hands off to the next meeting with an unnamed voice, largest
-  first, never one it already visited, and never re-asks a voice it named
-  while that name's relabel is still on its way. At the end it says "No
-  more voices to name." and leaves the strip as it is, starting nothing on
-  its own. With no live meeting to open (every such voice heard only in
-  archived meetings) it opens the naming panel on the first voice, as the
-  tray did.
+- **Name N voices** (revised 2026-09-27 after QA). N is the number of voices
+  the queue will ask about, each once: a registry voice counts once however
+  many meetings heard it (the row's `finish.voice_uids`; naming it once
+  names it everywhere), and a transcript-local voice counts once in its own
+  meeting. Hidden voices count, since their meetings still ask about them. N
+  was the tray's count of visible registry voices, which read "Name 1 voice"
+  on the demo while the queue asked about 4, and the library's 31 against
+  voices in 49 meetings. It opens the meeting holding the unnamed voice with
+  the most talk time (the row's `finish.voice_secs`) straight into its
+  Voices step, the voice with the most talk time first, never the Title or
+  Flags steps. After that meeting's last voice the flow hands off to the
+  next meeting with an unnamed voice, largest first, never one it already
+  visited. It never asks again about a voice it named, dropped, or skipped
+  earlier in the run: a meeting whose every open voice is one of those is
+  passed by, and a skipped voice met again arrives skipped. At the end it
+  says "No more voices to name." and leaves the strip as it is, starting
+  nothing on its own. With no live meeting to open (every such voice heard
+  only in archived meetings) N is the tray's count instead, the button's
+  title says "Heard only in archived meetings: name them one at a time", and
+  it opens the naming panel on the first voice, as the tray did.
 - **Review flags** toggles the flagged-only filter, at any count. While the
   filter is on it reads "Review flags ✕" in the attention pair and is
   pressed (`aria-pressed`).

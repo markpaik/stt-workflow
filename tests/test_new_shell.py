@@ -2175,7 +2175,7 @@ _TRAY_HARNESS = [
     "let S=null;",
     _js_fn("_trayVerb"), _js_fn("_trayRow"),
     _js_oneline("dupeDisarm"), _js_oneline("nowMsg"), _js_oneline("trayCount"),
-    _js_fn("traySig"), _js_fn("nowTrayHTML"),
+    _js_fn("voiceQueueCount"), _js_fn("traySig"), _js_fn("nowTrayHTML"),
     "const tray={innerHTML:'',sig:''};",
     "function draw(s){tray.sig=traySig(s);tray.innerHTML=nowTrayHTML(s);}",
 ]
@@ -4106,7 +4106,8 @@ def _timeline_env(sort="date", search="", flagged="false"):
         re.search(r"(?m)^const NOW_KINDS=.*;$", NEW_JS).group(0),
         "let DUPE_ARMED=false,DUPE_ERR='',NOW_MSG={};",
         _js_fn("_trayVerb"), _js_fn("_trayRow"), _js_oneline("dupeDisarm"),
-        _js_oneline("nowMsg"), _js_oneline("trayCount"), _js_fn("traySig"),
+        _js_oneline("nowMsg"), _js_oneline("trayCount"), _js_fn("voiceQueueCount"),
+        _js_fn("traySig"),
         _js_fn("nowTrayHTML"), _js_fn("drawTimeline"),
         "const html=()=>els['#timeline'].innerHTML;",
         "const order=h=>(h.match(/id=\"sec-\\w+\"|data-id=\"[^\"]*\"|class=\"ghead [^\"]*\"|"
@@ -4312,7 +4313,7 @@ console.log(JSON.stringify(o));
     assert out["start"]["hash"] == "#m/B"
     assert out["start"]["carry"] == {"base": "B", "past": ["title", "flags"], "live": True,
                                      "keep": True, "mode": "voices", "seen": ["B"],
-                                     "resolved": []}
+                                     "resolved": [], "passed": []}
     b = out["b"]
     # the title is open on B, but the queue starts in Voices
     assert b["cur"] == "voices" and b["mode"] == "voices" and b["seen"] == ["B"]
@@ -4343,7 +4344,232 @@ def test_a_named_voice_is_remembered_by_the_queue():
 """)
     assert out == {"resolved": ["U058"], "st": "named"}
     assert "if(v.uid)(FS.resolved||(FS.resolved=[])).push(v.uid);" in _js_fn("fvForget")
-    assert "fsVoiceOrder(fresh,MP.segs,FS.resolved)" in _js_fn("fsSegsLoaded")
+    assert "fsVoiceOrder(fresh,MP.segs,FS.resolved,FS.passed)" in _js_fn("fsSegsLoaded")
+
+
+# ---------------------------------------------------------------------------
+# "Name N voices" promises scope (phase 2 QA, 2026-09-27). N used to be the
+# tray's unknown_voice count, one per visible registry voice, while the queue
+# walked every meeting with an unnamed voice: transcript-local voices and
+# hidden registry voices too. The seeded demo read "Name 1 voice" and asked
+# about 4. N is now voiceQueueCount over the finish records, and the queue
+# asks about each voice once, a skipped one included.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_voice_queue_count_counts_each_voice_once():
+    out = _run_node(_js_fn("voiceQueueCount") + """
+const f=(v,uids)=>({title:true,voices:v,flags:0,done:!v,voice_uids:uids});
+console.log(JSON.stringify({
+  // U7 heard in A and B is one voice; A's second and C's two are local
+  mixed:voiceQueueCount([
+    {id:'A',finish:f(2,['U7'])},{id:'B',finish:f(2,['U7','U12'])},
+    {id:'C',finish:f(2,[])},{id:'D',finish:f(1,['U12'])},
+    {id:'E',finish:f(0,[])},{id:'rec:x',state:'recording'}]),
+  // a record from before voice_uids: every voice counts as local
+  old:voiceQueueCount([{id:'A',finish:{title:true,voices:3,flags:0}}]),
+  none:voiceQueueCount([]),
+  missing:voiceQueueCount(undefined),
+}));
+""")
+    assert out == {"mixed": 5, "old": 3, "none": 0, "missing": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_voice_queue_passes_by_voices_it_already_asked_about():
+    out = _run_node(_js_fn("nextVoiceMeeting") + _js_fn("fsVoiceOrder") + """
+const f=(v,uids,secs)=>({title:true,voices:v,flags:0,done:!v,voice_secs:secs,voice_uids:uids});
+const tl=[{id:'B',finish:f(1,['U7'],40)},{id:'D',finish:f(2,['U7','U12'],30)},
+  {id:'E',finish:f(1,[],5)}];
+const id=r=>r?r.id:null;
+const voices=[{id:'S1',uid:'U7',st:''},{id:'S2',uid:null,st:''},{id:'S3',uid:'U12',st:''}];
+const segs=[{speaker:'S1',start:0,end:30},{speaker:'S2',start:30,end:40},
+  {speaker:'S3',start:40,end:41}];
+console.log(JSON.stringify({
+  first:id(nextVoiceMeeting(tl,[],[])),
+  // B's one voice is U7, already asked about: B is passed by, not opened
+  asked:id(nextVoiceMeeting(tl,[],['U7'])),
+  // D still holds U12
+  one:id(nextVoiceMeeting(tl,['E'],['U7'])),
+  both:id(nextVoiceMeeting(tl,['E'],['U7','U12'])),
+  // skipped earlier in the run: still open here, but already skipped
+  passed:fsVoiceOrder(voices,segs,[],['U7']).map(v=>v.id+':'+v.st),
+  named:fsVoiceOrder(voices,segs,['U7'],['U12']).map(v=>v.id+':'+v.st),
+  untouched:voices.map(v=>v.st),
+}));
+""")
+    assert out["first"] == "B" and out["asked"] == "D"
+    assert out["one"] == "D" and out["both"] is None
+    assert out["passed"] == ["S1:skip", "S2:", "S3:"]
+    assert out["named"] == ["S2:", "S3:skip"]
+    assert out["untouched"] == ["", "", ""], "the page's own voice list is never mutated"
+
+
+def _voice_walk_env():
+    """The voice queue end to end, over a five-meeting library the way the
+    page drives it: fsVoicesStart, then per meeting fsInit and the transcript
+    load (fsSegsLoaded), the user answering each voice the step shows, and
+    the hand-off. walk(policy) returns every voice asked about and the
+    meetings opened. The relabel after a save lands only when `land` is set."""
+    return _voice_queue_env() + "\n".join([
+        _js_fn("voiceQueueCount"), _js_fn("finishActsHTML"), _js_fn("fsVoiceOrder"),
+        _js_fn("fsSegsLoaded"), _js_fn("fsVoicesFrom"), _js_fn("mUnknownUid"),
+        _js_oneline("_fsOpenVoices"), _js_fn("_fsSubstantial"), _js_fn("fsSync"),
+        _js_fn("fsStripSync"), _js_fn("fvSkip"), _js_fn("fvNext"), _js_fn("fsVoiceHTML"),
+        "function mIsMinor(){return false;}function mSyncPP(){}",
+        "let MP=null,NPBUSY=false;",
+        """
+const unk=[{uid:'U007',display:'Speaker 7',meetings:['A','B']},
+  {uid:'U012',display:'Speaker 12',archived:true,meetings:['B','D']}];
+function lib(){
+  // who each meeting heard, unnamed, and for how long
+  return {
+    A:[['S7','Speaker 7',50],['S1','Speaker 1',20]],
+    B:[['S7','Speaker 7',10],['S12','Speaker 12',40]],
+    C:[['S1','Speaker 1',30],['S2','Speaker 2',25]],
+    D:[['S12','Speaker 12',20]],
+    E:[]};
+}
+function rowOf(base,heard){
+  const uids=[...new Set(heard.map(h=>(unk.find(u=>u.display===h[1]
+    &&u.meetings.includes(base))||{}).uid).filter(Boolean))].sort();
+  return {id:base,state:'ready',when:'2026-01-01T00:00:00',finish:{title:true,
+    voices:heard.length,flags:0,done:!heard.length,voice_uids:uids,
+    voice_secs:Math.max(0,...heard.map(h=>h[2]))}};
+}
+function walk(policy,land){
+  const L=lib();
+  const sync=()=>{S.timeline=Object.keys(L).map(b=>rowOf(b,L[b]));
+    S.unknowns=unk.filter(u=>Object.keys(L).some(b=>L[b].some(h=>h[1]===u.display)));};
+  sync();
+  S.tray=[{kind:'unknown_voice',target:'U007'}];
+  const label=finishActsHTML(voiceQueueCount(S.timeline),0,false,false);
+  const asked=[],opened=[];
+  FS=null;FS_CARRY=null;toasts.length=0;location.hash='';
+  fsVoicesStart();
+  for(let guard=0;guard<20&&FS_CARRY;guard++){
+    const base=decodeURIComponent(location.hash.slice(3));
+    opened.push(base);route={view:'meeting',base};
+    MP={base,built:true,spkOpts:L[base].map(h=>({id:h[0],display:h[1],named:false,dismissed:false})),
+      segs:L[base].map(h=>({speaker:h[0],start:0,end:h[2],text:'x'}))};
+    fsInit(base);
+    fsSegsLoaded();
+    while(FS&&!FS_CARRY&&FS.cur==='voices'&&FS.voices[FS.vi]&&!FS.voices[FS.vi].st){
+      const v=FS.voices[FS.vi];
+      asked.push(base+':'+v.display);
+      if(policy==='skip'){fvSkip(false);continue;}
+      // Save and next, as fvSave does on success
+      v.st='named';
+      if(v.uid)FS.resolved.push(v.uid);
+      if(land){
+        for(const b of Object.keys(L))
+          L[b]=L[b].filter(h=>v.uid?h[1]!==v.display:!(b===base&&h[0]===v.id));
+        sync();
+      }
+      fvNext();
+    }
+  }
+  return {label,asked,opened,toasts:toasts.slice(),mode:FS&&FS.mode};
+}
+""",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_name_n_voices_asks_about_exactly_n_voices():
+    """The label's N is the number of voices the queue asks about, whether the
+    user names each one (with the relabel landing at once, or still on its
+    way) or skips each one. Only one voice here is a visible registry voice,
+    so the old label read "Name 1 voice"; the sum of the meetings' counts is
+    7, because Speaker 7 and Speaker 12 are each heard in two meetings."""
+    out = _run_node(_voice_walk_env() + """
+console.log(JSON.stringify({named:walk('name',true),lagging:walk('name',false),
+  skipped:walk('skip',false)}));
+""")
+    every = ["A:Speaker 7", "A:Speaker 1", "B:Speaker 12", "C:Speaker 1", "C:Speaker 2"]
+    for key in ("named", "lagging", "skipped"):
+        w = out[key]
+        assert ">Name 5 voices</button>" in w["label"], key
+        assert w["asked"] == every, key
+        assert len(w["asked"]) == 5, key
+        assert w["toasts"] == ["No more voices to name."], key
+        assert w["mode"] is None, key
+    # named with the relabel landed, D has nothing left and never opens; while
+    # the relabel is still on its way, or after a skip, the queue passes D by
+    # on the uid it already asked about
+    for key in ("named", "lagging", "skipped"):
+        assert out[key]["opened"] == ["A", "B", "C"], key
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_meeting_whose_every_voice_was_skipped_is_not_asked_again():
+    """A stale row can still lead the queue into a meeting whose only open
+    voice the run already skipped. The step never asks about it again: Voices
+    is moved past, the queue ends, and the strip leaves the voice for later."""
+    out = _run_node(_voice_walk_env() + """
+const L=lib();
+S.timeline=Object.keys(L).map(b=>rowOf(b,L[b]));S.unknowns=unk;
+FS_CARRY={base:'D',past:['title','flags'],live:true,keep:true,mode:'voices',
+  seen:['A','B','C','D'],resolved:['U007'],passed:['U012']};
+route={view:'meeting',base:'D'};
+MP={base:'D',built:true,spkOpts:[{id:'S12',display:'Speaker 12',named:false,dismissed:false}],
+  segs:[{speaker:'S12',start:0,end:20,text:'x'}]};
+fsInit('D');fsSegsLoaded();
+console.log(JSON.stringify({cur:FS.cur,mode:FS.mode,past:FS.past,toasts,
+  st:FS.voices.map(v=>v.st),asking:box.innerHTML.includes('Who is'),
+  left:box.innerHTML.includes('Left for later: 1 voice.')}));
+""")
+    assert out["asking"] is False and out["st"] == ["skip"]
+    assert out["mode"] is None and out["toasts"] == ["No more voices to name."]
+    assert out["past"] == ["voices"] and out["left"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_skipped_registry_voice_is_remembered_by_the_queue():
+    out = _run_node(_voices_env() + """
+document.activeElement=body;
+key('s');const first=(FS.passed||[]).slice();
+document.activeElement=body;
+key('s');                        // Speaker 61 is transcript-local: no uid
+console.log(JSON.stringify({first,then:FS.passed,st:FS.voices.map(v=>v.st)}));
+""")
+    assert out == {"first": ["U058"], "then": ["U058"], "st": ["skip", "skip"]}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_eyebrow_counts_the_voices_the_queue_will_ask_about():
+    """drawTimeline labels "Name N voices" with voiceQueueCount, never the
+    tray's count of visible registry voices. With no live meeting holding a
+    voice, the tray's voices open one at a time in the naming panel, and the
+    button's title says so. A row whose voice becomes a registry voice
+    rebuilds the list even though its own voice count did not move."""
+    out = _run_node(_timeline_env() + """
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+const f=(v,uids)=>({title:true,voices:v,flags:0,done:!v,voice_secs:1,voice_uids:uids});
+const voice={kind:'unknown_voice',title:'Speaker 7',detail:'',target:'U007',count:2};
+const tl=[{id:'A',state:'ready',when:recent,date:'2026-09-26',finish:f(2,['U007'])},
+  {id:'B',state:'ready',when:recent,date:'2026-09-25',finish:f(2,['U007','U012'])},
+  {id:'C',state:'ready',when:recent,date:'2026-09-24',finish:f(1,[])}];
+drawTimeline({timeline:tl,tray:[voice]});
+const queue=html(),s0=els['#timeline'].dataset.sig;
+drawTimeline({timeline:[tl[0],tl[1],{...tl[2],finish:f(1,['U007'])}],tray:[voice]});
+const s1=els['#timeline'].dataset.sig,merged=html();
+els['#timeline'].dataset.sig='';
+drawTimeline({timeline:[{id:'D',state:'ready',when:recent,date:'2026-09-24',finish:f(0,[])}],
+  tray:[voice,{...voice,title:'Speaker 9',target:'U009'}]});
+const panel=html();
+console.log(JSON.stringify({queue,panel,merged,moved:s1!==s0}));
+""")
+    # U007 (heard in A and B), U012, A's local voice, and C's: four. Never
+    # the tray's 1 (U007 alone is a visible registry voice) and never the
+    # meetings' sum of 5
+    assert ">Name 4 voices</button>" in out["queue"]
+    assert "the most talk time first" in out["queue"]
+    # C's voice turns out to be Speaker 7 too: one voice fewer to ask about,
+    # though no meeting's own count moved, so the list must still rebuild
+    assert out["moved"] is True and ">Name 3 voices</button>" in out["merged"]
+    assert ">Name 2 voices</button>" in out["panel"]
+    assert "Heard only in archived meetings: name them one at a time" in out["panel"]
+    assert 'onclick="fsVoicesStart()"' in out["panel"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")

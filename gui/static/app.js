@@ -252,7 +252,9 @@ function drawRecOk(s){
  * note, a recorder stall, the duplicate-file sweep, and duplicate transcripts
  * -- and a failed file is its own failed row in Now, dismiss and Retry
  * included. The chronic kinds became the To finish eyebrow's two actions:
- * "Name N voices" (unknown_voice) and "Review flags" (review).
+ * "Name N voices" (N from the timeline's finish records, see voiceQueueCount;
+ * the unknown_voice count only when no live meeting holds a voice) and
+ * "Review flags" (review).
  */
 function _trayVerb(label,onclick,busy){
   return `<button class="btn mini tw-verb" type="button" onclick="${onclick}"${busy?' disabled':''}>${label}</button>`;
@@ -324,7 +326,7 @@ function traySig(s){
   return JSON.stringify(items.filter(t=>NOW_KINDS.has(t.kind))
       .map(t=>[t.kind,t.title,t.detail,t.target,t.count,t.exact]))
     +'|'+(note?note.at+'\x1f'+note.text:'')
-    +'|'+trayCount(s,'unknown_voice')+'|'+trayCount(s,'review')
+    +'|'+voiceQueueCount(s.timeline)+'|'+trayCount(s,'unknown_voice')+'|'+trayCount(s,'review')
     +'|'+DUPE_ARMED+'|'+DUPE_ERR+'|'+JSON.stringify(NOW_MSG);
 }
 function trayCount(s,kind){return (s.tray||[]).filter(t=>t.kind===kind).length;}
@@ -629,11 +631,15 @@ function secHeadHTML(label,id,acts){
 }
 // the To finish eyebrow's two actions, each only when it applies: "Name N
 // voices" walks the unknown voices meeting by meeting (fsVoicesStart), and
-// "Review flags" toggles the flagged-only filter (pressed while it is on)
-function finishActsHTML(nVoices,nFlagged,on){
+// "Review flags" toggles the flagged-only filter (pressed while it is on).
+// `panel`: no live meeting asks about these voices (each was heard only in
+// archived meetings), so the button opens the naming panel on one at a time
+// and its title says so.
+function finishActsHTML(nVoices,nFlagged,on,panel){
   let h='';
   if(nVoices>0)h+=`<button class="secact" type="button" onclick="fsVoicesStart()"`
-    +` title="Name each unknown voice in turn, the most talk time first">`
+    +` title="${panel?'Heard only in archived meetings: name them one at a time'
+      :'Name each unknown voice in turn, the most talk time first'}">`
     +`Name ${nVoices} voice${nVoices!==1?'s':''}</button>`;
   if(nFlagged>0||on)h+=`<button class="secact" type="button" onclick="flaggedToggle()"`
     +` aria-pressed="${on?'true':'false'}"`
@@ -701,7 +707,12 @@ function drawTimeline(s){
   // (it disarms a dupe sweep whose row is gone).
   const tsig=traySig(s);
   const urgent=nowTrayHTML(s);
-  const acts=finishActsHTML(trayCount(s,'unknown_voice'),trayCount(s,'review'),flaggedOnly);
+  // "Name N voices": the voices the queue will ask about, each once. With
+  // none in a live meeting, the tray's unknown voices, which the button opens
+  // one at a time in the naming panel (fsVoicesStart's fallback).
+  const vq=voiceQueueCount(s.timeline);
+  const acts=finishActsHTML(vq||trayCount(s,'unknown_voice'),trayCount(s,'review'),
+    flaggedOnly,!vq);
 
   // empty states (quiet, centered), rendered inside the timeline under Now
   if((all.length===0||rows.length===0)&&!UPLOADS.length){
@@ -3680,7 +3691,7 @@ let FS=null;        // the open meeting's flow: {base,row,fin,past,voices,vi,
                     // cur,live,hand,looks,clip,busy}. live: the flow may take
                     // focus and play the clip on its own (a recent meeting, or
                     // one reached by a hand-off or an advance in this session)
-let FS_CARRY=null;  // {base,past,live,keep,mode?,seen?,resolved?}: a flow
+let FS_CARRY=null;  // {base,past,live,keep,mode?,seen?,resolved?,passed?}: a flow
                     // crossing a route change (the title accept re-stamped the
                     // folder, ] / Next, or the voice queue's hand-off)
 
@@ -3733,24 +3744,50 @@ function nextToFinish(timeline,currentBase,dir,now){
 // yet visited in this run that holds the unnamed voice with the most talk
 // time (finish.voice_secs). Ties keep the timeline's order. Any meeting with
 // an unnamed voice counts, however old: the queue walks the whole library.
-function nextVoiceMeeting(timeline,seen){
-  const skip=new Set(seen||[]);
+// `asked` holds the registry uids this run already named, dropped, or
+// skipped: a meeting whose every open voice is one of them has nothing left
+// to ask (a name's relabel lands a little after the save), so the queue
+// passes it by instead of opening it for nothing.
+function nextVoiceMeeting(timeline,seen,asked){
+  const skip=new Set(seen||[]),done=new Set(asked||[]);
   let best=null;
   for(const r of timeline||[]){
     const f=r&&r.finish;
     if(!f||!(f.voices>0)||skip.has(r.id))continue;
+    if(f.voices-(f.voice_uids||[]).filter(u=>done.has(u)).length<=0)continue;
     if(!best||(f.voice_secs||0)>(best.finish.voice_secs||0))best=r;
   }
   return best;
 }
+// "Name N voices": how many voices the queue will ask about, each once. A
+// registry voice (finish.voice_uids) counts once however many meetings heard
+// it, because naming it names it everywhere and the queue never asks about it
+// again. A transcript-local voice counts once in its own meeting. The sum over
+// meetings (finish.voices) overcounts the first; the tray's unknown_voice
+// count misses the second and every hidden voice.
+function voiceQueueCount(timeline){
+  const uids=new Set();
+  let local=0;
+  for(const r of timeline||[]){
+    const f=r&&r.finish;
+    if(!f||!(f.voices>0))continue;
+    const ids=f.voice_uids||[];
+    for(const u of ids)uids.add(u);
+    local+=Math.max(0,f.voices-ids.length);
+  }
+  return uids.size+local;
+}
 // the queue's order inside one meeting: the most talk time first, and never a
 // voice this run already named or dropped (the relabel that carries a name to
-// the other meetings lands a little after the save)
-function fsVoiceOrder(voices,segs,resolved){
-  const done=new Set(resolved||[]),talk={};
+// the other meetings lands a little after the save). A voice this run skipped
+// in another meeting stays open here but arrives already skipped: the queue
+// asks about each voice once, as many times as "Name N voices" counted it.
+function fsVoiceOrder(voices,segs,resolved,passed){
+  const done=new Set(resolved||[]),again=new Set(passed||[]),talk={};
   for(const g of segs||[])
     talk[g.speaker]=(talk[g.speaker]||0)+Math.max(0,(g.end||0)-(g.start||0));
   return (voices||[]).filter(v=>!(v.uid&&done.has(v.uid)))
+    .map(v=>v.uid&&again.has(v.uid)?Object.assign({},v,{st:'skip'}):v)
     .sort((a,b)=>(talk[b.id]||0)-(talk[a.id]||0));
 }
 
@@ -3859,10 +3896,11 @@ function fsInit(base){
       past:(carry&&carry.past)||[],voices:null,vi:0,cur:null,
       live:!!(carry&&carry.live)||toFinish(row),hand:!!(carry&&carry.live),
       looks:[],clip:null,busy:false,first:true,
-      // the voice queue: its mode, the meetings it has visited, and the uids
-      // it has named or dropped so far
+      // the voice queue: its mode, the meetings it has visited, the uids it
+      // has named or dropped so far, and the uids it has skipped
       mode:(carry&&carry.mode)||null,seen:((carry&&carry.seen)||[]).slice(),
-      resolved:((carry&&carry.resolved)||[]).slice()};
+      resolved:((carry&&carry.resolved)||[]).slice(),
+      passed:((carry&&carry.passed)||[]).slice()};
   fsShow(false);
 }
 // paint the strip and the current step's body; `auto` means the flow moved
@@ -3942,8 +3980,12 @@ function fsSegsLoaded(){
   if(!FS||!MP||FS.base!==MP.base)return;
   const fresh=fsVoicesFrom(MP.spkOpts);
   if(!FS.voices){
-    FS.voices=FS.mode==='voices'?fsVoiceOrder(fresh,MP.segs,FS.resolved):fresh;
+    FS.voices=FS.mode==='voices'?fsVoiceOrder(fresh,MP.segs,FS.resolved,FS.passed):fresh;
     FS.vi=Math.max(0,FS.voices.findIndex(v=>!v.st));
+    // every open voice here was skipped earlier in the run: the queue has
+    // nothing to ask, so Voices is moved past and the hand-off follows
+    if(FS.mode==='voices'&&FS.voices.length&&!FS.voices.some(v=>!v.st)
+       &&!FS.past.includes('voices'))FS.past.push('voices');
   }else{
     const live=new Set(fresh.map(v=>v.id));
     FS.voices.forEach(v=>{if((!v.st||v.st==='skip')&&!live.has(v.id))v.st='gone';});
@@ -3982,21 +4024,22 @@ function fsResume(){
 // them heard only in archived meetings), the tray's old path: the naming
 // panel on the first unknown voice.
 function fsVoicesStart(){
-  const r=nextVoiceMeeting(S&&S.timeline,[]);
-  if(r){fsVoiceCarry(r.id,[],[]);return;}
+  const r=nextVoiceMeeting(S&&S.timeline,[],[]);
+  if(r){fsVoiceCarry(r.id,[],[],[]);return;}
   const u=((S&&S.tray)||[]).find(t=>t.kind==='unknown_voice');
   if(u)openNamePanelByUid(u.target);
 }
-function fsVoiceCarry(base,seen,resolved){
+function fsVoiceCarry(base,seen,resolved,passed){
   FS_CARRY={base,past:['title','flags'],live:true,keep:true,mode:'voices',
-    seen:seen.concat(base),resolved:resolved.slice()};
+    seen:seen.concat(base),resolved:resolved.slice(),passed:passed.slice()};
   location.hash='#m/'+encodeURIComponent(base);
 }
 // the queue's hand-off, after this meeting's last voice
 function fsVoiceGo(){
-  const r=nextVoiceMeeting(S&&S.timeline,FS.seen);
+  const resolved=FS.resolved||[],passed=FS.passed||[];
+  const r=nextVoiceMeeting(S&&S.timeline,FS.seen,resolved.concat(passed));
   if(!r)return false;
-  fsVoiceCarry(r.id,FS.seen,FS.resolved||[]);
+  fsVoiceCarry(r.id,FS.seen,resolved,passed);
   return true;
 }
 // ] / [ and the Next button: the next meeting to finish, by the #m route
@@ -4163,10 +4206,14 @@ function fvNext(){
 }
 // from the key, the next voice leaves the keyboard where it is: the user is
 // driving from outside the box, so a second s skips again instead of typing
+// A skipped registry voice is remembered for the run (FS.passed), so the
+// voice queue never asks about it again in another meeting.
 function fvSkip(byKey){
   const v=FS&&FS.voices&&FS.voices[FS.vi];
   if(!v||NPBUSY||FS.cur!=='voices')return;
-  v.st='skip';FS.live=true;FS.keepBlur=!!byKey;fvNext();
+  v.st='skip';FS.live=true;FS.keepBlur=!!byKey;
+  if(v.uid&&!(FS.passed||(FS.passed=[])).includes(v.uid))FS.passed.push(v.uid);
+  fvNext();
 }
 async function fvSave(force,local){
   if(!FS||NPBUSY||FS.cur!=='voices')return;

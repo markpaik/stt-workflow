@@ -799,6 +799,9 @@ def test_the_waiting_row_carries_the_stage_breakdown(sandbox, monkeypatch):
 # true opens exactly as it did before the strip existed. voice_secs (phase 2)
 # is the talk time of the meeting's longest-talking unnamed voice: the To
 # finish eyebrow's "Name N voices" opens the meeting holding the largest first.
+# voice_uids (phase 2 QA) names the unknown-registry voices among the unnamed
+# ones, so the eyebrow can count what the queue will ask about: each uid once
+# across meetings, each transcript-local voice once in its own meeting.
 
 FIN_SPEAKERS = [{"id": "SPEAKER_00", "display": "Alex Rivera", "name": "Alex Rivera"},
                 {"id": "SPEAKER_01", "display": "Speaker 2"},
@@ -820,7 +823,7 @@ def test_finish_on_a_meeting_waiting_for_its_title(sandbox):
     r = _row(srv.gather_state(), id="Recording 09262026 0915")
     assert r["state"] == "needs_name"
     assert r["finish"] == {"title": False, "voices": 2, "flags": 1, "done": False,
-                           "voice_secs": 0.0}
+                           "voice_secs": 0.0, "voice_uids": []}
 
 
 def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
@@ -830,7 +833,7 @@ def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
     assert r["state"] == "ready"
     # the minor crumb is not a finish step: only substantial lines count
     assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": False,
-                           "voice_secs": 0.0}
+                           "voice_secs": 0.0, "voice_uids": []}
     assert r["review_substantial"] == r["finish"]["flags"]
 
 
@@ -839,17 +842,20 @@ def test_finish_skips_dismissed_voices_and_minor_flags(sandbox):
              segments=[dict(FIN_MINOR)])
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_02")
     assert _finish_of("Grumble 09262026") == {
-        "title": True, "voices": 1, "flags": 0, "done": False, "voice_secs": 0.0}
+        "title": True, "voices": 1, "flags": 0, "done": False,
+        "voice_secs": 0.0, "voice_uids": []}
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_01")
     assert _finish_of("Grumble 09262026") == {
-        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}
+        "title": True, "voices": 0, "flags": 0, "done": True,
+        "voice_secs": 0.0, "voice_uids": []}
 
 
 def test_finish_on_a_meeting_with_only_flags_left(sandbox):
     _meeting("Flags Only 09262026", speakers=[dict(FIN_SPEAKERS[0])],
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_SUBSTANTIAL, start=30.0, end=35.0)])
     assert _finish_of("Flags Only 09262026") == {
-        "title": True, "voices": 0, "flags": 2, "done": False, "voice_secs": 0.0}
+        "title": True, "voices": 0, "flags": 2, "done": False,
+        "voice_secs": 0.0, "voice_uids": []}
 
 
 def test_finish_on_a_finished_meeting(sandbox):
@@ -857,7 +863,8 @@ def test_finish_on_a_finished_meeting(sandbox):
     # key reads as reviewed (pre-inbox meetings never flood the inbox)
     _meeting("Done Deal 09262026", speakers=[dict(FIN_SPEAKERS[0])])
     assert _finish_of("Done Deal 09262026") == {
-        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}
+        "title": True, "voices": 0, "flags": 0, "done": True,
+        "voice_secs": 0.0, "voice_uids": []}
 
 
 def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox):
@@ -876,4 +883,37 @@ def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox):
     # no unnamed voice left: nothing to queue
     summarize.dismiss_voice("Talkers 09262026", "SPEAKER_02")
     assert _finish_of("Talkers 09262026") == {
-        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}
+        "title": True, "voices": 0, "flags": 0, "done": True,
+        "voice_secs": 0.0, "voice_uids": []}
+
+
+def test_finish_names_the_registry_voices_among_the_open_ones(sandbox):
+    """voice_uids lists the unknown-registry uids among a meeting's unnamed
+    voices, matched as the page's mUnknownUid matches them (the display, and
+    this meeting in the voice's meetings). A hidden voice still counts: its
+    chip stays, so the meeting still asks about it. A voice dismissed here, a
+    named one, and a transcript-local one never appear."""
+    named = {"id": "SPEAKER_00", "display": "Alex Rivera", "name": "Alex Rivera"}
+    _meeting("Vendor Demo 09262026",
+             speakers=[dict(named), {"id": "SPEAKER_01", "display": "Speaker 7"},
+                       {"id": "SPEAKER_02", "display": "Speaker 3"}])
+    _meeting("Board Prep 09252026",
+             speakers=[dict(named), {"id": "SPEAKER_01", "display": "Speaker 7"},
+                       {"id": "SPEAKER_02", "display": "Speaker 12"},
+                       {"id": "SPEAKER_03", "display": "Speaker 13"}])
+    # U013 is registered, but not for Board Prep: its display alone is no match
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
+        "U007": {"file": "U007.npy",
+                 "meetings": ["Vendor Demo 09262026", "Board Prep 09252026"]},
+        "U012": {"file": "U012.npy", "meetings": ["Board Prep 09252026"],
+                 "archived": True},
+        "U013": {"file": "U013.npy", "meetings": ["Vendor Demo 09262026"]}}}))
+    vendor = _finish_of("Vendor Demo 09262026")
+    board = _finish_of("Board Prep 09252026")
+    assert (vendor["voices"], vendor["voice_uids"]) == (2, ["U007"])
+    assert (board["voices"], board["voice_uids"]) == (3, ["U007", "U012"])
+    # dismissed in Board Prep only: it leaves that meeting's record alone
+    summarize.dismiss_voice("Board Prep 09252026", "SPEAKER_01")
+    assert _finish_of("Board Prep 09252026")["voice_uids"] == ["U012"]
+    assert _finish_of("Vendor Demo 09262026")["voice_uids"] == ["U007"]
+

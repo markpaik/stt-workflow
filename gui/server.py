@@ -745,17 +745,27 @@ def _preview(text, sentences=2, cap=320):
     return t[:cap - 1].rstrip() + "…"
 
 
-def _finish(meta) -> dict:
-    """{title, voices, flags, done, voice_secs} for one meeting's metadata.
-    voice_secs is the talk time of the meeting's longest-talking unnamed
-    voice (0 with none): "Name N voices" opens the meeting that holds the
-    voice with the most talk time first."""
+def _finish(meta, uid_of=None) -> dict:
+    """{title, voices, flags, done, voice_secs, voice_uids} for one meeting's
+    metadata. voice_secs is the talk time of the meeting's longest-talking
+    unnamed voice (0 with none): "Name N voices" opens the meeting that holds
+    the voice with the most talk time first. voice_uids are the unknown-
+    registry uids among those unnamed voices, matched the way the page's
+    mUnknownUid matches them (display, and this meeting in the voice's
+    meetings); the rest are transcript-local. One uid heard in three meetings
+    is ONE voice to the queue, because naming it once names it everywhere, so
+    "Name N voices" counts each uid once and each local voice once per
+    meeting: the number of voices the queue will actually ask about."""
     title = not meta["needs_review"]
-    voices = len(meta.get("unnamed_clusters") or {})
+    unnamed = meta.get("unnamed_clusters") or {}
+    voices = len(unnamed)
     flags = int(meta.get("flagged") or 0)
+    uids = sorted({uid_of[(d, meta["base"])] for d in unnamed
+                   if (d, meta["base"]) in (uid_of or {})})
     return {"title": title, "voices": voices, "flags": flags,
             "done": title and not voices and not flags,
-            "voice_secs": float(meta.get("voice_secs") or 0) if voices else 0.0}
+            "voice_secs": float(meta.get("voice_secs") or 0) if voices else 0.0,
+            "voice_uids": uids}
 
 
 def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
@@ -766,6 +776,11 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
     # sources already owned by another row: never emit a duplicate history-only
     # failure for a file that is queued, in flight, or already a meeting
     emitted = set()
+    # (display, meeting) -> the unknown-registry uid heard there, hidden ones
+    # included: a hidden voice keeps its naming chip, so it is still a voice
+    # the meeting's finish record counts and the voice queue asks about
+    uid_of = {(u["display"], m): u["uid"]
+              for u in unknown_list for m in u.get("meetings") or []}
 
     # --- recording: the live capture, always one row, pinned to the top ---
     if rec:
@@ -821,7 +836,7 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                # still asking (dismissed ones excluded, the same set every "?"
                # reads); `flags` the substantial flagged lines. The meeting
                # page's finish strip walks these in order.
-               "finish": _finish(meta)}
+               "finish": _finish(meta, uid_of)}
         if meta["needs_review"]:
             # the naming row is a review card, not a bare text box: the same
             # evidence the ready row shows (length, who was heard, what the

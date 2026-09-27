@@ -173,6 +173,9 @@ Sonnet runs QA and the full suite, then review and commit.
    Shipped 2026-09-27 (QA fixes): phone width holds at 420px with no
    sideways scroll and no cut word, and the naming panel and the drawer
    keep the list's and the page's keys while they are open.
+   Shipped 2026-09-27 (QA fix): "Name N voices" counts the voices the
+   queue will ask about, each registry voice once and each local voice once
+   per meeting, and the queue never asks about a voice twice in one run.
 3. **Two panes.** The reader mounts beside the list at 900px and up; the
    `#m/<base>` route stays for deep links and narrow windows. Node tests on
    selection and routing; the size and contrast gates update.
