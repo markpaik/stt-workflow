@@ -91,6 +91,86 @@ def test_the_index_rebuilds_from_a_scan_when_it_is_missing(sandbox):
     assert config.base_of(mid) == "Alpha Mtg 05012026"
 
 
+def _count_rebuilds(monkeypatch):
+    calls = []
+    real = config.rebuild_meetings_index
+
+    def counting(dest_dir=None):
+        calls.append(dest_dir)
+        return real(dest_dir)
+    monkeypatch.setattr(config, "rebuild_meetings_index", counting)
+    return calls
+
+
+def test_a_retained_archived_reference_does_not_rescan_on_every_poll(
+        sandbox, monkeypatch):
+    """resolved_meetings / resolved_sources ask base_of about every reference
+    whose stored name is not live, on every 2 s panel poll. An archived
+    meeting's id is a MISS by design, and each miss used to rescan the whole
+    library and rewrite meetings_index.json. Repeated misses against an
+    unchanged index and library must cost neither."""
+    from stt import archive
+    _meeting("Team Sync 05012026")
+    _meeting("Other Mtg 05022026")
+    config.backfill_meeting_ids()
+    mid = config.id_of("Team Sync 05012026")
+    assert archive.archive_meeting("Team Sync 05012026")["ok"]
+    rebuilds = _count_rebuilds(monkeypatch)
+
+    assert config.base_of(mid) is None
+    first = len(rebuilds)
+    assert first <= 1
+    stamp = config.MEETINGS_INDEX_PATH.stat().st_mtime_ns
+    for _ in range(20):
+        assert config.base_of(mid) is None
+    voice = {"meetings": ["Team Sync 05012026"], "meeting_ids": [mid]}
+    for _ in range(5):                       # the real poll path
+        assert unknowns.resolved_meetings(voice) == ["Team Sync 05012026"]
+    assert len(rebuilds) == first, "a repeated miss rescanned the library"
+    assert config.MEETINGS_INDEX_PATH.stat().st_mtime_ns == stamp, \
+        "a repeated miss rewrote the index"
+
+    # the heal still works: an out-of-band move back into the library (no
+    # index_set) moves the meetings dir, so the next miss rebuilds ONCE
+    import shutil
+    shutil.move(str(config.archive_dir() / "Team Sync 05012026"),
+                str(config.meetings_dir() / "Team Sync 05012026"))
+    assert config.base_of(mid) == "Team Sync 05012026"
+    assert len(rebuilds) == first + 1
+    assert config.base_of(mid) == "Team Sync 05012026"
+    assert len(rebuilds) == first + 1, "a hit never rebuilds"
+
+
+def test_a_missing_index_rebuilds_once_then_misses_are_free(sandbox, monkeypatch):
+    _meeting("Alpha Mtg 05012026")
+    config.backfill_meeting_ids()
+    config.MEETINGS_INDEX_PATH.unlink()
+    rebuilds = _count_rebuilds(monkeypatch)
+    ghost = "f" * 16
+    for _ in range(10):
+        assert config.base_of(ghost) is None
+    assert len(rebuilds) == 1, "the missing file costs one scan, not one per ask"
+    assert config.base_of(config.id_of("Alpha Mtg 05012026")) == "Alpha Mtg 05012026"
+    assert len(rebuilds) == 1
+
+
+def test_a_miss_is_memoized_when_the_mtimes_cannot_order(sandbox, monkeypatch):
+    """A meetings dir stamped in the future (a skewed clock, a synced volume)
+    makes the index look older than the library forever. The memo keyed on
+    the index and dir mtimes still stops the second scan."""
+    import os
+    import time
+    _meeting("Alpha Mtg 05012026")
+    config.backfill_meeting_ids()
+    future = time.time() + 3600
+    os.utime(config.meetings_dir(), (future, future))
+    rebuilds = _count_rebuilds(monkeypatch)
+    ghost = "e" * 16
+    for _ in range(10):
+        assert config.base_of(ghost) is None
+    assert len(rebuilds) == 1
+
+
 # ---------- the index follows every move ----------
 
 def test_base_of_follows_a_rename(sandbox):
@@ -356,3 +436,56 @@ def test_prune_never_removes_a_lock_somebody_is_holding(sandbox):
     release.set()
     t.join(5)
     assert config.prune_lock_files() == 1        # released: now it goes
+
+
+def test_prune_keeps_an_archived_meetings_lock(sandbox):
+    """restore_meeting and a delete from the archive lock the ARCHIVED base,
+    and lock_key answers with the archived id. That stem can be requested
+    again, so it is not an orphan: unlinking it reopens the two-holder race
+    for the next restore."""
+    from stt import archive
+    _meeting("Team Sync 05012026")
+    config.backfill_meeting_ids()
+    _meeting("Legacy Old 01012026")          # arrives after the backfill: no id
+    mid = config.id_of("Team Sync 05012026")
+    assert archive.archive_meeting("Team Sync 05012026")["ok"]
+    assert archive.archive_meeting("Legacy Old 01012026")["ok"]
+    assert config.id_of("Legacy Old 01012026", config.archive_dir()) is None
+    _locks().mkdir(parents=True, exist_ok=True)
+    for stem in (mid, "Legacy Old 01012026", "Gone Away 03012026"):
+        (_locks() / f"{stem}.lock").write_text("")
+
+    assert config.prune_lock_files() == 1
+    names = {p.name for p in _locks().iterdir()}
+    assert f"{mid}.lock" in names, "an archived meeting's id lock was pruned"
+    assert "Legacy Old 01012026.lock" in names, \
+        "an archived legacy meeting's base lock was pruned"
+    assert "Gone Away 03012026.lock" not in names
+    # a restore asks for exactly the stem that was kept
+    assert config.lock_key("Team Sync 05012026") == mid
+
+
+def test_prune_rechecks_a_stem_under_the_flock_before_unlinking(
+        sandbox, monkeypatch):
+    """The first scan and the unlink are not atomic. A stem that is dead at
+    the scan can be requested again by the time the flock is taken — here a
+    legacy meeting arrives under that very name. The stem is re-checked with
+    the flock held, and a stem that came back to life is never unlinked."""
+    _meeting("Alpha Mtg 05012026")
+    config.backfill_meeting_ids()
+    _locks().mkdir(parents=True, exist_ok=True)
+    arriving = _locks() / "Arriving Mtg 05012026.lock"
+    arriving.write_text("")
+    real_flock = fcntl.flock
+
+    def racing_flock(fh, op):
+        real_flock(fh, op)
+        if (op & fcntl.LOCK_NB and str(getattr(fh, "name", "")) == str(arriving)
+                and not config.meeting_file("Arriving Mtg 05012026", ".json").exists()):
+            _meeting("Arriving Mtg 05012026")   # no id: it locks on its base
+    monkeypatch.setattr(fcntl, "flock", racing_flock)
+
+    assert config.prune_lock_files() == 0
+    assert arriving.exists(), "a stem that is requestable again was unlinked"
+    assert config.lock_key("Arriving Mtg 05012026") == "Arriving Mtg 05012026"
+    assert config.orphan_lock_files() == []

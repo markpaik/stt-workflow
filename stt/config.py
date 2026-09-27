@@ -476,19 +476,58 @@ def rebuild_meetings_index(dest_dir=None) -> dict:
     return ids
 
 
+# meeting_id -> (index path, index mtime_ns, meetings-dir mtime_ns) of the last
+# lookup that settled on "not live". One entry per id, so it stays as small as
+# the set of ids anyone asks about.
+_miss_memo = {}
+
+
+def _mtime_ns(p):
+    try:
+        return Path(p).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def base_of(meeting_id: str):
     """The live basename of a meeting id, or None.
 
     The index is checked against the meeting it names — a mapping whose json is
-    gone, or now carries a different id, is stale — and one rebuild answers a
-    miss, so an index deleted or left behind by an out-of-band move heals
-    itself on the first lookup instead of failing until someone notices."""
+    gone, or now carries a different id, is stale — and a stale mapping always
+    costs one rebuild, so an index left behind by an out-of-band move heals
+    itself on the first lookup instead of failing until someone notices.
+
+    A clean miss (the id is simply not in the index) is the common case, not a
+    fault: every archived or deleted meeting a registry still names lands here,
+    and resolved_meetings / resolved_sources ask on every 2 s panel poll. So a
+    clean miss rebuilds only when the index can be behind the library — the
+    file is missing, or it is not newer than the meetings dir (a folder was
+    added, moved or renamed since it was written). A miss is then memoized per
+    (id, index mtime, meetings-dir mtime): the same question against an
+    unchanged index and library is answered without a scan or a rewrite, even
+    where the mtimes cannot order themselves (an index that could not be
+    written, a clock that runs ahead)."""
     if not meeting_id:
         return None
     base = load_meetings_index()["ids"].get(meeting_id)
     if base and id_of(base) == meeting_id:
         return base
-    return rebuild_meetings_index().get(meeting_id)
+    idx_m = _mtime_ns(MEETINGS_INDEX_PATH)
+    dir_m = _mtime_ns(meetings_dir())
+    stamp = (str(MEETINGS_INDEX_PATH), idx_m, dir_m)
+    if idx_m is not None and _miss_memo.get(meeting_id) == stamp:
+        return None
+    if base is None and idx_m is not None and dir_m is not None and idx_m > dir_m:
+        _miss_memo[meeting_id] = stamp      # nothing has moved since the write
+        return None
+    found = rebuild_meetings_index().get(meeting_id)
+    if found:
+        _miss_memo.pop(meeting_id, None)
+    else:
+        _miss_memo[meeting_id] = (str(MEETINGS_INDEX_PATH),
+                                  _mtime_ns(MEETINGS_INDEX_PATH),
+                                  _mtime_ns(meetings_dir()))
+    return found
 
 
 def index_set(meeting_id: str, base: str) -> bool:
@@ -527,59 +566,115 @@ def lock_key(base: str) -> str:
     return id_of(base) or id_of(base, archive_dir()) or base
 
 
-def _dead_lock_files(dest_dir=None) -> list:
-    """Lock files whose stem names nothing live, WITHOUT the held test.
+def _requestable_lock_keys(dest_dir=None) -> set:
+    """Every lock-file stem lock_key can still ask for.
 
-    What is live is what lock_key would ask for today: the id of every live
-    meeting that has one, and the BASE of every live meeting that does not (a
-    legacy meeting still locks on its name). A base-named lock belonging to a
-    meeting that now carries an id is therefore dead too — lock_key can never
-    ask for it again, so it is as dead as the ones a rename left behind."""
+    That is the key of every LIVE meeting — its id, or its base when it has no
+    id yet (a legacy meeting still locks on its name) — and the key of every
+    ARCHIVED meeting too: restore_meeting and a delete from the archive take
+    lock_meeting on an archived base, and lock_key answers that with the
+    archived id. A base-named lock for a meeting that now carries an id is not
+    in here: lock_key can never ask for that name again."""
+    d = Path(dest_dir) if dest_dir else meetings_dir()
+    keep = set()
+    for b in meeting_bases(d):
+        keep.add(id_of(b, d) or b)
+    arc = archive_dir(d)
+    for b in archived_bases(d):
+        keep.add(id_of(b, arc) or b)
+    return keep
+
+
+def _dead_lock_files(dest_dir=None) -> list:
+    """Lock files whose stem nobody can request again, WITHOUT the held test:
+    a base-named lock for a meeting that now has an id, or a stem that names
+    no live or archived meeting at all."""
     d = Path(dest_dir or meetings_dir()) / ".locks"
     if not d.is_dir():
         return []
-    keep = set()
-    for b in meeting_bases(Path(dest_dir) if dest_dir else None):
-        keep.add(id_of(b, dest_dir) or b)
+    keep = _requestable_lock_keys(dest_dir)
     return [f for f in sorted(d.iterdir())
             if f.is_file() and f.suffix == ".lock" and f.stem not in keep]
+
+
+# how many candidate lock files are held open at once while the live set is
+# re-read: bounded so a library with hundreds of orphans never runs the panel
+# process out of file descriptors (macOS defaults to 256).
+_PRUNE_CHUNK = 64
+
+
+def _sweep_lock_files(dest_dir=None, unlink=False) -> list:
+    """The dead lock files nobody holds, re-checked UNDER the flock.
+
+    Each candidate is taken non-blocking first (a held one is left alone).
+    Then, with the chunk's flocks still held, the requestable keys are read
+    again from disk, and only a stem that is STILL dead is returned — and,
+    with unlink, removed before its flock is released. The re-read catches a
+    stem that came back to life between the first scan and the flock: a
+    legacy meeting that arrived under that name, or a meeting restored from
+    outside the store carrying that id."""
+    cands = _dead_lock_files(dest_dir)
+    out = []
+    for i in range(0, len(cands), _PRUNE_CHUNK):
+        with contextlib.ExitStack() as stack:
+            taken = []
+            for f in cands[i:i + _PRUNE_CHUNK]:
+                try:
+                    fh = stack.enter_context(open(f, "r+"))
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held? leave it
+                except OSError:
+                    continue
+                taken.append(f)
+            if not taken:
+                continue
+            keep = _requestable_lock_keys(dest_dir)
+            for f in taken:
+                if f.stem in keep:
+                    continue                 # requestable again: never unlink
+                if unlink:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        continue
+                out.append(f)
+    return out
 
 
 def orphan_lock_files(dest_dir=None) -> list:
     """The dead lock files nobody is holding right now — exactly what
     prune_lock_files would remove, by path, so the registry doctor can name
     them in a report instead of only counting them."""
-    out = []
-    for f in _dead_lock_files(dest_dir):
-        try:
-            with open(f, "r+") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)   # held? leave it
-                out.append(f)
-        except OSError:
-            continue
-    return out
+    return _sweep_lock_files(dest_dir, unlink=False)
 
 
 def prune_lock_files(dest_dir=None, dry_run=False) -> int:
-    """Remove lock files that name nothing live. That is how the live library
-    gets from 262 lock files back to one per meeting.
+    """Remove lock files nobody can request again. That is how the live
+    library gets from 262 lock files back to one per meeting.
+
+    Only two kinds of stem go: a base-named lock for a meeting that now has an
+    id (lock_key asks for the id from then on), and a stem that names no live
+    and no archived meeting at all. An archived meeting's lock stays, because
+    a restore or a delete still locks under it.
 
     A lock another process is actually holding is never touched: we take it
     non-blocking first, so a concurrent relabel can never have its lock file
-    unlinked out from under it (the next caller would create a fresh file and
-    both would think they had exclusive access). Returns how many were
-    removed — or, with dry_run, how many WOULD be removed, nothing unlinked."""
-    n = 0
-    for f in _dead_lock_files(dest_dir):
-        try:
-            with open(f, "r+") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)   # held? leave it
-                if not dry_run:
-                    f.unlink()
-                n += 1
-        except OSError:
-            continue
-    return n
+    unlinked out from under it. With the flock held, the stem is checked
+    against the live set once more before the unlink.
+
+    The residual window: flock does not stop anyone from OPENING the path. A
+    caller that resolves the same dead stem between our re-check and our
+    unlink (a stale name that raced a rename, or the pipeline locking a
+    brand-new meeting's base before its json exists) opens our inode, waits
+    on our flock, and then locks an unlinked file, while the next caller
+    creates a fresh one — two holders. The re-check narrows that to a stem
+    going from dead to requested within the milliseconds between the re-read
+    and the unlink. Closing it outright needs the locker to confirm, after its
+    flock, that the path still names the inode it holds, and to retry if not
+    (review.lock_meeting).
+
+    Returns how many were removed — or, with dry_run, how many WOULD be
+    removed, nothing unlinked."""
+    return len(_sweep_lock_files(dest_dir, unlink=not dry_run))
 
 
 def backfill_meeting_ids(dest_dir=None) -> int:
