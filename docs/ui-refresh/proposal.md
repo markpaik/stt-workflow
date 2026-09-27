@@ -165,6 +165,11 @@ Sonnet runs QA and the full suite, then review and commit.
    rows, the tray folds into Now and To finish, the pill gains its naming
    segment, the tab title counts. Node tests on the section builder and the
    pill text; the tray tests move to the new section.
+   Shipped 2026-09-27: Now (the tray's urgent kinds, then the live rows) and
+   To finish (compact rows with step dots, "Name N voices" and "Review
+   flags") above the accordion, the tray band retired, the pill's naming
+   segment, and the `(N) Meetings` tab title. See "To finish and Now" in
+   `gui/DESIGN.md`.
 3. **Two panes.** The reader mounts beside the list at 900px and up; the
    `#m/<base>` route stays for deep links and narrow windows. Node tests on
    selection and routing; the size and contrast gates update.

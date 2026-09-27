@@ -413,6 +413,13 @@ def test_archived_meeting_is_excluded(sandbox):
 
 
 # ---------- the tray ----------
+#
+# The panel no longer draws a tray band (docs/ui-refresh phase 2), but the
+# ranked `tray` key stays the data behind two sections: its urgent kinds
+# (recorder_stall, failed, dupe_files, dupe_meetings) render as Now rows, and
+# its chronic kinds (unknown_voice, review) are counted by the To finish
+# eyebrow's "Name N voices" and "Review flags". The client half is pinned in
+# tests/test_new_shell.py; these pin the data it reads.
 
 def test_tray_empty_when_nothing_needs_attention(sandbox):
     _meeting("Clean Meeting 05012026")   # ready, no flags, no unknowns, no failures
@@ -786,10 +793,12 @@ def test_the_waiting_row_carries_the_stage_breakdown(sandbox, monkeypatch):
 
 # ---------- the finish record (docs/ui-refresh, phase 1) ----------
 #
-# Every meeting row carries `finish: {title, voices, flags, done}`, computed
-# from counts gather_state already holds. The meeting page's finish strip walks
-# title, voices, and flags in that order, and a row whose `done` is true opens
-# exactly as it did before the strip existed.
+# Every meeting row carries `finish: {title, voices, flags, done, voice_secs}`,
+# computed from counts gather_state already holds. The meeting page's finish
+# strip walks title, voices, and flags in that order, and a row whose `done` is
+# true opens exactly as it did before the strip existed. voice_secs (phase 2)
+# is the talk time of the meeting's longest-talking unnamed voice: the To
+# finish eyebrow's "Name N voices" opens the meeting holding the largest first.
 
 FIN_SPEAKERS = [{"id": "SPEAKER_00", "display": "Alex Rivera", "name": "Alex Rivera"},
                 {"id": "SPEAKER_01", "display": "Speaker 2"},
@@ -810,7 +819,8 @@ def test_finish_on_a_meeting_waiting_for_its_title(sandbox):
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_MINOR)])
     r = _row(srv.gather_state(), id="Recording 09262026 0915")
     assert r["state"] == "needs_name"
-    assert r["finish"] == {"title": False, "voices": 2, "flags": 1, "done": False}
+    assert r["finish"] == {"title": False, "voices": 2, "flags": 1, "done": False,
+                           "voice_secs": 0.0}
 
 
 def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
@@ -819,7 +829,8 @@ def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
     r = _row(srv.gather_state(), id="Budget Review 09262026")
     assert r["state"] == "ready"
     # the minor crumb is not a finish step: only substantial lines count
-    assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": False}
+    assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": False,
+                           "voice_secs": 0.0}
     assert r["review_substantial"] == r["finish"]["flags"]
 
 
@@ -828,17 +839,17 @@ def test_finish_skips_dismissed_voices_and_minor_flags(sandbox):
              segments=[dict(FIN_MINOR)])
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_02")
     assert _finish_of("Grumble 09262026") == {
-        "title": True, "voices": 1, "flags": 0, "done": False}
+        "title": True, "voices": 1, "flags": 0, "done": False, "voice_secs": 0.0}
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_01")
     assert _finish_of("Grumble 09262026") == {
-        "title": True, "voices": 0, "flags": 0, "done": True}
+        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}
 
 
 def test_finish_on_a_meeting_with_only_flags_left(sandbox):
     _meeting("Flags Only 09262026", speakers=[dict(FIN_SPEAKERS[0])],
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_SUBSTANTIAL, start=30.0, end=35.0)])
     assert _finish_of("Flags Only 09262026") == {
-        "title": True, "voices": 0, "flags": 2, "done": False}
+        "title": True, "voices": 0, "flags": 2, "done": False, "voice_secs": 0.0}
 
 
 def test_finish_on_a_finished_meeting(sandbox):
@@ -846,4 +857,23 @@ def test_finish_on_a_finished_meeting(sandbox):
     # key reads as reviewed (pre-inbox meetings never flood the inbox)
     _meeting("Done Deal 09262026", speakers=[dict(FIN_SPEAKERS[0])])
     assert _finish_of("Done Deal 09262026") == {
-        "title": True, "voices": 0, "flags": 0, "done": True}
+        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}
+
+
+def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox):
+    # Speaker 2 talks 9.5s over two lines, Speaker 3 4s, the named speaker 30s
+    # (never a naming target), and a textless line counts for nothing
+    _meeting("Talkers 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
+             segments=[{"start": 0.0, "end": 30.0, "speaker": "SPEAKER_00", "text": "hello"},
+                       {"start": 30.0, "end": 36.0, "speaker": "SPEAKER_01", "text": "yes"},
+                       {"start": 36.0, "end": 39.5, "speaker": "SPEAKER_01", "text": "and"},
+                       {"start": 40.0, "end": 44.0, "speaker": "SPEAKER_02", "text": "no"},
+                       {"start": 44.0, "end": 99.0, "speaker": "SPEAKER_02", "text": "  "}])
+    assert _finish_of("Talkers 09262026")["voice_secs"] == 9.5
+    # dismissing the talker leaves the next-largest unnamed voice
+    summarize.dismiss_voice("Talkers 09262026", "SPEAKER_01")
+    assert _finish_of("Talkers 09262026")["voice_secs"] == 4.0
+    # no unnamed voice left: nothing to queue
+    summarize.dismiss_voice("Talkers 09262026", "SPEAKER_02")
+    assert _finish_of("Talkers 09262026") == {
+        "title": True, "voices": 0, "flags": 0, "done": True, "voice_secs": 0.0}

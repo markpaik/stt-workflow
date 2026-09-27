@@ -1,7 +1,8 @@
 /* ============================================================================
    The panel shell: the poll-and-render loop ONLY. Reads /api/state every
-   2s and renders the status pill, the "needs you" tray, and the One Timeline
-   (all seven read-only row states). It changes no server state.
+   2s and renders the status pill and the One Timeline: its Now and To finish
+   sections (which carry the server's ranked tray items), then the library.
+   It changes no server state.
 
    Interactions -- the Process popover, the per-row menu, tray verbs, category
    cycling, naming Accept, bulk selection -- are stubbed in the "Builder B
@@ -62,13 +63,14 @@ function dateBucket(iso){
 function nameBucket(title){const t=(title||'').trim();
   return /^[a-z]/i.test(t)?t[0].toUpperCase():'#';}
 
-// two-zone ordering (by-date view). The actionable states pin to an UNLABELED
-// cluster above every date group, in this fixed order, so a failed April file
-// sits at the top rather than buried in April. Everything else (ready) groups
-// by its own meeting date. Sorting by one key while grouping by another is what
-// fragmented the months; the ready zone therefore sorts AND groups by dateKey.
-const PIN_ORDER={recording:0,processing:1,needs_name:2,failed:3,held:4,waiting:5};
-const PINNED=new Set(Object.keys(PIN_ORDER));
+// three-zone ordering (by-date view, docs/ui-refresh phase 2). The pipeline's
+// live states form the "Now" section, in this fixed order, so a failed April
+// file sits at the top rather than buried in April. A meeting with an open
+// step forms "To finish" (timelineSections). Everything else groups by its own
+// meeting date. Sorting by one key while grouping by another is what
+// fragmented the months; the library therefore sorts AND groups by dateKey.
+const PIN_ORDER={recording:0,processing:1,failed:2,held:3,waiting:4};
+const NOW_STATES=new Set(Object.keys(PIN_ORDER));
 function dateKey(r){return r.date||((r.when||'').slice(0,10));}   // fall back to last-activity
 
 /* ==================== the year-to-month accordion ====================
@@ -162,20 +164,23 @@ function grpStates(groups,nest,forced){
 }
 
 /* ============================ status pill ============================ *
- * The ONLY place pipeline state appears, one line, by priority:
- *   REC ticking  ->  transcribing N  ->  paused N waiting  ->  N waiting  ->  hidden
+ * The ONLY place pipeline state appears. Two segments, each shown only when it
+ * has something to say (docs/ui-refresh phase 2): the pipeline, by priority,
+ *   REC ticking  ->  transcribing N  ->  paused N waiting  ->  N waiting
+ * and beside it the naming, "naming 3 of 7" -- its own segment, so a naming
+ * never hides behind a transcription. Nothing to say hides the pill.
  */
-function drawPill(s){
-  const pill=$('#pill');
+function pillParts(s){
+  const tl=s.timeline||[];
   const rec=s.recording;
-  const waiting=(s.timeline||[]).filter(r=>r.state==='waiting').length;
+  const waiting=tl.filter(r=>r.state==='waiting').length;
   // paused shows the whole queued backlog (waiting + held), not just waiting
-  const queued=(s.timeline||[]).filter(r=>r.state==='waiting'||r.state==='held').length;
-  let cls='pill',html='',show=true;
+  const queued=tl.filter(r=>r.state==='waiting'||r.state==='held').length;
+  let cls='pill',pipe='';
   if(rec){
     cls='pill rec';
     const c=`<span id="pillClock">${clock(rec.elapsed_secs)}</span>`;
-    html=rec.paused?`&#9208; REC ${c}`:`<span class="recdot"></span>REC ${c}`;
+    pipe=rec.paused?`&#9208; REC ${c}`:`<span class="recdot"></span>REC ${c}`;
   }else if(s.running){
     cls='pill accent';
     const n=Object.keys(s.active||{}).length||1;
@@ -183,28 +188,32 @@ function drawPill(s){
     // runs requested while this one holds the lock wait in the job queue; the
     // pill carries their count so a queued Redo is never invisible
     const qj=(s.queued_jobs||[]).length;
-    html=`transcribing ${n}${eta}${qj?` &middot; ${qj} queued`:''}`;
+    pipe=`transcribing ${n}${eta}${qj?` &middot; ${qj} queued`:''}`;
   }else if(s.paused){
     cls='pill amber';
-    html=`&#9208; paused${queued?` &middot; ${queued} waiting`:''}`;
+    pipe=`&#9208; paused${queued?` &middot; ${queued} waiting`:''}`;
   }else if(waiting){
-    cls='pill';
-    html=`${waiting} waiting`;
-  }else if(s.relabel_running||s.relabel_pending){
-    // the quiet relabel-in-progress note (a voice was just named): sub-colored,
-    // lowest priority, gone on its own when the relabel finishes. BOTH signals:
-    // relabel_pending only means a second pass is QUEUED behind a first, so the
-    // ordinary unblocked relabel showed nothing at all.
-    cls='pill';
-    // the queue knows how many meetings this naming touches, so say so. A
-    // whole-library pass re-lists as it goes and has no total -- that one
-    // keeps the old wording rather than inventing a denominator.
+    pipe=`${waiting} waiting`;
+  }
+  // the naming segment: BOTH signals (relabel_pending alone only means a
+  // second pass is QUEUED behind a first). The queue knows how many meetings
+  // this naming touches, so say so; a whole-library pass re-lists as it goes
+  // and has no total, so it keeps the old wording rather than inventing one.
+  let naming='';
+  if(s.relabel_running||s.relabel_pending){
     const j=(s.jobs||{}).running;
-    html=(j&&j.total)?`naming: ${Math.min(j.done+1,j.total)} of ${j.total}`
+    naming=(j&&j.total)?`naming ${Math.min(j.done+1,j.total)} of ${j.total}`
       :'applying names&#8230;';
-  }else{show=false;}
-  pill.hidden=!show;
-  if(show){pill.className=cls;pill.innerHTML=html;}
+  }
+  const segs=[pipe,naming].filter(Boolean);
+  if(!segs.length)return null;
+  return {cls,html:segs.length>1
+    ?segs.map(x=>`<span class="pseg">${x}</span>`).join(''):segs[0]};
+}
+function drawPill(s){
+  const pill=$('#pill'),p=pillParts(s);
+  pill.hidden=!p;
+  if(p){pill.className=p.cls;pill.innerHTML=p.html;}
 }
 
 // 1s local tick advances the recording clock between the 2s polls, in place
@@ -223,7 +232,7 @@ setInterval(()=>{
  * sub-styled line right under the header, never an amber tray ask. The server
  * expires a success note on its own (~20s TTL in stt/status.py), so the line
  * needs no dismiss and disappears by itself when the poll stops carrying it.
- * A FAILED note is a decision and renders in the tray instead (drawTray).
+ * A FAILED note is a decision and renders as a Now row instead (nowTrayHTML).
  */
 function drawRecOk(s){
   const el=$('#recok');if(!el)return;
@@ -236,16 +245,17 @@ function drawRecOk(s){
   el.textContent='✓ '+rn.text;       // the old strip's copy, verbatim
 }
 
-/* ============================ tray ============================ *
- * Amber "needs you" band. Rare, urgent kinds (recorder stall, failures) get one
- * line PER ITEM. Chronic kinds aggregate to one line PER KIND that expands in
- * place: flagged reviews -> "Flagged lines in N meetings", unknown voices ->
- * "N voices need names". With a single meeting/voice, no aggregation: the line
- * links straight through. trayOpen (toggled by trayExpand) folds into the
- * signature so an expanded group survives the 2s polls.
+/* ====================== the tray's items, in Now ====================== *
+ * /api/state still carries a ranked `tray` of what needs the user, but the
+ * band that showed it is gone (docs/ui-refresh phase 2). Its urgent kinds get
+ * one compact row each at the top of the Now section -- the recorder's FAILED
+ * note, a recorder stall, the duplicate-file sweep, and duplicate transcripts
+ * -- and a failed file is its own failed row in Now, dismiss and Retry
+ * included. The chronic kinds became the To finish eyebrow's two actions:
+ * "Name N voices" (unknown_voice) and "Review flags" (review).
  */
-function _trayVerb(label,onclick){
-  return `<button class="btn mini tw-verb" type="button" onclick="${onclick}">${label}</button>`;
+function _trayVerb(label,onclick,busy){
+  return `<button class="btn mini tw-verb" type="button" onclick="${onclick}"${busy?' disabled':''}>${label}</button>`;
 }
 function _trayRow(title,detail,verb){
   return `<div class="trayrow">
@@ -253,25 +263,15 @@ function _trayRow(title,detail,verb){
     <span class="tw-detail">${esc(detail)}</span>
     ${verb}</div>`;
 }
-function _trayAgg(label,verb){
-  return `<div class="trayrow"><span class="tw-title agg">${esc(label)}</span>${verb}</div>`;
-}
-function _traySub(title,meta,count,call){
-  return `<div class="traysub" onclick="${call}" tabindex="0">
-    <span class="ts-title">${esc(title)}</span>
-    <span class="ts-meta">${meta}</span>
-    ${count?`<span class="ts-count">${esc(count)}</span>`:''}</div>`;
-}
-// an aggregate of MORE than this many items never expands in the tray: the
-// first expansion just rebuilt the 40-row wall inside it (DESIGN, 2026-07-12)
-const TRAY_EXPAND_MAX=8;
 // the armed state of the duplicate-file sweep: deleting files has no undo, so
-// it is the house two-step, and the flag rides the tray signature so a 2s poll
-// cannot disarm it under the user's cursor. A FAILURE is state too (DUPE_ERR):
-// writing it straight into the DOM died within 2s, because the signature was
-// computed before the flag flipped and the next poll rebuilt the tray over it.
+// it is the house two-step, and the flag rides the timeline signature (via
+// traySig) so a 2s poll cannot disarm it under the user's cursor. A FAILURE is
+// state too (DUPE_ERR): writing it straight into the DOM died within 2s,
+// because the signature was computed before the flag flipped and the next
+// poll rebuilt the list over it.
 let DUPE_ARMED=false,DUPE_ERR='';
-function dupeArm(on){DUPE_ARMED=!!on;if(on)DUPE_ERR='';drawTray(S||{});}
+function nowRedraw(){if(S&&route.view==='timeline'){drawTimeline(S);afterRender();}}
+function dupeArm(on){DUPE_ARMED=!!on;if(on)DUPE_ERR='';nowRedraw();}
 // the armed state belongs to the dupe_files row that armed it. Arm the sweep,
 // walk away without confirming, and the flagged file leaves the queue by
 // another path: the flag used to survive, so the NEXT duplicate row (days
@@ -287,7 +287,7 @@ async function dupeDeleteGo(btn){
   DUPE_ARMED=false;
   if(!r||!r.ok){
     DUPE_ERR=(r&&r.error)||'Could not delete those files.';
-    drawTray(S||{});
+    nowRedraw();
     return;
   }
   DUPE_ERR='';
@@ -301,67 +301,66 @@ async function dupeDeleteGo(btn){
     DUPE_ERR=why.length
       ?'Nothing was deleted: '+why.join('; ')+'.'
       :'Nothing was deleted: no waiting file is still an exact copy.';
-    drawTray(S||{});
+    nowRedraw();
     refresh();
     return;
   }
   refresh();
 }
-function drawTray(s){
-  const tray=$('#tray');
+// what the Now rows depend on, folded into the timeline's change signature so
+// a poll neither drops an armed sweep nor thrashes the rows. It runs BEFORE
+// the signature is compared: no dupe_files item means there is nothing armed
+// to confirm (see dupeDisarm).
+const NOW_KINDS=new Set(['recorder_stall','dupe_files','dupe_meetings']);
+// the outcome of a Now row's own Fix verb, keyed by kind: {at,label,busy,
+// detail}. `at` ties it to the note (or stall) that asked, so a new one starts
+// clean. Rendered by nowTrayHTML and folded into traySig.
+let NOW_MSG={};
+function nowMsg(kind,at){const m=NOW_MSG[kind];return m&&m.at===at?m:null;}
+function traySig(s){
   const items=s.tray||[];
-  // BEFORE the signature and before the empty early-return: no dupe_files row
-  // means there is nothing armed to confirm (see dupeDisarm)
   if(!items.some(t=>t.kind==='dupe_files'))dupeDisarm();
+  const note=(s.recorder_note&&!s.recorder_note.ok)?s.recorder_note:null;
+  return JSON.stringify(items.filter(t=>NOW_KINDS.has(t.kind))
+      .map(t=>[t.kind,t.title,t.detail,t.target,t.count,t.exact]))
+    +'|'+(note?note.at+'\x1f'+note.text:'')
+    +'|'+trayCount(s,'unknown_voice')+'|'+trayCount(s,'review')
+    +'|'+DUPE_ARMED+'|'+DUPE_ERR+'|'+JSON.stringify(NOW_MSG);
+}
+function trayCount(s,kind){return (s.tray||[]).filter(t=>t.kind===kind).length;}
+// the urgent kinds, one compact row each, in the tray's own rank order
+function nowTrayHTML(s){
+  const items=s.tray||[];
   // the recorder's last outcome when it FAILED ("captured NO audio..."): a
   // decision, so it outranks everything, even a live stall. A SUCCESS note is
   // the quiet #recok line under the header instead (drawRecOk), never in here.
   const note=(s.recorder_note&&!s.recorder_note.ok)?s.recorder_note:null;
-  if(!items.length&&!note){tray.hidden=true;tray.dataset.sig='';tray.innerHTML='';return;}
-  const stalls=items.filter(t=>t.kind==='recorder_stall');
-  const fails=items.filter(t=>t.kind==='failed');
-  const dfiles=items.filter(t=>t.kind==='dupe_files');
-  const dmeets=items.filter(t=>t.kind==='dupe_meetings');
-  const reviews=items.filter(t=>t.kind==='review');
-  const voices=items.filter(t=>t.kind==='unknown_voice');
-  // the expand flags AND the library filter fold into the signature so a poll
-  // keeps an open group open and an active line active
-  const sig=JSON.stringify(items.map(t=>[t.kind,t.title,t.detail,t.target,t.count,t.exact]))
-    +'|'+(note?note.at+'\x1f'+note.text:'')
-    +'|'+trayOpen.review+'|'+trayOpen.voices+'|'+flaggedOnly+'|'+DUPE_ARMED+'|'+DUPE_ERR;
-  if(!tray.hidden&&tray.dataset.sig===sig)return;   // unchanged: don't rebuild
-  tray.dataset.sig=sig;tray.hidden=false;
-
-  let h=`<div class="trayhdr">Needs you</div>`;
-  // the failed recorder note, top-ranked: the note text verbatim, Fix
-  // permissions when it reads like a permission problem (the old strip's
-  // gate), and an x that dismisses it server-side (it persists until then)
+  let h='';
+  // the note text verbatim, Fix permissions when it reads like a permission
+  // problem (the old strip's gate), and an x that dismisses it server-side
+  // (it persists until then)
   if(note){
+    const m=nowMsg('recorder_note',note.at);
     const fix=/[Mm]icrophone|audio/.test(note.text)
-      ?_trayVerb('Fix permissions',`trayAct('recorder_note','')`):'';
+      ?_trayVerb(m?m.label:'Fix permissions',`trayAct('recorder_note','')`,m&&m.busy):'';
     const x=`<button class="btn mini tw-verb" type="button" title="Dismiss"
       onclick="api('/api/recorder_note',{clear:true}).then(refresh)">&#10005;</button>`;
     h+=`<div class="trayrow">
       <span class="tw-title">Recorder</span>
-      <span class="tw-detail">${esc(note.text)}</span>
+      <span class="tw-detail">${esc(m&&m.detail||note.text)}</span>
       <span class="tw-acts">${fix}${x}</span></div>`;
   }
   // rare + urgent: one line each, acted on in place
-  for(const t of stalls)
-    h+=_trayRow(t.title,t.detail,_trayVerb('Fix',`trayAct('recorder_stall','${escJs(t.target)}')`));
-  // a failure whose source file is GONE has nothing to re-run: the tray line
-  // offered Retry anyway, which posted /api/run for a file that is not there.
-  // Same split the row makes, from the same flag.
-  for(const t of fails)
-    h+=_trayRow(t.title,t.detail,t.gone
-      ?_trayVerb('Dismiss',`trayAct('failed_gone','${escJs(t.target)}')`)
-      :_trayVerb('Retry',`trayAct('failed','${escJs(t.target)}')`));
-
-  // waiting files that were already processed: above the reviews, because the
-  // next automatic run spends real hours transcribing them again. The bulk
-  // delete only ever covers the byte-identical ones (t.exact) -- a name-only
-  // match is deleted one file at a time, from its own row, on purpose.
-  for(const t of dfiles){
+  for(const t of items.filter(t=>t.kind==='recorder_stall')){
+    const m=nowMsg('recorder_stall',t.target);
+    h+=_trayRow(t.title,m&&m.detail||t.detail,
+      _trayVerb(m?m.label:'Fix',`trayAct('recorder_stall','${escJs(t.target)}')`,m&&m.busy));
+  }
+  // waiting files that were already processed: the next automatic run spends
+  // real hours transcribing them again. The bulk delete only ever covers the
+  // byte-identical ones (t.exact) -- a name-only match is deleted one file at
+  // a time, from its own row, on purpose.
+  for(const t of items.filter(t=>t.kind==='dupe_files')){
     const verbs=DUPE_ARMED
       ?`<button class="btn mini tw-verb" type="button" onclick="dupeArm(false)">Cancel</button>
         <button class="btn danger mini tw-verb" type="button"
@@ -371,52 +370,9 @@ function drawTray(s){
     // the renderer owns this text, so a poll's rebuild keeps it visible
     h+=_trayRow(t.title,DUPE_ERR&&!DUPE_ARMED?DUPE_ERR:t.detail,verbs);
   }
-  for(const t of dmeets)
+  for(const t of items.filter(t=>t.kind==='dupe_meetings'))
     h+=_trayRow(t.title,t.detail,_trayVerb('Review &#8594;',`trayAct('dupe_meetings','')`));
-
-  // unknown voices: 1 -> direct; 2..8 -> one line that expands to per-voice
-  // rows; more than 8 never expands (name them one at a time, largest first)
-  if(voices.length===1)
-    h+=_trayRow(voices[0].title,voices[0].detail,
-        _trayVerb('Name &#8594;',`trayAct('unknown_voice','${escJs(voices[0].target)}')`));
-  else if(voices.length>TRAY_EXPAND_MAX){
-    h+=_trayAgg(`${voices.length} voices need names`,
-        _trayVerb('Name &#8594;',`trayAct('unknown_voice','${escJs(voices[0].target)}')`));
-  }
-  else if(voices.length>1){
-    h+=_trayAgg(`${voices.length} voices need names`,
-        _trayVerb(trayOpen.voices?'Hide':'Name &#8594;',`trayExpand('voices')`));
-    if(trayOpen.voices)h+=voices.map(t=>{
-      const n=t.count;
-      return _traySub(t.title,'heard in '+n+' meeting'+(n!==1?'s':''),'',
-        `openNamePanelByUid('${escJs(t.target)}')`);
-    }).join('');
-  }
-
-  // flagged reviews, LAST on purpose (a per-line accuracy chore, rarely the
-  // day's work -- deprioritized 2026-08-21 by request): 1 -> direct; 2..8 ->
-  // one line that expands to per-meeting rows; MORE than 8 -> the line FILTERS
-  // the library to flagged rows instead (full-size rows out there, never a
-  // second smaller library in here) and reads as active while the filter is on
-  if(reviews.length===1)
-    h+=_trayRow(reviews[0].title,reviews[0].detail,
-        _trayVerb('Review &#8594;',`trayAct('review','${escJs(reviews[0].target)}')`));
-  else if(reviews.length>TRAY_EXPAND_MAX){
-    h+=`<div class="trayrow${flaggedOnly?' active':''}"><span class="tw-title agg">${
-      esc(`Flagged lines in ${reviews.length} meetings`)}</span>${
-      _trayVerb(flaggedOnly?'Showing &#10005;':'Review &#8594;','flaggedToggle()')}</div>`;
-  }
-  else if(reviews.length>1){
-    h+=_trayAgg(`Flagged lines in ${reviews.length} meetings`,
-        _trayVerb(trayOpen.review?'Hide':'Review &#8594;',`trayExpand('review')`));
-    if(trayOpen.review)h+=reviews.map(t=>{
-      const r=rowById(t.target);
-      const meta=r&&r.date?esc(shortDate(r.date)):'';
-      return _traySub(t.title,meta,t.count+' to check',
-        `openReviewBadge('${escJs(t.target)}')`);
-    }).join('');
-  }
-  tray.innerHTML=h;
+  return h;
 }
 
 /* ============================ timeline ============================ *
@@ -474,54 +430,12 @@ function dupNote(row){
     ${lead} ${what}</div>`;
 }
 
-// ---- needs_name review card helpers ----
 // the filename minus its final extension, and nothing else: the date and topic
-// the user typed into the name are the whole reason the line is shown.
+// the user typed into the name are why the Title step offers it (fsUseFile).
 function srcStem(name){
   if(!name)return '';
   const i=name.lastIndexOf('.');
   return i>0?name.slice(0,i):name;
-}
-// adopt the source filename into the row's own name box (the row is the form,
-// so the input is found from the clicked button's row, never by id)
-function nsrcAdopt(el,stem){
-  const box=el.closest('.row');
-  const inp=box&&box.querySelector('.nameform .ntitle');
-  if(!inp)return;
-  inp.value=stem;inp.focus();
-  inp.setSelectionRange(inp.value.length,inp.value.length);
-}
-// mUnknownUid parameterized by meeting base: the transcript page pins one base
-// in MP, a timeline row asks about its own. Hidden (archived) unknowns are NOT
-// filtered out -- hiding stops the tray nagging, it never means the voice
-// stopped being nameable.
-function rowUnknownUid(base,display){
-  const u=(S&&S.unknowns||[]).find(x=>x.display===display
-    &&(x.meetings||[]).includes(base));
-  return u?u.uid:null;
-}
-// who the meeting heard, as chips. Named people read as plain muted text;
-// an unnamed voice gets a "?" chip that opens the SAME slide-over the
-// transcript legend uses, so the app has exactly one naming flow. Registry
-// uid first; a voice the registry never tracked (minting floor, or a "not a
-// real speaker" tombstone) still names from this meeting's cluster.
-// A voice dismissed as "not a real speaker" in this meeting falls through to
-// the plain chip with NO extra check here: the SERVER is the gate, dropping the
-// id out of unnamed_clusters, so there is exactly one place dismissal is
-// enforced instead of a client-side rule that can drift from it.
-function rowSpeakerChips(row){
-  const unc=row.unnamed_clusters||{};
-  return (row.speakers||[]).map(w=>{
-    const uid=rowUnknownUid(row.id,w),cid=unc[w];
-    const tip='Who is this? Listen and name this voice';
-    if(uid)
-      return `<button class="nchip unk" type="button" title="${tip}"
-        onclick="openNamePanelByUid('${escJs(uid)}','${escJs(row.id)}')">${esc(w)}<span class="nchipq">?</span></button>`;
-    if(cid)
-      return `<button class="nchip unk" type="button" title="${tip}"
-        onclick="openNamePanelByCluster('${escJs(row.id)}','${escJs(cid)}','${escJs(w)}')">${esc(w)}<span class="nchipq">?</span></button>`;
-    return `<span class="nchip">${esc(w)}</span>`;
-  }).join('');
 }
 
 function bodyAndSlot(row){
@@ -574,38 +488,6 @@ function bodyAndSlot(row){
       return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div></div>
         <div class="rslot"><span class="rstate spill busy">${esc(STAGE_NICE[row.stage]||row.stage||'working')}${pct!=null?' '+pct+'%':''}${eta}</span></div>
         ${pct!=null?`<span class="progress" style="width:${pct}%"></span>`:''}`;
-    }
-
-    case 'needs_name':{
-      // the row IS the form, prefilled. Builder B wires acceptMeeting().
-      // Under the form sits the evidence a human actually names a meeting from:
-      // the original filename, who was heard, and what it was about.
-      const want=row.suggested_title||row.title||'';
-      // the source FILENAME carries what the user encoded when they saved it
-      // (date, topic, who was in the room); the AI title throws that away, so
-      // the stem is offered as a one-click adoption. A recorder-made file's
-      // stem IS the title, so the equal case is suppressed and those rows
-      // stay clean.
-      const stem=srcStem(row.source_file);
-      const src=(stem&&stem.trim().toLowerCase()!==want.trim().toLowerCase())
-        ?`<div class="nsrc">from file:
-            <button class="nsrcname" type="button" title="Use this filename as the name"
-              onclick="nsrcAdopt(this,'${escJs(stem)}')">${esc(stem)}</button>
-          </div>`:'';
-      const chips=rowSpeakerChips(row);
-      return `<div class="nneeds">
-        <div class="nameform">
-          <input class="ntitle" type="text" value="${esc(want)}"
-            placeholder="Name this meeting"
-            onkeydown="if(event.key==='Enter')acceptMeeting('${escJs(row.id)}',this)">
-          <input type="date" value="${esc(row.suggested_date||row.date||'')}" aria-label="Meeting date">
-          ${row.has_audio?`<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>`:''}
-          <button class="btn primary mini" type="button" onclick="acceptMeeting('${escJs(row.id)}')">Accept</button>
-        </div>
-        ${src}
-        ${chips?`<div class="nchips">${chips}</div>`:''}
-        ${row.summary?`<div class="nsum">${esc(row.summary)}</div>`:''}
-      </div>`;
     }
 
     case 'ready':{
@@ -689,9 +571,81 @@ function toggleExpand(id){
 }
 
 function rowHTML(row){
+  // a meeting waiting for its title is a compact To finish row in either
+  // sort: the finish strip's Title step names it, so the list never holds a form
+  if(row.state==='needs_name')return finishRowHTML(row);
   const open=row.state==='ready'&&OPEN.has(row.id);
   return `<div class="row${open?' open':''}" data-state="${esc(row.state)}" data-id="${esc(row.id)}" tabindex="0">`
     +gutter(row)+bodyAndSlot(row)+`</div>`;
+}
+
+/* ====================== the Now and To finish sections ====================== *
+ * (docs/ui-refresh phase 2.) The by-date list opens with two sections above
+ * the accordion, each under the house eyebrow: "Now" (the pipeline's live
+ * rows and the tray's urgent kinds) and "To finish" (every meeting with an
+ * open step: its title, or any step on a meeting processed in the last 14
+ * days). A section with nothing in it renders nothing; a finished meeting
+ * lives only in the accordion.
+ */
+function timelineSections(rows,now){
+  const out={now:[],fin:[],rest:[]};
+  for(const r of rows||[]){
+    if(NOW_STATES.has(r.state))out.now.push(r);
+    else if(r.state==='needs_name'||toFinish(r,now))out.fin.push(r);
+    else out.rest.push(r);
+  }
+  out.now.sort((a,b)=>(PIN_ORDER[a.state]-PIN_ORDER[b.state])
+    ||(b.when||'').localeCompare(a.when||''));
+  // To finish keeps the timeline's own order: it is the order ] walks
+  out.rest.sort((a,b)=>dateKey(b).localeCompare(dateKey(a))
+    ||(b.when||'').localeCompare(a.when||''));
+  return out;
+}
+// the three steps as dots: done green with a check, open teal with its count
+function finishDotsHTML(row){
+  return `<span class="steps">`+finishSteps(row).slice(0,3).map(st=>{
+    const done=st.state==='done';
+    const c=!done&&st.count?` <span class="mono">${st.count}</span>`:'';
+    return `<span class="sdot${done?' done':''}">${done?'&#10003; ':''}${st.label}${c}</span>`;
+  }).join('')+`</span>`;
+}
+// one compact row: the title and date, one meta line, the step dots. The row
+// is a link to the meeting, where the finish strip takes over.
+function finishRowHTML(row){
+  const title=(row.state==='needs_name'&&row.suggested_title)||row.title||'';
+  const bits=[];
+  if(row.minutes!=null)bits.push(row.minutes+' min');
+  if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
+  return `<a class="lrow" href="#m/${encodeURIComponent(row.id)}" data-id="${esc(row.id)}"`
+    +` data-state="${esc(row.state)}"><span class="lt"><span class="ltitle">${esc(title)}</span>`
+    +(row.date?`<span class="ldate">${esc(shortDate(row.date))}</span>`:'')+`</span>`
+    +(bits.length?`<span class="lmeta">${bits.join(' &middot; ')}</span>`:'')
+    +finishDotsHTML(row)+`</a>`;
+}
+// a section's eyebrow: the label, a hairline rule, then any actions
+function secHeadHTML(label,id,acts){
+  return `<div class="mgroup sechead" id="${id}"><span class="glabel">${label}</span>`
+    +`<span class="grule" aria-hidden="true"></span>${acts||''}</div>`;
+}
+// the To finish eyebrow's two actions, each only when it applies: "Name N
+// voices" walks the unknown voices meeting by meeting (fsVoicesStart), and
+// "Review flags" toggles the flagged-only filter (pressed while it is on)
+function finishActsHTML(nVoices,nFlagged,on){
+  let h='';
+  if(nVoices>0)h+=`<button class="secact" type="button" onclick="fsVoicesStart()"`
+    +` title="Name each unknown voice in turn, the most talk time first">`
+    +`Name ${nVoices} voice${nVoices!==1?'s':''}</button>`;
+  if(nFlagged>0||on)h+=`<button class="secact" type="button" onclick="flaggedToggle()"`
+    +` aria-pressed="${on?'true':'false'}"`
+    +` title="${on?'Show every meeting again':'Show only meetings with flagged lines'}">`
+    +`${on?'Review flags &#10005;':'Review flags'}</button>`;
+  return h;
+}
+// the markup above the accordion: Now (urgent items, uploads, live rows), then
+// To finish (its eyebrow when it has rows or an action applies, then its rows)
+function headSectionsHTML(nowHTML,fin,acts){
+  return (nowHTML?secHeadHTML('Now','sec-now')+nowHTML:'')
+    +((fin.length||acts)?secHeadHTML('To finish','sec-fin',acts)+fin.map(finishRowHTML).join(''):'');
 }
 
 // fields that decide whether a rebuild is needed -- elapsed_secs is deliberately
@@ -710,6 +664,9 @@ function sigOf(r){
   r.est_detail,
   r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
   (r.speakers||[]).join(','),
+  // the finish record paints a To finish row's dots, and moves as voices are
+  // named and flags checked while nothing else on the row changes
+  r.finish?[r.finish.title,r.finish.voices,r.finish.flags].join(','):'',
   open?1:0,m?(m.summary||''):'',m?(m.next_steps||[]).join(''):''];}
 
 function drawTimeline(s){
@@ -721,8 +678,8 @@ function drawTimeline(s){
   const all=s.timeline||[];
   const rows=all.filter(r=>{
     if(cat&&r.state==='ready'&&r.category!==cat)return false;   // tag filter: ready rows only
-    // the tray's >8 flagged aggregate: ready rows with nothing to check drop
-    // out; the pinned actionable cluster (recording..waiting) stays visible
+    // "Review flags": ready rows with nothing to check drop out; Now and the
+    // meetings waiting for a title stay visible
     if(flaggedOnly&&r.state==='ready'&&!(r.review_substantial>0))return false;
     if(q){
       // match the visible name (a needs_name row shows its suggested title) plus speakers
@@ -734,27 +691,42 @@ function drawTimeline(s){
 
   // synthetic upload rows: prune the ones whose REAL waiting row has landed
   // (the same rebuild adds one and drops the other, so the swap never
-  // flickers), then pin the survivors above everything
+  // flickers), then pin the survivors above every row
   uploadsPrune();
   const upHTML=UPLOADS.map(uploadRowHTML).join('');
 
-  // empty states (quiet, centered), rendered inside the timeline
-  if(all.length===0&&!UPLOADS.length){
-    tl.innerHTML=`<p class="empty">Record a meeting from the menu bar, or drop an audio file here.</p>`;
-    $('#rail').hidden=true;tl.dataset.sig='EMPTY';return;
-  }
-  if(rows.length===0&&!UPLOADS.length){
-    tl.innerHTML=`<p class="empty">No matches.</p>`;
-    $('#rail').hidden=true;tl.dataset.sig='NOMATCH:'+cat+':'+q+':'+flaggedOnly;return;
+  // the tray's urgent kinds and the To finish actions never depend on the
+  // sort, a search, or an empty library: the band that held them is gone, so
+  // they must stay reachable from every state of the list. traySig runs first
+  // (it disarms a dupe sweep whose row is gone).
+  const tsig=traySig(s);
+  const urgent=nowTrayHTML(s);
+  const acts=finishActsHTML(trayCount(s,'unknown_voice'),trayCount(s,'review'),flaggedOnly);
+
+  // empty states (quiet, centered), rendered inside the timeline under Now
+  if((all.length===0||rows.length===0)&&!UPLOADS.length){
+    const empty=all.length===0
+      ?'Record a meeting from the menu bar, or drop an audio file here.':'No matches.';
+    const sig=(all.length===0?'EMPTY':'NOMATCH:'+cat+':'+q+':'+flaggedOnly)+'|'+tsig;
+    $('#rail').hidden=true;
+    if(tl.dataset.sig===sig)return;
+    tl.dataset.sig=sig;
+    tl.innerHTML=headSectionsHTML(urgent,[],acts)
+      +`<p class="empty">${empty}</p>`;
+    return;
   }
 
   // ---- ordering + grouping ----
-  // by-name: one flat alphabetical list, letter groups (unchanged).
-  // by-date: the pinned actionable cluster first (one unlabeled group), then the
-  // ready rows sorted AND grouped by the SAME key (meeting date, newest first).
+  // by-name: one flat alphabetical list, letter groups, under Now's urgent
+  // items and the To finish actions.
+  // by-date: Now and To finish first (one unfoldable group above every
+  // section), then the library sorted AND grouped by the SAME key (meeting
+  // date, newest first).
   const groups=[];
   let nest=false;                 // year sections only once the library spans 2+ years
+  let head='',split='';
   if(sort==='name'){
+    head=headSectionsHTML(urgent,[],acts);
     const ordered=rows.slice().sort((a,b)=>
       (a.title||'').toLowerCase().localeCompare((b.title||'').toLowerCase())
       ||(b.date||'').localeCompare(a.date||''));
@@ -764,12 +736,12 @@ function drawTimeline(s){
       groups[groups.length-1].rows.push(r);
     }
   }else{
-    const pinned=rows.filter(r=>PINNED.has(r.state)).sort((a,b)=>
-      (PIN_ORDER[a.state]-PIN_ORDER[b.state])||(b.when||'').localeCompare(a.when||''));
-    const rest=rows.filter(r=>!PINNED.has(r.state)).sort((a,b)=>
-      dateKey(b).localeCompare(dateKey(a))||(b.when||'').localeCompare(a.when||''));
-    if(pinned.length)groups.push({key:'',pinned:true,rows:pinned});
-    for(const r of rest){
+    const sec=timelineSections(rows);
+    const top=headSectionsHTML(urgent+upHTML+sec.now.map(rowHTML).join(''),sec.fin,acts);
+    // the pinned group carries its own markup: the two sections, whole
+    if(top)groups.push({key:'',pinned:true,rows:sec.now.concat(sec.fin),html:top});
+    split=sec.now.length+':'+sec.fin.length;
+    for(const r of sec.rest){
       const key=dateBucket(dateKey(r));
       const last=groups[groups.length-1];
       if(!last||last.pinned||last.key!==key)groups.push({key,rows:[]});
@@ -787,23 +759,24 @@ function drawTimeline(s){
   if(sort==='date')grpStates(groups,nest,forced);      // g.open / g.yearOpen, once
   const ordered=[].concat(...groups.map(g=>g.rows));   // flat, for the change signature
   // the fold state is part of the signature: a toggle changes what is in the
-  // DOM without changing a single row, and the poll must not undo it
-  const gsig=sort!=='date'?'':groups.map(g=>g.pinned?'P'
+  // DOM without changing a single row, and the poll must not undo it. So is
+  // the Now / To finish split: a meeting aging out of To finish moves zones.
+  const gsig=sort!=='date'?'':groups.map(g=>g.pinned?'P'+split
     :g.id+':'+(g.open?1:0)+':'+(g.yearOpen?1:0)).join(',');
   const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly
-    +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig;
+    +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig+'|'+tsig;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
-  // never wipe a half-typed name in a needs_name field; a later unchanged poll
-  // (or a blur) lets the rebuild happen. Only INPUT/SELECT focus blocks it, so
-  // a merely focused row still refreshes.
+  // never wipe a half-typed title or date (an inline rename in a row); a later
+  // unchanged poll (or a blur) lets the rebuild happen. Only INPUT/SELECT
+  // focus blocks it, so a merely focused row still refreshes.
   const ae=document.activeElement;
   if(ae&&tl.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName))return;
   tl.dataset.sig=sig;
-  tl.innerHTML=upHTML+(sort==='date'
+  tl.innerHTML=sort==='date'
     ?accordionHTML(groups,nest,forced)
-    :groups.map((g,i)=>
-      (g.pinned?'':`<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`)
-      +g.rows.map(rowHTML).join('')).join(''));
+    :head+upHTML+groups.map((g,i)=>
+      `<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`
+      +g.rows.map(rowHTML).join('')).join('');
   drawRail(groups,q.length>0,sort);
 }
 
@@ -825,8 +798,9 @@ function accordionHTML(groups,nest,forced){
   if(groups.some(g=>!g.pinned&&g.open===undefined))grpStates(groups,nest,forced);
   for(let i=0;i<groups.length;i++){
     const g=groups[i];
-    // the pinned actionable cluster: above every section, unlabeled, unfoldable
-    if(g.pinned){html+=g.rows.map(rowHTML).join('');continue;}
+    // the pinned group: above every section, unfoldable. drawTimeline hands
+    // it the Now and To finish sections whole (g.html); bare rows otherwise
+    if(g.pinned){html+=g.html!=null?g.html:g.rows.map(rowHTML).join('');continue;}
     if(nest&&g.year&&g.year!==lastYr){
       lastYr=g.year;
       const yCount=groups.reduce((n,x)=>
@@ -914,12 +888,12 @@ function relabelWatch(s){
   MP.stamp=st;
   mReloadSegs();
 }
-// While a meeting page is open the 2s poll keeps the pill/tray/bulk regions
-// live (drawPill/drawTray/applySel) but must NOT rebuild the meeting document
+// While a meeting page is open the 2s poll keeps the pill and bulk regions
+// live (drawPill/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
 // relabelWatch runs FIRST, before that early return: the meeting view is the
 // one place a finished relabel has to be picked up.
-function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawTray(S);drawDrawer(S);
+function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
   if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
@@ -947,15 +921,42 @@ function stampsMoved(prev,next){
 function flashRows(ids){
   if(!ids||!ids.length)return;
   const want=new Set(ids);
-  document.querySelectorAll('.row[data-id]').forEach(el=>{
+  document.querySelectorAll('.row[data-id], .lrow[data-id]').forEach(el=>{
     if(!want.has(el.dataset.id))return;
     el.classList.add('updated');
     setTimeout(()=>{el.classList.remove('updated');},FLASH_MS);
   });
 }
+/* The tab title. A meeting that joins To finish while the panel sits in a
+ * background tab says so there: "(1) Meetings", counting every meeting that
+ * joined since the tab was hidden. The count resets the moment the tab is
+ * visible again. The first poll only sets the baseline, so opening the panel
+ * in a background tab never counts what was already waiting. */
+let TAB_SEEN=null;
+const TAB_JOINED=new Set();
+function finishIds(timeline,now){
+  return (timeline||[]).filter(r=>r.state==='needs_name'||toFinish(r,now)).map(r=>r.id);
+}
+function tabJoins(prev,next){
+  if(!prev)return [];
+  const was=new Set(prev);
+  return (next||[]).filter(id=>!was.has(id));
+}
+function tabTitle(n){return n>0?'('+n+') Meetings':'Meetings';}
+function tabWatch(s){
+  const ids=finishIds(s&&s.timeline);
+  if(document.hidden)for(const id of tabJoins(TAB_SEEN,ids))TAB_JOINED.add(id);
+  TAB_SEEN=ids;
+  document.title=tabTitle(TAB_JOINED.size);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden)return;
+  TAB_JOINED.clear();document.title=tabTitle(0);
+});
 async function refresh(){try{
   const prev=S;
   S=await api('/api/state');
+  tabWatch(S);
   render();
   // the list view only: the meeting page answers a moved stamp by reloading
   // itself (relabelWatch), which is a louder signal than a tint
@@ -1172,55 +1173,32 @@ function drawProcessPop(s){
   fillProcessPop(pop);
 }
 
-/* ------------------------------------------------------------- tray -------- */
-// which aggregate groups are expanded; folded into drawTray's signature so a
-// poll never collapses one the user just opened
-let trayOpen={review:false,voices:false};
-function trayExpand(group){trayOpen[group]=!trayOpen[group];drawTray(S);}
-// the >8 flagged aggregate's library filter: only ready rows with lines to
-// check show (the pinned actionable cluster stays); the header chip clears it
+/* ---------------------------------------------- tray items + filters ------ */
+// "Review flags" on the To finish eyebrow: only ready rows with lines to check
+// show (Now and To finish stay); the header chip clears it too
 let flaggedOnly=false;
 function flaggedToggle(){flaggedOnly=!flaggedOnly;render();}
 function flaggedClear(){flaggedOnly=false;render();}
 async function trayAct(kind,target){
-  const ev=window.event;
-  if(kind==='recorder_note'){
-    // the failed recorder note's Fix permissions: same in-flight label as the
-    // stall item; the outcome lands in the row's own detail text (the note
-    // itself persists server-side until its x dismisses it)
-    const btn=ev&&ev.target&&ev.target.closest?ev.target.closest('.tw-verb'):null;
-    if(btn){btn.disabled=true;btn.textContent='Resetting…';}
-    const r=await api('/api/fix_recorder_permissions',{});
-    const row=btn&&btn.closest('.trayrow'),d=row&&row.querySelector('.tw-detail');
-    if(r.ok){
-      if(btn)btn.textContent='Done ✓';
-      if(d)d.textContent=r.message||'Permissions reset.';
-    }else{
-      if(btn){btn.disabled=false;btn.textContent='Retry';}
-      if(d)d.textContent=r.error||'permission reset failed';
-    }
+  if(kind==='recorder_note'||kind==='recorder_stall'){
+    // Fix permissions, on the failed recorder note or a live stall: an
+    // in-flight label, then the outcome in the row's own detail text. Both
+    // are STATE (NOW_MSG), because the row lives in the list now and the
+    // list's 2s rebuild would wipe anything written into the DOM
+    const at=kind==='recorder_note'?((S&&S.recorder_note)||{}).at:target;
+    NOW_MSG[kind]={at,label:'Resetting…',busy:true,detail:''};nowRedraw();
+    let r;
+    try{r=await api('/api/fix_recorder_permissions',{});}
+    catch(e){r={ok:false,error:'Could not reach the server.'};}
+    if(r&&r.ok&&kind==='recorder_stall')delete NOW_MSG[kind];   // the poll says if it cleared
+    else NOW_MSG[kind]=r&&r.ok
+      ?{at,label:'Done ✓',busy:true,detail:r.message||'Permissions reset.'}
+      :{at,label:'Retry',busy:false,detail:(r&&r.error)||'permission reset failed'};
+    nowRedraw();
+    if(kind==='recorder_stall')refresh();
     return;
   }
-  if(kind==='recorder_stall'){
-    const btn=ev&&ev.target&&ev.target.closest?ev.target.closest('.tw-verb'):null;
-    if(btn){btn.disabled=true;btn.textContent='Resetting…';}
-    const r=await api('/api/fix_recorder_permissions',{});
-    if(!r.ok&&btn){
-      btn.disabled=false;btn.textContent='Retry';
-      const row=btn.closest('.trayrow'),d=row&&row.querySelector('.tw-detail');
-      if(d)d.textContent=r.error||'permission reset failed';
-    }
-    refresh();return;
-  }
-  if(kind==='failed'){
-    const r=rowById(target);
-    if(r&&r.source_file)api('/api/run',{files:[r.source_file],...runOpts()}).then(refresh);
-    return;
-  }
-  if(kind==='failed_gone'){failDismiss(target);return;}
-  if(kind==='review'){openReviewBadge(target);return;}
   if(kind==='dupe_meetings'){openDrawer('dupes');return;}
-  if(kind==='unknown_voice')openNamePanelByUid(target);
 }
 
 /* -------------------------------------------------- inline clip player ----- *
@@ -1342,7 +1320,7 @@ function rowRetry(id){                    // re-run a failed source still in the
 // in-shell route: set the hash and let the hashchange handler open the page
 // (Builder A, at the bottom). No navigation away; back/forward and deep links work.
 function openMeeting(id){location.hash='#m/'+encodeURIComponent(id);}
-// a row's review count / a tray review verb: open the meeting page with the
+// a row's review count: open the meeting page with the
 // flag stepper active on the first flag (the same pendingOpen pattern as the
 // ask focus and the search-hit seek: a flag the build consumes, never a timeout)
 function openReviewBadge(id){
@@ -1358,27 +1336,6 @@ function cycleCat(ev,id){                 // untagged -> work -> personal -> unt
   r.category=next;render();               // optimistic; the dot flips before the poll
   api('/api/set_category',{base:id,category:next}).then(refresh);
 }
-async function acceptMeeting(id){         // name/date from the row's own form
-  const rowEl=document.querySelector('.row[data-id="'+CSS.escape(id)+'"]');
-  if(!rowEl)return;
-  const form=rowEl.querySelector('.nameform')||rowEl;
-  const titleI=form.querySelector('.ntitle'),dateI=form.querySelector('input[type=date]');
-  const btn=form.querySelector('.btn.primary');
-  const name=(titleI&&titleI.value.trim())||'',date=(dateI&&dateI.value)||'';
-  const old=form.querySelector('.nameerr');if(old)old.remove();
-  if(btn){btn.disabled=true;btn.textContent='Saving…';}
-  const r=await api('/api/accept_meeting',{base:id,name,date});
-  if(!r.ok){                               // failure shows inline on the row, no banner
-    const live=document.querySelector('.row[data-id="'+CSS.escape(id)+'"] .nameform')||form;
-    const b2=live.querySelector('.btn.primary');if(b2){b2.disabled=false;b2.textContent='Accept';}
-    let err=live.querySelector('.nameerr');
-    if(!err){err=document.createElement('div');err.className='nameerr';live.appendChild(err);}
-    err.textContent=r.error||'Could not accept this meeting.';
-    return;
-  }
-  refresh();
-}
-
 /* ----------------------------------------------------------- row menu ------ */
 // the row whose menu / delete confirm is open keeps its hover actions in the
 // flow (.acting): the pointer is inside the popover, so :hover alone would
@@ -1987,7 +1944,7 @@ async function buildMeeting(base){
       el.scrollIntoView({block:'center'});
     }
   }
-  // a review chip / tray verb opened this page: start stepping on the first flag
+  // a review chip opened this page: start stepping on the first flag
   if(MP.pendingReview){MP.pendingReview=false;if(MP.segs.length)reviewStart(0);}
 }
 
@@ -2905,8 +2862,8 @@ async function reviewApply(action){
   renderReviewCard();
 }
 /* Save from the card: the card is a workspace, so the position HOLDS. The
- * card stays open at this segment, updated in place; the counter, strip, and
- * tray still drop optimistically when the save resolves the flag; stepping
+ * card stays open at this segment, updated in place; the counter and strip
+ * still drop optimistically when the save resolves the flag; stepping
  * moves on only from the bar (or Enter/n) afterwards. */
 async function reviewSave(){
   if(!MR||!MR.active||MR.busy)return;
@@ -3717,8 +3674,9 @@ let FS=null;        // the open meeting's flow: {base,row,fin,past,voices,vi,
                     // cur,live,hand,looks,clip,busy}. live: the flow may take
                     // focus and play the clip on its own (a recent meeting, or
                     // one reached by a hand-off or an advance in this session)
-let FS_CARRY=null;  // {base,past,live,keep}: a flow crossing a route change
-                    // (the title accept re-stamped the folder, or ] / Next)
+let FS_CARRY=null;  // {base,past,live,keep,mode?,seen?,resolved?}: a flow
+                    // crossing a route change (the title accept re-stamped the
+                    // folder, ] / Next, or the voice queue's hand-off)
 
 // the ordered steps with their state: done (closed), cur (the first open step
 // not in `past`), open (the rest). `past` holds steps the user moved on from
@@ -3765,6 +3723,31 @@ function nextToFinish(timeline,currentBase,dir,now){
   return null;
 }
 
+// the voice queue ("Name N voices" on the To finish eyebrow): the meeting not
+// yet visited in this run that holds the unnamed voice with the most talk
+// time (finish.voice_secs). Ties keep the timeline's order. Any meeting with
+// an unnamed voice counts, however old: the queue walks the whole library.
+function nextVoiceMeeting(timeline,seen){
+  const skip=new Set(seen||[]);
+  let best=null;
+  for(const r of timeline||[]){
+    const f=r&&r.finish;
+    if(!f||!(f.voices>0)||skip.has(r.id))continue;
+    if(!best||(f.voice_secs||0)>(best.finish.voice_secs||0))best=r;
+  }
+  return best;
+}
+// the queue's order inside one meeting: the most talk time first, and never a
+// voice this run already named or dropped (the relabel that carries a name to
+// the other meetings lands a little after the save)
+function fsVoiceOrder(voices,segs,resolved){
+  const done=new Set(resolved||[]),talk={};
+  for(const g of segs||[])
+    talk[g.speaker]=(talk[g.speaker]||0)+Math.max(0,(g.end||0)-(g.start||0));
+  return (voices||[]).filter(v=>!(v.uid&&done.has(v.uid)))
+    .sort((a,b)=>(talk[b.id]||0)-(talk[a.id]||0));
+}
+
 /* ------------------------------------------------------------- markup ---- */
 function fsStripHTML(steps){
   return `<div class="fstrip" role="list" aria-label="Steps to finish this meeting">`
@@ -3800,7 +3783,8 @@ function fsTitleHTML(row){
         onkeydown="fsTitleKey(event)">
       <button class="btn primary mini" id="fsaccept" type="button" onclick="fsAccept()"
         title="Accept this title and date (Enter)">Accept</button>
-      ${stem&&stem!==t?`<button class="btn mini" type="button" onclick="fsUseFile()"
+      ${stem&&stem.trim().toLowerCase()!==t.trim().toLowerCase()
+        ?`<button class="btn mini" type="button" onclick="fsUseFile()"
         title="${esc(stem)}">Use the file name</button>`:''}
     </div>
     <div id="fserr" class="mcerr" hidden></div>
@@ -3868,13 +3852,26 @@ function fsInit(base){
   FS={base,row,fin:{title:!!row.finish.title,voices:row.finish.voices||0,flags:row.finish.flags||0},
       past:(carry&&carry.past)||[],voices:null,vi:0,cur:null,
       live:!!(carry&&carry.live)||toFinish(row),hand:!!(carry&&carry.live),
-      looks:[],clip:null,busy:false,first:true};
+      looks:[],clip:null,busy:false,first:true,
+      // the voice queue: its mode, the meetings it has visited, and the uids
+      // it has named or dropped so far
+      mode:(carry&&carry.mode)||null,seen:((carry&&carry.seen)||[]).slice(),
+      resolved:((carry&&carry.resolved)||[]).slice()};
   fsShow(false);
 }
 // paint the strip and the current step's body; `auto` means the flow moved
 // on by itself, which is what may start the flag review
 function fsShow(auto){
   if(!FS)return;
+  // the voice queue: once this meeting's Voices step is behind it, hand off
+  // to the next meeting with an unnamed voice instead of the Title or Flags
+  // steps. At the end of the queue the flow drops back to the ordinary strip
+  // and starts nothing on its own.
+  if(FS.mode==='voices'&&fsCur(finishSteps({finish:FS.fin},FS.past))!=='voices'){
+    if(fsVoiceGo())return;
+    FS.mode=null;FS.past=FS.past.filter(k=>k==='voices');auto=false;
+    toast('No more voices to name.');
+  }
   const prev=FS.cur;
   fsRender();
   if(FS.cur==='title'&&FS.live){const t=$('#fstitle');if(t)t.focus({preventScroll:true});}
@@ -3939,7 +3936,7 @@ function fsSegsLoaded(){
   if(!FS||!MP||FS.base!==MP.base)return;
   const fresh=fsVoicesFrom(MP.spkOpts);
   if(!FS.voices){
-    FS.voices=fresh;
+    FS.voices=FS.mode==='voices'?fsVoiceOrder(fresh,MP.segs,FS.resolved):fresh;
     FS.vi=Math.max(0,FS.voices.findIndex(v=>!v.st));
   }else{
     const live=new Set(fresh.map(v=>v.id));
@@ -3973,6 +3970,28 @@ function fsResume(){
     FS.fin.voices=_fsOpenVoices();
   }
   FS.live=true;fsShow(true);
+}
+// "Name N voices": the first meeting of the voice queue, straight into its
+// Voices step. With no live meeting holding an unnamed voice (every one of
+// them heard only in archived meetings), the tray's old path: the naming
+// panel on the first unknown voice.
+function fsVoicesStart(){
+  const r=nextVoiceMeeting(S&&S.timeline,[]);
+  if(r){fsVoiceCarry(r.id,[],[]);return;}
+  const u=((S&&S.tray)||[]).find(t=>t.kind==='unknown_voice');
+  if(u)openNamePanelByUid(u.target);
+}
+function fsVoiceCarry(base,seen,resolved){
+  FS_CARRY={base,past:['title','flags'],live:true,keep:true,mode:'voices',
+    seen:seen.concat(base),resolved:resolved.slice()};
+  location.hash='#m/'+encodeURIComponent(base);
+}
+// the queue's hand-off, after this meeting's last voice
+function fsVoiceGo(){
+  const r=nextVoiceMeeting(S&&S.timeline,FS.seen);
+  if(!r)return false;
+  fsVoiceCarry(r.id,FS.seen,FS.resolved||[]);
+  return true;
 }
 // ] / [ and the Next button: the next meeting to finish, by the #m route
 function fsGo(dir){
@@ -4156,6 +4175,7 @@ async function fvSave(force,local){
   refresh();
   if(MP&&MP.base===base)mReloadSegs();
   if(!FS||FS.base!==base)return;
+  if(v.uid)(FS.resolved||(FS.resolved=[])).push(v.uid);
   FS.live=true;
   if(fvToken()===tok)fvNext();
   else{FS.fin.voices=_fsOpenVoices();fsStripSync();}
@@ -4184,6 +4204,7 @@ async function fvForget(){
   refresh();
   if(MP&&MP.base===base)mReloadSegs();
   if(!FS||FS.base!==base)return;
+  if(v.uid)(FS.resolved||(FS.resolved=[])).push(v.uid);
   FS.live=true;
   if(fvToken()===tok)fvNext();
   else{FS.fin.voices=_fsOpenVoices();fsStripSync();}
@@ -4289,7 +4310,7 @@ function drawerNavSync(s){
   const nav=$('#dnav');if(!nav)return;
   const n=(s&&s.archived_count)||0;   // the old page's "Archived · N" lives on the tab
   // the duplicate-transcript count rides its tab the same way, so the section
-  // is findable without the tray line that sent you there
+  // is findable without the Now row that sent you there
   const dn=((s&&s.tray||[]).find(t=>t.kind==='dupe_meetings')||{}).count||0;
   const sig=DRAWER.section+'|'+n+'|'+dn;
   if(nav.dataset.sig===sig)return;
@@ -5186,8 +5207,8 @@ function archHint(){
  * html{scroll-behavior:smooth} owns the scroll feel and the reduced-motion
  * block flips it to auto, so plain scrollIntoView honors both. */
 let kbLast=null;             // the row id that last held the ring
-function kbRows(){return [...document.querySelectorAll(
-  '#timeline .row[tabindex], #timeline .ghead')];}
+const KB_RING='#timeline .row[tabindex], #timeline .lrow, #timeline .ghead';
+function kbRows(){return [...document.querySelectorAll(KB_RING)];}
 function kbFocusRow(el){
   if(!el)return;
   el.focus({preventScroll:true});
@@ -5200,15 +5221,15 @@ function kbFocusRow(el){
 function kbRestore(){
   if(!kbLast||route.view!=='timeline')return;
   if(document.activeElement&&document.activeElement!==document.body)return;
-  const el=document.querySelector('#timeline .row[data-id="'+CSS.escape(kbLast)+'"]');
+  const k=CSS.escape(kbLast);
+  const el=document.querySelector('#timeline .row[data-id="'+k+'"], #timeline .lrow[data-id="'+k+'"]');
   if(el)el.focus({preventScroll:true});
 }
 document.addEventListener('mousedown',()=>{kbLast=null;});
 function kbMove(d){
   const rows=kbRows();if(!rows.length)return;
   const ae=document.activeElement;
-  let i=rows.indexOf(ae&&ae.closest
-    ?ae.closest('#timeline .row[tabindex], #timeline .ghead'):null);
+  let i=rows.indexOf(ae&&ae.closest?ae.closest(KB_RING):null);
   if(i<0&&kbLast)i=rows.findIndex(r=>r.dataset.id===kbLast);
   if(i<0){
     // nothing holds the ring yet: land on the first row in view, so j
@@ -5247,7 +5268,8 @@ function kbKey(e){
   // click (grpToggle), so stand back and let the browser fire it
   if(e.key==='Enter'&&e.target instanceof Element
      &&e.target.matches('#timeline .ghead'))return;
-  // Enter / e act on the focused row itself, never on a focused button in it
+  // Enter / e act on the focused row itself, never on a focused button in it.
+  // A To finish row is a link: Enter there is the link's own, and opens it.
   const row=(e.target instanceof Element&&e.target.matches('#timeline .row[tabindex]'))
     ?e.target:null;
   if(!row)return;
@@ -5255,7 +5277,6 @@ function kbKey(e){
   if(e.key==='Enter'){
     e.preventDefault();
     if(st==='ready')openMeeting(id);
-    else if(st==='needs_name')acceptMeeting(id);
     else{
       // waiting / held / failed: focus-within already reveals the hover
       // actions, so Enter just hands focus to the first one

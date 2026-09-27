@@ -7,10 +7,11 @@ deleted 2026-07-12 after the shell reached full parity.
 
 ## The idea
 
-A meeting is one object. Its row is its queue entry, its progress bar, its
-naming form, and its transcript link. The default screen is the library plus
-at most one amber tray of things needing the user. All machinery lives behind
-one popover (runs) and one drawer (settings).
+A meeting is one object. Its row is its queue entry, its progress bar, and
+its transcript link. The default screen is what is happening Now, what is
+left To finish, and then the library (revised 2026-09-27: the amber tray that
+once headed the screen folded into those two sections). All machinery lives
+behind one popover (runs) and one drawer (settings).
 
 ## Shell mechanics
 
@@ -22,7 +23,8 @@ one popover (runs) and one drawer (settings).
   mtime in `gui/server.py`, so edits to the parts reload live without a
   server restart.
 - The shell consumes the `timeline` and `tray` keys of `/api/state` and
-  reuses the existing action endpoints unchanged. Meetings, review, and
+  reuses the existing action endpoints unchanged. No band renders the `tray`
+  key any more: its items feed the Now and To finish sections. Meetings, review, and
   naming all open inside the shell; no deep-link query params remain.
 
 ## Newsprint tokens
@@ -120,33 +122,41 @@ Header (sticky, paper ground, hairline bottom): sans-semibold wordmark "Meetings
 status pill · search field (right-aligned) · Process ▾ · theme dot · gear
 (opens the drawer).
 
-Status pill: the ONLY place pipeline state appears. Mono, one at a time, by
-priority: `● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min`
-(accent) → `⏸ paused · 3 waiting` (amber, always with the waiting count when
-nonzero) → `3 waiting` → nothing when idle (the pill disappears; idle needs
-no announcement). Clicking the pill opens the Process ▾ popover.
+Status pill: the ONLY place pipeline state appears. Mono, in two segments
+(revised 2026-09-27). The pipeline segment shows one state, by priority:
+`● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min` (accent) →
+`⏸ paused · 3 waiting` (amber, always with the waiting count when nonzero) →
+`3 waiting`. The naming segment sits beside it, split by a `--line`
+hairline: `naming 3 of 7`, so a naming never hides behind a transcription.
+Either segment alone renders alone; with neither, the pill disappears (idle
+needs no announcement). The pill's colour is the pipeline segment's.
+Clicking the pill opens the Process ▾ popover.
 
-Tray (only when non-empty): amber-soft band under the header, uppercase
-semibold sans header "NEEDS YOU". Rare, urgent kinds (recorder stall, failures) get one
-line PER ITEM; chronic kinds aggregate to one line PER KIND. Revised
-2026-07-11 after real data showed 40 flagged meetings turning the tray into a
-wall of 46 asks; a tray that shouts daily is worse than no tray. The tray
-therefore never exceeds a handful of lines no matter the backlog.
+Tray: RETIRED 2026-09-27 (docs/ui-refresh phase 2). It was an amber band
+under the header, "NEEDS YOU": urgent kinds one line per item, chronic kinds
+one line per kind (revised 2026-07-11 after 40 flagged meetings made it a
+wall of 46 asks), and aggregates over 8 filtering the library instead of
+expanding (2026-07-12). Every kind it offered has a home in the list now:
 
-Aggregate expansion (revised 2026-07-12 after the first expansion rebuilt the
-wall inside the tray): an aggregate with more than 8 items does NOT expand
-in the tray. "Flagged lines in N meetings" instead applies a flagged-only
-FILTER to the library (full-size rows; a small "flagged only ✕" chip appears
-beside the category filter to clear it, and the tray line reads as active).
-Aggregates of 8 or fewer (e.g. "5 voices need names") expand in place, but
-their sub-rows use the library's meta scale (13px, roomy padding), never a
-denser one. The tray must never contain a second, smaller library.
+- the recorder's FAILED note, a recorder stall, the duplicate-file sweep, and
+  duplicate transcripts: one compact row each at the top of Now (below);
+- a failed file: its own failed row in Now, which already carries Retry or
+  the dismiss for a gone source, so Now never repeats it;
+- "N voices need names": the To finish eyebrow's "Name N voices"; each voice
+  is also in the drawer's Speakers section;
+- "Flagged lines in N meetings": the To finish eyebrow's "Review flags",
+  which toggles the same flagged-only FILTER at any count (full-size rows; the
+  "flagged only ✕" chip beside the category filter clears it too). There is
+  never a second, smaller library.
 
-Timeline: a centered list on paper in two zones. First an UNLABELED pinned
-cluster of everything actionable, in this order: recording, processing,
-needs_name, failed, held, waiting — these never sink into date groups no
-matter how old their files are (a failed April file must sit at the top, not
-buried in April). Below it, ready meetings sorted AND grouped by the same
+Timeline: a centered list on paper in three zones (revised 2026-09-27; see
+"To finish and Now" under the Finish flow). First "Now": recording,
+processing, failed, held, and waiting rows in that order, under the tray's
+urgent rows. These never sink into date groups no matter how old their files
+are (a failed April file must sit at the top, not buried in April). Then "To
+finish": a meeting waiting for its title, or with an open step and processed
+in the last 14 days, as compact rows. Below them, the rest of the ready
+meetings (every finished one, and older backlog) sorted AND grouped by the same
 key: meeting date, newest first, with month group headers in uppercase semibold sans
 (`JULY 2026 · 6`) and Today/Yesterday labels only for rows actually dated
 today/yesterday. Sorting by one key while grouping by another fragments the
@@ -168,11 +178,11 @@ The right rail's pill is the state:
               busy-blue hairline progress bar along the card's bottom edge
               (Boardroom; supersedes the accent progress); no actions (Stop
               lives in the Process ▾ popover)
-- needs_name  the row IS the form, a white card wearing the 4px accent left
-              edge (Boardroom; supersedes the accent-soft ground): title input
-              (prefilled with suggested_title, flexing to all available
-              width), date input (suggested_date), [▶] [Accept].
-              Enter accepts. No separate inbox card exists.
+- needs_name  a compact To finish row (revised 2026-09-27; the tall form
+              row and its 4px accent edge are retired): the suggested
+              title, the step dots with Title open, and a click opens the
+              meeting, where the finish strip's Title step names it. No
+              separate inbox card exists, and the list holds no form.
 - ready       meta = `MMM D · NN min · speakers`; the review count sits in
               the right rail beneath the state pill (Boardroom; supersedes
               the in-meta placement) as plain amber TEXT, no chip
@@ -232,8 +242,9 @@ work / personal) and sort (by month / by name) sit left of the search field,
 borderless until hover.
 
 Empty states, in sub text, centered: library empty → "Record a meeting from
-the menu bar, or drop an audio file here."; search empty → "No matches.";
-tray absent entirely when empty.
+the menu bar, or drop an audio file here."; search empty → "No matches.". A
+section with nothing in it renders nothing; Now's urgent rows and the To
+finish actions stay above an empty state, in either sort.
 
 ## Reviewing and editing on the meeting page
 
@@ -263,8 +274,8 @@ and Save, split, remove, and insert all hold both scroll and stepping
 position (structural reloads re-anchor by segment start time), update the
 counters in place, and wait for an explicit next. Cmd+Enter saves from the
 textarea; plain Enter stays a newline. Polls and bar resolutions never
-collapse an open editor. Counts everywhere (bar, strip, row meta, tray)
-update optimistically.
+collapse an open editor. Counts everywhere (bar, strip, row meta) update
+optimistically; the To finish dots follow on the next poll.
 
 ## The drawer
 
@@ -302,9 +313,11 @@ in-drawer confirm; same endpoints).
 
 ## Naming a voice
 
-One slide-over (the naming panel, z 60/61, above the drawer) is where every
-voice gets its name, opened from the drawer's Speakers section, a timeline
-row's "?" chip, or the transcript legend. Anatomy, top to bottom, form before
+One slide-over (the naming panel, z 60/61, above the drawer) names a voice
+wherever no meeting's finish flow is in hand: opened from the drawer's
+Speakers section or the transcript legend (the timeline row's "?" chip
+retired with the tall naming row, 2026-09-27; the finish strip's Voices step
+names inline through the same save). Anatomy, top to bottom, form before
 evidence:
 
 - **The preview line.** One quiet sub line directly under the name box:
@@ -323,13 +336,14 @@ evidence:
 - **The after-save toast.** "Named here. Updating 4 other meetings." from the
   response's own `targets`, or "Named here." when there are none. The one
   sentence a save is allowed to say; the panel then closes.
-- **The pill.** The naming's own progress, lowest priority in the status pill:
-  `naming: 3 of 7` while the relabel queue knows its total, `applying names…`
-  while it does not (a whole-library pass re-lists as it goes). Gone on its own
-  when the queue empties. No banner, ever.
+- **The pill.** The naming's own progress, the status pill's second segment
+  (revised 2026-09-27; it was the lowest priority and vanished behind any
+  transcription): `naming 3 of 7` while the relabel queue knows its total,
+  `applying names…` while it does not (a whole-library pass re-lists as it
+  goes). Gone on its own when the queue empties. No banner, ever.
 - **The row flash.** A meeting rewritten by that relabel tints for two seconds
   in `--accent-soft` (class `updated`, the row's own transition, none under
-  reduced motion). The list's rows carry `generated_at`, so the flash marks
+  reduced motion; a To finish row flashes the same way). The list's rows carry `generated_at`, so the flash marks
   exactly the meetings whose bytes moved between two polls. It never enters the
   list's change signature: a flash may not cause a rebuild.
 - **The suggestion lines.** In the drawer's Speakers section, under an unknown
@@ -378,14 +392,77 @@ accepts the step, Space replays the clip, `1` to `3` fill the box from a chip,
 route. Escape in a step's input releases the keyboard to these keys. Key hints
 live in title attributes, never as visible key caps.
 
+### To finish and Now (shipped 2026-09-27, phase 2 of docs/ui-refresh)
+
+The by-date list opens with two sections above the year-to-month accordion,
+each under the month header's own eyebrow (13px semibold uppercase, .08em,
+a `--hair` rule filling the line). A section with nothing in it renders
+nothing, not even its eyebrow.
+
+- **Now.** First the tray's urgent kinds, one compact row each, in the
+  tray's rank order: the recorder's FAILED note (Fix permissions when it
+  reads like a permission problem, and ✕), a recorder stall (Fix), the
+  duplicate-file sweep (the house two-step: Delete copies, then Cancel or
+  Delete N files), and duplicate transcripts (Review → opens the drawer's
+  Duplicates). Each is a white card with the 4px `--attn` left edge the
+  tray wore. A Fix outcome ("Done ✓", the reset message, or Retry with the
+  error) is state, so the list's 2s rebuild never wipes it. Then any drop
+  uploads, then the recording, processing, failed, held, and waiting rows,
+  unchanged. A failed file appears once, as its row.
+- **To finish.** Every meeting with an open step: its title not yet
+  accepted, or any open step on a meeting processed in the last 14 days
+  (`toFinish`). Rows keep the timeline's order, the order `]` walks. A
+  finished meeting, and older backlog, appears only in the accordion.
+
+A To finish row is compact and is one link to `#m/<base>`, where the finish
+strip takes over: the title at 15px semibold (the suggested title while the
+title is open) with the date right-aligned at 13px sub, one 13px meta line
+(`47 min · speakers`), then the step dots. A dot is a 4px chip at 13px
+semibold: teal (`--attn` on `--attn-soft`) while open, with its count in
+mono ("Voices 2", "Flags 6"; Title carries no count), green (`--ok` on
+`--ok-soft`) with a check once done ("✓ Title"). White card, 1px `--hair`
+border firming to `--line` on hover, 6px radius, no shadow, the accent focus
+ring. A meeting waiting for its title is this row in the by-name sort too.
+
+The To finish eyebrow carries two actions, quiet accent text at its right
+end, each only when it applies. The eyebrow stays for them even when no row
+is waiting, in either sort and under a search, so neither ever becomes
+unreachable.
+
+- **Name N voices** (N = unknown voices waiting, the tray's count). It opens
+  the meeting holding the unnamed voice with the most talk time (the row's
+  `finish.voice_secs`) straight into its Voices step, the voice with the
+  most talk time first, never the Title or Flags steps. After that meeting's last voice
+  the flow hands off to the next meeting with an unnamed voice, largest
+  first, never one it already visited, and never re-asks a voice it named
+  while that name's relabel is still on its way. At the end it says "No
+  more voices to name." and leaves the strip as it is, starting nothing on
+  its own. With no live meeting to open (every such voice heard only in
+  archived meetings) it opens the naming panel on the first voice, as the
+  tray did.
+- **Review flags** toggles the flagged-only filter, at any count. While the
+  filter is on it reads "Review flags ✕" in the attention pair and is
+  pressed (`aria-pressed`).
+
+Status. The pill's naming segment (see the Anatomy) says what a naming is
+doing while anything else runs. The tab title reads `(N) Meetings` while the
+panel sits in a background tab and N meetings have joined To finish since it
+was hidden; it returns to `Meetings` the moment the tab is visible. The
+first poll only sets the baseline, so opening the panel in a background tab
+counts nothing that was already waiting.
+
+Keys: `j`/`k` walk To finish rows with the other rows and the section
+headers; Enter on one is the link's own and opens the meeting.
+
 ## What deliberately does not exist in the new shell
 
 No Queue card, Processing card, Recent results, or naming inbox (row states
-replace all four). No Speakers card (tray surfaces unknown voices; management
-moves to the drawer phase). No permanent run-option checkboxes. No status
-text beyond the pill. No notification banners of any kind: outcomes are row
-states, and the recorder's last-outcome note appears as a tray `failed` item
-only when it needs a decision.
+replace all four). No Speakers card (the To finish eyebrow's "Name N voices"
+surfaces unknown voices; management lives in the drawer). No tray band
+(retired 2026-09-27). No permanent run-option checkboxes. No status text
+beyond the pill and the tab title's count. No notification banners of any
+kind: outcomes are row states, and the recorder's last-outcome note appears
+as a Now row only when it needs a decision.
 
 ## Parity checklist source
 
@@ -422,8 +499,9 @@ hue-true when a pair misses, exactly as the Signal and Boardroom rounds did):
                         darkened hue-true only if it misses 4.5:1 on ground
     --ok      #1E7B45 on #E3F4EA      ready pill
     --busy    = accent on accent-soft  transcribing pill and progress hairline
-    --attn    #0B7285 on #DDF2F6      attention: the Needs-you tray edge and
-                                       eyebrow, flagged counts, held state
+    --attn    #0B7285 on #DDF2F6      attention: the Now rows' edge (the
+                                       retired tray's), open finish steps,
+                                       flagged counts, held state
                                        (teal replaces every former amber use;
                                        the --amber token name is kept as an
                                        alias of --attn so no rule breaks)
@@ -444,8 +522,9 @@ on popovers, the drawer, and the bulk bar). Chips and pills carry a 4px
 radius. Controls carry the 6px radius and a 1px --line border. The sticky
 header keeps the paper ground and adds a faint dot grid behind it
 (radial-gradient of --line at 1px on a 14px cell, at reduced alpha so text
-contrast is untouched). The attention tray keeps its 4px left edge, now
---attn; naming rows keep the 4px accent edge. Progress is a 2px accent
+contrast is untouched). The Now rows for the tray's urgent kinds keep the
+retired tray's 4px --attn left edge; the naming row's 4px accent edge retired
+with the tall row (2026-09-27). Progress is a 2px accent
 hairline. Focus ring stays accent. Motion rules unchanged.
 
 Grouping, the year-to-month accordion (replaces flat month headers):
@@ -472,8 +551,9 @@ Grouping, the year-to-month accordion (replaces flat month headers):
   to that state while a filter is on, including a click on a header the
   filter forced open. A jump-rail click expands the target section and its
   year before scrolling.
-- The pinned actionable cluster (recording, processing, needs_name, failed,
-  held, waiting) stays above every group and never folds.
+- Now and To finish (revised 2026-09-27; formerly the pinned actionable
+  cluster of recording, processing, needs_name, failed, held, waiting) stay
+  above every group and never fold.
 - Collapsed sections render only their header line: the rows are not in
   the DOM, so a 400-meeting library costs the browser only its open
   months.

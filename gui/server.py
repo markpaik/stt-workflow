@@ -529,6 +529,19 @@ def _meeting_meta(j: Path, dst_dir: Path):
         # filename/mtime derivation only for pre-migration jsons
         iso = (d.get("date") or dates.meeting_date(j.stem)
                or _date.fromtimestamp(audio_mtime).isoformat())
+        unnamed = {s["display"]: s["id"]
+                   for s in d.get("speakers", [])
+                   if not s.get("name")
+                   and s.get("id") != s.get("display")
+                   and s.get("id") not in dismissed}
+        # talk seconds per cluster, over the lines that carry text (the same
+        # lines /api/voice_lines counts): the voice queue starts with the
+        # unnamed voice that talked the most
+        talk = {}
+        for seg in d.get("segments", []):
+            if seg.get("text", "").strip():
+                talk[seg.get("speaker")] = talk.get(seg.get("speaker"), 0.0) + max(
+                    0.0, float(seg.get("end") or 0) - float(seg.get("start") or 0))
         meta = {"base": j.stem,
                 "date": iso,
                 # display name: the folder carries the date so recurring
@@ -544,11 +557,10 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 # holding only uids cannot offer naming for those. This map is
                 # the cluster-side naming path, the same one the transcript
                 # legend uses.
-                "unnamed_clusters": {s["display"]: s["id"]
-                                     for s in d.get("speakers", [])
-                                     if not s.get("name")
-                                     and s.get("id") != s.get("display")
-                                     and s.get("id") not in dismissed},
+                "unnamed_clusters": unnamed,
+                # the longest-talking unnamed voice's seconds, for the queue
+                "voice_secs": round(max((talk.get(c, 0.0) for c in unnamed.values()),
+                                        default=0.0), 1),
                 # the dismissed ids themselves, so a row or page that wants to
                 # SAY so (or offer an undo) can, without re-reading the json
                 "dismissed_voices": sorted(dismissed),
@@ -734,12 +746,16 @@ def _preview(text, sentences=2, cap=320):
 
 
 def _finish(meta) -> dict:
-    """{title, voices, flags, done} for one meeting's metadata."""
+    """{title, voices, flags, done, voice_secs} for one meeting's metadata.
+    voice_secs is the talk time of the meeting's longest-talking unnamed
+    voice (0 with none): "Name N voices" opens the meeting that holds the
+    voice with the most talk time first."""
     title = not meta["needs_review"]
     voices = len(meta.get("unnamed_clusters") or {})
     flags = int(meta.get("flagged") or 0)
     return {"title": title, "voices": voices, "flags": flags,
-            "done": title and not voices and not flags}
+            "done": title and not voices and not flags,
+            "voice_secs": float(meta.get("voice_secs") or 0) if voices else 0.0}
 
 
 def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):

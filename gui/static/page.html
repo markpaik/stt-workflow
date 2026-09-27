@@ -26,8 +26,8 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
       <option value="work">work</option>
       <option value="personal">personal</option>
     </select>
-    <!-- flagged-only chip: appears while the tray's >8 flagged aggregate is
-         filtering the library to rows with lines to check; click clears it -->
+    <!-- flagged-only chip: appears while "Review flags" (the To finish
+         eyebrow) filters the library to rows with lines to check; click clears it -->
     <button id="flagchip" class="flagchip" type="button" hidden
             title="Showing only meetings with flagged lines. Click to clear.">flagged only &#10005;</button>
     <select id="sort" class="ctl" aria-label="Sort and group"
@@ -56,15 +56,12 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 <main class="wrap">
 
   <!-- the recorder's SUCCESS note ("Saved X - processing"): good news, so a
-       quiet sub-styled line right under the header, never an amber tray ask.
+       quiet sub-styled line right under the header, never an ask.
        It disappears on its own when the server-side TTL drops it from state.
-       A FAILED note renders in the tray below instead (it asks for a decision). -->
+       A FAILED note renders as a row in the timeline's Now section instead
+       (it asks for a decision). The tray band that once sat here is gone:
+       its items live in the Now and To finish sections. -->
   <div id="recok" class="recok" hidden aria-live="polite"></div>
-
-  <!-- amber "needs you" tray: only present when non-empty, ranked by the server
-       (recorder failure -> stall -> failed -> review -> unknown voice). Builder B
-       wires the row verbs and the "and N more" expand. -->
-  <section id="tray" class="tray" hidden aria-label="Needs you"></section>
 
   <!-- quiet full-text search sub-list under the search field (Builder B) -->
   <div id="searchhits" class="searchhits" hidden></div>
@@ -76,8 +73,9 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <div class="timelinewrap">
     <!-- jump rail: year / month, visible only at 3+ groups with no active search -->
     <nav id="rail" class="rail" hidden aria-label="Jump to a month"></nav>
-    <!-- the One Timeline: one row per meeting/file, its state read from /api/state.
-         Row markup and the empty state are rendered by app.js. -->
+    <!-- the One Timeline: the Now and To finish sections, then the library,
+         one row per meeting/file, its state read from /api/state. Row markup
+         and the empty state are rendered by app.js. -->
     <section id="timeline" class="timeline" aria-label="Meetings"></section>
   </div>
 
@@ -103,8 +101,8 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 <div id="drawerveil" class="dveil" hidden onclick="closeDrawer()"></div>
 <aside id="drawer" class="drawer" hidden aria-label="Settings and management"></aside>
 
-<!-- voice-naming slide-over (edit layer): opened from the tray's voice items
-     and from unknown speakers in a meeting page's legend. Contents are built
+<!-- voice-naming slide-over (edit layer): opened from the drawer's Speakers
+     section and from unknown speakers in a meeting page's legend. Contents are built
      by app.js; veil click / Escape / Cancel close it. -->
 <div id="nameveil" class="nveil" hidden onclick="closeNamePanel()"></div>
 <aside id="namepanel" class="npanel" hidden aria-label="Name this voice"></aside>

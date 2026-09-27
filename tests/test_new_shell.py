@@ -65,8 +65,12 @@ def test_root_serves_the_shell_and_ignores_the_ui_param(running_server):
 def test_new_shell_has_all_seven_state_hooks():
     page = _compose(STATIC)
     for st in ("recording", "waiting", "held", "processing",
-               "needs_name", "ready", "failed"):
+               "ready", "failed"):
         assert f'data-state="{st}"' in page, f"missing state hook: {st}"
+    # needs_name lost its tall row and its CSS hook (docs/ui-refresh phase 2):
+    # the state is a compact To finish row in either sort, never a form
+    assert "if(row.state==='needs_name')return finishRowHTML(row);" in page
+    assert "r.state==='needs_name'||toFinish(r,now)" in page
 
 
 def test_new_shell_carries_both_theme_blocks_and_the_prepaint_snippet():
@@ -109,9 +113,12 @@ def test_new_shell_js_parses():
 NEW_JS = (STATIC / "app.js").read_text(encoding="utf-8")
 
 # the seams A left named in the read-only shell, all owned by Builder B now
-SEAMS = ["toggleProcess", "scheduleSearch", "trayAct", "trayExpand", "rowListen",
+# (trayExpand and acceptMeeting retired with the tray band and the tall naming
+# row in docs/ui-refresh phase 2: the To finish actions and the finish strip's
+# Title step replaced them)
+SEAMS = ["toggleProcess", "scheduleSearch", "trayAct", "rowListen",
          "rowHold", "rowRelease", "rowProcess", "rowDelete", "rowRetry",
-         "openMeeting", "rowMenu", "openReviewBadge", "acceptMeeting",
+         "openMeeting", "rowMenu", "openReviewBadge",
          "cycleCat", "toggleSel"]
 
 
@@ -268,9 +275,11 @@ def test_column_cap_is_fluid_boardroom_wide():
 
 
 def test_flagged_aggregate_filters_the_library_not_the_tray():
-    # >8 flagged meetings: the tray line toggles a library filter (never a
-    # second in-tray list); the chip beside the category filter clears it
-    assert "TRAY_EXPAND_MAX=8" in NEW_JS
+    # "Review flags" on the To finish eyebrow toggles a library filter (never
+    # a second, smaller list; the tray band that once expanded one is gone);
+    # the chip beside the category filter clears it
+    assert "TRAY_EXPAND_MAX" not in NEW_JS and "trayExpand" not in NEW_JS
+    assert 'onclick="flaggedToggle()"' in _js_fn("finishActsHTML")
     assert re.search(r"function\s+flaggedToggle\s*\(", NEW_JS)
     assert re.search(r"function\s+flaggedClear\s*\(", NEW_JS)
     # ready rows without substantial flags drop out; pinned states are untouched
@@ -330,7 +339,8 @@ def test_serif_retired_and_mono_demoted_to_true_data():
     assert survivors == {".mono", ".pill"}, f"unexpected mono rules: {survivors}"
     # structural text is sans: row meta, group headers, tray header, right slot
     # (line-start anchored so `.rslot` hits its own rule, not `.row.open .rslot`)
-    for sel in (".rmeta", ".mgroup", ".rslot", ".mmeta", ".tray .trayhdr"):
+    for sel in (".rmeta", ".mgroup", ".rslot", ".mmeta", ".trayrow .tw-title",
+                ".lrow .ltitle", ".sdot"):
         m = re.search(r"(?m)^" + re.escape(sel) + r"\{[^}]*\}", NEW_CSS)
         assert m and "var(--sans)" in m.group(0), f"{sel} must be the sans stack"
     # in the markup, .mono rides only on timestamps/clocks/timers: the ticking
@@ -474,9 +484,9 @@ def test_naming_panel_shows_what_the_voice_said():
     assert "npLines(cluster.meeting,cluster.speaker)" in panel
     assert "npLines(base,display)" in panel
     assert re.search(r"function openNamePanelByUid\(uid,base\)", NEW_JS)
-    # the two callers that KNOW their meeting pass it
-    assert re.search(r"openNamePanelByUid\('\$\{escJs\(uid\)\}','\$\{escJs\(row\.id\)\}'\)",
-                     NEW_JS)
+    # the caller that KNOWS its meeting passes it: the transcript legend (the
+    # timeline row's "?" chip retired with the tall naming row in phase 2;
+    # the finish strip's Voices step names inline through saveName instead)
     assert re.search(r"openNamePanelByUid\('\$\{escJs\(uid\)\}','\$\{escJs\(MP\.base\)\}'\)",
                      NEW_JS)
     # the CSS block: quiet, on the tokens, above the 13px type floor
@@ -766,33 +776,79 @@ console.log(JSON.stringify({reloads}));
     assert json.loads(r.stdout) == {"reloads": 0}
 
 
+def _pill_env():
+    return "\n".join([
+        "function clock(x){return '0:'+String(x).padStart(2,'0');}",
+        "function fmtEta(x){return Math.round(x/60)+' min';}",
+        _js_fn("pillParts"),
+        "const pill=s=>{const p=pillParts(s);return p?[p.cls,p.html]:null;};",
+    ])
+
+
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_the_pill_counts_the_meetings_a_naming_is_walking():
     """The queue knows the target list, so the pill says how far along it is
     instead of an open-ended "applying names". A whole-library pass re-lists as
-    it goes and reports no total -- that one keeps the old wording."""
-    src = _js_fn("drawPill")
-    i = src.index("}else if(s.relabel_running||s.relabel_pending){")
-    branch = src[i:src.index("}else{show=false;}", i)]
-    fixture = "\n".join([
-        "function run(s){let cls='',html='';" + branch[len("}else if(s.relabel_running||s.relabel_pending){"):]
-        + "return html;}",
-        """
+    it goes and reports no total -- that one keeps the old wording. Alone, the
+    naming segment renders alone (phase 2 dropped the colon)."""
+    out = _run_node(_pill_env() + """
+const nm=j=>pill({relabel_running:true,jobs:{running:j}});
 console.log(JSON.stringify([
-  run({jobs:{running:{kind:'relabel',total:7,done:2}}}),
-  run({jobs:{running:{kind:'relabel',total:7,done:7}}}),
-  run({jobs:{running:{kind:'all',total:null,done:0}}}),
-  run({jobs:{running:null}}),
-  run({})]));
-"""])
-    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == [
-        "naming: 3 of 7",
-        "naming: 7 of 7",          # the last meeting, never "8 of 7"
-        "applying names&#8230;",
-        "applying names&#8230;",
-        "applying names&#8230;"]
+  nm({kind:'relabel',total:7,done:2}),
+  nm({kind:'relabel',total:7,done:7}),
+  nm({kind:'all',total:null,done:0}),
+  nm(null),
+  pill({relabel_pending:true}),
+  pill({})]));
+""")
+    assert out == [
+        ["pill", "naming 3 of 7"],
+        ["pill", "naming 7 of 7"],          # the last meeting, never "8 of 7"
+        ["pill", "applying names&#8230;"],
+        ["pill", "applying names&#8230;"],
+        ["pill", "applying names&#8230;"],
+        None]                               # idle: the pill hides
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_pill_gives_naming_its_own_segment_beside_the_pipeline():
+    """docs/ui-refresh phase 2: "naming 3 of 7" was the pill's lowest
+    priority, so it vanished whenever a file transcribed. It is a second
+    segment now: "transcribing 1 . ~6 min | naming 3 of 7". Either segment
+    alone renders alone, and the pipeline keeps its own priority order."""
+    out = _run_node(_pill_env() + """
+const j={running:{kind:'relabel',total:7,done:2}};
+const tl=[{state:'waiting'},{state:'held'},{state:'ready'}];
+console.log(JSON.stringify({
+  both:pill({running:true,active:{a:{}},overall_eta_sec:360,relabel_running:true,jobs:j}),
+  runOnly:pill({running:true,active:{a:{}},overall_eta_sec:360,queued_jobs:[{}]}),
+  rec:pill({recording:{elapsed_secs:5},running:true,relabel_running:true,jobs:j}),
+  recPaused:pill({recording:{elapsed_secs:5,paused:true}}),
+  paused:pill({paused:true,timeline:tl,relabel_pending:true,jobs:{running:null}}),
+  waiting:pill({timeline:tl,relabel_running:true,jobs:j}),
+  held:pill({timeline:[{state:'held'}]}),
+}));
+""")
+    assert out["both"] == ["pill accent",
+                           '<span class="pseg">transcribing 1 &middot; &#8776;6 min</span>'
+                           '<span class="pseg">naming 3 of 7</span>']
+    assert out["runOnly"] == ["pill accent",
+                              "transcribing 1 &middot; &#8776;6 min &middot; 1 queued"]
+    # recording outranks transcribing inside the pipeline segment
+    assert out["rec"][0] == "pill rec"
+    assert out["rec"][1].count('class="pseg"') == 2
+    assert 'REC <span id="pillClock">0:05</span></span>' in out["rec"][1]
+    assert out["recPaused"] == ["pill rec", '&#9208; REC <span id="pillClock">0:05</span>']
+    assert out["paused"] == ["pill amber",
+                             '<span class="pseg">&#9208; paused &middot; 2 waiting</span>'
+                             '<span class="pseg">applying names&#8230;</span>']
+    assert out["waiting"] == ["pill", '<span class="pseg">1 waiting</span>'
+                                      '<span class="pseg">naming 3 of 7</span>']
+    assert out["held"] is None, "a held file alone is not pipeline news"
+    # the divider is a hairline between segments, never a literal bar
+    assert re.search(r"(?m)^\.pill \.pseg\+\.pseg\{[^}]*border-left:1px solid var\(--line\)",
+                     NEW_CSS)
+    assert "drawPill(S)" in _js_fn("render")
 
 
 def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
@@ -802,7 +858,7 @@ def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
         "placed after the early return, the watcher never fires on a meeting page"
     # the pill takes BOTH signals: relabel_pending alone only ever meant "a
     # second pass is queued behind a first"
-    assert "s.relabel_running||s.relabel_pending" in _js_fn("drawPill")
+    assert "s.relabel_running||s.relabel_pending" in _js_fn("pillParts")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -861,12 +917,13 @@ console.log(JSON.stringify({
 
 def test_flagged_reviews_sit_last_in_the_tray():
     """Deprioritized by request (2026-08-21): flagged-line review is a per-line
-    accuracy chore, rarely the day's first work, so its tray block renders
-    BELOW unknown voices. The order is the source order of the two blocks."""
-    tray = re.search(r"function drawTray\(s\)\{.*?\n\}", NEW_JS, re.S).group(0)
-    voices_at = tray.index("voices need names")
-    reviews_at = tray.index("Flagged lines in")
-    assert voices_at < reviews_at, "unknown voices render above flagged reviews"
+    accuracy chore, rarely the day's first work, so it renders AFTER unknown
+    voices. The tray band is gone (phase 2): on the To finish eyebrow, "Name N
+    voices" comes first and "Review flags" last. The order is the source
+    order of the two actions."""
+    acts = _js_fn("finishActsHTML")
+    assert acts.index("fsVoicesStart()") < acts.index("flaggedToggle()"), \
+        "unknown voices render before flagged reviews"
 
 
 def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():
@@ -1080,7 +1137,10 @@ def test_jk_walk_rows_with_a_ring_that_survives_polls():
     # rows are already tabindex=0 (the ring reuses :focus-visible); section
     # headers are buttons and ride the ring with them, so a folded month is
     # reachable. Synthetic upload rows (no tabindex) are still skipped.
-    assert "'#timeline .row[tabindex], #timeline .ghead'" in NEW_JS
+    # To finish rows (links, phase 2) ride the ring between the two
+    assert "const KB_RING='#timeline .row[tabindex], #timeline .lrow, #timeline .ghead';" \
+        in NEW_JS
+    assert "closest(KB_RING)" in _js_fn("kbMove")
     assert re.search(r"function\s+kbMove\s*\(", NEW_JS)
     # the focused row scrolls into view through the page's own scroll-behavior
     # convention (html smooth, auto under reduced motion): no explicit
@@ -1100,7 +1160,9 @@ def test_jk_walk_rows_with_a_ring_that_survives_polls():
 def test_enter_acts_by_row_state_and_e_peeks():
     body = _kb_body()
     assert "if(st==='ready')openMeeting(id)" in body
-    assert "else if(st==='needs_name')acceptMeeting(id)" in body
+    # a To finish row is a link: Enter is the link's own (no Accept-from-the-
+    # list any more; the finish strip's Title step names the meeting)
+    assert "acceptMeeting" not in NEW_JS
     # waiting/held/failed: Enter hands focus to the first revealed action
     # (focus-within already shows the set)
     assert ".ractions .iact" in body
@@ -1176,18 +1238,21 @@ def test_library_empty_state_regains_the_drop_line():
 # shell. Same regex-over-the-files style as every block above.
 # ---------------------------------------------------------------------------
 def test_failed_recorder_note_is_the_top_tray_item():
-    # a FAILED note renders as its own tray kind, ABOVE the stall lines
-    body = NEW_JS[NEW_JS.index("function drawTray"):NEW_JS.index("tray.innerHTML=h")]
+    # a FAILED note renders as its own Now row, ABOVE the stall lines
+    body = _js_fn("nowTrayHTML")
     assert "s.recorder_note&&!s.recorder_note.ok" in body
     assert body.index('tw-title">Recorder') < body.index("trayAct('recorder_stall'"), \
         "the recorder note must outrank the stall line"
-    # the note folds into the tray signature so polls neither drop nor thrash it
-    assert re.search(r"note\?note\.at", body)
+    # the note folds into the timeline signature so polls neither drop nor thrash it
+    assert re.search(r"note\?note\.at", _js_fn("traySig"))
     # Fix permissions: same endpoint + in-flight label as the stall item...
-    m = re.search(r"if\(kind==='recorder_note'\)\{(.*?)\n  \}", NEW_JS, re.S)
+    m = re.search(r"if\(kind==='recorder_note'\|\|kind==='recorder_stall'\)\{(.*?)\n  \}",
+                  NEW_JS, re.S)
     assert m, "trayAct lost its recorder_note branch"
     assert "'/api/fix_recorder_permissions'" in m.group(1)
     assert "Resetting…" in m.group(1) and "Retry" in m.group(1)
+    # ...kept as state (NOW_MSG), because the list's 2s rebuild wipes the DOM
+    assert "NOW_MSG[kind]" in m.group(1) and "JSON.stringify(NOW_MSG)" in _js_fn("traySig")
     # ...shown behind the old strip's microphone/audio gate
     assert "/[Mm]icrophone|audio/" in body
     # the x dismisses with the old page's exact endpoint and payload
@@ -1195,9 +1260,10 @@ def test_failed_recorder_note_is_the_top_tray_item():
 
 
 def test_saved_recorder_note_is_a_quiet_line_not_a_tray_ask():
-    # the success line mounts right under the header, BEFORE the tray
-    assert 'id="recok"' in NEW_PAGE
-    assert NEW_PAGE.index('id="recok"') < NEW_PAGE.index('id="tray"')
+    # the success line mounts right under the header, BEFORE the list (the
+    # tray band that once sat between them is gone)
+    assert 'id="recok"' in NEW_PAGE and 'id="tray"' not in NEW_PAGE
+    assert NEW_PAGE.index('id="recok"') < NEW_PAGE.index('id="timeline"')
     # rendered only for an OK note, with the old strip's check prefix
     m = re.search(r"function drawRecOk[\s\S]*?\n\}", NEW_JS)
     assert m, "drawRecOk missing"
@@ -1287,65 +1353,50 @@ def test_click_to_edit_title_and_date_on_ready_rows():
 
 
 # ---------------------------------------------------------------------------
-# The naming row is a review card (2026-08-06): the form keeps its place, and
-# under it sit the three things a human names a meeting from -- the original
-# filename (the user encodes date and topic there; the AI title loses it), the
-# voices heard, and the summary. Unnamed voices open the ONE naming slide-over.
+# The naming row was a review card (2026-08-06): a form, then the three things
+# a human names a meeting from -- the original filename, the voices heard, and
+# the summary. docs/ui-refresh phase 2 retired the tall row: a meeting waiting
+# for its title is a compact To finish row, and the meeting page's finish strip
+# names it. Each rule the card pinned moves to its new home here: the file
+# name to the Title step, the voices to the Voices step and the legend (the
+# same uid lookup, archived voices included), and the escaping to both.
 # ---------------------------------------------------------------------------
-def _needs_name_case():
-    return NEW_JS[NEW_JS.index("case 'needs_name'"):NEW_JS.index("case 'ready'")]
-
-
 def test_needs_name_row_shows_the_source_filename_and_adopts_it():
-    body = _needs_name_case()
-    # the form is still first, prefilled, with Accept
-    assert 'class="ntitle"' in body and "acceptMeeting(" in body
-    # the filename line renders from the row's source_file, via the stem
+    # the Title step offers the stem one click away and fills its own box
+    body = _js_fn("fsTitleHTML")
     assert "row.source_file" in body and "srcStem(" in body
-    assert 'class="nsrc"' in body and 'class="nsrcname"' in body
-    assert "nsrcAdopt(this," in body
+    assert 'onclick="fsUseFile()"' in body and "Use the file name" in body
     # suppressed when the stem already equals the prefilled title (a recorder
     # default), trimmed and case-insensitively
-    assert "trim().toLowerCase()!==" in body
-    # the adopter fills the row's own name box, then focuses it
-    m = re.search(r"function nsrcAdopt\(.*?\n\}", NEW_JS, re.S)
-    assert m and "'.nameform .ntitle'" in m.group(0)
-    assert "inp.value=stem" in m.group(0) and "inp.focus()" in m.group(0)
+    assert "stem.trim().toLowerCase()!==t.trim().toLowerCase()" in body
+    use = _js_fn("fsUseFile")
+    assert "t.value=srcStem(" in use and "t.focus()" in use
+    # the list holds no form at all any more
+    assert "nsrcAdopt" not in NEW_JS and 'class="ntitle"' not in NEW_JS
 
 
 def test_needs_name_row_chips_reuse_the_one_naming_panel():
-    body = _needs_name_case()
-    assert "rowSpeakerChips(row)" in body
-    m = re.search(r"function rowSpeakerChips\(.*?\n\}\n", NEW_JS, re.S)
-    assert m, "rowSpeakerChips missing"
-    chips = m.group(0)
-    # both naming paths: the registry uid, and the cluster for a voice the
-    # registry never tracked (minting floor / "not a real speaker" tombstone)
-    assert "openNamePanelByUid(" in chips and "openNamePanelByCluster(" in chips
-    assert "row.unnamed_clusters" in chips
-    # the uid lookup is mUnknownUid parameterized by base, and hidden
-    # (archived) unknowns are NOT filtered out of it
-    m = re.search(r"function rowUnknownUid\(.*?\n\}", NEW_JS, re.S)
-    assert m and "archived" not in m.group(0)
-    assert "(x.meetings||[]).includes(base)" in m.group(0)
-    # named people stay plain text; unnamed wear the "?" affix
-    assert '<span class="nchip">' in chips and 'class="nchipq"' in chips
+    # the unnamed voices of a meeting waiting for its title are named in its
+    # Voices step (the shared saveName), and the legend's "?" chips still open
+    # the ONE naming slide-over, by uid or by cluster
+    assert "await saveName({" in _js_fn("fvSave")
+    leg = _js_fn("mLegend")
+    assert "openNamePanelByUid(" in leg and "openNamePanelByCluster(" in leg
+    assert "rowSpeakerChips" not in NEW_JS
+    # the Voices step reads the same set the legend's chips do
+    assert "!o.named&&!o.dismissed&&o.id!==o.display" in _js_fn("fsVoicesFrom")
 
 
 def test_needs_name_row_shows_the_summary_quietly():
-    body = _needs_name_case()
-    assert "row.summary" in body and 'class="nsum"' in body
-    # one clamped, muted paragraph on the theme tokens (no hardcoded colors)
-    m = re.search(r"(?m)^\.nsum\{[^}]*\}", NEW_CSS, re.S)
-    assert m and "var(--sub)" in m.group(0) and "line-clamp:2" in m.group(0)
+    # the compact row is quiet on purpose: title, date, one meta line, the
+    # step dots. The summary is one click away, on the meeting page.
+    row = _js_fn("finishRowHTML")
+    assert "row.summary" not in row
+    assert 'class="lmeta"' in row and "finishDotsHTML(row)" in row
+    m = re.search(r"(?m)^\.lrow \.lmeta\{[^}]*\}", NEW_CSS)
+    assert m and "var(--sub)" in m.group(0) and "13px" in m.group(0)
 
 
-# The three tests above pin the SOURCE TEXT of the review-card logic (the right
-# calls and operators appear), not its behavior. That leaves real regressions
-# invisible -- a reversed comparison, a stem cut at the wrong dot, or a filter
-# reintroduced on archived unknowns would all still contain the same literal
-# substrings. These drive the actual functions through node, house-style (see
-# test_stepper_orders_fabricated_out_of_order_flags_by_start_time above).
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_srcstem_strips_only_the_final_extension():
     # a regression that cuts at the FIRST dot would silently corrupt every
@@ -1363,88 +1414,91 @@ def test_srcstem_strips_only_the_final_extension():
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_needs_name_row_equal_stem_is_actually_suppressed_end_to_end():
     fixture = "\n".join([
-        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
-        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"),
-        "let S=null;", _js_fn("bodyAndSlot"),
+        _js_oneline("esc"), _js_fn("srcStem"), _js_fn("fsTitleHTML"),
         """
-const same = bodyAndSlot({state:'needs_name', id:'b1',
+const same = fsTitleHTML({state:'needs_name', id:'b1',
   source_file:'Team Sync 0714.m4a',
-  suggested_title:'  team sync 0714  ', title:'  team sync 0714  ',
-  speakers:[], unnamed_clusters:{}});
-const diff = bodyAndSlot({state:'needs_name', id:'b2',
+  suggested_title:'  team sync 0714  ', title:'  team sync 0714  '});
+const diff = fsTitleHTML({state:'needs_name', id:'b2',
   source_file:'Team.Sync 0714.m4a',
-  suggested_title:'Different Title', title:'Different Title',
-  speakers:[], unnamed_clusters:{}});
+  suggested_title:'Different Title', title:'Different Title'});
 console.log(JSON.stringify({
-  sameHasNsrc: same.includes('class="nsrc"'),
-  diffHasNsrc: diff.includes('class="nsrc"'),
-  diffKeepsInternalDot: diff.includes('Team.Sync 0714'),
+  sameHasFile: same.includes('Use the file name'),
+  diffHasFile: diff.includes('Use the file name'),
+  diffKeepsInternalDot: diff.includes('title="Team.Sync 0714"'),
 }));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["sameHasNsrc"] is False, \
-        "equal stem (trimmed, case-insensitive) must suppress the from-file line"
-    assert out["diffHasNsrc"] is True
+    assert out["sameHasFile"] is False, \
+        "equal stem (trimmed, case-insensitive) must suppress the file-name offer"
+    assert out["diffHasFile"] is True
     assert out["diffKeepsInternalDot"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_row_unknown_uid_matches_archived_voices_not_just_live_ones():
-    # archiving an unknown was meant to stop the tray/drawer nagging about a
-    # one-time voice, never to strip its naming affordance out of a row that
-    # heard them -- a regression that starts filtering archived entries here
-    # would silently turn a real, still-nameable person into a dead chip
-    fixture = _js_fn("rowUnknownUid") + "\n" + """
+    # archiving an unknown was meant to stop the drawer nagging about a
+    # one-time voice, never to strip its naming affordance out of a meeting
+    # that heard them -- a regression that starts filtering archived entries
+    # would silently turn a real, still-nameable person into a dead chip. The
+    # row's lookup retired with the tall row; the page's (the legend and the
+    # Voices step both read it) keeps the rule.
+    fixture = _js_fn("mUnknownUid") + "\n" + """
 S = {unknowns: [{uid:'U1', display:'Voice 9', meetings:['base1'], archived:true},
                 {uid:'U2', display:'Voice 10', meetings:['base1'], archived:false}]};
+const at=(base,d)=>{MP={base};return mUnknownUid(d);};
+let MP=null;
 console.log(JSON.stringify([
-  rowUnknownUid('base1','Voice 9'),
-  rowUnknownUid('base1','Voice 10'),
-  rowUnknownUid('base1','Voice 99'),
-  rowUnknownUid('otherbase','Voice 9')
+  at('base1','Voice 9'),
+  at('base1','Voice 10'),
+  at('base1','Voice 99'),
+  at('otherbase','Voice 9')
 ]));
 """
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout) == ["U1", "U2", None, None]
+    assert "uid:mUnknownUid(o.display)" in _js_fn("fsVoicesFrom")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_needs_name_row_escapes_hostile_filenames_and_speaker_names():
     # a meeting really can be named after a person with an apostrophe, and a
     # filename or a diarized display can carry quotes/angle brackets. Every
-    # interpolation into the review card must survive that without breaking
-    # out of its HTML attribute or its onclick JS-string context.
+    # interpolation into the compact row and the Title step must survive that
+    # without breaking out of its HTML attribute or its href.
     fixture = "\n".join([
-        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
-        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"),
-        "let S=null;", _js_fn("bodyAndSlot"),
+        _finish_env(), _js_fn("srcStem"), _js_fn("fsTitleHTML"),
+        "function shortDate(d){return d;}",
+        _js_fn("finishDotsHTML"), _js_fn("finishRowHTML"),
         r"""
-const html = bodyAndSlot({state:'needs_name', id:"o'brien<b>",
+const row={state:'needs_name', id:"o'brien<b>", date:'2026-09-26',
   source_file: "Mark C. Ashby <sync> \"weird\".m4a",
-  suggested_title: 'Something else', title: 'Something else',
+  suggested_title: 'Something <i>else</i>', title: 'Something else',
   speakers: ["Ashby <script>alert(1)</script>"],
-  unnamed_clusters: {"Ashby <script>alert(1)</script>": "SPEAKER_00"},
-  summary: "A <b>bold</b> claim & an 'apostrophe'"});
-console.log(JSON.stringify({html}));
+  finish: fin(false,1,0)};
+console.log(JSON.stringify({row:finishRowHTML(row), title:fsTitleHTML(row)}));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    html = json.loads(r.stdout)["html"]
-    # never a raw, unescaped tag from user-controlled text
-    assert "<script>alert(1)</script>" not in html
-    assert "<b>bold</b>" not in html
-    # the filename/display text renders HTML-escaped
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
-    assert "&lt;sync&gt;" in html and "&quot;weird&quot;" in html
-    # the onclick JS-string args are escJs'd: an embedded apostrophe is
-    # backslash-escaped so it cannot close the enclosing '...' early and spill
-    # into (and break) the surrounding double-quoted onclick="..." attribute
-    assert "onclick=\"nsrcAdopt(this,'Mark C. O\\'Halloran" in html
-    assert ("onclick=\"openNamePanelByCluster('o\\'brien&lt;b&gt;',"
-            "'SPEAKER_00','O\\'Halloran &lt;script&gt;alert(1)&lt;/script&gt;')\"") in html
+    out = json.loads(r.stdout)
+    for html in out.values():
+        # never a raw, unescaped tag from user-controlled text
+        assert "<script>alert(1)</script>" not in html
+        assert "<i>else</i>" not in html
+    row = out["row"]
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in row
+    assert "Something &lt;i&gt;else&lt;/i&gt;" in row
+    # the href is percent-encoded and the data-id attribute-escaped
+    assert 'href="#m/o\'brien%3Cb%3E"' in row
+    assert 'data-id="o\'brien&lt;b&gt;"' in row
+    # the Title step: the file name only ever sits in an escaped attribute,
+    # never inside an onclick string
+    t = out["title"]
+    assert 'title="Mark C. O\'Halloran &lt;sync&gt; &quot;weird&quot;"' in t
+    assert 'onclick="fsUseFile()"' in t
 
 
 # ---------------------------------------------------------------------------
@@ -1674,13 +1728,17 @@ def test_indigo_tokens_shipped_and_boardroom_retired():
     assert not re.search(r"--cardsh(?:-hov)?\s*:", NEW_CSS), \
         "the card-shadow tokens are still declared"
     # rows are bordered cards: 6px radius, 10px gaps, a border that FIRMS on
-    # hover instead of a lift; attention items wear their colored left edge
-    # (teal tray, accent naming row)
+    # hover instead of a lift; the Now rows for the tray's urgent kinds wear
+    # the teal attention edge the tray band wore. The naming row's accent
+    # edge retired with the tall row (phase 2): a To finish row's teal Title
+    # dot says the same thing.
     assert re.search(r"(?m)^\.row\{[^}]*border-radius:6px", NEW_CSS)
     assert re.search(r"(?m)^\.row\{[^}]*margin:0 0 10px", NEW_CSS)
     assert ".row:hover{border-color:var(--line)}" in NEW_CSS
-    assert re.search(r"(?m)^\.tray\{[^}]*border-left:4px solid var\(--attn\)", NEW_CSS)
-    assert re.search(r'needs_name"\]\{[^}]*border-left:4px solid var\(--accent\)', NEW_CSS)
+    assert re.search(r"(?m)^\.trayrow\{[^}]*border-left:4px solid var\(--attn\)", NEW_CSS)
+    assert 'needs_name"]' not in NEW_CSS
+    assert re.search(r"(?m)^\.lrow\{[^}]*border-radius:6px", NEW_CSS)
+    assert ".lrow:hover{border-color:var(--line)}" in NEW_CSS
 
 
 def test_geometric_surfaces_carry_the_indigo_radii_and_no_stray_shadow():
@@ -1708,8 +1766,8 @@ def test_geometric_surfaces_carry_the_indigo_radii_and_no_stray_shadow():
 def test_no_shadow_rule_reaches_a_row_the_tray_or_a_card():
     """The border does the separating. Shadows survive only on the popovers,
     the drawer (and the naming slide-over, a drawer in all but name), and the
-    bulk bar -- never on a row, the tray, or any of the in-flow card
-    surfaces."""
+    bulk bar -- never on a row, a Now row, a To finish row, or any of the
+    in-flow card surfaces."""
     # every rule that casts a DROP shadow, by selector. The inset edge markers
     # (.mseg.mnow / .mseg.mrev) are left edges drawn with box-shadow:inset,
     # not lift, so they are excluded by the inset check below.
@@ -1729,7 +1787,8 @@ def test_no_shadow_rule_reaches_a_row_the_tray_or_a_card():
     # named directly, so a future edit that re-adds a lift to any of the three
     # surfaces the spec calls out fails here rather than by eye
     for sel in (r"(?m)^\.row\{[^}]*\}", r"(?m)^\.row:hover\{[^}]*\}",
-                r"(?m)^\.tray\{[^}]*\}", r"(?m)^\.msection\{[^}]*\}",
+                r"(?m)^\.trayrow\{[^}]*\}", r"(?m)^\.lrow\{[^}]*\}",
+                r"(?m)^\.sdot\{[^}]*\}", r"(?m)^\.msection\{[^}]*\}",
                 r"(?m)^\.mcard\{[^}]*\}"):
         m = re.search(sel, NEW_CSS)
         assert m, f"rule missing: {sel}"
@@ -1806,11 +1865,12 @@ def test_a_waiting_row_says_when_it_was_already_processed():
 
 
 def test_the_duplicate_sweep_is_a_two_step_and_deletes_only_copies():
-    tray = _js_fn("drawTray")
+    tray = _js_fn("nowTrayHTML")
     assert "t.kind==='dupe_files'" in tray and "t.kind==='dupe_meetings'" in tray
-    # the armed flag rides the tray signature, or a 2s poll would disarm the
-    # confirm under the user's cursor
-    assert "DUPE_ARMED" in tray and "+DUPE_ARMED" in tray
+    # the armed flag rides the timeline signature (via traySig), or a 2s poll
+    # would disarm the confirm under the user's cursor
+    assert "DUPE_ARMED" in tray and "+DUPE_ARMED" in _js_fn("traySig")
+    assert "'|'+tsig" in _js_fn("drawTimeline")
     # the count offered for deletion is the EXACT (byte-identical) subset,
     # never every flagged file
     assert "t.exact" in tray
@@ -1899,7 +1959,7 @@ def test_a_failed_sweep_survives_the_next_poll():
     """The failure message used to be written straight into tray DOM after the
     armed flag flipped -- the next poll's rebuild (signature mismatch) erased
     it within two seconds and the row snapped back as if nothing was clicked.
-    It is state now: part of the signature, rendered by drawTray itself."""
+    It is state now: part of the signature, rendered by nowTrayHTML itself."""
     assert "let DUPE_ARMED=false,DUPE_ERR=''" in NEW_JS
     assert "+DUPE_ARMED+'|'+DUPE_ERR" in NEW_JS
     assert "DUPE_ERR&&!DUPE_ARMED?DUPE_ERR:t.detail" in NEW_JS
@@ -1955,21 +2015,21 @@ def test_a_failed_row_tells_the_truth_about_its_retry():
 
 # ---------------------------------------------------------------------------
 # Fix pass 2 (2026-09-06): the tray, the bulk bar, the naming flyout, and the
-# duplicates drawer.
+# duplicates drawer. The tray band is gone since docs/ui-refresh phase 2: its
+# urgent kinds are Now rows (traySig + nowTrayHTML, rendered inside the
+# timeline), so the harness drives those. draw(s) is what drawTimeline does
+# with them each poll: the signature first (it disarms), then the markup.
 # ---------------------------------------------------------------------------
 _TRAY_HARNESS = [
     _js_oneline("esc"), _js_oneline("escJs"),
-    "const tray={hidden:true,dataset:{},innerHTML:''};",
-    "function $(sel){return sel==='#tray'?tray:null;}",
-    "function rowById(){return null;}",
-    "function shortDate(){return '';}",
-    "let trayOpen={review:false,voices:false},flaggedOnly=false;",
-    "const TRAY_EXPAND_MAX=8;",
-    "let DUPE_ARMED=false,DUPE_ERR='';",
+    re.search(r"(?m)^const NOW_KINDS=.*;$", NEW_JS).group(0),
+    "let DUPE_ARMED=false,DUPE_ERR='',NOW_MSG={};",
     "let S=null;",
-    _js_fn("_trayVerb"), _js_fn("_trayRow"), _js_fn("_trayAgg"), _js_fn("_traySub"),
-    _js_oneline("dupeDisarm"),
-    _js_fn("drawTray"),
+    _js_fn("_trayVerb"), _js_fn("_trayRow"),
+    _js_oneline("dupeDisarm"), _js_oneline("nowMsg"), _js_oneline("trayCount"),
+    _js_fn("traySig"), _js_fn("nowTrayHTML"),
+    "const tray={innerHTML:'',sig:''};",
+    "function draw(s){tray.sig=traySig(s);tray.innerHTML=nowTrayHTML(s);}",
 ]
 
 
@@ -1978,25 +2038,26 @@ def test_the_dupe_sweep_disarms_when_its_tray_row_goes_away():
     """R1: arm "Delete copies", walk away without confirming, and the flagged
     file leaves the queue by another path. DUPE_ARMED survived, so a FUTURE
     duplicate row -- different files, days later -- rendered pre-armed and its
-    first click fired the no-undo bulk delete with confirm:true."""
+    first click fired the no-undo bulk delete with confirm:true. The row is a
+    Now row now; the rule is the same."""
     fixture = "\n".join(_TRAY_HARNESS + ["""
 const withDupes={tray:[{kind:'dupe_files',title:'Already processed',
   detail:'2 waiting files were already processed',target:'src:a.m4a',
   exact:2,count:2}]};
-drawTray(withDupes);
+draw(withDupes);
 DUPE_ARMED=true;                       // the user armed the sweep
-tray.dataset.sig='';drawTray(withDupes);
+draw(withDupes);
 const armed={html:tray.innerHTML.includes('dupeDeleteGo(this)'),flag:DUPE_ARMED};
 // the flagged file leaves the queue some other way: no dupe_files row at all
-drawTray({tray:[{kind:'review',title:'Board Prep',detail:'3 flagged',
+draw({tray:[{kind:'review',title:'Board Prep',detail:'3 flagged',
   target:'Board Prep',count:3}]});
 const gone={flag:DUPE_ARMED};
 // and the NEXT duplicate row must render unarmed
-drawTray(withDupes);
+draw(withDupes);
 const later={html:tray.innerHTML.includes('dupeDeleteGo(this)'),
   arm:tray.innerHTML.includes('dupeArm(true)'),flag:DUPE_ARMED};
-// an empty tray disarms too (the early return must not skip the reset)
-DUPE_ARMED=true;drawTray({tray:[]});
+// an empty tray disarms too
+DUPE_ARMED=true;draw({tray:[]});
 const emptied={flag:DUPE_ARMED};
 console.log(JSON.stringify({armed,gone,later,emptied}));
 """])
@@ -2022,26 +2083,38 @@ def test_a_route_change_disarms_the_duplicate_sweep():
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_the_tray_offers_dismiss_not_retry_for_a_gone_failure():
     """R5, client half: the tray line kept offering Retry for a source that is
-    no longer on disk, so the click posted /api/run for nothing."""
-    fixture = "\n".join(_TRAY_HARNESS + ["""
-drawTray({tray:[{kind:'failed',title:'ghost.m4a',detail:'boom',
-  target:'src:ghost.m4a',count:1,gone:true}]});
-const gone=tray.innerHTML;
-drawTray({tray:[{kind:'failed',title:'here.m4a',detail:'boom',
-  target:'src:here.m4a',count:1,gone:false}]});
-const here=tray.innerHTML;
+    no longer on disk, so the click posted /api/run for nothing. The tray's
+    failed line is gone (phase 2): the failed ROW in Now is the one home, so
+    the rule moves onto it -- dismiss for a gone source, Retry for one still
+    in the folder -- and the Now rows never repeat a failed file."""
+    fixture = "\n".join(_TRAY_HARNESS + [
+        "function clock(){return '0:00';}", "function fmtEta(){return '';}",
+        "const STAGE_NICE={};",
+        "function dupNote(){return '';}", "function slotActions(x){return x;}",
+        "function catDot(){return '';}", "function shortDate(){return '';}",
+        "function meetingByBase(){return null;}",
+        _js_fn("bodyAndSlot"),
+        """
+const gone=bodyAndSlot({state:'failed',id:'src:ghost.m4a',title:'ghost.m4a',
+  error:'boom',gone:true,retry_note:'the original is gone'});
+const here=bodyAndSlot({state:'failed',id:'src:here.m4a',title:'here.m4a',
+  error:'boom',gone:false});
+draw({tray:[{kind:'failed',title:'here.m4a',detail:'boom',target:'src:here.m4a',
+  count:1,gone:false}]});
 console.log(JSON.stringify({
-  goneVerb:gone.includes("trayAct('failed_gone','src:ghost.m4a')"),
-  goneRetry:gone.includes("trayAct('failed','src:ghost.m4a')"),
-  hereRetry:here.includes("trayAct('failed','src:here.m4a')"),
-  hereDismiss:here.includes('failed_gone')}));
+  goneVerb:gone.includes("failDismiss('src:ghost.m4a')"),
+  goneRetry:gone.includes("rowRetry('src:ghost.m4a')"),
+  hereRetry:here.includes("rowRetry('src:here.m4a')"),
+  hereDismiss:here.includes('failDismiss'),
+  nowRepeats:tray.innerHTML.includes('here.m4a')}));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout) == {"goneVerb": True, "goneRetry": False,
-                                    "hereRetry": True, "hereDismiss": False}
-    # and the dispatcher routes that verb to the dismissal, never to /api/run
-    assert "if(kind==='failed_gone'){failDismiss(target);return;}" in _js_fn("trayAct")
+                                    "hereRetry": True, "hereDismiss": False,
+                                    "nowRepeats": False}
+    # the failed row sits in Now, above every section
+    assert "recording:0,processing:1,failed:2" in NEW_JS
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -2051,7 +2124,7 @@ def test_a_sweep_that_deleted_nothing_says_why():
     re-rendered and silently no-opped on every further click."""
     fixture = "\n".join([
         "let DUPE_ARMED=true,DUPE_ERR='';let S={};",
-        "let trays=0;function drawTray(){trays++;}",
+        "let trays=0;function nowRedraw(){trays++;}",
         "let refreshes=0;function refresh(){refreshes++;}",
         "let reply=null;function api(){return Promise.resolve(reply);}",
         _js_fn("dupeDeleteGo"),
@@ -2211,8 +2284,7 @@ def test_a_waiting_row_renders_the_stage_breakdown():
     """W27: est_detail was computed on every poll for every queued file and
     never rendered. Either render it or stop computing it; it renders."""
     fixture = "\n".join([
-        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("srcStem"),
-        _js_fn("rowUnknownUid"), _js_fn("rowSpeakerChips"), _js_fn("dupNote"),
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
         _js_fn("slotActions"), "let S=null;", _js_fn("bodyAndSlot"),
         """
 const withDet=bodyAndSlot({state:'waiting',id:'src:a.m4a',title:'a.m4a',
@@ -2945,7 +3017,8 @@ def test_the_accordion_keeps_the_sort_and_group_by_meeting_date_rule():
     """Sorting by one key while grouping by another is what fragmented the
     months; the accordion changes the presentation, never the ordering."""
     body = _js_fn("drawTimeline")
-    assert "dateKey(b).localeCompare(dateKey(a))" in body
+    assert "dateKey(b).localeCompare(dateKey(a))" in _js_fn("timelineSections")
+    assert "for(const r of sec.rest){" in body
     assert "const key=dateBucket(dateKey(r));" in body
     # the fold state is part of the render signature, or a toggle would be
     # undone by the very next 2s poll
@@ -3003,10 +3076,10 @@ def test_the_selection_never_reaches_a_row_a_fold_hides():
 def test_the_ring_reaches_a_folded_section_header():
     """j/k must be able to land on a section header, or a folded month is
     unreachable without the mouse. Enter there is the button's own click."""
-    i = NEW_JS.index("function kbRows(")
-    rows = NEW_JS[i:NEW_JS.index("function ", i + 10)]
-    assert ".ghead" in rows, "kbRows must collect the section headers too"
-    assert ".row[tabindex]" in rows, "and the rows it always collected"
+    ring = re.search(r"(?m)^const KB_RING=.*;$", NEW_JS).group(0)
+    assert "KB_RING" in _js_oneline("kbRows")
+    assert ".ghead" in ring, "kbRows must collect the section headers too"
+    assert ".row[tabindex]" in ring, "and the rows it always collected"
     body = _kb_body()
     # the header branch returns BEFORE the row handling and never preventDefaults
     head = body[body.index("matches('#timeline .ghead')"):]
@@ -3709,3 +3782,490 @@ def test_the_finish_strip_sits_under_the_audio_and_above_the_summary():
                 ".vbtns{", ".clip{", ".said{", ".doneline{"):
         assert cls in sec, f"missing {cls}"
     assert not re.findall(r"#[0-9A-Fa-f]{3,6}\b", sec), "no new colors"
+
+
+# ---------------------------------------------------------------------------
+# docs/ui-refresh phase 2: the To finish section and status. The by-date list
+# opens with "Now" and "To finish" above the accordion; the tray band folds
+# into them; the pill gains its naming segment; the tab title counts. These
+# drive the shipped functions under node, house-style.
+# ---------------------------------------------------------------------------
+def _sections_env():
+    return "\n".join([
+        _finish_env(),
+        re.search(r"(?m)^const PIN_ORDER=.*;$", NEW_JS).group(0),
+        re.search(r"(?m)^const NOW_STATES=.*;$", NEW_JS).group(0),
+        "function dateKey(r){return r.date||((r.when||'').slice(0,10));}",
+        "function shortDate(d){return 'D'+d;}",
+        _js_fn("timelineSections"), _js_fn("finishDotsHTML"), _js_fn("finishRowHTML"),
+        _js_fn("secHeadHTML"), _js_fn("finishActsHTML"), _js_fn("headSectionsHTML"),
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_section_builder_sorts_rows_into_now_to_finish_and_the_library():
+    out = _run_node(_sections_env() + """
+const recent=new Date(NOW-2*864e5).toISOString().slice(0,19);
+const rows=[
+  {id:'W',state:'waiting',when:'2026-09-27T08:00:00'},
+  {id:'F',state:'failed',when:'2026-04-01T08:00:00'},
+  {id:'P',state:'processing',when:'2026-09-27T09:00:00'},
+  {id:'R',state:'recording',when:'2026-09-27T10:00:00'},
+  {id:'H',state:'held',when:'2026-09-20T08:00:00'},
+  {id:'N',state:'needs_name',when:'2026-01-02T08:00:00',date:'2026-01-02',finish:fin(false,0,0)},
+  {id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0)},
+  {id:'D',state:'ready',when:recent,date:'2026-09-24',finish:fin(true,0,0)},
+  {id:'O',state:'ready',when:'2026-08-01T08:00:00',date:'2026-08-01',finish:fin(true,1,4)},
+  {id:'X',state:'ready',when:'2026-09-01T08:00:00',date:'2026-09-01'},
+];
+const s=timelineSections(rows,NOW),ids=a=>a.map(r=>r.id);
+console.log(JSON.stringify({now:ids(s.now),fin:ids(s.fin),rest:ids(s.rest),
+  empty:timelineSections([],NOW)}));
+""")
+    # Now: the pipeline's live rows in the fixed order; a failed April file
+    # sits at the top, never buried in April
+    assert out["now"] == ["R", "P", "F", "H", "W"]
+    # To finish: a title waiting (however old), and a recent open step, in
+    # the timeline's own order (the order ] walks)
+    assert out["fin"] == ["N", "V"]
+    # the library: the finished meeting, the older backlog (flags and a voice
+    # left, processed in August: a filter, never a to-do), and a row with no
+    # finish record at all, newest meeting date first
+    assert out["rest"] == ["D", "X", "O"]
+    assert out["empty"] == {"now": [], "fin": [], "rest": []}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_to_finish_row_is_a_compact_link_with_its_step_dots():
+    out = _run_node(_sections_env() + """
+console.log(JSON.stringify({
+  named:finishRowHTML({id:'Budget Review 09262026',state:'ready',title:'Budget Review',
+    date:'2026-09-26',minutes:47,speakers:['Grace Lindqvist','Speaker 58'],
+    finish:fin(true,2,6)}),
+  waiting:finishRowHTML({id:'Recording 0926',state:'needs_name',title:'Recording 0926',
+    suggested_title:'Literacy pilot',finish:fin(false,1,0)}),
+  dots:[fin(false,2,6),fin(true,0,3),fin(true,0,0)].map(f=>finishDotsHTML({finish:f})),
+}));
+""")
+    n = out["named"]
+    # a link to the meeting page, where the finish strip takes over
+    assert n.startswith('<a class="lrow" href="#m/Budget%20Review%2009262026"')
+    assert 'data-id="Budget Review 09262026"' in n and 'data-state="ready"' in n
+    assert '<span class="ltitle">Budget Review</span><span class="ldate">D2026-09-26</span>' in n
+    assert '<span class="lmeta">47 min &middot; Grace Lindqvist, Speaker 58</span>' in n
+    # a meeting waiting for its title shows the suggested one; no date, no meta
+    w = out["waiting"]
+    assert '<span class="ltitle">Literacy pilot</span></span>' in w
+    assert "ldate" not in w and "lmeta" not in w
+    # the dots: done green with a check, open teal with a mono count; Title
+    # carries no count, and the strip's Done step never becomes a dot
+    assert out["dots"][0] == ('<span class="steps"><span class="sdot">Title</span>'
+                              '<span class="sdot">Voices <span class="mono">2</span></span>'
+                              '<span class="sdot">Flags <span class="mono">6</span></span></span>')
+    assert out["dots"][1] == ('<span class="steps"><span class="sdot done">&#10003; Title</span>'
+                              '<span class="sdot done">&#10003; Voices</span>'
+                              '<span class="sdot">Flags <span class="mono">3</span></span></span>')
+    assert out["dots"][2].count('class="sdot done"') == 3
+    # the dot colours are the token pairs the design names
+    assert re.search(r"(?m)^\.sdot\{[^}]*color:var\(--attn\);background:var\(--attn-soft\)", NEW_CSS)
+    assert ".sdot.done{color:var(--ok);background:var(--ok-soft)}" in NEW_CSS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_to_finish_eyebrow_carries_its_actions_only_when_they_apply():
+    out = _run_node(_sections_env() + """
+const row={id:'V',state:'ready',title:'V',finish:fin(true,1,0)};
+console.log(JSON.stringify({
+  none:finishActsHTML(0,0,false),
+  both:finishActsHTML(31,12,false),
+  one:finishActsHTML(1,0,false),
+  on:finishActsHTML(0,0,true),
+  nothing:headSectionsHTML('',[],''),
+  nowOnly:headSectionsHTML('<div>R</div>',[],''),
+  finOnly:headSectionsHTML('',[row],''),
+  actsOnly:headSectionsHTML('',[],finishActsHTML(3,0,false)),
+}));
+""")
+    assert out["none"] == ""
+    b = out["both"]
+    assert 'onclick="fsVoicesStart()"' in b and ">Name 31 voices</button>" in b
+    assert 'onclick="flaggedToggle()"' in b and 'aria-pressed="false"' in b
+    assert ">Review flags</button>" in b
+    assert ">Name 1 voice</button>" in out["one"] and "flaggedToggle" not in out["one"]
+    # the filter on keeps its toggle, pressed, even with nothing left to count
+    assert 'aria-pressed="true"' in out["on"] and "Review flags &#10005;" in out["on"]
+    # a section with nothing in it renders nothing
+    assert out["nothing"] == ""
+    assert out["nowOnly"] == ('<div class="mgroup sechead" id="sec-now"><span class="glabel">Now'
+                              '</span><span class="grule" aria-hidden="true"></span></div><div>R</div>')
+    assert 'id="sec-fin"' in out["finOnly"] and 'class="lrow"' in out["finOnly"]
+    assert "sec-now" not in out["finOnly"]
+    # the eyebrow stays for its actions when no row is waiting: "Name N
+    # voices" and "Review flags" must never become unreachable
+    assert 'id="sec-fin"' in out["actsOnly"] and "Name 3 voices" in out["actsOnly"]
+    assert "lrow" not in out["actsOnly"]
+
+
+def _timeline_env(sort="date", search="", flagged="false"):
+    """drawTimeline over stubbed DOM nodes, with the real section, tray, and
+    accordion helpers. rowHTML is stubbed to a marker per state."""
+    return "\n".join([
+        _sections_env(),
+        "const els={'#timeline':{dataset:{},innerHTML:'',contains:()=>false},"
+        "'#rail':{hidden:true,innerHTML:''},'#filter':{value:''},"
+        "'#search':{value:" + json.dumps(search) + "},'#sort':{value:" + json.dumps(sort) + "}};",
+        "function $(q){return els[q]||null;}",
+        "const document={activeElement:null};",
+        "const localStorage={getItem:()=>null,setItem:()=>{}};",
+        "let flaggedOnly=" + flagged + ";",
+        "let S=null,LAST_GROUPS=[],LAST_NEST=false;",
+        "const OPEN=new Set();function meetingByBase(){return null;}",
+        "function _isoLocal(){return '2026-09-27';}",
+        "const BUCKET={today:'Today',yesterday:'Yesterday',undated:'Undated'};",
+        "function dateBucket(iso){return iso?iso.slice(0,7):'Undated';}",
+        "function nameBucket(t){return (t||'#')[0].toUpperCase();}",
+        "function escJs(s){return esc(s);}",
+        _js_region("/* ==================== the year-to-month accordion",
+                   "/* ============================ status pill "),
+        _js_fn("ghead"), _js_fn("accordionHTML"), _js_fn("sigOf"),
+        "function rowHTML(r){return r.state==='needs_name'?finishRowHTML(r)"
+        ":'<div class=\"row\" data-id=\"'+r.id+'\"></div>';}",
+        "function drawRail(){}",
+        "const UPLOADS=[];function uploadsPrune(){}function uploadsSig(){return '[]';}"
+        "function uploadRowHTML(){return '';}",
+        re.search(r"(?m)^const NOW_KINDS=.*;$", NEW_JS).group(0),
+        "let DUPE_ARMED=false,DUPE_ERR='',NOW_MSG={};",
+        _js_fn("_trayVerb"), _js_fn("_trayRow"), _js_oneline("dupeDisarm"),
+        _js_oneline("nowMsg"), _js_oneline("trayCount"), _js_fn("traySig"),
+        _js_fn("nowTrayHTML"), _js_fn("drawTimeline"),
+        "const html=()=>els['#timeline'].innerHTML;",
+        "const order=h=>(h.match(/id=\"sec-\\w+\"|data-id=\"[^\"]*\"|class=\"ghead [^\"]*\"|"
+        "class=\"trayrow\"/g)||[]).map(x=>x.replace(/^(id|data-id|class)=/,''));",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_list_opens_with_now_and_to_finish_above_the_accordion():
+    out = _run_node(_timeline_env() + """
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+const st={timeline:[
+  {id:'P',state:'processing',when:recent,pct:40},
+  {id:'N',state:'needs_name',when:recent,date:'2026-09-26',finish:fin(false,1,0)},
+  {id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0)},
+  {id:'D',state:'ready',when:recent,date:'2026-09-24',finish:fin(true,0,0)},
+],tray:[
+  {kind:'recorder_stall',title:'Recording',detail:'no audio',target:'rec:x',count:1},
+  {kind:'unknown_voice',title:'Speaker 58',detail:'',target:'U58',count:2},
+  {kind:'review',title:'V',detail:'',target:'V',count:3},
+]};
+drawTimeline(st);
+const full=order(html());
+const noTray={timeline:[st.timeline[3]],tray:[]};
+els['#timeline'].dataset.sig='';drawTimeline(noTray);
+const quiet=order(html());
+els['#timeline'].dataset.sig='';
+drawTimeline({timeline:[st.timeline[3]],tray:[{kind:'dupe_meetings',title:'Duplicate transcripts',
+  detail:'1 pair',target:'dupes',count:1}]});
+const dupes=order(html());
+console.log(JSON.stringify({full,quiet,dupes,h:html()}));
+""")
+    # Now (the stall row, then the processing row), To finish (its two
+    # rows), then the library; the finished meeting lives only there
+    assert out["full"] == ['"sec-now"', '"trayrow"', '"P"', '"sec-fin"', '"N"', '"V"',
+                           '"ghead mgroup"', '"D"']
+    # a section with nothing in it renders nothing
+    assert out["quiet"] == ['"ghead mgroup"', '"D"']
+    assert out["dupes"] == ['"sec-now"', '"trayrow"', '"ghead mgroup"', '"D"']
+    # the chronic kinds are the eyebrow's actions, never rows of their own
+    h = out["h"]
+    assert "Speaker 58" not in h
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_now_and_the_to_finish_actions_survive_a_search_and_the_name_sort():
+    """The tray band showed its items whatever the list was doing. Its items
+    moved into the list, so a search with no match, an empty library, and the
+    by-name sort must all keep them reachable."""
+    stall = ("{kind:'recorder_stall',title:'Recording',detail:'no audio',"
+             "target:'rec:x',count:1}")
+    voice = "{kind:'unknown_voice',title:'Speaker 58',detail:'',target:'U58',count:2}"
+    out = _run_node(_timeline_env(search="zzz") + """
+drawTimeline({timeline:[{id:'D',state:'ready',when:'2026-09-01T00:00:00',
+  title:'Budget',finish:fin(true,0,0)}],tray:[""" + stall + "," + voice + """]});
+const nomatch=html();
+els['#search'].value='';els['#timeline'].dataset.sig='';
+drawTimeline({timeline:[],tray:[""" + stall + "," + voice + """]});
+const empty=html();
+els['#sort'].value='name';els['#timeline'].dataset.sig='';
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+drawTimeline({timeline:[{id:'B',state:'ready',title:'Budget',when:recent,finish:fin(true,1,0)},
+  {id:'A',state:'needs_name',title:'Alpha',when:recent,finish:fin(false,0,0)}],
+  tray:[""" + stall + "," + voice + """]});
+const byName=order(html());
+console.log(JSON.stringify({nomatch,empty,byName}));
+""")
+    for key in ("nomatch", "empty"):
+        h = out[key]
+        assert 'id="sec-now"' in h and 'class="trayrow"' in h, key
+        assert "Name 1 voice" in h, key
+    assert "No matches." in out["nomatch"]
+    assert "Record a meeting from the menu bar" in out["empty"]
+    # by name: Now's urgent row and the To finish actions head the letter
+    # groups; the rows themselves stay alphabetical, and a meeting waiting for
+    # its title is the compact row there too
+    assert out["byName"] == ['"sec-now"', '"trayrow"', '"sec-fin"', '"A"', '"B"']
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_list_signature_follows_the_dots_and_the_now_rows():
+    """A To finish row's dots move while nothing else on the row does (a voice
+    named), and an armed sweep or a Fix outcome changes only the Now rows:
+    each must still rebuild the list, and an unchanged poll must not."""
+    out = _run_node(_timeline_env() + """
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+const row={id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0)};
+const dup={kind:'dupe_files',title:'Already processed',detail:'2 files',target:'src:a',exact:2,count:2};
+drawTimeline({timeline:[row],tray:[dup]});
+const s0=els['#timeline'].dataset.sig;
+drawTimeline({timeline:[row],tray:[dup]});
+const same=els['#timeline'].dataset.sig===s0;
+drawTimeline({timeline:[{...row,finish:fin(true,1,0)}],tray:[dup]});
+const s1=els['#timeline'].dataset.sig;
+DUPE_ARMED=true;
+drawTimeline({timeline:[{...row,finish:fin(true,1,0)}],tray:[dup]});
+const s2=els['#timeline'].dataset.sig;
+console.log(JSON.stringify({same,dots:s1!==s0,armed:s2!==s1,
+  armedHtml:html().includes('dupeDeleteGo(this)')}));
+""")
+    assert out == {"same": True, "dots": True, "armed": True, "armedHtml": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_voice_queue_starts_with_the_most_talk_time_and_never_revisits():
+    out = _run_node(_finish_env() + "\n".join([
+        _js_fn("nextVoiceMeeting"), _js_fn("fsVoiceOrder"), """
+const f=(v,secs)=>({title:true,voices:v,flags:0,done:!v,voice_secs:secs});
+const tl=[
+  {id:'rec:x',state:'recording'},
+  {id:'A',state:'ready',finish:f(1,12)},
+  {id:'B',state:'needs_name',finish:{...f(2,40),title:false}},
+  {id:'C',state:'ready',finish:f(0,0)},
+  {id:'D',state:'ready',finish:f(3,40)},
+  {id:'E',state:'ready',finish:f(1,5)},
+];
+const id=r=>r?r.id:null;
+const voices=[{id:'S1',uid:'U1',st:''},{id:'S2',uid:null,st:''},{id:'S3',uid:'U3',st:''}];
+const segs=[{speaker:'S1',start:0,end:3},{speaker:'S2',start:3,end:13},
+  {speaker:'S3',start:13,end:30},{speaker:'S1',start:30,end:31}];
+console.log(JSON.stringify({
+  first:id(nextVoiceMeeting(tl,[])),
+  next:id(nextVoiceMeeting(tl,['B'])),
+  then:id(nextVoiceMeeting(tl,['B','D'])),
+  last:id(nextVoiceMeeting(tl,['B','D','A'])),
+  none:id(nextVoiceMeeting(tl,['B','D','A','E'])),
+  empty:id(nextVoiceMeeting([],[])),
+  order:fsVoiceOrder(voices,segs,[]).map(v=>v.id),
+  skipResolved:fsVoiceOrder(voices,segs,['U3']).map(v=>v.id),
+}));
+"""]))
+    # B and D tie at 40s: the timeline's order keeps B first
+    assert out["first"] == "B" and out["next"] == "D"
+    assert out["then"] == "A" and out["last"] == "E"
+    # C has nothing left, the recording row has no finish record
+    assert out["none"] is None and out["empty"] is None
+    # inside one meeting: the most talk time first; a voice this run already
+    # named (its relabel still in flight) is never asked about again
+    assert out["order"] == ["S3", "S2", "S1"]
+    assert out["skipResolved"] == ["S2", "S1"]
+
+
+def _voice_queue_env():
+    return _finish_env() + "\n".join([
+        _js_fn("fsInit"), _js_fn("fsShow"), _js_fn("fsRender"), _js_fn("fsTitleHTML"),
+        _js_fn("fsFlagsHTML"), _js_fn("fsLeftHTML"), _js_fn("fsNext"),
+        _js_fn("nextVoiceMeeting"), _js_fn("fsVoicesStart"), _js_fn("fsVoiceCarry"),
+        _js_fn("fsVoiceGo"),
+        "function srcStem(n){return (n||'').replace(/\\.[^.]+$/,'');}",
+        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[],tray:[]},route={base:null};",
+        "const box={hidden:true,innerHTML:''};",
+        "const document={getElementById:id=>id==='mfinish'?box:null};",
+        "function $(q){return null;}",
+        "const location={hash:''};",
+        "let reviews=0,panels=[],toasts=[],opens=0;",
+        "function fvOpen(){opens++;} function reviewStart(){reviews++;}",
+        "function toast(m){toasts.push(m);}",
+        "function openNamePanelByUid(u){panels.push(u);}",
+        "function rowById(id){return S.timeline.find(r=>r.id===id);}",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_name_n_voices_walks_the_voices_step_across_meetings():
+    """"Name N voices" opens the meeting holding the unnamed voice with the
+    most talk time, starts the flow in its Voices step (never the Title or
+    Flags steps), and after that meeting's last voice hands off to the next
+    meeting with an unnamed voice. The end of the queue drops back to the
+    ordinary strip and starts nothing on its own."""
+    out = _run_node(_voice_queue_env() + """
+const f=(t,v,fl,secs)=>({title:t,voices:v,flags:fl,done:t&&!v&&!fl,voice_secs:secs});
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+S.timeline=[
+  {id:'A',state:'ready',when:recent,finish:f(true,1,2,12)},
+  {id:'B',state:'needs_name',when:recent,suggested_title:'Budget',finish:f(false,2,3,40)},
+  {id:'C',state:'ready',when:recent,finish:f(true,0,0,0)},
+];
+S.tray=[{kind:'unknown_voice',target:'U58'}];
+const o={};
+fsVoicesStart();
+o.start={hash:location.hash,carry:FS_CARRY};
+fsInit('B');
+o.b={cur:FS.cur,mode:FS.mode,seen:FS.seen,live:FS.live,opens,
+  titleCur:box.innerHTML.includes('data-step="title" aria-current'),
+  voicesCur:box.innerHTML.includes('data-step="voices" aria-current')};
+// the last voice here is named: the hand-off, never the Title or Flags steps
+FS.fin.voices=0;FS.resolved.push('U1');
+fsShow(true);
+o.handoff={hash:location.hash,carry:FS_CARRY,reviews};
+fsInit('A');
+o.a={cur:FS.cur,seen:FS.seen,resolved:FS.resolved};
+// A's last voice: nothing left to hand off to (B was visited, C is done)
+FS.fin.voices=0;
+fsShow(true);
+o.end={mode:FS.mode,cur:FS.cur,reviews,toasts,hash:location.hash,
+  flagsBody:box.innerHTML.includes('id="fsflags"')};
+// no live meeting holds an unnamed voice: the naming panel, as the tray did
+S.timeline=[S.timeline[2]];location.hash='';FS_CARRY=null;
+fsVoicesStart();
+o.fallback={panels,hash:location.hash,carry:FS_CARRY};
+console.log(JSON.stringify(o));
+""")
+    assert out["start"]["hash"] == "#m/B"
+    assert out["start"]["carry"] == {"base": "B", "past": ["title", "flags"], "live": True,
+                                     "keep": True, "mode": "voices", "seen": ["B"],
+                                     "resolved": []}
+    b = out["b"]
+    # the title is open on B, but the queue starts in Voices
+    assert b["cur"] == "voices" and b["mode"] == "voices" and b["seen"] == ["B"]
+    assert b["voicesCur"] is True and b["titleCur"] is False
+    assert b["live"] is True and b["opens"] == 1
+    h = out["handoff"]
+    assert h["hash"] == "#m/A" and h["reviews"] == 0, "no flag review on the way out"
+    assert h["carry"]["seen"] == ["B", "A"] and h["carry"]["resolved"] == ["U1"]
+    assert h["carry"]["mode"] == "voices"
+    assert out["a"] == {"cur": "voices", "seen": ["B", "A"], "resolved": ["U1"]}
+    e = out["end"]
+    assert e["mode"] is None and e["hash"] == "#m/A"
+    assert e["cur"] == "flags" and e["flagsBody"] is True
+    assert e["reviews"] == 0, "the end of the queue starts nothing on its own"
+    assert e["toasts"] == ["No more voices to name."]
+    assert out["fallback"] == {"panels": ["U58"], "hash": "", "carry": None}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_named_voice_is_remembered_by_the_queue():
+    out = _run_node(_voices_env() + """
+(async()=>{
+  FS.mode='voices';FS.resolved=[];
+  els['#fvname'].value='Grace Lindqvist';document.activeElement=body;
+  key('Enter');await new Promise(r=>setTimeout(r,0));
+  console.log(JSON.stringify({resolved:FS.resolved,st:FS.voices[0].st}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+""")
+    assert out == {"resolved": ["U058"], "st": "named"}
+    assert "if(v.uid)(FS.resolved||(FS.resolved=[])).push(v.uid);" in _js_fn("fvForget")
+    assert "fsVoiceOrder(fresh,MP.segs,FS.resolved)" in _js_fn("fsSegsLoaded")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_tab_title_counts_meetings_that_joined_to_finish_while_hidden():
+    listener = re.search(r"document\.addEventListener\('visibilitychange',[\s\S]*?\n\}\);",
+                         NEW_JS).group(0)
+    out = _run_node(_finish_env() + "\n".join([
+        "const handlers={};",
+        "const document={hidden:true,title:'Meetings',"
+        "addEventListener:(k,f)=>{handlers[k]=f;}};",
+        "let TAB_SEEN=null;const TAB_JOINED=new Set();",
+        _js_fn("finishIds"), _js_fn("tabJoins"), _js_oneline("tabTitle"), _js_fn("tabWatch"),
+        listener, """
+const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
+const done={id:'D',state:'ready',when:recent,finish:fin(true,0,0)};
+const t=[];
+tabWatch({timeline:[{id:'OLD',state:'needs_name',when:recent,finish:fin(false,0,0)},done]});
+t.push(document.title);                        // the first poll is the baseline
+tabWatch({timeline:[{id:'OLD',state:'needs_name',finish:fin(false,0,0)},
+  {id:'N1',state:'needs_name',when:recent,finish:fin(false,1,0)},done]});
+t.push(document.title);
+// N1 is named and leaves; N2 joins: two meetings joined since hidden
+tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0)},done]});
+t.push(document.title);
+tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0)},done]});
+t.push(document.title);                        // an unchanged poll adds nothing
+document.hidden=false;handlers.visibilitychange();
+t.push(document.title);
+// while visible nothing counts, and hiding again starts from zero
+tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0)}]});
+t.push(document.title);
+document.hidden=true;handlers.visibilitychange();
+tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0)},
+  {id:'N4',state:'needs_name',when:recent,finish:fin(false,0,0)}]});
+t.push(document.title);
+console.log(JSON.stringify({t,joins:[tabJoins(null,['a']),tabJoins(['a'],['a','b'])],
+  titles:[tabTitle(0),tabTitle(3)]}));
+"""]))
+    assert out["t"] == ["Meetings", "(1) Meetings", "(2) Meetings", "(2) Meetings",
+                        "Meetings", "Meetings", "(1) Meetings"]
+    assert out["joins"] == [[], ["b"]]
+    assert out["titles"] == ["Meetings", "(3) Meetings"]
+    assert "tabWatch(S);" in _js_fn("refresh")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_fix_outcome_on_a_now_row_survives_the_rebuild():
+    """The tray wrote "Done" and the reset message into its own DOM, which
+    only rebuilt when the tray changed. A Now row lives in the list, and the
+    list rebuilds on every processing tick, so the outcome is state now."""
+    out = _run_node("\n".join(_TRAY_HARNESS + [
+        "let reply={ok:true,message:'Permissions reset. Try recording again.'};",
+        "function api(){return Promise.resolve(reply);}",
+        "let draws=0,refreshes=0;function nowRedraw(){draws++;}",
+        "function refresh(){refreshes++;}",
+        "function openDrawer(){}",
+        _js_fn("trayAct"), """
+(async()=>{
+  S={recorder_note:{ok:false,at:'t1',text:'The recorder captured no audio. Check microphone access.'},
+     tray:[{kind:'recorder_stall',title:'Recording',detail:'no audio',target:'rec:x',count:1}]};
+  const p=trayAct('recorder_note','');
+  draw(S);const busy=tray.innerHTML;
+  await p;draw(S);const done=tray.innerHTML;const sig1=tray.sig;
+  reply={ok:false,error:'tccutil failed'};
+  await trayAct('recorder_stall','rec:x');draw(S);const failed=tray.innerHTML;
+  reply={ok:true};
+  await trayAct('recorder_stall','rec:x');draw(S);const cleared=tray.innerHTML;
+  // a NEW failed note starts clean
+  S.recorder_note={ok:false,at:'t2',text:'No audio again.'};draw(S);const fresh=tray.innerHTML;
+  console.log(JSON.stringify({busy,done,failed,cleared,fresh,draws,refreshes,
+    sigMoved:sig1!==tray.sig}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""]))
+    assert "threw" not in out, out
+    assert ">Resetting…</button>" in out["busy"] and "disabled>Resetting" in out["busy"]
+    assert "Permissions reset. Try recording again." in out["done"]
+    assert "disabled>Done ✓</button>" in out["done"]
+    assert "tccutil failed" in out["failed"] and ">Retry</button>" in out["failed"]
+    assert ">Fix</button>" in out["cleared"] and "tccutil failed" not in out["cleared"]
+    assert ">Fix permissions</button>" in out["fresh"] and "No audio again." in out["fresh"]
+    assert out["draws"] == 6 and out["refreshes"] == 2 and out["sigMoved"] is True
+
+
+def test_phase_two_styles_ride_the_tokens():
+    """The section rules add no colour of their own, keep the 13px floor, and
+    give the To finish rows the focus ring and the reduced-motion kill."""
+    sec = NEW_CSS[NEW_CSS.index("/* ------------------------------------------------ Now and To finish"):
+                  NEW_CSS.index("/* ------------------------------------------------- timeline + rail")]
+    for cls in (".trayrow{", ".sechead{", ".secact{", ".lrow{", ".steps{", ".sdot{",
+                ".sdot.done{"):
+        assert cls in sec, f"missing {cls}"
+    assert not re.findall(r"#[0-9A-Fa-f]{3,6}\b", sec), "no new colors"
+    assert ":where(button,select,input,.row,.lrow,.railbtn):focus-visible" in NEW_CSS
+    assert ".lrow,.lrow.updated," in NEW_CSS     # the reduced-motion transition kill
+    assert re.search(r"(?m)^\.lrow \.ltitle\{[^}]*font:600 15px", NEW_CSS)

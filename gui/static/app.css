@@ -120,7 +120,7 @@
 }
 
 *{box-sizing:border-box;margin:0}
-/* the hidden attribute must win over any display rule below (tray, rail,
+/* the hidden attribute must win over any display rule below (rail,
    bulkbar, pill, popovers all start hidden and are toggled by .hidden) */
 [hidden]{display:none!important}
 html{scroll-behavior:smooth}
@@ -158,6 +158,10 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .pill.amber{color:var(--attn);background:var(--attn-soft);border-color:transparent}
 .pill .recdot{width:8px;height:8px;border-radius:50%;background:var(--rec);
   flex:none;animation:pulse 1.3s infinite}
+/* two segments (docs/ui-refresh phase 2): the pipeline, then the naming,
+   split by a hairline. Each segment alone renders alone, with no divider. */
+.pill .pseg{display:inline-flex;align-items:center;gap:7px}
+.pill .pseg+.pseg{border-left:1px solid var(--line);padding-left:8px}
 
 /* filter + sort: borderless until hover; native search field */
 .ctl{font:500 13px/1 var(--sans);color:var(--sub);background:transparent;
@@ -168,8 +172,8 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
   width:clamp(140px,28vw,280px)}
 .search::placeholder{color:var(--sub)}
 
-/* "flagged only" chip beside the category filter: visible only while the tray's
-   >8 flagged aggregate is filtering the library; clicking it clears the filter */
+/* "flagged only" chip beside the category filter: visible only while "Review
+   flags" (the To finish eyebrow) is filtering the library; clicking it clears it */
 .flagchip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
   font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;
   color:var(--attn);background:var(--attn-soft);
@@ -212,53 +216,63 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 
 /* keyboard focus: visible everywhere, plain accent ring (the Signal glow
    retired with its colorway; the ring itself stays for accessibility) */
-:where(button,select,input,.row,.trayrow,.railbtn):focus-visible{
+:where(button,select,input,.row,.lrow,.railbtn):focus-visible{
   outline:2px solid var(--accent);
   outline-offset:2px}
 
 /* the recorder's success note: a quiet sub line right under the header (good
-   news is an acknowledgement, not an ask: never teal, never a tray row) */
+   news is an acknowledgement, not an ask: never teal, never a Now row) */
 .recok{margin:14px 2px 0;color:var(--sub);font:400 13px/1.4 var(--sans)}
 
-/* --------------------------------------------------------------- tray ----- */
-/* a white card wearing the 4px TEAL attention edge; no shadow, like every
-   other card -- the hairline border and the 4px edge do all the separating */
-.tray{margin:14px 0 10px;background:var(--card);
-  border:1px solid var(--hair);border-left:4px solid var(--attn);
-  border-radius:6px;padding:8px 16px 12px}
-.tray .trayhdr{font:600 13px/1.2 var(--sans);letter-spacing:.08em;
-  text-transform:uppercase;color:var(--attn);padding:6px 0 4px}
-.trayrow{display:flex;align-items:center;gap:10px;padding:8px 0;
-  border-top:1px solid var(--hair)}
-.trayrow:first-of-type{border-top:0}
+/* ------------------------------------------------ Now and To finish ------- */
+/* (docs/ui-refresh phase 2.) The tray band is gone. Its urgent kinds are one
+   compact row each at the top of the Now section: a white card wearing the
+   4px TEAL attention edge the band wore, no shadow, like every other card. */
+.trayrow{display:flex;align-items:center;gap:10px;padding:10px 16px;margin:0 0 10px;
+  background:var(--card);border:1px solid var(--hair);border-left:4px solid var(--attn);
+  border-radius:6px}
 .trayrow .tw-title{font:600 14.5px/1.3 var(--sans);color:var(--ink);flex:none;
   max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* an aggregate line ("Flagged lines in N meetings") is the whole line, uncapped */
-.trayrow .tw-title.agg{flex:1;min-width:0;max-width:none}
 .trayrow .tw-detail{color:var(--sub);font-size:13px;min-width:0;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .trayrow .tw-verb{margin-left:auto;flex:none}
-/* two verbs on one line (the recorder note's Fix + dismiss): ONE right-pushed
-   group, so the pair never splits the row's free space between them */
+/* two verbs on one line (the recorder note's Fix + dismiss, the armed sweep's
+   Cancel + Delete): ONE right-pushed group, so the pair never splits the
+   row's free space between them */
 .trayrow .tw-acts{margin-left:auto;flex:none;display:flex;gap:8px;align-items:center}
-.trayrow .tw-acts .tw-verb{margin-left:0}
-/* >8 items: the aggregate line filters the LIBRARY instead of expanding; while
-   the flagged-only filter is on, the line reads as active */
-.trayrow.active .tw-title{color:var(--attn);font-weight:600}
-.trayrow.active .tw-verb{color:var(--attn);background:var(--attn-soft);
-  border-color:color-mix(in srgb,var(--attn) 45%,var(--line))}
-/* expanded per-meeting / per-voice rows under an aggregate line (<=8 items).
-   Library meta scale (13px, nothing under 13px), roomy padding:
-   the tray must never read as a second, denser library. */
-.traysub{display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 4px 10px 18px;
-  border-top:1px solid var(--hair)}
-.traysub:hover{background:var(--inset);border-radius:6px}
-.traysub .ts-title{font:600 14px/1.35 var(--sans);color:var(--ink);flex:none;
-  max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.traysub .ts-meta{font:400 13px/1.3 var(--sans);font-variant-numeric:tabular-nums;
-  color:var(--sub);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.traysub .ts-count{margin-left:auto;flex:none;color:var(--attn);
-  font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums}
+.trayrow .tw-acts .tw-verb,.trayrow .tw-verb+.tw-verb{margin-left:0}
+
+/* a section's eyebrow ("Now", "To finish"): the month header's own type, a
+   hairline rule, then the section's actions as quiet accent text */
+.sechead{display:flex;align-items:center;gap:10px}
+.secact{flex:none;font:500 13px/1.2 var(--sans);letter-spacing:0;text-transform:none;
+  color:var(--accent-text);background:none;border:0;border-radius:4px;
+  padding:4px 7px;cursor:pointer}
+.secact:hover{background:var(--inset);text-decoration:underline;text-underline-offset:2px}
+/* "Review flags" while its filter is on: pressed, in the attention pair */
+.secact[aria-pressed="true"]{color:var(--attn);background:var(--attn-soft)}
+
+/* a To finish row: denser than a library card (title 15px, one meta line, the
+   step dots). The whole row is a link to the meeting, where the strip takes
+   over. Hover firms the border, as on every card. */
+.lrow{display:flex;flex-direction:column;gap:3px;padding:11px 16px;margin:0 0 10px;
+  background:var(--card);border:1px solid var(--hair);border-radius:6px;
+  color:var(--ink);text-decoration:none;scroll-margin-top:84px;
+  transition:border-color .18s ease,background-color .5s ease}
+.lrow:hover{border-color:var(--line)}
+.lrow.updated{background:var(--accent-soft)}
+.lrow .lt{display:flex;align-items:baseline;gap:10px;min-width:0}
+.lrow .ltitle{flex:1;min-width:0;font:600 15px/1.3 var(--sans);letter-spacing:-.005em;
+  color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .ldate{flex:none;font:500 13px/1.3 var(--sans);color:var(--sub)}
+.lrow .lmeta{font:400 13px/1.4 var(--sans);color:var(--sub);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the finish steps as dots: open teal with its count, done green with a check */
+.steps{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
+.sdot{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+  font:600 13px/1.3 var(--sans);padding:1px 7px;border-radius:4px;
+  color:var(--attn);background:var(--attn-soft)}
+.sdot.done{color:var(--ok);background:var(--ok-soft)}
 
 /* ------------------------------------------------- timeline + rail -------- */
 .timelinewrap{display:flex;gap:14px;align-items:flex-start;margin-top:6px}
@@ -448,46 +462,16 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .row[data-state="processing"] .progress{position:absolute;left:14px;bottom:0;height:2px;
   background:var(--accent);border-radius:2px;transition:width .5s ease;
   max-width:calc(100% - 28px)}
-/* the naming row wears the 4px accent attention edge; the row IS the form */
-.row[data-state="needs_name"]{border-left:4px solid var(--accent);
-  align-items:center;flex-wrap:wrap;padding:12px 16px}
 .row[data-state="failed"] .rmeta.err{color:var(--rec-text);white-space:normal}
 
-/* needs_name inline form: the title input flexes to ALL available width */
-.nameform{display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
-.nameform .ntitle{font:600 14.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:6px;padding:7px 10px;
-  flex:1 1 240px;min-width:180px}
-.nameform input[type=date]{font:inherit;font-size:13px;color:var(--ink);
-  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:6px 9px;
-  color-scheme:inherit}
-.nameform input:focus{outline:2px solid var(--accent);
-  outline-offset:1px;border-color:var(--accent)}
-
-/* the naming row is a review card: the form on top, then the evidence a human
-   names from (source filename, who was heard, what it was about). The form
-   keeps its own width behaviour; only the stack grows. */
-.nneeds{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0}
-.nneeds>.nameform{flex:0 0 auto}
-/* the original filename: quiet line, the stem itself an inline link (the user
-   encodes date and topic there; the AI title loses it) */
-.nsrc{font:400 13px/1.35 var(--sans);color:var(--sub)}
-.nsrcname{font:inherit;color:var(--accent-text);background:none;border:0;
-  padding:0;cursor:pointer;text-align:left}
-.nsrcname:hover{text-decoration:underline;text-underline-offset:2px}
-/* the voices heard: named people plain, unnamed ones a "?" chip opening the
-   one naming slide-over */
+/* chips: a named person plain, a button chip (the naming panel's looks-like
+   answers) outlined */
 .nchips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .nchip{display:inline-flex;align-items:center;font:500 13px/1.2 var(--sans);
   color:var(--sub);padding:2px 2px}
 button.nchip{background:none;border:1px solid var(--line);border-radius:4px;
   padding:2px 9px;cursor:pointer}
 button.nchip:hover{border-color:var(--attn);color:var(--attn)}
-.nchip .nchipq{color:var(--attn);font-weight:700;margin-left:3px}
-/* the summary the local model wrote, clamped to two lines like a ready row */
-.nsum{font:400 13.5px/1.5 var(--sans);color:var(--sub);
-  display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;
-  overflow:hidden;max-height:calc(1.5em * 2)}
 
 /* small icon action buttons inside rows */
 .iact{font:500 13px/1 var(--sans);color:var(--ink);background:var(--card);
@@ -503,7 +487,7 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 /* the ONLY three shadow-casting surfaces in the shell, plus the drawer and
    the naming slide-over below (both are drawers) and the two floating
    notices, which are popovers in every way but name. Cards, rows, and the
-   tray cast nothing at all. */
+   Now rows cast nothing at all. */
 .popover{position:absolute;z-index:50;background:var(--card);border:1px solid var(--hair);
   border-radius:6px;box-shadow:var(--shadow);padding:8px}
 .bulkbar{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:45;
@@ -517,7 +501,7 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 @media(prefers-reduced-motion:reduce){
   *{scroll-behavior:auto!important}
   .pill .recdot,.row[data-state="recording"] .capdot{animation:none}
-  .row,.row.updated,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
+  .row,.row.updated,.lrow,.lrow.updated,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
   .row[data-state="processing"] .progress{transition:none}
 }
 
@@ -597,7 +581,7 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 .renameinput{font:600 14.5px/1.3 var(--sans);color:var(--ink);background:var(--card);
   border:1px solid var(--accent);border-radius:6px;padding:4px 8px;width:min(420px,60vw)}
 
-/* inline error surfaced on a needs_name row when Accept fails (no banner) */
+/* inline error surfaced under a row's inline rename when it fails (no banner) */
 .nameerr{flex-basis:100%;color:var(--rec-text);
   font:400 13px/1.35 var(--sans);margin-top:2px}
 
@@ -1047,7 +1031,7 @@ button.mlg:hover{border-color:var(--attn);color:var(--attn)}
   border:1px solid var(--line);border-radius:6px;padding:9px 11px;margin:8px 0 2px;
   display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 
-/* recorder stall strip (mirrors the tray's urgency, scoped to the drawer) */
+/* recorder stall strip (mirrors the Now row's urgency, scoped to the drawer) */
 .dstall{font:400 13px/1.5 var(--sans);color:var(--ink);background:var(--rec-soft);
   border:1px solid color-mix(in srgb,var(--rec) 35%,var(--hair));border-radius:6px;
   padding:10px 12px;margin:10px 0 2px;display:flex;gap:8px;align-items:center;
