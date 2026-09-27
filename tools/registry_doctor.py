@@ -3,6 +3,8 @@
 
     python tools/registry_doctor.py            # report only, writes nothing
     python tools/registry_doctor.py --fix      # apply the safe repairs
+    python tools/registry_doctor.py --fix --voiceprints DIR
+                                               # check AND repair DIR only
 
 What it looks for: one voice holding two global numbers or two enrolled
 profiles (duplicate), a global number whose stored samples no longer agree
@@ -47,7 +49,9 @@ def main() -> int:
     ap.add_argument("--fix", action="store_true",
                     help="apply the safe repairs (default: report only)")
     ap.add_argument("--voiceprints", default=None,
-                    help="voiceprints directory (default: the configured one)")
+                    help="voiceprints directory to check and, with --fix, to "
+                         "repair; the configured one is never written when "
+                         "this names another (default: the configured one)")
     ap.add_argument("--meetings", default=None,
                     help="meetings directory (default: the configured one)")
     args = ap.parse_args()

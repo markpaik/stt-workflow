@@ -5,8 +5,10 @@ Phase 4 stops new duplicates and new split stacks from forming. This is the
 tool for the ones already on disk — plus the reference and lock litter that
 accumulates beside them.
 """
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -275,3 +277,123 @@ def test_the_cli_exits_1_when_a_finding_cannot_be_fixed(sandbox, tmp_path):
     assert "two enrolled profiles share a voice" in r.stdout
     assert set(json.loads((home / "voiceprints/registry.json").read_text())) == \
         {"Dana Cole", "Dana C."}
+
+
+# ---------- the directory a repair lands in ----------
+
+def _hashes(d: Path) -> dict:
+    """Every file under `d`, by relative path, with its content hash."""
+    return {str(p.relative_to(d)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(d.rglob("*")) if p.is_file()}
+
+
+def _seed_every_fixable_defect():
+    """One of each voiceprint defect fix() repairs, in the configured dir."""
+    for b in ("Live 05012026", "Live 05022026", "Live 05032026"):
+        _meeting(b)
+    e = _basis(seed=9)
+    f = _basis(seed=10)
+    # duplicate: one voice under two global numbers
+    _seed_unknown("U004", [f[0]], ["Live 05012026"])
+    _seed_unknown("U009", [_mix(f, 0.97, np.sqrt(1 - 0.97 ** 2))], ["Live 05022026"])
+    # split: one stack spanning two voices
+    _seed_unknown("U050", [e[0], _mix(e, 0.9, np.sqrt(1 - 0.9 ** 2)),
+                           _mix(e, 0.3, 0.0, np.sqrt(1 - 0.09))],
+                  ["Live 05012026", "Live 05022026", "Live 05032026"])
+    # dangling: a meeting ref and a sample source that name nothing on disk
+    _seed_unknown("U001", [f[3]], ["Live 05012026", "Deleted 01012020"])
+    identify.enroll("Alice", f[2], source="Deleted 01012020")
+    # stale counter
+    raw = json.loads((config.VOICEPRINTS_DIR / "unknowns.json").read_text())
+    raw["next"] = 6
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(raw))
+
+
+def test_fix_repairs_the_directory_it_checked_and_never_the_configured_one(
+        sandbox, tmp_path):
+    """fix() took voiceprints_dir but every repair read and wrote
+    config.VOICEPRINTS_DIR, so `--fix --voiceprints DIR` checked DIR and
+    then merged, split and rewrote the CONFIGURED registry. Two directories
+    with the same defects: the one named gets every repair, and the
+    configured one is byte-for-byte what it was."""
+    _seed_every_fixable_defect()
+    home = config.VOICEPRINTS_DIR
+    other = tmp_path / "other_voiceprints"
+    shutil.copytree(home, other)
+    before_home = _hashes(home)
+
+    findings = registry_doctor.check(other)
+    assert {"duplicate", "split", "dangling", "stale_next"} <= set(_kinds(findings))
+    done = registry_doctor.fix(findings, other)
+
+    assert _hashes(home) == before_home, \
+        "a repair meant for the named dir landed in the configured registry"
+    assert config.VOICEPRINTS_DIR == home, "the configured dir was not put back"
+
+    assert "merged U009 into U004" in done
+    raw = json.loads((other / "unknowns.json").read_text())
+    assert set(raw["speakers"]) == {"U001", "U004", "U050", "U051"}
+    assert raw["speakers"]["U051"]["unlinked_from"] == "U050"
+    assert raw["speakers"]["U001"]["meetings"] == ["Live 05012026"]
+    assert raw["next"] == 52
+    assert json.loads((other / "registry.json").read_text())["Alice"]["sources"] == ["?"]
+    assert [f for f in registry_doctor.check(other) if f.fixable] == []
+
+
+def test_the_cli_fix_with_voiceprints_never_touches_the_configured_dir(
+        sandbox, tmp_path):
+    """The same guarantee through the command a person actually runs: the
+    configured registry under STT_HOME keeps every file hash, and the
+    directory passed as --voiceprints is the one that gets merged."""
+    home = tmp_path / "home"
+    (home / "voiceprints").mkdir(parents=True)
+    (home / "meetings").mkdir(parents=True)
+    e = _basis(seed=11)
+    np.save(home / "voiceprints/U001.npy", e[0].reshape(1, -1))
+    np.save(home / "voiceprints/U002.npy",
+            _mix(e, 0.97, np.sqrt(1 - 0.97 ** 2)).reshape(1, -1))
+    (home / "voiceprints/unknowns.json").write_text(json.dumps({"next": 1, "speakers": {
+        "U001": {"file": "U001.npy", "meetings": ["M1"]},
+        "U002": {"file": "U002.npy", "meetings": ["M2"]}}}))
+    other = tmp_path / "other_voiceprints"
+    shutil.copytree(home / "voiceprints", other)
+    before_home = _hashes(home / "voiceprints")
+
+    r = _run(home, "--fix", "--voiceprints", str(other))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "merged U002 into U001" in r.stdout
+    assert _hashes(home / "voiceprints") == before_home, \
+        "--fix --voiceprints DIR rewrote the configured registry"
+    left = json.loads((other / "unknowns.json").read_text())
+    assert set(left["speakers"]) == {"U001"} and left["next"] == 3
+
+
+def test_fix_puts_the_configured_dir_back_when_a_repair_raises(
+        sandbox, tmp_path, monkeypatch):
+    """The repoint is undone in a finally: a repair that raises must not
+    leave every later registry read in this process aimed at the other dir."""
+    e = _basis(seed=12)
+    _seed_unknown("U004", [e[0]], ["M1"])
+    _seed_unknown("U009", [_mix(e, 0.97, np.sqrt(1 - 0.97 ** 2))], ["M2"])
+    home = config.VOICEPRINTS_DIR
+    other = tmp_path / "other_voiceprints"
+    shutil.copytree(home, other)
+
+    def boom(*a, **kw):
+        raise RuntimeError("merge failed")
+    monkeypatch.setattr(unknowns, "merge", boom)
+    with pytest.raises(RuntimeError, match="merge failed"):
+        registry_doctor.fix(registry_doctor.check(other), other)
+    assert config.VOICEPRINTS_DIR == home
+
+
+def test_fix_refuses_to_repoint_while_this_thread_holds_the_registry_lock(
+        sandbox, tmp_path):
+    """lock_registry() is re-entrant by depth, so a nested acquire under a
+    repoint would skip the other dir's lock file. Refuse instead."""
+    other = tmp_path / "other_voiceprints"
+    other.mkdir()
+    with identify.lock_registry():
+        with pytest.raises(RuntimeError, match="holds the registry lock"):
+            registry_doctor.fix([], other)
+    assert config.VOICEPRINTS_DIR == sandbox / "voiceprints"

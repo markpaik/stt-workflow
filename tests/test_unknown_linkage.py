@@ -190,3 +190,58 @@ def test_the_old_060_band_no_longer_links(sandbox):
     assert out["S0"] == "U002"
     sugg = unknowns.load()["speakers"]["U002"]["suggested"]
     assert sugg == [{"uid": "U001", "score": pytest.approx(0.65, abs=1e-6)}]
+
+
+# ---------- a stack that drifted before the floor ----------
+
+def _drifted_u050():
+    """A legacy U050 on disk: two samples at 0.48, below LINK_STACK_MIN,
+    from before the floor existed. M2's cluster IS the second sample."""
+    e = _basis(seed=8)
+    a = e[0]
+    b = _mix(e, 0.48, np.sqrt(1 - 0.48 ** 2))
+    links = [{"meeting": "M1", "meeting_id": None, "cluster": "SPEAKER_00",
+              "score": 1.0},
+             {"meeting": "M2", "meeting_id": None, "cluster": "SPEAKER_01",
+              "score": 0.72}]
+    _seed_unknown("U050", [a, b], ["M1", "M2"], nxt=51, links=links)
+    assert unknowns.min_pairwise(np.vstack([a, b])) < unknowns.LINK_STACK_MIN
+    return a, b
+
+
+def test_a_relabel_keeps_its_link_on_a_stack_that_drifted_before_the_floor(sandbox):
+    """The relabel of a meeting the unknown already lists appends nothing,
+    so the stack does not move and the floor has nothing to measure. The
+    gate used to measure the unchanged stack anyway: a legacy drifted U050
+    lost M2 to a fresh U051 on the next relabel while U050 still listed M2
+    in its meetings and its links — one cluster, two numbers."""
+    a, b = _drifted_u050()
+    before = np.load(config.VOICEPRINTS_DIR / "U050.npy").copy()
+
+    out = unknowns.assign({"SPEAKER_01": b}, {"SPEAKER_01": None}, "M2",
+                          stats={"SPEAKER_01": GOOD_STATS})
+    assert out == {"SPEAKER_01": "U050"}, "the relabel forked M2 onto a fresh number"
+
+    reg = unknowns.load()
+    assert set(reg["speakers"]) == {"U050"}
+    assert reg["next"] == 51, "no number was minted"
+    meta = reg["speakers"]["U050"]
+    assert meta["meetings"] == ["M1", "M2"]
+    assert np.allclose(np.load(config.VOICEPRINTS_DIR / "U050.npy"), before)
+    assert [(ln["meeting"], ln["cluster"]) for ln in meta["links"]] == \
+        [("M1", "SPEAKER_00"), ("M2", "SPEAKER_01")]
+    assert meta["links"][1]["score"] == pytest.approx(1.0, abs=1e-9)
+    # the drift is still there for the doctor to split
+    assert [f.subject for f in registry_doctor.check()
+            if f.kind == "split"] == ["U050"]
+
+
+def test_a_new_meeting_still_cannot_link_to_a_drifted_stack(sandbox):
+    """The other side of the same rule: a NEW meeting appends a sample, so
+    the floor still applies, and a stack that already disagrees with itself
+    takes no new link until the doctor splits it."""
+    a, b = _drifted_u050()
+
+    out = unknowns.assign({"S0": b}, {"S0": None}, "M3", stats={"S0": GOOD_STATS})
+    assert out["S0"] == "U051"
+    assert unknowns.load()["speakers"]["U050"]["meetings"] == ["M1", "M2"]

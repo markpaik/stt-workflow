@@ -21,8 +21,10 @@ one right answer, and this applies it.
 The invariants the hygiene test guards are the same ones `check` runs, so
 there is one definition of "clean" and the test cannot drift from the tool.
 """
+import contextlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import NamedTuple
 
@@ -365,12 +367,64 @@ def _drop_dangling(subject: str, is_unknown: bool, lib: Library) -> list:
     return done
 
 
+# fix() is the only code in this process that repoints config.VOICEPRINTS_DIR,
+# and two fix() calls on two threads must not interleave their swaps.
+_REPOINT = threading.Lock()
+
+
+@contextlib.contextmanager
+def _voiceprints_at(voiceprints_dir):
+    """Point every registry read and write at `voiceprints_dir` for the span
+    of one fix(), and put the configured directory back in a finally.
+
+    Why a swap and not a parameter: the repairs go through unknowns.merge,
+    unknowns.load/save, identify.load_registry/save_registry and
+    identify.lock_registry, and every one of them reads config.VOICEPRINTS_DIR
+    at call time. `--fix --voiceprints DIR` used to check DIR and then repair
+    the CONFIGURED registry — merging, splitting and healing numbers in a
+    directory nobody asked it to touch. Under the swap, lock_registry() also
+    takes DIR's own .registry.lock, which is the lock that guards DIR.
+
+    The swap is process-global. The CLI is fix()'s only caller and runs one
+    thread, so nothing else reads the global while it is swapped. A
+    long-running process (the panel server) must call fix() with
+    voiceprints_dir=None, which never swaps. A swap is also refused while
+    this thread already holds the registry lock: lock_registry() is
+    re-entrant by depth, so a nested acquire would skip DIR's lock file."""
+    if voiceprints_dir is None:
+        yield
+        return
+    target = Path(voiceprints_dir)
+    if target.resolve() == Path(config.VOICEPRINTS_DIR).resolve():
+        yield
+        return
+    if getattr(identify._lock_depth, "n", 0):
+        raise RuntimeError("registry_doctor.fix() cannot repoint the voiceprints "
+                           "directory while this thread holds the registry lock")
+    with _REPOINT:
+        prev = config.VOICEPRINTS_DIR
+        config.VOICEPRINTS_DIR = target
+        try:
+            yield
+        finally:
+            config.VOICEPRINTS_DIR = prev
+
+
 def fix(findings, voiceprints_dir=None, meetings_dir=None) -> list:
     """Apply the repairs the findings authorize, and report what was done.
+
+    Every repair lands in `voiceprints_dir` — the directory check() read —
+    and never in the configured one when the two differ (see
+    _voiceprints_at).
 
     Order matters: duplicates merge before splits unlink (a merge changes a
     stack, so the split test must see the merged one), and `next` heals last
     so it covers every number minted along the way."""
+    with _voiceprints_at(voiceprints_dir):
+        return _fix(findings, meetings_dir)
+
+
+def _fix(findings, meetings_dir) -> list:
     md = Path(meetings_dir) if meetings_dir is not None else config.meetings_dir()
     lib = _library(md)
     done = []
@@ -406,9 +460,7 @@ def fix(findings, voiceprints_dir=None, meetings_dir=None) -> list:
 
     with identify.lock_registry():
         reg = unknowns.load()          # load() heals `next` in memory
-        before = _read_json(
-            (Path(voiceprints_dir) if voiceprints_dir is not None
-             else config.VOICEPRINTS_DIR) / "unknowns.json", {}).get("next")
+        before = _read_json(config.VOICEPRINTS_DIR / "unknowns.json", {}).get("next")
         if before != reg["next"]:
             unknowns.save(reg)
             done.append(f"healed unknowns.json next: {before} -> {reg['next']}")

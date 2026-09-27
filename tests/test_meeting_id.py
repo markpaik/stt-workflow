@@ -182,6 +182,56 @@ def test_a_legacy_registry_entry_with_no_ids_still_reads(sandbox):
     assert unknowns.aligned_meeting_ids({"meetings": ["A", "B"]}) == [None, None]
 
 
+def test_naming_an_unknown_carries_each_samples_meeting_id_into_the_profile(
+        sandbox, monkeypatch):
+    """promote() enrolled each sample with its base alone, so enroll()
+    re-derived the id from a name the rename chase may have missed. A stale
+    base resolves to nothing, and the new profile lost the one reference
+    that survives a rename. The unknown already holds the id: pass it."""
+    _meeting("Team Sync 05012026")
+    _meeting("Staff Mtg 05022026")
+    config.backfill_meeting_ids()
+    mid_a = config.id_of("Team Sync 05012026")
+    mid_b = config.id_of("Staff Mtg 05022026")
+
+    rng = np.random.default_rng(13)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", rng.normal(size=(2, 32)))
+    unknowns.save({"speakers": {"U001": {
+        "file": "U001.npy", "meetings": ["Team Sync 05012026", "Staff Mtg 05022026"],
+        "meeting_ids": [mid_a, mid_b]}}})
+
+    def boom(*a, **kw):
+        raise RuntimeError("the chase failed")
+    monkeypatch.setattr(unknowns, "rename_meeting_refs", boom)
+    assert summarize.rename_meeting("Team Sync 05012026", "Focus Group")["ok"]
+    assert unknowns.load()["speakers"]["U001"]["meetings"][0] == \
+        "Team Sync 05012026", "the stored name IS stale"
+
+    assert unknowns.promote("U001", "Dana")
+    person = identify.load_registry()["Dana"]
+    assert person["sources"] == ["Team Sync 05012026", "Staff Mtg 05022026"]
+    assert person["source_ids"] == [mid_a, mid_b], \
+        "the profile re-derived the id from a stale base and lost it"
+    assert identify.resolved_sources(person) == ["Focus Group 05012026",
+                                                 "Staff Mtg 05022026"]
+
+
+def test_naming_a_legacy_unknown_with_no_ids_still_derives_them(sandbox):
+    """An unknown written before meeting ids existed has no id list. It
+    passes None per sample, and enroll() derives the id from the base
+    exactly as it did before."""
+    _meeting("Team Sync 05012026")
+    config.backfill_meeting_ids()
+    rng = np.random.default_rng(17)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", rng.normal(size=(1, 32)))
+    unknowns.save({"speakers": {"U001": {
+        "file": "U001.npy", "meetings": ["Team Sync 05012026"]}}})
+
+    assert unknowns.promote("U001", "Dana")
+    assert identify.load_registry()["Dana"]["source_ids"] == \
+        [config.id_of("Team Sync 05012026")]
+
+
 def test_removing_a_sample_keeps_the_two_lists_aligned(sandbox):
     """sources and source_ids are parallel lists indexed by sample. Any edit
     that drops a sample has to drop from both, or every later reference

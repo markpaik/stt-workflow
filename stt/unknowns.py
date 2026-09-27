@@ -24,7 +24,10 @@ The linking rules, in one place:
   Sample drift is what the stack floor stops: every link appends a centroid,
   so a chain of barely-passing 0.62 matches walks the stack away from the
   voice it started on until one id spans two people (U050 did, at 0.48
-  between its two clusters).
+  between its two clusters). A relabel of a meeting the unknown already
+  lists appends nothing, so it skips the stack floor and keeps its link: a
+  stack that drifted before the floor existed is split by the registry
+  doctor, never forked one meeting at a time by a relabel.
 * Every link records its evidence in `links`: the meeting, its id, the
   cluster, and the score that carried it. One entry per meeting-cluster pair,
   rewritten in place on a relabel.
@@ -460,15 +463,21 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
             # against each other because a chain of barely-passing matches
             # walked it from one person to another. Try the append first and
             # refuse the link when the stack would stop agreeing with itself.
-            # A relabel that adds no sample (this meeting is already stored) is
-            # measured against the stack exactly as it stands.
+            # A relabel that adds no sample (this meeting is already stored)
+            # skips the floor: the stack does not move, so there is nothing to
+            # measure. Measuring the stack as it stands refused the link on a
+            # legacy stack that drifted BEFORE this floor existed, and the
+            # meeting went to a fresh number while the old one still listed it
+            # in its meetings and links. A drifted stack is the doctor's to
+            # split (stt/registry_doctor.py), not a relabel's to fork.
             stack_after = None
             if matched:
-                s = _samples(reg, uid)
                 already = meeting in (reg["speakers"][uid].get("meetings") or [])
-                stack_after = s if already else np.vstack([s, _l2(v)])[-MAX_SAMPLES:]
-                if min_pairwise(stack_after) < LINK_STACK_MIN:
-                    matched = False
+                if not already:
+                    stack_after = np.vstack([_samples(reg, uid),
+                                             _l2(v)])[-MAX_SAMPLES:]
+                    if min_pairwise(stack_after) < LINK_STACK_MIN:
+                        matched = False
             if matched:
                 claimed.setdefault(uid, v)
                 # returning unknown: add this meeting's sample ONCE (a relabel of the
@@ -616,11 +625,18 @@ def promote(uid: str, name: str) -> bool:
                 rows_before = np.load(f0)
         # carry meeting provenance along (samples were appended one per meeting;
         # align best-effort — the sample window and meeting list can drift apart)
-        meetings = reg["speakers"][uid].get("meetings", [])
+        # The meeting's id travels with its base. Without it enroll()
+        # re-derives the id from the base, and a base a rename chase missed
+        # resolves to nothing, so the profile lost the one reference that
+        # survives a rename. A legacy entry with no ids passes None, which is
+        # exactly the base-only derivation it had before.
+        meetings = reg["speakers"][uid].get("meetings", []) or []
+        mids = aligned_meeting_ids(reg["speakers"][uid])
         try:
             for i, row in enumerate(s):
-                src = meetings[i] if i < len(meetings) else (meetings[-1] if meetings else None)
-                identify.enroll(name, row, source=src)
+                k = min(i, len(meetings) - 1)
+                src, mid = (meetings[k], mids[k]) if meetings else (None, None)
+                identify.enroll(name, row, source=src, source_id=mid)
         except Exception as e:
             _restore_profile(name, before, rows_before)
             print(f"WARNING: naming {display(uid)} '{name}' failed ({e}) -- "
