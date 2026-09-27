@@ -170,6 +170,9 @@ Sonnet runs QA and the full suite, then review and commit.
    flags") above the accordion, the tray band retired, the pill's naming
    segment, and the `(N) Meetings` tab title. See "To finish and Now" in
    `gui/DESIGN.md`.
+   Shipped 2026-09-27 (QA fixes): phone width holds at 420px with no
+   sideways scroll and no cut word, and the naming panel and the drawer
+   keep the list's and the page's keys while they are open.
 3. **Two panes.** The reader mounts beside the list at 900px and up; the
    `#m/<base>` route stays for deep links and narrow windows. Node tests on
    selection and routing; the size and contrast gates update.

@@ -274,6 +274,49 @@ def test_column_cap_is_fluid_boardroom_wide():
     assert "max-width:min(920px" not in NEW_CSS
 
 
+def _narrow_block():
+    """The shell's phone-width block: the @media(max-width:720px) rule set
+    that opens with the body gutter (the meeting page keeps its own)."""
+    a = NEW_CSS.index("@media(max-width:720px){\n  body{")
+    return NEW_CSS[a:NEW_CSS.index("\n}\n", a)]
+
+
+def test_phone_width_forces_no_sideways_scroll_and_cuts_no_word():
+    """QA, phase 2: at 420px the two-segment pill ran 33px past the edge (a
+    forced sideways scroll) and the search field cut its own hint to "Search
+    titles and w". Measured in headless Chrome at a true 420px viewport after
+    this block: scrollWidth 420, no element past the edge, no cut text."""
+    b = _narrow_block()
+    # a 16px gutter replaces the 94vw cap
+    assert "body{max-width:none;padding:0 16px 64px}" in b
+    # the controls take their own line and the search field grows to fill it
+    assert ".controls{flex:1 1 100%}" in b
+    assert ".search{flex:1 1 180px;width:auto;min-width:0}" in b
+    # the pill wraps; its two segments stack over a hairline, not side by side
+    assert ".pill{max-width:100%;white-space:normal;" in b
+    assert ".pill:has(.pseg){flex-direction:column;" in b
+    assert re.search(r"\.pill \.pseg\+\.pseg\{[^}]*border-left:0;[^}]*"
+                     r"border-top:1px solid var\(--line\)", b)
+    # a Now row's detail wraps under its title; the To finish eyebrow wraps
+    assert ".trayrow{flex-wrap:wrap;" in b
+    assert ".trayrow .tw-detail{order:1;flex:1 1 100%;white-space:normal}" in b
+    assert ".sechead{flex-wrap:wrap}" in b
+    # a wide right rail drops under the text instead of squeezing the title
+    assert ".row{flex-wrap:wrap;" in b and ".rbody{flex:1 1 160px}" in b
+    # titles and meta lines wrap instead of ending in an ellipsis
+    m = re.search(r"([^{}]+)\{\s*white-space:normal;overflow-wrap:break-word\}", b)
+    assert m, "the wrap rule is gone"
+    sels = {x.strip() for x in m.group(1).split(",")}
+    assert {".rtitle", ".rmeta", ".lrow .ltitle", ".lrow .lmeta",
+            ".trayrow .tw-title"} <= sels
+    # the rail still hides, and the block adds no colour of its own
+    assert ".rail{display:none!important}" in b
+    assert not re.findall(r"#[0-9A-Fa-f]{3,6}\b", b)
+    # the meeting page's find field: an empty count yields its width
+    m620 = NEW_CSS[NEW_CSS.index("@media(max-width:620px){"):]
+    assert m620[:m620.index("\n}\n")].count(".mfindn:empty{display:none}") == 1
+
+
 def test_flagged_aggregate_filters_the_library_not_the_tray():
     # "Review flags" on the To finish eyebrow toggles a library filter (never
     # a second, smaller list; the tray band that once expanded one is gone);
@@ -1169,6 +1212,111 @@ def test_enter_acts_by_row_state_and_e_peeks():
     assert "e.key==='e'&&st==='ready'" in body and "toggleExpand(id)" in body
     # Enter/e act on the focused ROW itself, never a focused button inside it
     assert "e.target.matches('#timeline .row[tabindex]')" in body
+
+
+def _layer_env():
+    """kbKey, kbRestore and mKey over a stub page: a timeline row that can take
+    the ring, the header search field, and the two edit layers (the naming
+    panel and the drawer) as plain flags."""
+    return "\n".join([
+        _js_oneline("kbLayerOpen"), _js_fn("kbKey"), _js_fn("kbRestore"), _js_fn("mKey"),
+        "let NP=null,_popClose=null,MR=null,kbLast=null;",
+        "const DRAWER={open:false};",
+        "let route={view:'timeline'};",
+        "class Element{}",
+        "const CSS={escape:s=>s};",
+        "const log=[];",
+        "const se={tagName:'INPUT',value:'',focus(){log.push('search');},blur(){}};",
+        "const mf={tagName:'INPUT',focus(){log.push('find');},select(){}};",
+        "const row={tagName:'DIV',dataset:{id:'M1'},focus(){log.push('ring:M1');}};",
+        "const save={tagName:'BUTTON'};",
+        "const body={tagName:'BODY'};",
+        "const document={activeElement:body,body,getElementById:()=>null,"
+        "querySelector:()=>row};",
+        "const location={hash:''};",
+        "function $(q){return q==='#search'?se:(q==='#mfind'?mf:null);}",
+        "function kbMove(d){log.push('move:'+d);}",
+        "function kbRows(){return [row];}",
+        "function kbFocusRow(){log.push('ring');}",
+        "function render(){} function scheduleSearch(){}",
+        "function openMeeting(){log.push('open');} function toggleExpand(){log.push('peek');}",
+        "function fsKey(){log.push('fsKey');return false;}",
+        "function reviewGo(d){log.push('reviewGo:'+d);} function reviewStep(){log.push('reviewStep');}",
+        "function reviewApply(v){log.push('apply:'+v);} function reviewUseAltGo(){}",
+        "function reviewExit(){log.push('exit');} function mCloseCard(){log.push('closeCard');}",
+        "function press(fn,k,pre){let prevented=false;log.length=0;"
+        "fn({key:k,metaKey:false,ctrlKey:false,altKey:false,target:save,"
+        "defaultPrevented:!!pre,preventDefault(){prevented=true;}});"
+        "return {log:log.slice(),prevented};}",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_an_open_naming_panel_or_drawer_keeps_the_list_keys_off_the_rows():
+    """QA, phase 2: with the naming panel open and its Save button focused, j
+    jumped focus off the panel onto a hidden timeline row (and the ring
+    remembered it). While either layer is open, j/k, / and Enter stay put, and
+    a poll's rebuild never puts the ring back under it."""
+    out = _run_node(_layer_env() + """
+const o={};
+document.activeElement=save;
+o.free={j:press(kbKey,'j'),k:press(kbKey,'k'),slash:press(kbKey,'/')};
+NP={uid:'U007'};
+o.panel={j:press(kbKey,'j'),k:press(kbKey,'k'),slash:press(kbKey,'/'),
+  enter:press(kbKey,'Enter')};
+NP=null;DRAWER.open=true;
+o.drawer={j:press(kbKey,'j'),k:press(kbKey,'k'),slash:press(kbKey,'/')};
+DRAWER.open=false;
+o.closed=press(kbKey,'j');
+// the ring's restore after a rebuild: never under a layer
+document.activeElement=body;kbLast='M1';
+NP={uid:'U007'};log.length=0;kbRestore();o.restorePanel=log.slice();
+NP=null;DRAWER.open=true;log.length=0;kbRestore();o.restoreDrawer=log.slice();
+DRAWER.open=false;log.length=0;kbRestore();o.restoreFree=log.slice();
+console.log(JSON.stringify(o));
+""")
+    assert out["free"]["j"] == {"log": ["move:1"], "prevented": True}
+    assert out["free"]["k"] == {"log": ["move:-1"], "prevented": True}
+    assert out["free"]["slash"] == {"log": ["search"], "prevented": True}
+    quiet = {"log": [], "prevented": False}
+    for layer in ("panel", "drawer"):
+        for k, v in out[layer].items():
+            assert v == quiet, f"{k} reached the list under the {layer}: {v}"
+    assert out["closed"] == {"log": ["move:1"], "prevented": True}
+    assert out["restorePanel"] == [] and out["restoreDrawer"] == []
+    assert out["restoreFree"] == ["ring:M1"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_an_open_layer_keeps_the_meeting_page_keys_and_its_escape_to_itself():
+    """The same rule on the meeting page: while the naming panel (opened from
+    the legend) or the drawer is open, n/p, /, the stepper's a and the finish
+    flow's keys stay put. And one Escape that closed a layer (its handler runs
+    before mKey and preventDefaults) never also exits the stepper under it."""
+    out = _run_node(_layer_env() + """
+const o={};
+route={view:'meeting',base:'M1'};MR={active:true,items:[],i:0};
+document.activeElement=body;
+o.free={n:press(mKey,'n'),slash:press(mKey,'/'),a:press(mKey,'a'),esc:press(mKey,'Escape')};
+NP={meeting:'M1',speaker:'SPEAKER_01'};
+o.panel={n:press(mKey,'n'),p:press(mKey,'p'),slash:press(mKey,'/'),a:press(mKey,'a'),
+  esc:press(mKey,'Escape')};
+NP=null;DRAWER.open=true;
+o.drawer={n:press(mKey,'n'),slash:press(mKey,'/'),a:press(mKey,'a'),esc:press(mKey,'Escape')};
+DRAWER.open=false;
+// the panel's (or the drawer's) own Escape already ran and closed it
+o.consumed=press(mKey,'Escape',true);
+console.log(JSON.stringify(o));
+""")
+    assert out["free"]["n"]["log"] == ["fsKey", "reviewGo:1"]
+    assert out["free"]["slash"]["log"] == ["fsKey", "find"]
+    assert out["free"]["a"]["log"] == ["fsKey", "apply:accept"]
+    assert out["free"]["esc"] == {"log": ["fsKey", "exit"], "prevented": True}
+    quiet = {"log": [], "prevented": False}
+    for layer in ("panel", "drawer"):
+        for k, v in out[layer].items():
+            assert v == quiet, f"{k} reached the page under the {layer}: {v}"
+    assert out["consumed"] == {"log": ["fsKey"], "prevented": False}
 
 
 def test_drop_overlay_markup_rides_the_theme_tokens():
@@ -3624,6 +3772,7 @@ def _voices_env():
         _js_fn("fsKey"), _js_fn("fvUse"), _js_fn("fvSkip"), _js_fn("fvNext"),
         _js_fn("fvSave"), _js_fn("saveName"), _js_fn("namedToast"), _js_fn("fvBusy"),
         _js_fn("fvToken"), _js_oneline("_fsOpenVoices"), _js_fn("fsGo"),
+        _js_oneline("kbLayerOpen"), "const DRAWER={open:false};",
         "let NP=null,_popClose=null,MR=null,NPBUSY=false,MP={base:'M1',audio:null};",
         "let route={view:'meeting',base:'M1'};",
         "const location={hash:'#m/M1'};",
@@ -3653,6 +3802,27 @@ def _voices_env():
         "voices:[{id:'SPEAKER_01',display:'Speaker 58',uid:'U058',st:''},"
         "{id:'SPEAKER_02',display:'Speaker 61',uid:null,st:''}]};",
     ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_voices_step_keys_stand_back_while_the_drawer_is_open():
+    """The drawer opens over the meeting page from the gear: while it is open
+    the Voices step's keys (and ] [) belong to it, so s never skips a voice,
+    Enter never saves one, and ] never leaves the page under it."""
+    out = _run_node(_voices_env() + """
+DRAWER.open=true;document.activeElement=body;
+const o={};
+for(const k of [']','[','s','Enter',' ','1'])o[k]=key(k);
+o.state={vi:FS.vi,past:FS.past,posted:posted.length,shows:shows.length,
+  hash:location.hash};
+DRAWER.open=false;
+o.after=key('s');
+console.log(JSON.stringify(o));
+""")
+    for k in ("]", "[", "s", "Enter", " ", "1"):
+        assert out[k] == {"handled": False, "prevented": False}, k
+    assert out["state"] == {"vi": 0, "past": [], "posted": 0, "shows": 0, "hash": "#m/M1"}
+    assert out["after"] == {"handled": True, "prevented": True}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")

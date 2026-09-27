@@ -505,10 +505,33 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
   .row[data-state="processing"] .progress{transition:none}
 }
 
-/* narrow: the header controls wrap rather than force a horizontal scroll */
+/* narrow (a phone, a slim window): nothing forces a sideways scroll and no
+   word is cut. A 16px gutter replaces the 94vw cap. The controls take their
+   own line and the search field grows to fill it, so its placeholder reads
+   whole. The pill may wrap, its two segments stacked over a hairline. A Now
+   row's detail wraps under its title instead of ending in an ellipsis after
+   a word or two. A row whose right rail cannot sit beside ~160px of title
+   (a live stage, the hover actions) drops the rail under the text rather
+   than squeezing the title to a few letters. Titles and meta lines wrap
+   instead of ending in an ellipsis. */
 @media(max-width:720px){
+  body{max-width:none;padding:0 16px 64px}
   .rail{display:none!important}
   .wordmark{font-size:20px}
+  .controls{flex:1 1 100%}
+  .search{flex:1 1 180px;width:auto;min-width:0}
+  .pill{max-width:100%;white-space:normal;line-height:1.3}
+  .pill:has(.pseg){flex-direction:column;align-items:flex-start;gap:5px}
+  .pill .pseg+.pseg{align-self:stretch;border-left:0;padding-left:0;
+    border-top:1px solid var(--line);padding-top:5px}
+  .sechead{flex-wrap:wrap}
+  .trayrow{flex-wrap:wrap;row-gap:4px}
+  .trayrow .tw-title{flex:1 1 auto;max-width:none}
+  .trayrow .tw-detail{order:1;flex:1 1 100%;white-space:normal}
+  .row{flex-wrap:wrap;row-gap:8px}
+  .rbody{flex:1 1 160px}
+  .rtitle,.rmeta,.lrow .ltitle,.lrow .lmeta,.trayrow .tw-title{
+    white-space:normal;overflow-wrap:break-word}
 }
 
 /* ============================================================================
@@ -748,8 +771,10 @@ body.route-meeting .bulkbar,body.route-meeting #searchhits{display:none!importan
 .maskq:disabled{background:var(--inset);color:var(--sub)}
 .maskbtn{flex:none}
 
-/* narrow screens: relax the transcript grid so long names/text still fit */
+/* narrow screens: relax the transcript grid so long names/text still fit, and
+   an empty match count yields its width so the find field's hint reads whole */
 @media(max-width:620px){
+  .mfindn:empty{display:none}
   .mseg{grid-template-columns:46px 1fr;gap:6px 10px}
   .mseg .mtext{grid-column:1 / -1}
   .mtitle{font-size:22px}

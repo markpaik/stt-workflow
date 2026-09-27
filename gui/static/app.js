@@ -2330,6 +2330,9 @@ function mFindClear(){
 }
 function mKey(e){
   if(route.view!=='meeting')return;
+  // an edit layer over the page (the naming panel, the drawer) owns every key
+  // while it is open: n/p, /, the stepper's keys and the finish flow's stay put
+  if(kbLayerOpen())return;
   if(fsKey(e))return;    // the finish flow's keys: ] [ and the Voices step's
   const ae=document.activeElement,typing=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&document.getElementById('mcard')){
@@ -2358,9 +2361,12 @@ function mKey(e){
       if(!(it&&it.alt&&it.alt.length))return;
       e.preventDefault();reviewUseAltGo();
     }else{e.preventDefault();reviewApply('accept');}
-  }else if(e.key==='Escape'&&!typing&&!NP&&!_popClose){
+  }else if(e.key==='Escape'&&!typing&&!NP&&!_popClose&&!e.defaultPrevented){
     // leave the stepper / close an open card (the naming panel and any open
-    // popover own their Escape first)
+    // popover own their Escape first). mKey registers after the panel's and
+    // the drawer's own Escape handlers, so by now a layer that took this
+    // press is already closed: its preventDefault is the only trace, and one
+    // Escape must never also exit the stepper under it
     if(MR&&MR.active){e.preventDefault();reviewExit();}
     else if(document.getElementById('mcard')){e.preventDefault();mCloseCard();}
   }
@@ -4007,7 +4013,7 @@ function fsKey(e){
   if(!route||route.view!=='meeting'||e.metaKey||e.ctrlKey||e.altKey)return false;
   const ae=document.activeElement;
   const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
-  if(typing||NP||_popClose||document.getElementById('mcard'))return false;
+  if(typing||kbLayerOpen()||_popClose||document.getElementById('mcard'))return false;
   if(e.key===']'||e.key==='['){
     if(fsGo(e.key===']'?1:-1))e.preventDefault();
     return true;
@@ -5208,6 +5214,12 @@ function archHint(){
  * block flips it to auto, so plain scrollIntoView honors both. */
 let kbLast=null;             // the row id that last held the ring
 const KB_RING='#timeline .row[tabindex], #timeline .lrow, #timeline .ghead';
+// the edit layers that slide over the list and the page: the naming panel and
+// the drawer. While either is open it owns every key, so j/k, /, Enter and the
+// page's own keys never reach the rows or the transcript underneath it (focus
+// used to jump off the panel onto a hidden row), and the ring is never put
+// back under it. Escape stays each layer's own, and closes it.
+function kbLayerOpen(){return !!NP||!!(DRAWER&&DRAWER.open);}
 function kbRows(){return [...document.querySelectorAll(KB_RING)];}
 function kbFocusRow(el){
   if(!el)return;
@@ -5219,7 +5231,7 @@ function kbFocusRow(el){
 // remembered row when focus fell to <body>. A real click clears the memory,
 // so the ring never fights the mouse.
 function kbRestore(){
-  if(!kbLast||route.view!=='timeline')return;
+  if(!kbLast||route.view!=='timeline'||kbLayerOpen())return;
   if(document.activeElement&&document.activeElement!==document.body)return;
   const k=CSS.escape(kbLast);
   const el=document.querySelector('#timeline .row[data-id="'+k+'"], #timeline .lrow[data-id="'+k+'"]');
@@ -5262,6 +5274,7 @@ function kbKey(e){
     }
     return;
   }
+  if(kbLayerOpen())return;   // the naming panel or the drawer owns the keys
   if(e.key==='/'){e.preventDefault();se.focus();return;}
   if(e.key==='j'||e.key==='k'){e.preventDefault();kbMove(e.key==='j'?1:-1);return;}
   // a section header holds the ring too: Enter on one is the button's own

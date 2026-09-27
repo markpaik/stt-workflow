@@ -120,7 +120,9 @@ and hover lifts; honor `prefers-reduced-motion`.
 
 Header (sticky, paper ground, hairline bottom): sans-semibold wordmark "Meetings" ·
 status pill · search field (right-aligned) · Process ▾ · theme dot · gear
-(opens the drawer).
+(opens the drawer). At 720px and below the controls take their own line and
+the search field grows to fill it, so its hint reads whole (see "Phone
+width" under To finish and Now).
 
 Status pill: the ONLY place pipeline state appears. Mono, in two segments
 (revised 2026-09-27). The pipeline segment shows one state, by priority:
@@ -129,7 +131,9 @@ Status pill: the ONLY place pipeline state appears. Mono, in two segments
 `3 waiting`. The naming segment sits beside it, split by a `--line`
 hairline: `naming 3 of 7`, so a naming never hides behind a transcription.
 Either segment alone renders alone; with neither, the pill disappears (idle
-needs no announcement). The pill's colour is the pipeline segment's.
+needs no announcement). The pill's colour is the pipeline segment's. At
+720px and below the pill may wrap, and the two segments stack, the same
+`--line` hairline running across between them instead of down.
 Clicking the pill opens the Process ▾ popover.
 
 Tray: RETIRED 2026-09-27 (docs/ui-refresh phase 2). It was an amber band
@@ -452,7 +456,24 @@ first poll only sets the baseline, so opening the panel in a background tab
 counts nothing that was already waiting.
 
 Keys: `j`/`k` walk To finish rows with the other rows and the section
-headers; Enter on one is the link's own and opens the meeting.
+headers; Enter on one is the link's own and opens the meeting. The naming
+panel and the drawer own every key while either is open: `j`/`k`, `/`, and
+Enter never reach the rows under them, the meeting page's `n`/`p`, `/`, the
+stepper's keys, and the finish flow's keys stay put, and a rebuild never
+puts the ring back under them. The Escape that closes a layer closes only
+that layer; it never also exits the stepper or closes a card underneath.
+
+Phone width (720px and below; checked at 420px and 375px in both themes,
+revised 2026-09-27 after QA). Nothing forces a sideways scroll and no word
+is cut. A 16px gutter replaces the 94vw cap. The header's controls take
+their own line, the search field filling it. The pill wraps, its segments
+stacked. A Now row's detail wraps under its title and verbs, and the To
+finish eyebrow wraps its actions if it must. A row whose right rail cannot
+sit beside about 160px of title (a live stage, the hover actions) drops the
+rail under the text, right-aligned, instead of squeezing the title to a few
+letters. Row titles, meta lines, and To finish titles and meta wrap instead
+of ending in an ellipsis; the summary preview keeps its two clamped lines.
+On the meeting page an empty match count gives its width to the find field.
 
 ## What deliberately does not exist in the new shell
 
