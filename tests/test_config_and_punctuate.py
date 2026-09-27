@@ -191,18 +191,118 @@ def test_batched_result_of_the_wrong_length_is_refused(sandbox, monkeypatch):
     assert [s["text"] for s in segs] == ["Hello world.", "how are you"]
 
 
-def test_offline_gate_needs_both_cached_files(sandbox, monkeypatch):
-    """HF_HUB_OFFLINE is set only when the model is provably on disk: setting
-    it blind would turn a first run into a permanent failure."""
+def _hf_snapshot(root, files, rev="abc123"):
+    """A huggingface_hub cache laid out the way the hub writes one: refs/main
+    names the revision, and the files sit in snapshots/<rev>/."""
+    repo = root / ("models--" + punctuate._HF_REPO.replace("/", "--"))
+    (repo / "refs").mkdir(parents=True, exist_ok=True)
+    (repo / "refs" / "main").write_text(rev)
+    snap = repo / "snapshots" / rev
+    snap.mkdir(parents=True, exist_ok=True)
+    for name in files:
+        (snap / name).write_bytes(b"x")
+    return snap
+
+
+def test_local_model_dir_needs_every_cached_file(sandbox, monkeypatch):
+    """The model loads from disk only when EVERY file the loader reads is
+    cached in one snapshot. Anything less must fall through to the normal
+    download, or a first run turns into a permanent failure."""
     root = sandbox / "hfcache"
     monkeypatch.setenv("HF_HUB_CACHE", str(root))
-    assert punctuate._model_files_cached() is False
+    assert punctuate._cached_model_dir() is None
 
-    snap = (root / ("models--" + punctuate._HF_REPO.replace("/", "--"))
-            / "snapshots" / "abc123")
-    snap.mkdir(parents=True)
-    (snap / punctuate._SPE_FILENAME).write_bytes(b"x")
-    assert punctuate._model_files_cached() is False, \
-        "one of the two files is not enough"
-    (snap / punctuate._ONNX_FILENAME).write_bytes(b"x")
-    assert punctuate._model_files_cached() is True
+    snap = _hf_snapshot(root, [punctuate._SPE_FILENAME])
+    assert punctuate._cached_model_dir() is None, "one file is not enough"
+    _hf_snapshot(root, [punctuate._ONNX_FILENAME])
+    assert punctuate._cached_model_dir() is None, \
+        "the loader also reads config.yaml"
+    _hf_snapshot(root, [punctuate._CONFIG_FILENAME])
+    assert punctuate._cached_model_dir() == str(snap)
+
+
+class _FakeCfg:
+    """Mirrors punctuators' PunctCapSegConfigONNX fields, so an unknown
+    keyword fails here exactly as it would against the real dataclass."""
+
+    def __init__(self, spe_filename="sp.model", model_filename="model.onnx",
+                 config_filename="config.yaml", hf_repo_id=None, directory=None):
+        self.spe_filename = spe_filename
+        self.model_filename = model_filename
+        self.config_filename = config_filename
+        self.hf_repo_id = hf_repo_id
+        self.directory = directory
+
+
+def _fake_punctuators(monkeypatch):
+    """Stand-in punctuators package: records each config it is built with and
+    the environment at that moment (the real loader calls the hub inside
+    __init__, which is where HF_HUB_OFFLINE would matter)."""
+    import os
+    import sys
+    import types
+    built = []
+
+    class FakeModel:
+        def __init__(self, cfg, ort_providers=None):
+            built.append({"cfg": cfg, "env": dict(os.environ)})
+            if cfg.hf_repo_id is None:
+                for name in (cfg.spe_filename, cfg.model_filename,
+                             cfg.config_filename):
+                    assert os.path.isfile(os.path.join(cfg.directory, name)), name
+
+    mod = types.ModuleType("punctuators.models.punc_cap_seg_model")
+    mod.PunctCapSegConfigONNX = _FakeCfg
+    mod.PunctCapSegModelONNX = FakeModel
+    monkeypatch.setitem(sys.modules, "punctuators", types.ModuleType("punctuators"))
+    monkeypatch.setitem(sys.modules, "punctuators.models",
+                        types.ModuleType("punctuators.models"))
+    monkeypatch.setitem(sys.modules, "punctuators.models.punc_cap_seg_model", mod)
+    monkeypatch.setattr(punctuate, "_model", None)
+    return built
+
+
+def test_a_cached_model_loads_by_path_and_leaves_the_environment_alone(
+        sandbox, monkeypatch):
+    """The panel is a long-lived process. An HF_HUB_OFFLINE set in os.environ
+    to skip the hub leaked into every child it spawned, so a batch whose
+    diarizer still had to download failed. A cached model now loads from its
+    local snapshot directory, and the environment is never written."""
+    import os
+    root = sandbox / "hfcache"
+    monkeypatch.setenv("HF_HUB_CACHE", str(root))
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    every = (punctuate._SPE_FILENAME, punctuate._ONNX_FILENAME, "config.yaml")
+    snap = _hf_snapshot(root, every)
+    built = _fake_punctuators(monkeypatch)
+    before = dict(os.environ)
+
+    punctuate._get_model()
+
+    assert dict(os.environ) == before, "the process environment was changed"
+    assert "HF_HUB_OFFLINE" not in os.environ
+    assert len(built) == 1
+    cfg = built[0]["cfg"]
+    assert cfg.hf_repo_id is None, "a cached model must not go through the hub"
+    assert cfg.directory == str(snap)
+    assert (cfg.spe_filename, cfg.model_filename, cfg.config_filename) == every
+    assert built[0]["env"] == before
+
+
+def test_an_uncached_model_downloads_as_normal_and_leaves_the_environment_alone(
+        sandbox, monkeypatch):
+    import os
+    root = sandbox / "hfcache"
+    monkeypatch.setenv("HF_HUB_CACHE", str(root))
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    _hf_snapshot(root, [punctuate._SPE_FILENAME])      # a partial download
+    built = _fake_punctuators(monkeypatch)
+    before = dict(os.environ)
+
+    punctuate._get_model()
+
+    assert dict(os.environ) == before
+    cfg = built[0]["cfg"]
+    assert cfg.hf_repo_id == punctuate._HF_REPO and cfg.directory is None
+    assert (cfg.spe_filename, cfg.model_filename) == \
+        (punctuate._SPE_FILENAME, punctuate._ONNX_FILENAME)

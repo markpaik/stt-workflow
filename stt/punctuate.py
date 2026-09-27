@@ -26,6 +26,10 @@ _model = None
 _HF_REPO = "1-800-BAD-CODE/punctuation_fullstop_truecase_english"
 _SPE_FILENAME = "spe_32k_lc_en.model"
 _ONNX_FILENAME = "punct_cap_seg_en.onnx"
+# the loader reads a third file too: its label/length config. The package's
+# default name for it matches this repo, but a local directory must hold it.
+_CONFIG_FILENAME = "config.yaml"
+_MODEL_FILES = (_SPE_FILENAME, _ONNX_FILENAME, _CONFIG_FILENAME)
 
 
 def _hf_cache_root() -> Path:
@@ -40,38 +44,62 @@ def _hf_cache_root() -> Path:
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
-def _model_files_cached() -> bool:
-    """True when BOTH files this model needs are already on disk. The loader
-    otherwise makes three hf_hub_download HEAD requests per process — network
-    round-trips in the middle of a relabel, for files that never change."""
-    repo_dir = _hf_cache_root() / ("models--" + _HF_REPO.replace("/", "--"))
-    if not repo_dir.is_dir():
-        return False
+def _cached_model_dir():
+    """The one local snapshot directory that holds EVERY file the loader reads,
+    or None (a first run, a partial download, files split across revisions).
+
+    Resolved with huggingface_hub.try_to_load_from_cache, which reads the cache
+    and never the network. The loader otherwise makes three hf_hub_download
+    HEAD requests per process — network round-trips in the middle of a
+    relabel, for files that never change."""
     try:
-        names = {p.name for p in repo_dir.rglob("*") if p.is_file()}
-    except OSError:
-        return False
-    return _SPE_FILENAME in names and _ONNX_FILENAME in names
+        from huggingface_hub import try_to_load_from_cache
+    except Exception:
+        return None
+    dirs = set()
+    for name in _MODEL_FILES:
+        try:
+            found = try_to_load_from_cache(_HF_REPO, name,
+                                           cache_dir=str(_hf_cache_root()))
+        except Exception:
+            return None
+        # None = not cached; a sentinel object = "known missing upstream"
+        if not isinstance(found, str) or not os.path.isfile(found):
+            return None
+        dirs.add(os.path.dirname(found))
+    return dirs.pop() if len(dirs) == 1 else None
 
 
 def _get_model():
+    """Load the punctuator once per process.
+
+    When every file is already cached, the package is handed the local
+    snapshot directory and never calls the hub. Otherwise it downloads as
+    normal: a first run must be able to fetch the model. os.environ is never
+    touched — the panel is a long-lived process, and an HF_HUB_OFFLINE set
+    here would leak into every child it spawns (a batch whose diarizer still
+    has to download would fail)."""
     global _model
     if _model is None:
-        # offline ONLY when the files are provably here: setting it blind would
-        # turn a first run (nothing cached yet) from "download once" into a
-        # permanent failure. setdefault, so an explicit env choice still wins.
-        if _model_files_cached():
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
         from punctuators.models.punc_cap_seg_model import (
             PunctCapSegConfigONNX, PunctCapSegModelONNX)
 
         # Explicit filenames: the repo was renamed from punct_cap_seg_en and its
         # files don't match the package's default names (sp.model/model.onnx).
-        cfg = PunctCapSegConfigONNX(
-            hf_repo_id=_HF_REPO,
-            spe_filename=_SPE_FILENAME,
-            model_filename=_ONNX_FILENAME,
-        )
+        local = _cached_model_dir()
+        if local:
+            cfg = PunctCapSegConfigONNX(
+                directory=local,
+                spe_filename=_SPE_FILENAME,
+                model_filename=_ONNX_FILENAME,
+                config_filename=_CONFIG_FILENAME,
+            )
+        else:
+            cfg = PunctCapSegConfigONNX(
+                hf_repo_id=_HF_REPO,
+                spe_filename=_SPE_FILENAME,
+                model_filename=_ONNX_FILENAME,
+            )
         _model = PunctCapSegModelONNX(cfg=cfg, ort_providers=["CPUExecutionProvider"])
     return _model
 
