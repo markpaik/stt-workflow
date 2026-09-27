@@ -3503,11 +3503,6 @@ async function npSave(force,local){
     ui:{name:$('#npname'),err:$('#nperr'),warn:$('#npconfirm'),warnId:'npconfirm',
         btn:$('#npsave'),label:'Save name'}});
   if(!r)return;
-  // the response says what it did and WHERE: this meeting is already relabeled,
-  // and the naming resolved to a short list of other meetings it can touch
-  // instead of the whole library. Say so, so a save no longer reads as a
-  // silent seven-minute wait.
-  namedToast(r);
   const onIt=MP&&MP.base===meeting;
   // close ONLY if the panel still shows the voice this save acted on. A slow
   // request used to force-close whatever panel happened to be open when it
@@ -3521,12 +3516,18 @@ async function npSave(force,local){
   // and the next one lands on a uid that no longer exists.
   if(onIt)mReloadSegs();
 }
-// the after-save sentence, from the response's own targets: the one thing a
-// save is allowed to say (the slide-over and the finish strip both say it)
-function namedToast(r){
+// the after-save sentence, from the response's own fields: the one thing a
+// save is allowed to say (the slide-over, the finish strip and the drawer's
+// Link all say it). "here" only when the server says it APPLIED `here`, the
+// meeting the save was made from: a busy relabel lock, or no page open,
+// leaves that meeting queued with the rest, and the toast must not call it
+// done. ['--all'] is the fallback pass when the index could not be built.
+function namedToast(r,here){
   if(!r||!r.targets)return;
-  const n=r.targets.length;
-  toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
+  const t=r.targets,n=t.length,done=!!here&&r.applied===here;
+  const rest=t.includes('--all')?'Updating all meetings.'
+    :n?`Updating ${n} ${done?'other ':''}meeting${n===1?'':'s'}.`:'';
+  toast((done?'Named here.':'Named.')+(rest?' '+rest:''));
 }
 /* ONE naming save, shared by the slide-over (npSave) and the finish strip's
  * Voices step (fvSave). The caller captures the voice's identity before the
@@ -3535,20 +3536,28 @@ function namedToast(r){
  * its resting label. `again` names the caller's own save function, which the
  * floor strip and the warn strip call back with (false,true) and (true).
  * `busy` owns the one-request-at-a-time flag and disables the confirm buttons.
- * Resolves to the response on success, or null after painting why not. */
+ * Resolves to the response on success, after the toast that says what it did,
+ * or null after painting why not. */
 async function saveName(o){
   const force=o.force,local=o.local,ui=o.ui||{};
   const n=(ui.name?ui.name.value:'').trim();
   const err=ui.err,warn=ui.warn;
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return null;}
   const uid=o.uid,meeting=o.meeting,speaker=o.speaker;
+  // the meeting this save relabels first. A cluster save names its own
+  // meeting. A uid save names a registry voice, but the page open under it
+  // still has to change FIRST: sent along, the server relabels it inside the
+  // response instead of queueing it behind a toast that said "here".
+  // Captured before the await, like the identity above.
+  const here=uid?((MP&&MP.base)||''):meeting;
+  const body=uid?{uid:uid,name:n,confirm:!!force}
+    :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local};
+  if(uid&&here)body.meeting=here;
   const btn=ui.btn;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
   o.busy(true);
   let r=null;
   try{
-    r=await api('/api/name',uid
-      ?{uid:uid,name:n,confirm:!!force}
-      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local});
+    r=await api('/api/name',body);
   }catch(e){
     r=null;    // the fetch itself failed (server gone, connection dropped)
   }finally{
@@ -3589,6 +3598,11 @@ async function saveName(o){
     return null;
   }
   if(warn)warn.hidden=true;
+  // the response says what it did and WHERE: the meeting it relabeled here,
+  // if any, and the short list of other meetings the naming resolved to
+  // instead of the whole library. Said, so a save never reads as a silent
+  // seven-minute wait.
+  namedToast(r,here);
   return r;
 }
 // the documented undo for a meeting-local label: an EMPTY name in the local
@@ -4151,7 +4165,6 @@ async function fvSave(force,local){
     ui:{name:$('#fvname'),err:$('#fverr'),warn:$('#fvconfirm'),warnId:'fvconfirm',
         btn:$('#fvsave'),label:'Save and next'}});
   if(!r)return;
-  namedToast(r);
   v.st='named';
   refresh();
   if(MP&&MP.base===base)mReloadSegs();
@@ -4730,10 +4743,10 @@ async function dLinkUnknown(src,dst){
     dSpeakersForce();
     return;
   }
-  // the same sentence a save gets, from the same field of the same response:
-  // the link relabels exactly the meetings it can reach
-  const n=(r.targets||[]).length;
-  toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
+  // the same sentence a save gets, from the same response: the link
+  // relabels exactly the meetings it can reach, and none of them here (a
+  // merge applies no meeting inside the request)
+  namedToast(r);
   refresh();
 }
 // the panel, prefilled. openNamePanel paints its markup before its first await,

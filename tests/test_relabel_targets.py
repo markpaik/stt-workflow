@@ -169,6 +169,27 @@ def test_relabel_targets_queues_the_first_meeting_when_the_lock_is_busy(
     assert queued.submits == [(["Bravo Mtg", "Alpha Mtg"], "identity change")]
 
 
+def test_relabel_targets_unions_the_bases_the_caller_already_knows(
+        sandbox, queued):
+    """`bases` are meetings the caller knows the change reaches (a retired
+    unknown's own list). They join the score's answer, sorted. A base with no
+    diarization cache, or no meeting on disk at all, is not a target: relabel
+    could not rebuild it."""
+    v = _unit(1)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": _unit(2)})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(3)})
+    _meeting("Echo Mtg", {"SPEAKER_00": _unit(4)})
+    mfile("Echo Mtg", ".diar.npz").unlink()
+
+    res = srv._relabel_targets(
+        vector=v, first="Charlie Mtg",
+        bases=["Bravo Mtg", "Charlie Mtg", "Echo Mtg", "Gone Mtg", "", None])
+    assert res == {"applied": "Charlie Mtg",
+                   "targets": ["Alpha Mtg", "Bravo Mtg"]}
+    assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
+
+
 def test_relabel_targets_queues_nothing_when_there_is_nothing_to_do(sandbox, queued):
     _meeting("Alpha Mtg", {"SPEAKER_00": _unit(1)})
     assert srv._relabel_targets(vector=_unit(99)) == {"applied": None, "targets": []}
@@ -214,6 +235,114 @@ def test_name_on_an_unknown_targets_the_meetings_that_voice_was_heard_in(
     assert body["applied"] is None, "a uid naming names no single meeting"
     assert body["targets"] == ["Alpha Mtg"]
     assert queued.submits == [(["Alpha Mtg"], "identity change")]
+
+
+def _evict_early_sample(uid, later_base, later_vec):
+    """The unknown was heard again in `later_base`, and only its newest rows
+    survive (unknowns.MAX_SAMPLES): the early meeting stays in `meetings`
+    while its own row has left the stack. One kept row stands in for the
+    window here, so the early cluster scores against nothing that remains."""
+    reg = unknowns.load()
+    ent = reg["speakers"][uid]
+    ids = unknowns.aligned_meeting_ids(ent)
+    ent["meetings"] = list(ent["meetings"]) + [later_base]
+    ent["meeting_ids"] = ids + [config.id_of(later_base)]
+    np.save(config.VOICEPRINTS_DIR / ent["file"], np.atleast_2d(later_vec))
+    unknowns.save(reg)
+
+
+def test_name_on_an_unknown_reaches_a_meeting_its_kept_samples_no_longer_match(
+        running_server, queued):
+    """promote() retires the uid and its `meetings` list with it. The targets
+    were computed AFTER that, from the kept samples alone, so a meeting whose
+    row had left the MAX_SAMPLES window was found by nothing and kept its
+    retired 'Speaker N' label for good. The list is read before promote."""
+    early, late = _unit(3), _unit(4)
+    _meeting("Alpha Mtg", {"SPEAKER_00": early})
+    _meeting("Bravo Mtg", {"SPEAKER_00": late})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(7)})
+    uid = unknowns.assign({"SPEAKER_00": early}, {"SPEAKER_00": None},
+                          "Alpha Mtg")["SPEAKER_00"]
+    _evict_early_sample(uid, "Bravo Mtg", late)
+    from stt import centroids
+    assert identify.score_against(early, [late]) < \
+        config.NAMING_THRESHOLD - centroids.TARGET_MARGIN, \
+        "the premise: the early cluster no longer scores against the stack"
+
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Dana Cole", "confirm": True})
+    assert status == 200 and body["ok"] is True
+    assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"], \
+        "a meeting the voice was heard in is a target whatever its score"
+    assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
+
+
+def test_name_on_an_unknown_applies_the_open_meeting_here(
+        running_server, queued):
+    """A uid save sent no meeting, so the page the user had open was only
+    queued while the toast said "Named here." The panel now sends the open
+    page, and it relabels inside the response exactly as a cluster naming
+    does."""
+    v = _unit(3)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": v})
+    _meeting("Charlie Mtg", {"SPEAKER_00": _unit(7)})
+    uid = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                          "Alpha Mtg")["SPEAKER_00"]
+    assert unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                           "Bravo Mtg")["SPEAKER_00"] == uid
+
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Dana Cole", "confirm": True,
+                          "meeting": "Bravo Mtg"})
+    assert status == 200 and body["ok"] is True
+    assert body["applied"] == "Bravo Mtg"
+    assert body["targets"] == ["Alpha Mtg"]
+    assert queued.submits == [(["Alpha Mtg"], "identity change")]
+    names = {s.get("name") for s in json.loads(
+        mfile("Bravo Mtg", ".json").read_text())["speakers"]}
+    assert "Dana Cole" in names, "applied means applied"
+
+
+def test_name_on_an_unknown_ignores_an_open_meeting_that_is_not_in_the_library(
+        running_server, queued):
+    """The meeting is context for a uid save, never its identity: a page that
+    went stale (renamed in another tab) must not block naming the voice, and
+    a base that is not a real meeting never reaches a file path."""
+    v = _unit(3)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    uid = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                          "Alpha Mtg")["SPEAKER_00"]
+
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Dana Cole", "confirm": True,
+                          "meeting": "../../etc/passwd"})
+    assert status == 200 and body["ok"] is True
+    assert body["applied"] is None
+    assert body["targets"] == ["Alpha Mtg"]
+
+
+def test_name_on_an_unknown_never_calls_an_undiarized_open_meeting_applied(
+        running_server, queued, monkeypatch):
+    """relabel skips a meeting with no diarization cache, so relabeling it
+    "here" changes nothing on the page. The response must not say applied,
+    or the panel toasts "Named here." over a transcript that did not move."""
+    v = _unit(3)
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    _meeting("Bravo Mtg", {"SPEAKER_00": _unit(8)})
+    mfile("Bravo Mtg", ".diar.npz").unlink()
+    uid = unknowns.assign({"SPEAKER_00": v}, {"SPEAKER_00": None},
+                          "Alpha Mtg")["SPEAKER_00"]
+    done = []
+    monkeypatch.setattr(srv, "_relabel_now",
+                        lambda base: done.append(base) or True)
+
+    status, body = _post(running_server, "/api/name",
+                         {"uid": uid, "name": "Dana Cole", "confirm": True,
+                          "meeting": "Bravo Mtg"})
+    assert status == 200 and body["ok"] is True
+    assert body["applied"] is None and done == []
+    assert body["targets"] == ["Alpha Mtg"]
 
 
 def test_rename_speaker_targets_both_the_old_and_the_new_name(
@@ -269,6 +398,31 @@ def test_merge_speakers_targets_both_sides(running_server, queued):
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"]
     assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
+
+
+def test_merge_speakers_uid_into_name_reaches_a_meeting_its_samples_no_longer_match(
+        running_server, queued):
+    """The drawer's merge of an unknown into a person retires the uid through
+    the same promote(). A meeting whose row had left the stack was found by
+    nothing afterwards, exactly as in /api/name."""
+    va, early, late = _unit(1), _unit(3), _unit(4)
+    identify.enroll("Dana Cole", va, source="Alpha Mtg")
+    _meeting("Alpha Mtg", {"SPEAKER_00": va},
+             speakers=[{"id": "SPEAKER_00", "name": "Dana Cole",
+                        "display": "Dana Cole"}])
+    _meeting("Bravo Mtg", {"SPEAKER_00": early})
+    _meeting("Charlie Mtg", {"SPEAKER_00": late})
+    _meeting("Delta Mtg", {"SPEAKER_00": _unit(9)})
+    uid = unknowns.assign({"SPEAKER_00": early}, {"SPEAKER_00": None},
+                          "Bravo Mtg")["SPEAKER_00"]
+    _evict_early_sample(uid, "Charlie Mtg", late)
+
+    status, body = _post(running_server, "/api/merge_speakers",
+                         {"src": f"uid:{uid}", "dst": "name:Dana Cole"})
+    assert status == 200 and body["ok"] is True
+    assert body["targets"] == ["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"]
+    assert queued.submits == [
+        (["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"], "identity change")]
 
 
 def test_remove_sample_targets_the_remaining_profile(running_server, queued):
