@@ -782,3 +782,68 @@ def test_the_waiting_row_carries_the_stage_breakdown(sandbox, monkeypatch):
     tl = [r for r in st["timeline"] if r["id"] == "src:long talk.m4a"][0]
     assert tl["est_detail"] == row["est_detail"], \
         "the computed breakdown must reach the row the shell renders"
+
+
+# ---------- the finish record (docs/ui-refresh, phase 1) ----------
+#
+# Every meeting row carries `finish: {title, voices, flags, done}`, computed
+# from counts gather_state already holds. The meeting page's finish strip walks
+# title, voices, and flags in that order, and a row whose `done` is true opens
+# exactly as it did before the strip existed.
+
+FIN_SPEAKERS = [{"id": "SPEAKER_00", "display": "Alex Rivera", "name": "Alex Rivera"},
+                {"id": "SPEAKER_01", "display": "Speaker 2"},
+                {"id": "SPEAKER_02", "display": "Speaker 3"}]
+FIN_SUBSTANTIAL = {"start": 10.0, "end": 14.0, "speaker": "SPEAKER_00",
+                   "text": "the budget closes on Friday", "flags": ["low_conf"]}
+FIN_MINOR = {"start": 20.0, "end": 20.4, "speaker": "SPEAKER_00",
+             "text": "so", "flags": ["low_conf"]}
+
+
+def _finish_of(base):
+    return _row(srv.gather_state(), id=base)["finish"]
+
+
+def test_finish_on_a_meeting_waiting_for_its_title(sandbox):
+    _meeting("Recording 09262026 0915", date="2026-09-26", reviewed=False,
+             ai_title="Budget Review", speakers=[dict(s) for s in FIN_SPEAKERS],
+             segments=[dict(FIN_SUBSTANTIAL), dict(FIN_MINOR)])
+    r = _row(srv.gather_state(), id="Recording 09262026 0915")
+    assert r["state"] == "needs_name"
+    assert r["finish"] == {"title": False, "voices": 2, "flags": 1, "done": False}
+
+
+def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
+    _meeting("Budget Review 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
+             segments=[dict(FIN_SUBSTANTIAL), dict(FIN_MINOR)])
+    r = _row(srv.gather_state(), id="Budget Review 09262026")
+    assert r["state"] == "ready"
+    # the minor crumb is not a finish step: only substantial lines count
+    assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": False}
+    assert r["review_substantial"] == r["finish"]["flags"]
+
+
+def test_finish_skips_dismissed_voices_and_minor_flags(sandbox):
+    _meeting("Grumble 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
+             segments=[dict(FIN_MINOR)])
+    summarize.dismiss_voice("Grumble 09262026", "SPEAKER_02")
+    assert _finish_of("Grumble 09262026") == {
+        "title": True, "voices": 1, "flags": 0, "done": False}
+    summarize.dismiss_voice("Grumble 09262026", "SPEAKER_01")
+    assert _finish_of("Grumble 09262026") == {
+        "title": True, "voices": 0, "flags": 0, "done": True}
+
+
+def test_finish_on_a_meeting_with_only_flags_left(sandbox):
+    _meeting("Flags Only 09262026", speakers=[dict(FIN_SPEAKERS[0])],
+             segments=[dict(FIN_SUBSTANTIAL), dict(FIN_SUBSTANTIAL, start=30.0, end=35.0)])
+    assert _finish_of("Flags Only 09262026") == {
+        "title": True, "voices": 0, "flags": 2, "done": False}
+
+
+def test_finish_on_a_finished_meeting(sandbox):
+    # the one speaker is named, nothing is flagged, and a missing `reviewed`
+    # key reads as reviewed (pre-inbox meetings never flood the inbox)
+    _meeting("Done Deal 09262026", speakers=[dict(FIN_SPEAKERS[0])])
+    assert _finish_of("Done Deal 09262026") == {
+        "title": True, "voices": 0, "flags": 0, "done": True}

@@ -340,6 +340,44 @@ evidence:
   each, inset ground, no chips — a wall of guesses is a decision, and this is a
   glance.
 
+### Finish flow (shipped 2026-09-27, phase 1 of docs/ui-refresh)
+
+A meeting page carries one strip at its top, under the header and the docked
+audio bar and above the summary, while the meeting has an open step:
+`1 Title · 2 Voices (2) · 3 Flags (6) · Done`. The steps come from the row's
+`finish` record in `/api/state` (`{title, voices, flags, done}`: the name and
+date accepted, the unnamed voices not dismissed, the substantial flags). Teal
+marks an open step, indigo the current one, green a done one; counts are mono.
+The current step's controls render under the strip, and each step advances on
+its own:
+
+- **Title.** The suggested title and date, prefilled in the inline rename and
+  date inputs, with "Use the file name" beside them. Enter accepts through
+  `/api/accept_meeting`; a re-stamped folder re-routes the page and the flow
+  follows it.
+- **Voices.** One voice at a time, form before evidence: "Who is Speaker 58?",
+  "voice 1 of 2 in this meeting", the name box, the preview line and at most
+  three looks-like chips, then Save and next, Skip, and Not a real speaker.
+  Beside it, the voice's longest turn (played through the page's own span
+  playback) and up to three of its lines with timestamps. The save is the
+  naming panel's own (`saveName`), floor and warn confirms included. A skipped
+  voice keeps Voices open and the strip moves on past it.
+- **Flags.** The verdict bar, unchanged, from the first flag in document
+  order. A review that ends with no substantial flag left moves to Done.
+- **Done.** The strip becomes one green line, "Finished: title, voices, and
+  flags are done.", with "Next to finish →".
+
+A meeting is to finish when its title is open, or when any step is open and it
+was processed in the last 14 days. Only those take the keyboard and play the
+clip on their own; an older meeting with open steps shows the strip and waits.
+A meeting whose record was already done when the page opened shows no strip,
+so a finished meeting reads as it did before. Keys, never while typing: Enter
+accepts the step, Space replays the clip, `1` to `3` fill the box from a chip,
+`s` skips a voice (and leaves the box unfocused, so a second `s` skips again),
+`]` and `[` open the next or previous meeting to finish by the `#m/<base>`
+route. Escape in a step's input releases the keyboard to these keys. Key hints
+live in title attributes, never as visible key caps.
+
 ## What deliberately does not exist in the new shell
 
 No Queue card, Processing card, Recent results, or naming inbox (row states

@@ -733,6 +733,15 @@ def _preview(text, sentences=2, cap=320):
     return t[:cap - 1].rstrip() + "…"
 
 
+def _finish(meta) -> dict:
+    """{title, voices, flags, done} for one meeting's metadata."""
+    title = not meta["needs_review"]
+    voices = len(meta.get("unnamed_clusters") or {})
+    flags = int(meta.get("flagged") or 0)
+    return {"title": title, "voices": voices, "flags": flags,
+            "done": title and not voices and not flags}
+
+
 def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
     """(timeline, tray) — the unified per-meeting feed (newest first) and the
     ranked attention tray, built entirely from gather_state's own locals."""
@@ -789,7 +798,14 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                # the transcript's own save stamp: the open meeting page reloads
                # itself when ITS row's stamp moves, instead of guessing from a
                # library-wide "a relabel is running" boolean
-               "generated_at": meta.get("generated_at")}
+               "generated_at": meta.get("generated_at"),
+               # the finish record: what is left before this meeting is done,
+               # from the counts already on hand. `title` is the human's name
+               # and date accepted (reviewed); `voices` the unnamed clusters
+               # still asking (dismissed ones excluded, the same set every "?"
+               # reads); `flags` the substantial flagged lines. The meeting
+               # page's finish strip walks these in order.
+               "finish": _finish(meta)}
         if meta["needs_review"]:
             # the naming row is a review card, not a bare text box: the same
             # evidence the ready row shows (length, who was heard, what the

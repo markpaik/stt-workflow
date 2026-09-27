@@ -1905,7 +1905,7 @@ function teardownMeeting(){
   }
   window.removeEventListener('scroll',mOnScroll);
   document.removeEventListener('keydown',mKey);
-  MF=null;MP=null;MR=null;
+  MF=null;MP=null;MR=null;FS=null;
 }
 // called by the poll's render() while a meeting is open: finish a deep-link build
 // that was waiting for S, without ever rebuilding an already-built page
@@ -1936,6 +1936,7 @@ async function buildMeeting(base){
   page.innerHTML=
     _mHeader(m,base)
     +(m.audio?_mAudioBar():'')
+    +'<div id="mfinish" class="mfinish" hidden></div>'
     +_mSummary(m)
     +_mFlagged(m)
     +_mTranscriptShell()
@@ -1944,6 +1945,7 @@ async function buildMeeting(base){
   if(m.audio)mAudioInit(base);
   mStickyTop();
   mAskInit(base);
+  fsInit(base);          // the finish strip, when this meeting has an open step
   // a pending deep action lands once, as soon as the page skeleton exists:
   // seek the audio to a search hit's moment (the transcript scroll follows
   // after the segments load, below), focus the ask input, or arm the flag
@@ -1972,6 +1974,7 @@ async function buildMeeting(base){
   (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   body.innerHTML=mBodyHTML();
   mLegend(d);
+  fsSegsLoaded();        // the strip's voices and flags, from these segments
   // a search hit's moment: scroll its line into view now that the segments
   // exist (with audio, mSeek above already cued playback; the follow highlight
   // owns the .mnow mark from here, so only mark it ourselves when audioless)
@@ -2370,6 +2373,7 @@ function mFindClear(){
 }
 function mKey(e){
   if(route.view!=='meeting')return;
+  if(fsKey(e))return;    // the finish flow's keys: ] [ and the Voices step's
   const ae=document.activeElement,typing=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&document.getElementById('mcard')){
     // Cmd/Ctrl+Enter saves the open card from anywhere inside it, textarea
@@ -2603,6 +2607,7 @@ function mSyncFlagStrip(){
   }
   const note=document.querySelector('#meetingpage .mflagnote');
   if(note){if(!n)note.remove();else note.textContent=n+' flagged';}
+  fsFlagsSync();   // the finish strip's Flags count, and Done when none are left
 }
 
 // refresh ONE rebuilt row in place (text/speaker/flag changed locally)
@@ -2644,6 +2649,7 @@ async function mReloadSegs(target){
   body.innerHTML=mBodyHTML();
   mLegend(d);
   mSyncFlagStrip();
+  fsSegsLoaded();
   if(stepping){
     let rv;
     try{rv=await api('/api/review?base='+encodeURIComponent(base));}
@@ -3486,9 +3492,6 @@ function npBusy(on){
 }
 async function npSave(force,local){
   if(!NP||NPBUSY)return;
-  const n=($('#npname')?$('#npname').value:'').trim();
-  const err=$('#nperr'),warn=$('#npconfirm');
-  if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return;}
   // captured before the await, exactly like npDismiss: the panel can close
   // (Cancel/Escape) or reopen for another voice while the request is in flight,
   // and NP would then be null or someone else's identity when the answer lands.
@@ -3496,60 +3499,15 @@ async function npSave(force,local){
   // voice's Save button, and leave this one stuck reading "Saving...".
   const uid=NP.uid,meeting=NP.meeting||NP.base||'',speaker=NP.speaker;
   const tok=npToken();   // WHICH panel this save belongs to (see npToken)
-  const btn=$('#npsave');if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
-  npBusy(true);
-  let r=null;
-  try{
-    r=await api('/api/name',uid
-      ?{uid:uid,name:n,confirm:!!force}
-      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local});
-  }catch(e){
-    r=null;    // the fetch itself failed (server gone, connection dropped)
-  }finally{
-    npBusy(false);
-    if(btn){btn.disabled=false;btn.textContent='Save name';}
-  }
-  if(!r){
-    if(err){err.hidden=false;err.textContent='Could not reach the server.';}
-    return;
-  }
-  if(!r.ok){
-    if(r.floor&&warn){
-      // the quality floor refused to LEARN the voice, but the transcript is
-      // still the human's to label: offer the meeting-only save. This is the
-      // opposite of the panel's merge promise, so it says so plainly.
-      if(err)err.hidden=true;
-      warn.hidden=false;
-      warn.innerHTML=`${esc(r.error||'Too little speech to learn this voice.')}
-        You can still label them here. Save for this meeting only. The system
-        does not learn this voice.
-        <button class="btn mini" type="button" onclick="$('#npconfirm').hidden=true">Cancel</button>
-        <button class="btn primary mini" type="button" onclick="npSave(false,true)">Name for this meeting</button>`;
-      return;
-    }
-    if(r.warn&&warn){
-      // the enrollment quality gate: the house two-step confirm, numbers shown
-      if(err)err.hidden=true;
-      warn.hidden=false;
-      warn.innerHTML=`This voice matches ${esc(n)}&#8217;s saved samples at only
-        <b>${(+r.own).toFixed(2)}</b>${r.cross_name&&+r.cross>+r.own
-          ?` &mdash; and matches ${esc(r.cross_name)} better (<b>${(+r.cross).toFixed(2)}</b>)`:''}.
-        It may be the wrong person.
-        <button class="btn mini" type="button" onclick="$('#npconfirm').hidden=true">Cancel</button>
-        <button class="btn primary mini" type="button" onclick="npSave(true)">Save anyway</button>`;
-      return;
-    }
-    if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
-    return;
-  }
+  const r=await saveName({uid,meeting,speaker,force,local,again:'npSave',busy:npBusy,
+    ui:{name:$('#npname'),err:$('#nperr'),warn:$('#npconfirm'),warnId:'npconfirm',
+        btn:$('#npsave'),label:'Save name'}});
+  if(!r)return;
   // the response says what it did and WHERE: this meeting is already relabeled,
   // and the naming resolved to a short list of other meetings it can touch
   // instead of the whole library. Say so, so a save no longer reads as a
   // silent seven-minute wait.
-  if(r.targets){
-    const n=r.targets.length;
-    toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
-  }
+  namedToast(r);
   const onIt=MP&&MP.base===meeting;
   // close ONLY if the panel still shows the voice this save acted on. A slow
   // request used to force-close whatever panel happened to be open when it
@@ -3562,6 +3520,76 @@ async function npSave(force,local){
   // must stop asking the moment the save succeeds, or the click reads as failed
   // and the next one lands on a uid that no longer exists.
   if(onIt)mReloadSegs();
+}
+// the after-save sentence, from the response's own targets: the one thing a
+// save is allowed to say (the slide-over and the finish strip both say it)
+function namedToast(r){
+  if(!r||!r.targets)return;
+  const n=r.targets.length;
+  toast(n?`Named here. Updating ${n} other meetings.`:'Named here.');
+}
+/* ONE naming save, shared by the slide-over (npSave) and the finish strip's
+ * Voices step (fvSave). The caller captures the voice's identity before the
+ * await and hands over its own elements: the name box, the error line, the
+ * confirm strip (and its id, for the strip's Cancel), and the Save button with
+ * its resting label. `again` names the caller's own save function, which the
+ * floor strip and the warn strip call back with (false,true) and (true).
+ * `busy` owns the one-request-at-a-time flag and disables the confirm buttons.
+ * Resolves to the response on success, or null after painting why not. */
+async function saveName(o){
+  const force=o.force,local=o.local,ui=o.ui||{};
+  const n=(ui.name?ui.name.value:'').trim();
+  const err=ui.err,warn=ui.warn;
+  if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return null;}
+  const uid=o.uid,meeting=o.meeting,speaker=o.speaker;
+  const btn=ui.btn;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
+  o.busy(true);
+  let r=null;
+  try{
+    r=await api('/api/name',uid
+      ?{uid:uid,name:n,confirm:!!force}
+      :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local});
+  }catch(e){
+    r=null;    // the fetch itself failed (server gone, connection dropped)
+  }finally{
+    o.busy(false);
+    if(btn){btn.disabled=false;btn.textContent=ui.label;}
+  }
+  if(!r){
+    if(err){err.hidden=false;err.textContent='Could not reach the server.';}
+    return null;
+  }
+  if(!r.ok){
+    if(r.floor&&warn){
+      // the quality floor refused to LEARN the voice, but the transcript is
+      // still the human's to label: offer the meeting-only save. This is the
+      // opposite of the panel's merge promise, so it says so plainly.
+      if(err)err.hidden=true;
+      warn.hidden=false;
+      warn.innerHTML=`${esc(r.error||'Too little speech to learn this voice.')}
+        You can still label them here. Save for this meeting only. The system
+        does not learn this voice.
+        <button class="btn mini" type="button" onclick="$('#${ui.warnId}').hidden=true">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="${o.again}(false,true)">Name for this meeting</button>`;
+      return null;
+    }
+    if(r.warn&&warn){
+      // the enrollment quality gate: the house two-step confirm, numbers shown
+      if(err)err.hidden=true;
+      warn.hidden=false;
+      warn.innerHTML=`This voice matches ${esc(n)}&#8217;s saved samples at only
+        <b>${(+r.own).toFixed(2)}</b>${r.cross_name&&+r.cross>+r.own
+          ?` &mdash; and matches ${esc(r.cross_name)} better (<b>${(+r.cross).toFixed(2)}</b>)`:''}.
+        It may be the wrong person.
+        <button class="btn mini" type="button" onclick="$('#${ui.warnId}').hidden=true">Cancel</button>
+        <button class="btn primary mini" type="button" onclick="${o.again}(true)">Save anyway</button>`;
+      return null;
+    }
+    if(err){err.hidden=false;err.textContent=r.error||'Could not save the name.';}
+    return null;
+  }
+  if(warn)warn.hidden=true;
+  return r;
 }
 // the documented undo for a meeting-local label: an EMPTY name in the local
 // branch drops the entry, and the server allows an empty name only there
@@ -3671,6 +3699,494 @@ function pnKey(e){
   }else if(e.key==='Escape'&&open){
     e.preventDefault();e.stopPropagation();pnClose();
   }
+}
+
+/* ============================================================================
+   THE FINISH FLOW (docs/ui-refresh/proposal.md, phase 1). A meeting with open
+   steps shows one strip at the top of its page, under the header and audio:
+   Title, Voices (n), Flags (n), Done. The current step's controls render under
+   the strip and each step advances on its own. Every endpoint is the one the
+   rest of the shell already uses: /api/accept_meeting for the title, the
+   shared saveName for a voice, /api/forget or /api/dismiss_voice for "Not a
+   real speaker", and the verdict bar (reviewStart) for flags. A meeting whose
+   finish record was already done when the page opened shows no strip at all.
+   ============================================================================ */
+const FINISH_DAYS=14;
+const FS_LABEL={title:'Title',voices:'Voices',flags:'Flags',done:'Done'};
+let FS=null;        // the open meeting's flow: {base,row,fin,past,voices,vi,
+                    // cur,live,hand,looks,clip,busy}. live: the flow may take
+                    // focus and play the clip on its own (a recent meeting, or
+                    // one reached by a hand-off or an advance in this session)
+let FS_CARRY=null;  // {base,past,live,keep}: a flow crossing a route change
+                    // (the title accept re-stamped the folder, or ] / Next)
+
+// the ordered steps with their state: done (closed), cur (the first open step
+// not in `past`), open (the rest). `past` holds steps the user moved on from
+// with work left (a skipped voice). Done is done only when everything is.
+function finishSteps(row,past){
+  const f=(row&&row.finish)||{title:true,voices:0,flags:0};
+  const skip=new Set(past||[]);
+  const open={title:!f.title,voices:(f.voices||0)>0,flags:(f.flags||0)>0};
+  let cur=null;
+  const steps=['title','voices','flags'].map(k=>{
+    let state=open[k]?'open':'done';
+    if(state==='open'&&!cur&&!skip.has(k)){state='cur';cur=k;}
+    return {key:k,label:FS_LABEL[k],state,count:k==='title'?0:(f[k]||0)};
+  });
+  const all=!open.title&&!open.voices&&!open.flags;
+  steps.push({key:'done',label:'Done',state:all?'done':(cur?'open':'cur'),count:0});
+  return steps;
+}
+function fsCur(steps){const c=(steps||[]).find(s=>s.state==='cur');return c?c.key:null;}
+// "to finish", as the proposal defines it: an open title, or any open step on
+// a meeting processed in the last 14 days. Older backlog is a filter, never a
+// to-do list, so it is never handed over.
+function toFinish(row,now){
+  const f=row&&row.finish;
+  if(!f||f.done)return false;
+  if(!f.title)return true;
+  const t=Date.parse((row&&row.when)||'');
+  if(!isFinite(t))return false;
+  return ((now==null?Date.now():now)-t)<=FINISH_DAYS*864e5;
+}
+// the next row after the current one, in timeline order, that is to finish;
+// wraps at the end and never answers the current row. dir -1 walks backward.
+function nextToFinish(timeline,currentBase,dir,now){
+  const rows=timeline||[],n=rows.length;
+  if(!n)return null;
+  const d=dir<0?-1:1;
+  const i=rows.findIndex(r=>r.id===currentBase);
+  for(let k=1;k<=n;k++){
+    const j=i<0?(d>0?k-1:n-k):(((i+d*k)%n)+n)%n;
+    const r=rows[j];
+    if(!r||r.id===currentBase)continue;
+    if(toFinish(r,now))return r;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------- markup ---- */
+function fsStripHTML(steps){
+  return `<div class="fstrip" role="list" aria-label="Steps to finish this meeting">`
+    +steps.map((s,i)=>{
+      const no=s.state==='done'?'&#10003;':String(i+1);
+      const c=s.state!=='done'&&s.count?` <span class="c mono">${s.count}</span>`:'';
+      return (i?'<span class="fsep" aria-hidden="true">&#8250;</span>':'')
+        +`<span class="fstep ${s.state}" role="listitem" data-step="${s.key}"`
+        +`${s.state==='cur'?' aria-current="step"':''}><span class="no">${no}</span>${s.label}${c}</span>`;
+    }).join('')
+    +`</div>`;
+}
+function _fsNextBtn(next,primary){
+  return next
+    ?`<button class="btn ${primary?'primary ':''}mini" id="fsnext" type="button" onclick="fsGo(1)"
+      title="${esc(next.title||next.id)} (])">Next to finish &#8594;</button>`
+    :`<span class="fsnone">Nothing else to finish.</span>`;
+}
+function fsDoneHTML(next){
+  return `<div class="doneline" id="fsdone"><span>&#10003; Finished: title, voices, and flags are done.</span>
+    <span class="grow"></span>${_fsNextBtn(next,false)}</div>`;
+}
+function fsTitleHTML(row){
+  const t=(row&&(row.suggested_title||row.title))||'';
+  const d=(row&&(row.suggested_date||row.date))||'';
+  const stem=srcStem((row&&row.source_file)||'');
+  return `<div class="fbody fstitle">
+    <div class="vhead"><h3>Name this meeting</h3><span class="vsub">suggested title and date</span></div>
+    <div class="ftrow">
+      <input class="renameinput" id="fstitle" type="text" value="${esc(t)}" aria-label="Meeting title"
+        onkeydown="fsTitleKey(event)">
+      <input class="dateinput" id="fsdate" type="date" value="${esc(d)}" aria-label="Meeting date"
+        onkeydown="fsTitleKey(event)">
+      <button class="btn primary mini" id="fsaccept" type="button" onclick="fsAccept()"
+        title="Accept this title and date (Enter)">Accept</button>
+      ${stem&&stem!==t?`<button class="btn mini" type="button" onclick="fsUseFile()"
+        title="${esc(stem)}">Use the file name</button>`:''}
+    </div>
+    <div id="fserr" class="mcerr" hidden></div>
+  </div>`;
+}
+function fsVoiceHTML(voices,i,live){
+  const v=voices[i],n=voices.length;
+  const ticks=voices.map((x,k)=>`<i class="${k===i?'cur':(x.st==='named'||x.st==='gone')?'done':''}"></i>`).join('');
+  return `<div class="fbody fsvoice">
+    <div class="vhead"><h3>Who is ${esc(v.display)}?</h3>
+      <span class="vsub">voice ${i+1} of ${n} in this meeting</span>
+      <span class="vq" aria-hidden="true">${ticks}</span></div>
+    <div class="vgrid">
+      <div>
+        <input class="namebox" id="fvname" type="text" autocomplete="off" spellcheck="false"
+          placeholder="Person&#8217;s name" aria-label="This voice belongs to" onkeydown="fvBoxKey(event)">
+        <div class="preview" id="fvpreview" hidden></div>
+        <div class="looks" id="fvlooks" hidden></div>
+        <div class="vbtns">
+          <button class="btn primary" id="fvsave" type="button" onclick="fvSave()"
+            title="Save this name and go to the next voice (Enter)">Save and next</button>
+          <button class="btn" type="button" onclick="fvSkip()"
+            title="Leave this voice unnamed for now and go to the next (s)">Skip</button>
+          <button class="btn danger mini" type="button" onclick="fvForget()"
+            title="Grumbling, music, an echo: stop asking me to name this voice">Not a real speaker</button>
+        </div>
+        <div id="fvconfirm" class="dckconfirm" hidden></div>
+        <div id="fverr" class="mcerr" hidden></div>
+      </div>
+      <div>
+        <div class="clip" id="fvclip"><span class="src">${live?'Finding their longest turn&#8230;':''}</span></div>
+        <div class="said" id="fvsaid"></div>
+      </div>
+    </div>
+  </div>`;
+}
+function fsFlagsHTML(n){
+  return `<div class="fbody fsflags" id="fsflags"><span>${n} flagged line${n!==1?'s':''} to check.</span>
+    <button class="btn primary mini" type="button" onclick="fsFlagsStart()"
+      title="Step through them in document order (n)">Step through them</button></div>`;
+}
+function fsLeftHTML(fin,next){
+  const bits=[];
+  if(!fin.title)bits.push('the title');
+  if(fin.voices)bits.push(`${fin.voices} voice${fin.voices!==1?'s':''}`);
+  if(fin.flags)bits.push(`${fin.flags} flagged line${fin.flags!==1?'s':''}`);
+  return `<div class="fbody fsleft"><span>Left for later: ${bits.join(', ')}.</span>
+    <button class="btn mini" type="button" onclick="fsResume()">Go back to them</button>
+    <span class="grow"></span>${_fsNextBtn(next,true)}</div>`;
+}
+
+/* ------------------------------------------------------------ the flow ---- */
+function fsNext(dir){
+  return nextToFinish(S&&S.timeline,FS?FS.base:(route&&route.base),dir);
+}
+// the page opened: build the flow from the row's finish record, or none at all
+function fsInit(base){
+  const carry=FS_CARRY&&FS_CARRY.base===base?FS_CARRY:null;
+  FS_CARRY=null;FS=null;
+  const row=rowById(base),box=document.getElementById('mfinish');
+  if(!row||!row.finish||(row.finish.done&&!(carry&&carry.keep))){
+    if(box){box.hidden=true;box.innerHTML='';}
+    return;
+  }
+  FS={base,row,fin:{title:!!row.finish.title,voices:row.finish.voices||0,flags:row.finish.flags||0},
+      past:(carry&&carry.past)||[],voices:null,vi:0,cur:null,
+      live:!!(carry&&carry.live)||toFinish(row),hand:!!(carry&&carry.live),
+      looks:[],clip:null,busy:false,first:true};
+  fsShow(false);
+}
+// paint the strip and the current step's body; `auto` means the flow moved
+// on by itself, which is what may start the flag review
+function fsShow(auto){
+  if(!FS)return;
+  const prev=FS.cur;
+  fsRender();
+  if(FS.cur==='title'&&FS.live){const t=$('#fstitle');if(t)t.focus({preventScroll:true});}
+  else if(FS.cur==='voices')fvOpen();
+  else if(FS.cur==='flags'&&auto&&prev!=='flags'&&!(MR&&MR.active))reviewStart(0);
+}
+function fsRender(){
+  const box=document.getElementById('mfinish');
+  if(!box||!FS)return;
+  const steps=finishSteps({finish:FS.fin},FS.past);
+  const cur=fsCur(steps);
+  FS.cur=cur;
+  box.hidden=false;
+  if(steps[3].state==='done'){box.innerHTML=fsDoneHTML(fsNext(1));return;}
+  let body='';
+  if(cur==='title')body=fsTitleHTML(FS.row);
+  else if(cur==='voices'){
+    if(FS.voices&&!FS.voices[FS.vi]){const j=FS.voices.findIndex(x=>!x.st);if(j>=0)FS.vi=j;}
+    const v=FS.voices&&FS.voices[FS.vi];
+    body=v?fsVoiceHTML(FS.voices,FS.vi,FS.live)
+         :'<div class="fbody"><span class="spin"></span> Loading voices&#8230;</div>';
+  }
+  else if(cur==='flags')body=fsFlagsHTML(FS.fin.flags);
+  else body=fsLeftHTML(FS.fin,fsNext(1));
+  box.innerHTML=`<div class="finish">${fsStripHTML(steps)}${body}</div>`;
+}
+// counts moved but the step did not: repaint the strip alone, so a half-typed
+// name or title under it survives
+function fsStripSync(){
+  if(!FS)return;
+  const el=document.querySelector('#mfinish .fstrip');
+  if(el)el.outerHTML=fsStripHTML(finishSteps({finish:FS.fin},FS.past));
+}
+// re-derive the step from FS.fin: a changed step repaints, the same one keeps
+// its body and only its counts move
+function fsSync(){
+  if(!FS)return;
+  const cur=fsCur(finishSteps({finish:FS.fin},FS.past));
+  const all=FS.fin.title&&!FS.fin.voices&&!FS.fin.flags;
+  if(cur!==FS.cur||(all&&!document.getElementById('fsdone'))){fsShow(false);return;}
+  if(cur==='voices'){
+    if(!document.getElementById('fvname')){fsShow(false);return;}   // loading -> the voice
+    const v=FS.voices[FS.vi],box=$('#fvname');
+    // a relabel named the voice on screen before anyone typed: move on
+    if(v&&v.st==='gone'&&box&&!box.value.trim()){fvNext();return;}
+  }
+  fsStripSync();
+}
+function _fsSubstantial(){
+  return MP?MP.segs.filter(g=>g.flags&&g.flags.length&&!mIsMinor(g)).length:0;
+}
+// the voices this meeting still asks about, straight off the transcript's
+// speaker options: the same set the legend's "?" chips and the server's
+// finish count read (unnamed, not dismissed, id not its own display)
+function fsVoicesFrom(opts){
+  return (opts||[]).filter(o=>!o.named&&!o.dismissed&&o.id!==o.display)
+    .map(o=>({id:o.id,display:o.display,uid:mUnknownUid(o.display),st:''}));
+}
+function _fsOpenVoices(){return FS.voices?FS.voices.filter(v=>!v.st||v.st==='skip').length:FS.fin.voices;}
+// the transcript (re)loaded: the page's own segments are the freshest truth
+function fsSegsLoaded(){
+  if(!FS||!MP||FS.base!==MP.base)return;
+  const fresh=fsVoicesFrom(MP.spkOpts);
+  if(!FS.voices){
+    FS.voices=fresh;
+    FS.vi=Math.max(0,FS.voices.findIndex(v=>!v.st));
+  }else{
+    const live=new Set(fresh.map(v=>v.id));
+    FS.voices.forEach(v=>{if((!v.st||v.st==='skip')&&!live.has(v.id))v.st='gone';});
+  }
+  FS.fin.voices=_fsOpenVoices();
+  FS.fin.flags=_fsSubstantial();
+  const first=FS.first;FS.first=false;
+  fsSync();
+  // a hand-off landing on a meeting whose next step is its flags starts the
+  // stepping, as an advance inside one meeting does
+  if(first&&FS&&FS.hand&&FS.cur==='flags'&&!(MR&&MR.active))reviewStart(0);
+}
+// the verdict bar resolved or exited: the flag count follows the page's own
+// segments, and a review that leaves no substantial flag moves on to Done
+function fsFlagsSync(){
+  if(!FS||!MP||FS.base!==MP.base)return;
+  FS.fin.flags=_fsSubstantial();
+  if(FS.cur==='flags'&&!(MR&&MR.active)&&!FS.fin.flags){FS.live=true;fsShow(true);return;}
+  fsStripSync();
+  const fb=document.querySelector('#fsflags span');
+  if(fb)fb.textContent=`${FS.fin.flags} flagged line${FS.fin.flags!==1?'s':''} to check.`;
+}
+function fsFlagsStart(){if(MP&&MP.built)reviewStart(0);}
+function fsResume(){
+  if(!FS)return;
+  FS.past=[];
+  if(FS.voices){
+    FS.voices.forEach(v=>{if(v.st==='skip')v.st='';});
+    FS.vi=Math.max(0,FS.voices.findIndex(v=>!v.st));
+    FS.fin.voices=_fsOpenVoices();
+  }
+  FS.live=true;fsShow(true);
+}
+// ] / [ and the Next button: the next meeting to finish, by the #m route
+function fsGo(dir){
+  const r=nextToFinish(S&&S.timeline,FS?FS.base:(route&&route.base),dir);
+  if(!r)return false;
+  FS_CARRY={base:r.id,past:[],live:true,keep:false};
+  location.hash='#m/'+encodeURIComponent(r.id);
+  return true;
+}
+// the finish flow's keys, from mKey. Inactive while typing, while the naming
+// panel, a popover, or an edit card is open; the flag keys stay mKey's.
+function fsKey(e){
+  if(!route||route.view!=='meeting'||e.metaKey||e.ctrlKey||e.altKey)return false;
+  const ae=document.activeElement;
+  const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
+  if(typing||NP||_popClose||document.getElementById('mcard'))return false;
+  if(e.key===']'||e.key==='['){
+    if(fsGo(e.key===']'?1:-1))e.preventDefault();
+    return true;
+  }
+  if(!FS||FS.cur!=='voices'||!FS.voices||!FS.voices[FS.vi]||(MR&&MR.active))return false;
+  if(e.key==='1'||e.key==='2'||e.key==='3'){
+    if(fvUse(+e.key-1)){e.preventDefault();return true;}
+    return false;
+  }
+  if(e.key==='s'){e.preventDefault();fvSkip(true);return true;}
+  const onBtn=ae&&ae.tagName==='BUTTON';
+  if(e.key===' '&&!onBtn){e.preventDefault();fvPlay();return true;}
+  if(e.key==='Enter'&&!onBtn){e.preventDefault();fvSave();return true;}
+  return false;
+}
+
+/* ------------------------------------------------------- title step ------ */
+function fsTitleKey(e){
+  if(e.key==='Enter'){e.preventDefault();fsAccept();}
+  else if(e.key==='Escape'){e.preventDefault();e.target.blur();}
+}
+function fsUseFile(){
+  const t=$('#fstitle');if(!t||!FS)return;
+  t.value=srcStem(FS.row&&FS.row.source_file||'');t.focus();
+}
+async function fsAccept(){
+  if(!FS||FS.busy||FS.cur!=='title')return;
+  const base=FS.base,ti=$('#fstitle'),di=$('#fsdate'),btn=$('#fsaccept'),err=$('#fserr');
+  const name=(ti&&ti.value.trim())||'',date=(di&&di.value)||'';
+  FS.busy=true;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
+  let r;
+  try{r=await api('/api/accept_meeting',{base,name,date});}
+  catch(e){r={ok:false,error:'Could not reach the server.'};}
+  if(!FS||FS.base!==base||!route||route.base!==base)return;   // navigated away
+  FS.busy=false;
+  if(!r||!r.ok){
+    if(btn){btn.disabled=false;btn.textContent='Accept';}
+    if(err){err.hidden=false;err.textContent=(r&&r.error)||'Could not accept this meeting.';}
+    return;
+  }
+  FS.fin.title=true;FS.live=true;
+  if(r.base&&r.base!==base){
+    // the folder re-stamped: follow it, and keep the flow going there
+    FS_CARRY={base:r.base,past:FS.past.slice(),live:true,keep:true};
+    await refresh();
+    location.hash='#m/'+encodeURIComponent(r.base);
+    return;
+  }
+  if(name){
+    const m0=meetingByBase(base);if(m0)m0.title=name;
+    const r0=rowById(base);if(r0)r0.title=name;
+    const h=document.querySelector('#meetingpage .mtitle');if(h)h.textContent=name;
+  }
+  refresh();
+  fsShow(true);
+}
+
+/* ------------------------------------------------------ voices step ------ */
+function fvToken(){
+  const v=FS&&FS.voices&&FS.voices[FS.vi];
+  return v?FS.base+'\x00'+v.id+'\x00'+FS.vi:'';
+}
+function fvBoxKey(e){
+  if(e.key==='Enter'){e.preventDefault();fvSave();}
+  else if(e.key==='Escape'){e.preventDefault();e.target.blur();}
+}
+function fvBusy(on){
+  NPBUSY=!!on;
+  const w=$('#fvconfirm');
+  ((w&&w.querySelectorAll)?[...w.querySelectorAll('button')]:[]).forEach(b=>{b.disabled=!!on;});
+}
+// the voice on screen: focus the box, then fetch the preview and the lines
+// behind it (the step is usable the instant it opens, as the panel is)
+function fvOpen(){
+  const v=FS&&FS.voices&&FS.voices[FS.vi];
+  if(!v||!document.getElementById('fvname'))return;
+  FS.looks=[];FS.clip=null;
+  if(FS.live&&!FS.keepBlur){const b=$('#fvname');if(b)b.focus({preventScroll:true});}
+  FS.keepBlur=false;
+  const tok=fvToken();
+  fvPreview(v,tok);
+  fvLines(v,tok);
+}
+async function fvPreview(v,tok){
+  let r;
+  try{r=await api('/api/name_preview',v.uid?{uid:v.uid}:{meeting:FS.base,speaker:v.id});}
+  catch(e){return;}
+  if(!FS||fvToken()!==tok||!r||r.error||!Array.isArray(r.targets))return;
+  const line=$('#fvpreview'),looks=$('#fvlooks');
+  if(line){line.textContent=npPreviewLine(r);line.hidden=false;}
+  FS.looks=(r.looks_like||[]).slice(0,3);
+  if(looks&&FS.looks.length){
+    looks.innerHTML=FS.looks.map((x,k)=>`<button class="lchip" type="button" onclick="fvUse(${k})"
+      title="Fill the name box (${k+1}); nothing is saved until you press Enter"
+      >Looks like ${esc(x.name)} <span class="sc mono">${(+x.score).toFixed(2)}</span></button>`).join('');
+    looks.hidden=false;
+  }
+}
+async function fvLines(v,tok){
+  let r;
+  try{r=await api('/api/voice_lines?base='+encodeURIComponent(FS.base)
+    +'&speaker='+encodeURIComponent(v.id));}
+  catch(e){return;}
+  if(!FS||fvToken()!==tok)return;
+  const clip=$('#fvclip'),said=$('#fvsaid');
+  if(!r||r.error||!Array.isArray(r.lines)){if(clip)clip.innerHTML='';return;}
+  if(!r.lines.length){
+    if(clip)clip.innerHTML='<span class="src">No transcript text was attributed to this voice.</span>';
+    return;
+  }
+  const top=r.lines[0];            // longest first: the evidence
+  FS.clip={start:+top.start||0,end:(+top.start||0)+(+top.dur||0)};
+  if(clip)clip.innerHTML=MP&&MP.hasAudio
+    ?`<button class="iact play" type="button" onclick="fvPlay()" title="Play their longest turn (Space)">&#9654;</button>
+      <span class="src">Longest turn here, at <span class="mono">${mFmtT(FS.clip.start)}</span>. Space replays.</span>`
+    :`<span class="src">Longest turn here, at <span class="mono">${mFmtT(FS.clip.start)}</span>. This meeting has no audio.</span>`;
+  if(said)said.innerHTML=r.lines.slice(0,3).sort((a,b)=>a.start-b.start).map(l=>
+    `<p><span class="ts mono">${mFmtT(l.start)}</span><span>${esc(l.text)}</span></p>`).join('');
+  if(FS.live)fvPlay();
+}
+// the longest turn, through the page's own span playback (the verdict bar's
+// Play uses the same mechanism)
+function fvPlay(){
+  if(!FS||!FS.clip||!MP||!MP.hasAudio)return;
+  mPlaySpan(FS.clip.start,FS.clip.end);
+}
+function fvUse(k){
+  const x=FS&&FS.looks&&FS.looks[k],b=$('#fvname');
+  if(!x||!b)return false;
+  b.value=x.name;b.focus();
+  return true;
+}
+// the next voice still open after this one; past the last, the strip moves
+// on (a skipped voice keeps Voices open, so it is marked as moved past)
+function fvNext(){
+  if(!FS||!FS.voices)return;
+  if(MP&&MP.audio&&MP.spanStop!=null){try{MP.audio.pause();}catch(e){}MP.spanStop=null;mSyncPP();}
+  FS.fin.voices=_fsOpenVoices();
+  let j=-1;
+  for(let k=FS.vi+1;k<FS.voices.length;k++)if(!FS.voices[k].st){j=k;break;}
+  if(j>=0)FS.vi=j;
+  else{
+    FS.vi=FS.voices.length;
+    if(FS.fin.voices&&!FS.past.includes('voices'))FS.past.push('voices');
+  }
+  fsShow(true);
+}
+// from the key, the next voice leaves the keyboard where it is: the user is
+// driving from outside the box, so a second s skips again instead of typing
+function fvSkip(byKey){
+  const v=FS&&FS.voices&&FS.voices[FS.vi];
+  if(!v||NPBUSY||FS.cur!=='voices')return;
+  v.st='skip';FS.live=true;FS.keepBlur=!!byKey;fvNext();
+}
+async function fvSave(force,local){
+  if(!FS||NPBUSY||FS.cur!=='voices')return;
+  const v=FS.voices&&FS.voices[FS.vi];if(!v)return;
+  const base=FS.base,tok=fvToken();
+  const r=await saveName({uid:v.uid,meeting:base,speaker:v.id,force,local,again:'fvSave',busy:fvBusy,
+    ui:{name:$('#fvname'),err:$('#fverr'),warn:$('#fvconfirm'),warnId:'fvconfirm',
+        btn:$('#fvsave'),label:'Save and next'}});
+  if(!r)return;
+  namedToast(r);
+  v.st='named';
+  refresh();
+  if(MP&&MP.base===base)mReloadSegs();
+  if(!FS||FS.base!==base)return;
+  FS.live=true;
+  if(fvToken()===tok)fvNext();
+  else{FS.fin.voices=_fsOpenVoices();fsStripSync();}
+}
+// "Not a real speaker", as the panel does it: /api/forget for a registry
+// voice, /api/dismiss_voice for a cluster the registry never tracked. A
+// forgotten uid is also dismissed here, so this meeting stops counting it.
+async function fvForget(){
+  if(!FS||NPBUSY||FS.cur!=='voices')return;
+  const v=FS.voices&&FS.voices[FS.vi];if(!v)return;
+  const base=FS.base,tok=fvToken();
+  fvBusy(true);
+  let r=null;
+  try{
+    r=v.uid?await api('/api/forget',{uid:v.uid})
+           :await api('/api/dismiss_voice',{base:base,speaker:v.id});
+    if(r&&r.ok&&v.uid)await api('/api/dismiss_voice',{base:base,speaker:v.id});
+  }catch(e){r=r&&r.ok?r:null;}
+  finally{fvBusy(false);}
+  if(!r||!r.ok){
+    const err=$('#fverr');
+    if(err&&fvToken()===tok){err.hidden=false;err.textContent=(r&&r.error)||'Could not remove this voice.';}
+    return;
+  }
+  v.st='gone';
+  refresh();
+  if(MP&&MP.base===base)mReloadSegs();
+  if(!FS||FS.base!==base)return;
+  FS.live=true;
+  if(fvToken()===tok)fvNext();
+  else{FS.fin.voices=_fsOpenVoices();fsStripSync();}
 }
 
 /* --------------------------------------------------------- route wiring ---- */

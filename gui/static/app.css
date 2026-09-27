@@ -1131,3 +1131,78 @@ button.mlg:hover{border-color:var(--attn);color:var(--attn)}
 /* synthetic upload row: state-styled like waiting; the spinner is the
    progress (fetch exposes none), the error variant reuses the failed tones */
 .row.upl .spill .spin{margin-right:6px;vertical-align:-2px}
+
+/* ============================================================================
+   Finish flow (docs/ui-refresh/proposal.md, phase 1): the step strip at the
+   top of a meeting page with open steps, the current step's body under it,
+   and the green Finished line. Ported from docs/ui-refresh/mockup.html onto
+   the panel's tokens: teal marks an open step, indigo the current one, green
+   a done one. The mockup's 12px and 12.5px mono sizes lift to the 13px floor;
+   mono rides in the markup on the .mono utility (counts, scores, timestamps)
+   and the current step wears a hairline border, not the mockup's ring shadow.
+   ============================================================================ */
+.mfinish{margin:12px 0}
+.finish{background:var(--card);border:1px solid var(--hair);border-radius:6px;overflow:hidden}
+.fstrip{display:flex;align-items:center;gap:4px;padding:8px 10px;background:var(--paper);
+  flex-wrap:wrap}
+.finish .fbody{border-top:1px solid var(--hair)}
+.fstep{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border-radius:4px;
+  border:1px solid transparent;font:500 13.5px/1.2 var(--sans);color:var(--sub)}
+.fstep .no{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  font:600 13px/1 var(--sans);font-variant-numeric:tabular-nums;
+  background:var(--attn-soft);color:var(--attn)}
+.fstep.done{color:var(--ok)}
+.fstep.done .no{background:var(--ok-soft);color:var(--ok)}
+.fstep.cur{color:var(--ink);font-weight:600;background:var(--card);border-color:var(--hair)}
+.fstep.cur .no{background:var(--accent);color:var(--acc-ink)}
+.fstep .c{color:var(--attn)}
+.fsep{color:var(--line)}
+.fbody{padding:16px 18px}
+
+/* the Title step: the inline rename and date inputs, prefilled */
+.ftrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px}
+.ftrow .dateinput{padding:4px 8px}
+
+/* the Voices step: form first, evidence beside it */
+.vhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.vhead h3{font:600 17.5px/1.3 var(--sans);letter-spacing:-.005em;color:var(--ink)}
+.vsub{font:400 13px/1.4 var(--sans);color:var(--sub)}
+.vq{display:flex;gap:4px;margin-left:auto;align-self:center}
+.vq i{width:22px;height:4px;border-radius:2px;background:var(--hair)}
+.vq i.done{background:var(--ok)}
+.vq i.cur{background:var(--accent)}
+.vgrid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:22px;margin-top:12px}
+.namebox{width:100%;height:40px;padding:0 12px;border-radius:6px;border:2px solid var(--accent);
+  background:var(--card);color:var(--ink);font:400 15px/1.3 var(--sans)}
+.preview{margin-top:6px;font:400 13px/1.5 var(--sans);color:var(--sub)}
+.preview b{color:var(--ink);font-weight:600}
+.looks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.lchip{display:inline-flex;gap:6px;align-items:center;padding:4px 9px;border-radius:4px;
+  border:1px solid var(--line);background:var(--card);color:var(--ink);
+  font:500 13px/1.2 var(--sans);cursor:pointer}
+.lchip:hover{background:var(--inset)}
+.lchip .sc{color:var(--sub)}
+.vbtns{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center}
+.fbody .dckconfirm{margin-top:10px}
+.clip{display:flex;align-items:center;gap:10px;min-height:48px;border:1px solid var(--hair);
+  border-radius:6px;padding:10px 12px;background:var(--paper)}
+.clip .src{font:400 13px/1.45 var(--sans);color:var(--sub)}
+.clip .iact.play{flex:none;border-color:var(--line)}
+.said{margin-top:10px;font:400 13.5px/1.5 var(--sans);color:var(--ink)}
+.said p{display:flex;gap:10px;padding:6px 0;border-top:1px solid var(--hair)}
+.said .ts{flex:none;padding-top:1px;font-size:13px;color:var(--sub)}
+
+/* the Flags step: one line and a start button; the docked verdict bar is
+   the body while stepping, so the line steps aside */
+.fsflags,.fsleft{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  font:400 14px/1.4 var(--sans);color:var(--ink)}
+body:has(#mrevbar) .fsflags{display:none}
+
+/* Done: the strip becomes one green line */
+.doneline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;
+  border-radius:6px;background:var(--ok-soft);color:var(--ok);font:600 14px/1.3 var(--sans)}
+.fsnone{font-weight:500}
+
+@media(max-width:720px){
+  .vgrid{grid-template-columns:1fr}
+}

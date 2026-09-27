@@ -430,7 +430,11 @@ def test_naming_panel_replaces_the_who_bridge():
     assert re.search(r"const uid=NP\.uid,tok=npToken\(\);", _js_fn("npForget"))
     # the enrollment quality gate answers with a warning: the panel renders
     # the house two-step confirm (numbers shown), never a native dialog
-    assert 'id="npconfirm"' in NEW_JS and "npSave(true)" in NEW_JS
+    assert 'id="npconfirm"' in NEW_JS
+    # the confirm strip calls back into whichever surface opened it: the
+    # slide-over passes its own npSave, so "Save anyway" is npSave(true)
+    assert "${o.again}(true)" in _js_fn("saveName")
+    assert "again:'npSave'" in _js_fn("npSave")
     # the dead-player case says WHY instead of rendering a player that can't load
     assert "r.reason==='sources_deleted'" in NEW_JS
     assert "No audio available. The source recordings were deleted." in NEW_JS
@@ -565,7 +569,7 @@ def test_save_captures_its_identity_before_the_await():
         "let MP={base:'LT Meeting 05212026'};",
         _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
         "let NPBUSY=false;",
-        _js_fn("npSave"),
+        _js_fn("npSave"), _js_fn("saveName"), _js_fn("namedToast"),
         """
 (async()=>{
   const p=npSave();
@@ -616,7 +620,7 @@ def test_save_survives_a_fetch_that_never_answers():
         "let NP={uid:'U049',base:'B'};let MP=null;",
         _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
         "let NPBUSY=false;",
-        _js_fn("npSave"),
+        _js_fn("npSave"), _js_fn("saveName"), _js_fn("namedToast"),
         """
 (async()=>{
   await npSave();
@@ -1920,7 +1924,8 @@ def test_the_floor_refusal_offers_the_meeting_only_save():
     assert "if(r.floor&&warn){" in NEW_JS
     assert "Save for this meeting only." in NEW_JS
     assert "does not learn this voice" in NEW_JS
-    assert "npSave(false,true)" in NEW_JS
+    assert "${o.again}(false,true)" in _js_fn("saveName")
+    assert "again:'npSave'" in _js_fn("npSave")
     assert re.search(r"local:!!local", NEW_JS), "meeting mode must carry the flag"
 
 
@@ -2325,7 +2330,7 @@ def test_a_save_for_the_voice_still_shown_does_close_the_panel():
         "els['#npname'].value='Priya Shah';",
         "function api(){return Promise.resolve({ok:true,note:'relabeling'});}",
         _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
-        _js_fn("npSave"),
+        _js_fn("npSave"), _js_fn("saveName"), _js_fn("namedToast"),
         """
 (async()=>{
   NP={uid:'U049',base:'B'};MP={base:'B'};
@@ -2449,7 +2454,7 @@ def test_the_floor_and_warn_confirms_cannot_double_save():
         "els['#npconfirm'].querySelectorAll=()=>btns;",
         "const btns=[{disabled:false},{disabled:false}];",
         _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
-        _js_fn("npSave"),
+        _js_fn("npSave"), _js_fn("saveName"), _js_fn("namedToast"),
         """
 (async()=>{
   NP={meeting:'A',speaker:'SPEAKER_01'};MP={base:'A'};
@@ -3139,6 +3144,7 @@ def test_save_says_how_many_other_meetings_are_updating():
         "function refresh(){}",
         "function mReloadSegs(){}",
         "function toast(m){out.push(m);}",
+        _js_fn("namedToast"),
         "function tail(r,meeting,tok){" + tail + "}",
         "tail({ok:true,applied:'A',targets:['B','C','D']},'A','tok');",
         "tail({ok:true,applied:'A',targets:[]},'A','tok');",
@@ -3368,3 +3374,338 @@ def test_the_updated_row_tint_uses_an_existing_token_and_honors_reduced_motion()
     covering = [b for b in blocks if ".row.updated" in b]
     assert covering, "the reduced-motion block must name .row.updated"
     assert "transition:none" in covering[0]
+
+
+# ---------------------------------------------------------------------------
+# The finish flow (docs/ui-refresh/proposal.md, phase 1): the step strip on
+# the meeting page, the inline Voices step, and the hand-off to the next
+# meeting to finish. Pure functions and key handling run through node over
+# the extracted source; placement is regex over the files.
+# ---------------------------------------------------------------------------
+def _js_const(name):
+    m = re.search(r"(?m)^const " + re.escape(name) + r"=.*;$", NEW_JS)
+    assert m, f"missing const: {name}"
+    return m.group(0)
+
+
+def _finish_env():
+    return "\n".join([
+        _js_const("FINISH_DAYS"), _js_const("FS_LABEL"),
+        _js_oneline("esc"),
+        _js_fn("finishSteps"), _js_oneline("fsCur"), _js_fn("toFinish"),
+        _js_fn("nextToFinish"), _js_fn("fsStripHTML"), _js_fn("_fsNextBtn"),
+        _js_fn("fsDoneHTML"),
+        "const NOW=Date.parse('2026-09-27T12:00:00');",
+        "const fin=(title,voices,flags)=>({title,voices,flags,"
+        "done:title&&!voices&&!flags});",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_finish_steps_walk_title_voices_flags_in_order():
+    out = _run_node(_finish_env() + """
+const st=(f,past)=>finishSteps({finish:f},past).map(s=>[s.key,s.state,s.count]);
+console.log(JSON.stringify({
+  title:st(fin(false,2,6)),
+  voices:st(fin(true,2,6)),
+  flags:st(fin(true,0,6)),
+  done:st(fin(true,0,0)),
+  skipped:st(fin(true,1,6),['voices']),
+  skippedLast:st(fin(true,1,0),['voices']),
+  none:st(undefined),
+}));
+""")
+    assert out["title"] == [["title", "cur", 0], ["voices", "open", 2],
+                            ["flags", "open", 6], ["done", "open", 0]]
+    assert out["voices"] == [["title", "done", 0], ["voices", "cur", 2],
+                             ["flags", "open", 6], ["done", "open", 0]]
+    assert out["flags"] == [["title", "done", 0], ["voices", "done", 0],
+                            ["flags", "cur", 6], ["done", "open", 0]]
+    assert out["done"] == [["title", "done", 0], ["voices", "done", 0],
+                           ["flags", "done", 0], ["done", "done", 0]]
+    # a skipped voice keeps Voices open, and the next open step is current
+    assert out["skipped"][1] == ["voices", "open", 1]
+    assert out["skipped"][2] == ["flags", "cur", 6]
+    # nothing left to do but the skipped voice: Done is current, not done
+    assert out["skippedLast"][3] == ["done", "cur", 0]
+    assert out["none"][3] == ["done", "done", 0], "no record means nothing to finish"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_next_to_finish_wraps_skips_the_current_and_honors_fourteen_days():
+    out = _run_node(_finish_env() + """
+const rows=[
+  {id:'rec:x',state:'recording'},
+  {id:'A',state:'needs_name',when:'2026-01-01T09:00:00',finish:fin(false,0,0)},
+  {id:'B',state:'ready',when:'2026-09-26T09:00:00',finish:fin(true,0,0)},
+  {id:'C',state:'ready',when:'2026-09-25T09:00:00',finish:fin(true,2,0)},
+  {id:'D',state:'ready',when:'2026-08-01T09:00:00',finish:fin(true,0,9)},
+  {id:'E',state:'ready',when:'2026-09-20T09:00:00',finish:fin(true,0,3)},
+];
+const id=r=>r?r.id:null;
+console.log(JSON.stringify({
+  fromA:id(nextToFinish(rows,'A',1,NOW)),
+  fromC:id(nextToFinish(rows,'C',1,NOW)),
+  fromE:id(nextToFinish(rows,'E',1,NOW)),
+  backFromC:id(nextToFinish(rows,'C',-1,NOW)),
+  backFromA:id(nextToFinish(rows,'A',-1,NOW)),
+  unknown:id(nextToFinish(rows,'gone',1,NOW)),
+  unknownBack:id(nextToFinish(rows,'gone',-1,NOW)),
+  alone:id(nextToFinish([rows[3]],'C',1,NOW)),
+  empty:id(nextToFinish([],'C',1,NOW)),
+  oldTitle:toFinish(rows[1],NOW), oldFlags:toFinish(rows[4],NOW),
+  finished:toFinish(rows[2],NOW), noWhen:toFinish({finish:fin(true,1,0)},NOW),
+}));
+""")
+    # B is finished and D is backlog (flags only, processed in August)
+    assert out["fromA"] == "C"
+    assert out["fromC"] == "E"
+    assert out["fromE"] == "A", "the walk wraps past the end"
+    assert out["backFromC"] == "A" and out["backFromA"] == "E"
+    assert out["unknown"] == "A" and out["unknownBack"] == "E"
+    assert out["alone"] is None and out["empty"] is None
+    # an open title is always to finish; other open steps only within 14 days
+    assert out["oldTitle"] is True and out["oldFlags"] is False
+    assert out["finished"] is False and out["noWhen"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_finish_strip_markup_in_each_state():
+    out = _run_node(_finish_env() + """
+const strip=f=>fsStripHTML(finishSteps({finish:f}));
+const cls=h=>[...h.matchAll(/class="fstep (\\w+)"/g)].map(m=>m[1]);
+console.log(JSON.stringify({
+  title:strip(fin(false,2,6)), voices:strip(fin(true,2,6)),
+  flags:strip(fin(true,0,6)), done:strip(fin(true,0,0)),
+  cls:[fin(false,2,6),fin(true,2,6),fin(true,0,6),fin(true,0,0)].map(f=>cls(strip(f))),
+  doneNext:fsDoneHTML({id:'LT Weekly 09262026',title:'LT Weekly'}),
+  doneLast:fsDoneHTML(null),
+}));
+""")
+    assert out["cls"] == [["cur", "open", "open", "open"],
+                          ["done", "cur", "open", "open"],
+                          ["done", "done", "cur", "open"],
+                          ["done", "done", "done", "done"]]
+    t = out["title"]
+    # the numbered steps in order, the counts in mono, the current step marked
+    assert t.index(">Title") < t.index(">Voices") < t.index(">Flags") < t.index(">Done")
+    assert '<span class="c mono">2</span>' in t and '<span class="c mono">6</span>' in t
+    assert 'data-step="title" aria-current="step"' in t
+    assert t.count('class="fsep"') == 3
+    # a done step shows a check instead of its number, and drops its count
+    v = out["voices"]
+    assert '<span class="no">&#10003;</span>Title' in v
+    assert '<span class="no">2</span>Voices <span class="c mono">2</span>' in v
+    f = out["flags"]
+    assert 'Voices</span>' in f and '<span class="c mono">2</span>' not in f
+    # Finished: the green line, with the hand-off when there is somewhere to go
+    assert 'class="doneline"' in out["doneNext"]
+    assert "Finished: title, voices, and flags are done." in out["doneNext"]
+    assert 'onclick="fsGo(1)"' in out["doneNext"] and "Next to finish &#8594;" in out["doneNext"]
+    assert 'title="LT Weekly (])"' in out["doneNext"]
+    assert "fsGo" not in out["doneLast"] and "Nothing else to finish." in out["doneLast"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_strip_stays_away_from_a_meeting_already_finished():
+    """A finished meeting looks as it does today: no strip at all. An open one
+    renders the strip with the current step's body, and a flow carried across
+    a re-stamp keeps its Finished line even though the row now reads done."""
+    out = _run_node(_finish_env() + "\n".join([
+        _js_fn("fsInit"), _js_fn("fsShow"), _js_fn("fsRender"), _js_fn("fsTitleHTML"),
+        _js_fn("fsFlagsHTML"), _js_fn("fsLeftHTML"), _js_fn("fsNext"),
+        "function srcStem(n){return n.replace(/\\.[^.]+$/,'');}",
+        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[]},route={base:null};",
+        "const box={hidden:true,innerHTML:''};",
+        "const document={getElementById:id=>id==='mfinish'?box:null};",
+        "let focused=0;function $(q){return q==='#fstitle'?{focus(){focused++;}}:null;}",
+        "function fvOpen(){} function reviewStart(){}",
+        "let ROWS={};function rowById(id){return ROWS[id];}",
+        """
+const out={};
+ROWS.Done={id:'Done',when:'2026-09-26T09:00:00',finish:fin(true,0,0)};
+fsInit('Done');out.done={fs:FS,hidden:box.hidden,html:box.innerHTML};
+ROWS.New={id:'New',state:'needs_name',when:new Date().toISOString().slice(0,19),
+  suggested_title:'Budget Review',suggested_date:'2026-09-26',
+  source_file:'Recording 0926.m4a',finish:fin(false,1,0)};
+fsInit('New');out.open={cur:FS.cur,live:FS.live,hidden:box.hidden,html:box.innerHTML,focused};
+FS_CARRY={base:'Done',past:[],live:true,keep:true};
+fsInit('Done');out.carried={hidden:box.hidden,html:box.innerHTML,carry:FS_CARRY};
+console.log(JSON.stringify(out));
+"""]))
+    assert out["done"] == {"fs": None, "hidden": True, "html": ""}
+    o = out["open"]
+    assert o["cur"] == "title" and o["hidden"] is False and o["live"] is True
+    assert '<div class="finish"><div class="fstrip"' in o["html"]
+    # the title step: the inline rename and date inputs, prefilled
+    assert 'class="renameinput" id="fstitle" type="text" value="Budget Review"' in o["html"]
+    assert 'class="dateinput" id="fsdate" type="date" value="2026-09-26"' in o["html"]
+    assert 'onclick="fsAccept()"' in o["html"] and "Use the file name" in o["html"]
+    assert o["focused"] == 1, "a meeting to finish takes the keyboard on open"
+    assert 'class="doneline"' in out["carried"]["html"]
+    assert out["carried"]["carry"] is None, "a carry is consumed once"
+
+
+def _voices_env():
+    return _finish_env() + "\n".join([
+        _js_fn("fsKey"), _js_fn("fvUse"), _js_fn("fvSkip"), _js_fn("fvNext"),
+        _js_fn("fvSave"), _js_fn("saveName"), _js_fn("namedToast"), _js_fn("fvBusy"),
+        _js_fn("fvToken"), _js_oneline("_fsOpenVoices"), _js_fn("fsGo"),
+        "let NP=null,_popClose=null,MR=null,NPBUSY=false,MP={base:'M1',audio:null};",
+        "let route={view:'meeting',base:'M1'};",
+        "const location={hash:'#m/M1'};",
+        "const els={};",
+        "for(const k of ['#fvname','#fverr','#fvconfirm','#fvsave'])"
+        "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false,"
+        "tagName:'INPUT',focus(){document.activeElement=this;}};",
+        "function $(q){return els[q]||null;}",
+        "const body={tagName:'BODY'};",
+        "const document={activeElement:body,getElementById:()=>null};",
+        "let posted=[],reply={ok:true,targets:['X','Y']},toasts=[],shows=[],reloads=0,refreshes=0;",
+        "function api(p,b){posted.push({p,b});return Promise.resolve(reply);}",
+        "function toast(m){toasts.push(m);}",
+        "function refresh(){refreshes++;}",
+        "function mReloadSegs(){reloads++;}",
+        "function mSyncPP(){}",
+        "function fsShow(auto){shows.push([auto,FS.vi,FS.past.slice()]);FS.cur='voices';}",
+        "function fsStripSync(){}",
+        "function key(k){let prevented=false;"
+        "const handled=fsKey({key:k,metaKey:false,ctrlKey:false,altKey:false,"
+        "preventDefault(){prevented=true;}});return {handled,prevented};}",
+        "let S={timeline:[]};",
+        "let FS_CARRY=null;",
+        "let FS={base:'M1',cur:'voices',past:[],vi:0,live:true,"
+        "fin:{title:true,voices:2,flags:0},"
+        "looks:[{name:'Grace Lindqvist',score:.84},{name:'Elena Ruiz',score:.71}],"
+        "voices:[{id:'SPEAKER_01',display:'Speaker 58',uid:'U058',st:''},"
+        "{id:'SPEAKER_02',display:'Speaker 61',uid:null,st:''}]};",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_voices_step_keys_pick_save_and_skip():
+    out = _run_node(_voices_env() + """
+(async()=>{
+  const o={};
+  o.k2=key('2');o.box2=els['#fvname'].value;
+  o.k3=key('3');                      // only two chips: not handled
+  // typing in the name box: no key fires, not even s
+  document.activeElement=els['#fvname'];
+  o.typingS=key('s');o.typingEnter=key('Enter');
+  document.activeElement=body;
+  o.k1=key('1');o.box1=els['#fvname'].value;
+  document.activeElement=body;
+  o.enter=key('Enter');
+  await new Promise(r=>setTimeout(r,0));
+  o.posted=posted.slice();o.toasts=toasts.slice();
+  o.afterSave={vi:FS.vi,st:FS.voices[0].st,shows:shows.slice(),reloads,refreshes,
+    label:els['#fvsave'].textContent,busy:NPBUSY};
+  document.activeElement=body;
+  o.s=key('s');
+  o.afterSkip={vi:FS.vi,st:FS.voices[1].st,past:FS.past,voices:FS.fin.voices,
+    shows:shows.slice(-1)};
+  // the floor refusal offers the meeting-only save back through fvSave
+  FS.vi=1;FS.voices[1].st='';FS.past=[];
+  els['#fvname'].value='Tom Keller';reply={ok:false,floor:true,error:'Too little speech.'};
+  document.activeElement=body;
+  key('Enter');await new Promise(r=>setTimeout(r,0));
+  o.floor={post:posted[posted.length-1],warn:els['#fvconfirm'].innerHTML,
+    shown:!els['#fvconfirm'].hidden,vi:FS.vi};
+  console.log(JSON.stringify(o));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+""")
+    assert "threw" not in out, out
+    assert out["k2"] == {"handled": True, "prevented": True}
+    assert out["box2"] == "Elena Ruiz"
+    assert out["k3"] == {"handled": False, "prevented": False}
+    assert out["typingS"]["handled"] is False and out["typingEnter"]["handled"] is False
+    assert out["box1"] == "Grace Lindqvist"
+    assert out["enter"] == {"handled": True, "prevented": True}
+    # the save goes through the shared saveName, by uid for a registry voice
+    assert out["posted"] == [{"p": "/api/name",
+                              "b": {"uid": "U058", "name": "Grace Lindqvist",
+                                    "confirm": False}}]
+    assert out["toasts"] == ["Named here. Updating 2 other meetings."]
+    s = out["afterSave"]
+    assert s["st"] == "named" and s["vi"] == 1, "the strip advances to the next voice"
+    assert s["shows"] == [[True, 1, []]]
+    assert s["reloads"] == 1 and s["refreshes"] == 1
+    assert s["label"] == "Save and next" and s["busy"] is False
+    # s skips the last voice: Voices stays open, the strip moves past it
+    assert out["s"] == {"handled": True, "prevented": True}
+    k = out["afterSkip"]
+    assert k["st"] == "skip" and k["vi"] == 2 and k["past"] == ["voices"]
+    assert k["voices"] == 1 and k["shows"] == [[True, 2, ["voices"]]]
+    # a cluster voice posts by meeting and speaker; the floor strip calls fvSave
+    f = out["floor"]
+    assert f["post"]["b"] == {"meeting": "M1", "speaker": "SPEAKER_02",
+                              "name": "Tom Keller", "confirm": False, "local": False}
+    assert f["shown"] is True and 'onclick="fvSave(false,true)"' in f["warn"]
+    assert "$('#fvconfirm').hidden=true" in f["warn"]
+    assert f["vi"] == 1, "a refused save holds the voice on screen"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_hand_off_keys_open_the_next_meeting_to_finish():
+    out = _run_node(_voices_env() + """
+const now=new Date(Date.now()-3600e3).toISOString().slice(0,19);
+S.timeline=[
+  {id:'M0',when:now,finish:fin(true,1,0)},
+  {id:'M1',when:now,finish:fin(true,2,0)},
+  {id:'M2',when:now,finish:fin(true,0,0)},
+  {id:'M3',when:now,finish:fin(true,0,4)},
+];
+const o={};
+o.next=key(']');o.hashNext=location.hash;o.carry=FS_CARRY;
+location.hash='#m/M1';
+o.prev=key('[');o.hashPrev=location.hash;
+location.hash='#m/M1';
+document.activeElement=els['#fvname'];
+o.typing=key(']');o.hashTyping=location.hash;
+document.activeElement=body;NP={uid:'U1'};
+o.panel=key(']');NP=null;
+_popClose=()=>{};o.popover=key(']');_popClose=null;
+// a finished meeting page (no strip) still hands off
+FS=null;o.noStrip=key(']');o.hashNoStrip=location.hash;
+// nothing left to finish: the key is inert
+S.timeline=[{id:'M1',when:now,finish:fin(true,0,0)}];location.hash='#m/M1';
+o.nothing=key(']');o.hashNothing=location.hash;
+console.log(JSON.stringify(o));
+""")
+    assert out["next"] == {"handled": True, "prevented": True}
+    assert out["hashNext"] == "#m/M3", "M2 is finished, so ] skips it"
+    assert out["carry"] == {"base": "M3", "past": [], "live": True, "keep": False}
+    assert out["hashPrev"] == "#m/M0"
+    assert out["typing"]["handled"] is False and out["hashTyping"] == "#m/M1"
+    assert out["panel"]["handled"] is False and out["popover"]["handled"] is False
+    assert out["hashNoStrip"] == "#m/M3"
+    assert out["nothing"] == {"handled": True, "prevented": False}
+    assert out["hashNothing"] == "#m/M1"
+
+
+def test_the_finish_strip_sits_under_the_audio_and_above_the_summary():
+    build = _js_fn("buildMeeting")
+    i_audio = build.index("_mAudioBar()")
+    i_fin = build.index('<div id="mfinish" class="mfinish" hidden></div>')
+    i_sum = build.index("_mSummary(m)")
+    assert i_audio < i_fin < i_sum
+    assert "fsInit(base);" in build and "fsSegsLoaded();" in build
+    # the page keys hand the flow its own keys first; the voice save shares
+    # the panel's save path; teardown drops the flow with the page
+    assert "if(fsKey(e))return;" in _js_fn("mKey")
+    assert "await saveName({" in _js_fn("fvSave") and "again:'fvSave'" in _js_fn("fvSave")
+    assert "FS=null;" in _js_fn("teardownMeeting")
+    assert "fsFlagsSync();" in _js_fn("mSyncFlagStrip")
+    assert "fsSegsLoaded();" in _js_fn("mReloadSegs")
+    # the flags step is the existing verdict bar; the clip is span playback
+    assert "reviewStart(0)" in _js_fn("fsShow")
+    assert "mPlaySpan(FS.clip.start,FS.clip.end)" in _js_fn("fvPlay")
+    assert "'/api/name_preview'" in _js_fn("fvPreview")
+    assert "'/api/accept_meeting'" in _js_fn("fsAccept")
+    # the strip's classes live in the finish flow section, on existing tokens
+    sec = NEW_CSS[NEW_CSS.index("Finish flow (docs/ui-refresh"):]
+    for cls in (".finish{", ".fstrip{", ".fstep{", ".fbody{", ".vhead{", ".vq{",
+                ".vgrid{", ".namebox{", ".preview{", ".looks{", ".lchip{",
+                ".vbtns{", ".clip{", ".said{", ".doneline{"):
+        assert cls in sec, f"missing {cls}"
+    assert not re.findall(r"#[0-9A-Fa-f]{3,6}\b", sec), "no new colors"

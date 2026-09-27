@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meetings</title>
+<!-- Mockup of the "List and Reader" proposal (docs/ui-refresh/proposal.md).
+     Static states with a little JS to switch them. Sample data is fictional.
+     Tokens are copied from gui/static/app.css (Indigo Blueprint) and applied
+     the same way: :root light, prefers-color-scheme dark, and data-theme
+     overrides that win both ways. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#F4F6FB; --card:#FFFFFF; --ink:#101828; --sub:#5D6B85;
+  --hair:#E1E6F2; --line:#C7D0E4; --inset:#EEF1F8;
+  --accent:#2F4BD6; --acc-ink:#FFFFFF; --accent-soft:#E6EAFB; --accent-text:#2F4BD6;
+  --ok:#1E7B45; --ok-soft:#E3F4EA;
+  --busy:var(--accent); --busy-soft:var(--accent-soft);
+  --attn:#0B7285; --attn-soft:#DDF2F6;
+  --rec:#C2362F; --rec-soft:#FAE3E0; --rec-text:#BC342E;
+  --work:var(--accent); --work-soft:var(--accent-soft);
+  --personal:#A8327A; --personal-soft:#F8E4F0;
+  --sans:'Figtree',-apple-system,system-ui,"SF Pro Text","Segoe UI",sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --shadow:0 1px 2px rgba(16,24,40,.08), 0 12px 36px rgba(16,24,40,.14);
+  /* new in the proposal: the selected list row */
+  --sel:var(--accent-soft);
+  --listw:380px;
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --paper:#0F1320; --card:#161B2B; --ink:#E8EBF5; --sub:#98A2BF;
+  --hair:#232A3D; --line:#33405A; --inset:#1D2437;
+  --accent:#8B9DFF; --acc-ink:#0E1330; --accent-soft:#232C55; --accent-text:#8B9DFF;
+  --ok:#5BC98C; --ok-soft:#16291E;
+  --attn:#5FD0E3; --attn-soft:#0F2A33;
+  --rec:#F0605A; --rec-text:#F0605A; --rec-soft:#34191B;
+  --personal:#E58BC4; --personal-soft:#331A2A;
+  --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
+  color-scheme:dark;
+}}
+:root[data-theme=dark]{
+  --paper:#0F1320; --card:#161B2B; --ink:#E8EBF5; --sub:#98A2BF;
+  --hair:#232A3D; --line:#33405A; --inset:#1D2437;
+  --accent:#8B9DFF; --acc-ink:#0E1330; --accent-soft:#232C55; --accent-text:#8B9DFF;
+  --ok:#5BC98C; --ok-soft:#16291E;
+  --attn:#5FD0E3; --attn-soft:#0F2A33;
+  --rec:#F0605A; --rec-text:#F0605A; --rec-soft:#34191B;
+  --personal:#E58BC4; --personal-soft:#331A2A;
+  --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 36px rgba(0,0,0,.55);
+  color-scheme:dark;
+}
+:root[data-theme=light]{color-scheme:light}
+
+*{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none!important}
+body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
+  -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums;min-height:100vh}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.sub{color:var(--sub)}
+
+/* ---------------------------------------------------------------- header */
+.hdr{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;
+  padding:12px 20px;border-bottom:1px solid var(--hair);background-color:var(--paper);
+  background-image:radial-gradient(circle at 1px 1px,
+    color-mix(in srgb,var(--line) 55%,transparent) 1px,transparent 0);
+  background-size:14px 14px}
+.wordmark{font-size:19px;font-weight:700;letter-spacing:-.01em}
+.pill{display:inline-flex;align-items:center;gap:8px;font:500 13px/1 var(--mono);
+  padding:7px 10px;border-radius:4px;background:var(--card);border:1px solid var(--line);color:var(--sub)}
+.pill .pseg{display:inline-flex;align-items:center;gap:6px}
+.pill .pseg+.pseg{border-left:1px solid var(--line);padding-left:8px}
+.pill .rec{color:var(--rec-text)}
+.pill .busy{color:var(--accent-text)}
+.recdot{width:8px;height:8px;border-radius:50%;background:var(--rec);animation:blink 1.4s infinite}
+@keyframes blink{50%{opacity:.35}}
+.grow{flex:1}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:6px;
+  border:1px solid var(--line);background:var(--card);font-size:13.5px;font-weight:500;white-space:nowrap}
+.btn:hover{background:var(--inset)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--acc-ink)}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.ghost{border-color:transparent;background:none;color:var(--sub)}
+.btn.ghost:hover{background:var(--inset);color:var(--ink)}
+.btn.mini{height:28px;padding:0 10px;font-size:13px}
+.iconbtn{width:32px;height:32px;border-radius:6px;border:1px solid var(--line);background:var(--card);
+  display:inline-grid;place-items:center;font-size:14px}
+kbd{font:500 11.5px/1 var(--mono);padding:2px 5px;border:1px solid var(--line);border-bottom-width:2px;
+  border-radius:4px;color:var(--sub);background:var(--card)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ---------------------------------------------------------------- panes */
+.panes{display:grid;grid-template-columns:var(--listw) 1fr;min-height:calc(100vh - 57px)}
+.list{border-right:1px solid var(--hair);padding:14px 14px 90px;
+  position:sticky;top:57px;height:calc(100vh - 57px);overflow:auto}
+.reader{background:var(--card);min-width:0;padding:22px 32px 110px}
+
+/* search + chips */
+.search{width:100%;height:36px;padding:0 12px 0 32px;border-radius:6px;border:1px solid var(--line);
+  background:var(--card) no-repeat 10px 50%/14px;font-size:14px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%235D6B85' stroke-width='1.6'%3E%3Ccircle cx='7' cy='7' r='5'/%3E%3Cpath d='M11 11l3.5 3.5'/%3E%3C/svg%3E")}
+.search::placeholder{color:var(--sub)}
+.fchips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 14px}
+.fchip{font-size:13px;padding:3px 9px;border-radius:4px;border:1px solid var(--hair);color:var(--sub);background:var(--card)}
+.fchip.on{background:var(--accent-soft);border-color:transparent;color:var(--accent-text);font-weight:600}
+.fchip .n{font-family:var(--mono);margin-left:4px}
+
+/* section eyebrows */
+.eyebrow{display:flex;align-items:center;gap:8px;margin:16px 2px 8px;
+  font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--sub)}
+.eyebrow .rule{flex:1;height:1px;background:var(--hair)}
+.eyebrow .ct{font-family:var(--mono);letter-spacing:0;font-weight:500}
+.eyebrow .act{letter-spacing:0;text-transform:none;font-weight:500;color:var(--accent-text);font-size:13px}
+.eyebrow.year{color:var(--ink);font-size:14px;font-weight:700}
+.eyebrow.year .rule{background:var(--line)}
+.chev{display:inline-block;width:12px;font-size:9px;color:var(--sub)}
+
+/* list rows: denser than today's cards; 15px title, 13px meta, floor 13px */
+.lrow{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--hair);
+  border-radius:6px;padding:10px 12px 10px 14px;margin-bottom:6px;position:relative;transition:background .15s}
+.lrow:hover{background:var(--inset)}
+.lrow.sel{background:var(--sel);border-color:transparent;box-shadow:inset 3px 0 0 var(--accent)}
+.lrow .t{font-size:15px;font-weight:600;line-height:1.3;display:flex;gap:8px;align-items:baseline}
+.lrow .t span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .m{font-size:13px;color:var(--sub);margin-top:2px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.lrow .s{font-size:13px;color:var(--sub);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .d{font:500 13px var(--mono);color:var(--sub);white-space:nowrap}
+.rev{color:var(--attn);font-weight:600}
+.catchip{font-size:12.5px;font-weight:600;padding:1px 6px;border-radius:4px}
+.catchip.work{color:var(--work);background:var(--work-soft)}
+.catchip.personal{color:var(--personal);background:var(--personal-soft)}
+.today{font-size:12.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text)}
+
+/* finish dots on To-finish rows: title / voices / flags */
+.steps{display:flex;gap:6px;margin-top:6px}
+.sdot{font-size:12.5px;font-weight:600;padding:1px 7px;border-radius:4px;background:var(--attn-soft);color:var(--attn)}
+.sdot.done{background:var(--ok-soft);color:var(--ok)}
+.sdot.cur{background:var(--accent);color:var(--acc-ink)}
+
+/* Now block */
+.now{background:var(--card);border:1px solid var(--hair);border-radius:6px;padding:12px 14px;margin-bottom:6px;position:relative;overflow:hidden}
+.now.rec{box-shadow:inset 3px 0 0 var(--rec)}
+.now .t{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.now .clock{margin-left:auto;font:600 15px var(--mono);color:var(--rec-text)}
+.now .m{font-size:13px;color:var(--sub);margin-top:3px}
+.stages{display:flex;gap:4px;margin-top:9px}
+.stage{flex:1;font-size:12.5px;color:var(--sub);padding-top:6px;border-top:3px solid var(--hair)}
+.stage.done{border-color:var(--ok);color:var(--ok)}
+.stage.cur{border-color:var(--accent);color:var(--accent-text);font-weight:600}
+.now .eta{font:500 13px var(--mono);color:var(--accent-text);margin-left:auto}
+.now .acts{display:flex;gap:6px;margin-top:10px}
+
+/* ---------------------------------------------------------------- reader */
+.rhead{display:flex;align-items:flex-start;gap:16px}
+.rtitle{font-size:22px;font-weight:600;letter-spacing:-.01em;line-height:1.25;cursor:text}
+.rtitle:hover{text-decoration:underline dotted var(--line);text-underline-offset:5px}
+.rmeta{font-size:13.5px;color:var(--sub);margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.who{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
+.nchip{font-size:13px;padding:2px 8px;border-radius:4px;background:var(--inset);color:var(--ink)}
+.nchip.unk{background:var(--attn-soft);color:var(--attn);font-weight:600}
+.nchip.now{outline:2px solid var(--accent);outline-offset:1px}
+
+.audio{display:flex;align-items:center;gap:12px;margin:16px 0 0;padding:10px 12px;border:1px solid var(--hair);border-radius:6px;background:var(--paper)}
+.play{width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--acc-ink);display:grid;place-items:center;font-size:12px;flex:none}
+.wave{flex:1;height:28px;border-radius:3px;
+  background:repeating-linear-gradient(90deg,var(--line) 0 2px,transparent 2px 5px);
+  position:relative}
+.wave i{position:absolute;inset:0 auto 0 0;background:repeating-linear-gradient(90deg,var(--accent) 0 2px,transparent 2px 5px)}
+.audio .tm{font:500 13px var(--mono);color:var(--sub)}
+
+/* the finish strip */
+.finish{margin:18px 0 0;border:1px solid var(--hair);border-radius:6px;overflow:hidden}
+.fstrip{display:flex;align-items:center;gap:4px;padding:8px 10px;background:var(--paper);border-bottom:1px solid var(--hair);flex-wrap:wrap}
+.fstep{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:4px;font-size:13.5px;font-weight:500;color:var(--sub)}
+.fstep .no{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font:600 12px var(--mono);
+  background:var(--attn-soft);color:var(--attn)}
+.fstep.done{color:var(--ok)} .fstep.done .no{background:var(--ok-soft);color:var(--ok)}
+.fstep.cur{color:var(--ink);font-weight:600;background:var(--card);box-shadow:0 0 0 1px var(--hair)}
+.fstep.cur .no{background:var(--accent);color:var(--acc-ink)}
+.fstep .c{font-family:var(--mono);color:var(--attn)}
+.fsep{color:var(--line)}
+.fbody{padding:16px 18px}
+.fhint{margin-left:auto;font-size:13px;color:var(--sub)}
+
+/* Voices step */
+.vhead{display:flex;align-items:baseline;gap:10px}
+.vhead h3{font-size:17.5px;font-weight:600}
+.vq{display:flex;gap:4px;margin-left:auto}
+.vq i{width:22px;height:4px;border-radius:2px;background:var(--hair)}
+.vq i.done{background:var(--ok)} .vq i.cur{background:var(--accent)}
+.vgrid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:22px;margin-top:12px}
+.namebox{width:100%;height:40px;padding:0 12px;border-radius:6px;border:2px solid var(--accent);background:var(--card);font-size:15px}
+.preview{font-size:13px;color:var(--sub);margin-top:6px}
+.preview b{color:var(--ink);font-weight:600}
+.looks{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.lchip{font-size:13px;padding:4px 9px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;gap:6px;align-items:center}
+.lchip:hover{background:var(--inset)}
+.lchip .sc{font-family:var(--mono);color:var(--sub)}
+.vbtns{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;align-items:center}
+.clip{border:1px solid var(--hair);border-radius:6px;padding:10px 12px;background:var(--paper)}
+.clip .audio{margin:0;border:0;padding:0;background:none}
+.clip .src{font-size:13px;color:var(--sub);margin-top:8px}
+.said{margin-top:10px;font-size:13.5px}
+.said p{padding:6px 0;border-top:1px solid var(--hair);display:flex;gap:10px}
+.said .ts{font:500 12.5px var(--mono);color:var(--sub);padding-top:2px;flex:none}
+
+/* summary + transcript */
+.sect{margin-top:22px}
+.sect h4{font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--sub);margin-bottom:8px}
+.summary{font-size:15px;line-height:1.6;max-width:78ch}
+.steps-list{margin:8px 0 0 18px;font-size:14.5px}
+.steps-list li{margin:3px 0}
+.tx{margin-top:6px}
+.seg{display:grid;grid-template-columns:62px 140px 1fr;gap:10px;padding:8px 10px;border-radius:6px;font-size:14.5px}
+.seg .ts{font:500 12.5px var(--mono);color:var(--sub);padding-top:3px}
+.seg .sp{font-weight:600;font-size:13.5px;padding-top:1px}
+.sp.a{color:#2F4BD6} .sp.b{color:#0B7285} .sp.c{color:#A8327A} .sp.d{color:#1E7B45}
+:root[data-theme=dark] .sp.a{color:#8B9DFF} :root[data-theme=dark] .sp.b{color:#5FD0E3}
+:root[data-theme=dark] .sp.c{color:#E58BC4} :root[data-theme=dark] .sp.d{color:#5BC98C}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) .sp.a{color:#8B9DFF}
+  :root:not([data-theme=light]) .sp.b{color:#5FD0E3}:root:not([data-theme=light]) .sp.c{color:#E58BC4}
+  :root:not([data-theme=light]) .sp.d{color:#5BC98C}}
+.seg.flag{background:var(--attn-soft);box-shadow:inset 3px 0 0 var(--attn)}
+.seg.flag.cur{box-shadow:inset 3px 0 0 var(--attn),0 0 0 2px var(--accent)}
+.seg.faded{opacity:.55}
+.fcard{grid-column:2 / 4;margin-top:8px;padding:10px 12px;border-radius:6px;background:var(--card);border:1px solid var(--hair);font-size:13.5px}
+.fcard .why{color:var(--attn);font-weight:600}
+.fcard .alt{margin-top:6px;color:var(--sub)}
+.fcard .alt b{color:var(--ink);font-weight:500}
+
+/* the docked verdict bar (today's, unchanged) */
+.vbar{position:sticky;top:57px;z-index:10;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin:16px -32px 0;padding:8px 32px;background:var(--card);border-bottom:1px solid var(--hair);border-top:1px solid var(--hair)}
+.vbar .cnt{font:600 13px var(--mono);color:var(--attn);margin-right:6px}
+
+/* ask bar + done line */
+.ask{position:sticky;bottom:64px;margin-top:26px;display:flex;gap:8px;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--card);box-shadow:var(--shadow)}
+.ask input{flex:1;border:0;background:none;padding:0 8px;font-size:14.5px;outline:none}
+.doneline{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:6px;background:var(--ok-soft);color:var(--ok);font-weight:600;font-size:14px;margin-top:18px}
+
+/* key sheet */
+.veil{position:fixed;inset:0;background:rgba(16,24,40,.35);z-index:50;display:grid;place-items:center}
+.sheet{background:var(--card);border-radius:6px;box-shadow:var(--shadow);padding:20px 24px;width:min(560px,92vw);font-size:14px}
+.sheet h3{font-size:15px;margin-bottom:10px}
+.sheet dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:center}
+.sheet dt{text-align:right}
+
+/* mockup-only chrome: the state switcher (not part of the design) */
+.mockbar{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);z-index:40;display:flex;gap:4px;align-items:center;
+  padding:6px;border-radius:8px;background:var(--card);border:1px dashed var(--line);box-shadow:var(--shadow);font-size:13px}
+.mockbar .lab{color:var(--sub);padding:0 8px}
+.mockbar button{padding:6px 11px;border-radius:6px;color:var(--sub);font-weight:500}
+.mockbar button.on{background:var(--accent);color:var(--acc-ink)}
+
+/* ---------------------------------------------------------------- narrow */
+@media(max-width:1100px){:root{--listw:330px}.reader{padding:20px 22px 110px}.vbar{margin:16px -22px 0;padding:8px 22px}
+  .vgrid{grid-template-columns:1fr}.seg{grid-template-columns:54px 110px 1fr}}
+@media(max-width:899px){
+  .panes{grid-template-columns:1fr}
+  .list{position:static;height:auto;border-right:0;border-bottom:1px solid var(--hair);padding-bottom:14px}
+  .hdr .search-h{display:none}
+  .seg{grid-template-columns:1fr}.seg .ts{padding:0}.fcard{grid-column:1}
+  .mockbar .lab{display:none}
+  /* narrow: the reader takes the screen while a meeting is being finished,
+     with a back control, as the #m route does today */
+  body[data-state=naming] .list,body[data-state=review] .list{display:none}
+  .back:not([hidden]){display:inline-flex!important}
+}
+.back{display:none;margin-bottom:12px;font-size:13.5px;color:var(--accent-text);font-weight:500}
+@media(prefers-reduced-motion:reduce){.recdot{animation:none}*{transition:none!important}}
+</style></head>
+<body data-state="idle">
+
+<header class="hdr">
+  <span class="wordmark">Meetings</span>
+  <span class="pill" id="pill" hidden></span>
+  <span class="grow"></span>
+  <button class="btn" type="button">Process <span class="sub">&#9662;</span></button>
+  <button class="iconbtn" type="button" id="themeBtn" title="Theme: auto / light / dark">&#9680;</button>
+  <button class="iconbtn" type="button" title="Settings, speakers, history, archive">&#9881;</button>
+</header>
+
+<div class="panes">
+<!-- =========================================================== LIST PANE -->
+<nav class="list" aria-label="Meetings">
+  <input class="search" type="search" placeholder="Search titles and words   /" aria-label="Search">
+  <div class="fchips">
+    <button class="fchip on" type="button">All</button>
+    <button class="fchip" type="button">Work</button>
+    <button class="fchip" type="button">Personal</button>
+    <button class="fchip" type="button">Has flags<span class="n">41</span></button>
+    <button class="fchip" type="button">Has voices<span class="n">12</span></button>
+  </div>
+
+  <!-- NOW: only in the recording state -->
+  <div data-show="recording">
+    <div class="eyebrow">Now<span class="rule"></span></div>
+    <div class="now rec">
+      <div class="t"><span class="recdot"></span>Recording<span class="clock" id="recClock">12:41</span></div>
+      <div class="m">Mic and system audio, both channels live</div>
+    </div>
+    <div class="now">
+      <div class="t">Recording 09272026 0815<span class="eta">&#8776;6 min left</span></div>
+      <div class="m">38 min of audio &middot; started 8:58</div>
+      <div class="stages">
+        <span class="stage done">Preparing</span><span class="stage done">Transcribing</span>
+        <span class="stage cur">Speakers 64%</span><span class="stage">Summary</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- TO FINISH -->
+  <div class="eyebrow">To finish<span class="rule"></span><button class="act" type="button">Name 12 voices</button></div>
+
+  <button class="lrow" type="button" data-sel="naming review">
+    <div class="t"><span>Literacy pilot check-in</span><span class="d">Sep 25</span></div>
+    <div class="m"><span>52 min &middot; Priya Raman, Tom Keller<span data-show="idle recording naming">, 2 unnamed</span><span data-show="review">, Grace Lindqvist, Marcus Oyelaran</span></span></div>
+    <div class="steps">
+      <span class="sdot done">&#10003; Title</span>
+      <span class="sdot" data-cur="naming" data-show="idle recording naming">Voices 2</span>
+      <span class="sdot done" data-show="review">&#10003; Voices</span>
+      <span class="sdot" data-cur="review">Flags 6</span>
+    </div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Enrollment forecast working session</span><span class="d">Sep 26</span></div>
+    <div class="m">38 min &middot; Marcus Oyelaran, Elena Ruiz, 1 unnamed</div>
+    <div class="steps"><span class="sdot">Title</span><span class="sdot">Voices 1</span><span class="sdot">Flags 2</span></div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Weekly 1:1 with Dana Whitfield</span><span class="d">Sep 24</span></div>
+    <div class="m">31 min &middot; Dana Whitfield</div>
+    <div class="steps"><span class="sdot done">&#10003; Title</span><span class="sdot done">&#10003; Voices</span><span class="sdot">Flags 3</span></div>
+  </button>
+
+  <!-- LIBRARY: the existing year-to-month accordion -->
+  <div class="eyebrow"><span class="chev">&#9660;</span>September 2026<span class="rule"></span><span class="ct">9</span></div>
+  <button class="lrow" type="button" data-sel="idle recording">
+    <div class="t"><span>Budget review with Finance</span><span class="d">Sep 23</span></div>
+    <div class="m">44 min &middot; Sam Obi, Luis Moreno, Grace Lindqvist <span class="catchip work">Work</span></div>
+    <div class="s">Q2 allocations hold; transportation line needs a revised estimate before the board packet.</div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Attendance data sync</span><span class="d">Sep 22</span></div>
+    <div class="m">28 min &middot; Elena Ruiz, Tom Keller <span class="rev">4 to check</span></div>
+    <div class="s">Chronic absence flags will refresh weekly; the school list moves to the shared drive.</div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Principal advisory council</span><span class="d">Sep 18</span></div>
+    <div class="m">61 min &middot; 7 speakers <span class="catchip work">Work</span></div>
+    <div class="s">Principals asked for earlier access to the fall benchmark files and a single contact.</div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Grant reporting plan</span><span class="d">Sep 16</span></div>
+    <div class="m">35 min &middot; Grace Lindqvist, Sam Obi</div>
+    <div class="s">Interim report due Oct 15; outcomes table uses last spring's cohort.</div>
+  </button>
+  <button class="lrow" type="button">
+    <div class="t"><span>Dentist follow-up call</span><span class="d">Sep 12</span></div>
+    <div class="m">9 min &middot; 2 speakers <span class="catchip personal">Personal</span></div>
+  </button>
+  <div class="eyebrow"><span class="chev">&#9660;</span>August 2026<span class="rule"></span><span class="ct">14</span></div>
+  <button class="lrow" type="button">
+    <div class="t"><span>Summer school outcomes debrief</span><span class="d">Aug 28</span></div>
+    <div class="m">49 min &middot; Priya Raman, Marcus Oyelaran <span class="rev">2 to check</span></div>
+    <div class="s">Credit recovery completion rose; math sections ran short of staff in week three.</div>
+  </button>
+  <div class="eyebrow"><span class="chev">&#9654;</span>July 2026<span class="rule"></span><span class="ct">12</span></div>
+  <div class="eyebrow year"><span class="chev">&#9654;</span>2025<span class="rule"></span><span class="ct">38</span></div>
+</nav>
+
+<!-- =========================================================== READER -->
+<main class="reader" aria-label="Meeting">
+  <button class="back" type="button" data-show="naming review">&#8249; Meetings</button>
+
+  <!-- ---------------------------------------------- IDLE / RECORDING -->
+  <section data-show="idle recording">
+    <div class="rhead">
+      <div class="grow">
+        <h2 class="rtitle" title="Click to rename">Budget review with Finance</h2>
+        <div class="rmeta"><span title="Click to change the date">Tue, Sep 23, 2026</span> &middot; <span class="mono">44 min</span> &middot; <span class="catchip work">Work</span></div>
+        <div class="who"><span class="nchip">Sam Obi</span><span class="nchip">Luis Moreno</span><span class="nchip">Grace Lindqvist</span></div>
+      </div>
+      <button class="btn ghost" type="button">Export</button>
+      <button class="btn ghost" type="button" title="Export, copy, show files, redo, archive, delete">&#8943;</button>
+    </div>
+    <div class="audio"><span class="play">&#9654;</span><span class="wave"><i style="width:0"></i></span><span class="tm">0:00 / 44:12</span><span class="tm">1&times;</span></div>
+    <div class="doneline">&#10003; Finished: title, voices, and flags are done.</div>
+    <div class="sect"><h4>Summary</h4>
+      <p class="summary">Sam Obi walked through the second-quarter allocations, which hold at the adopted levels. Luis Moreno flagged that the transportation line is running ahead of plan because of the added late routes, and asked for a revised estimate before the board packet closes. Grace Lindqvist will reconcile the grant-funded positions against payroll so the packet shows them separately.</p>
+      <h4 style="margin-top:16px">Committed next steps</h4>
+      <ul class="steps-list"><li>Luis sends the revised transportation estimate by Oct 1.</li>
+        <li>Grace reconciles grant-funded positions against payroll.</li>
+        <li>Sam drafts the board packet summary page.</li></ul>
+    </div>
+    <div class="sect"><h4>Transcript</h4>
+      <div class="tx">
+        <div class="seg"><span class="ts">00:12</span><span class="sp a">Sam Obi</span><span>Let's start with the allocations, since those drive everything else in the packet.</span></div>
+        <div class="seg"><span class="ts">00:31</span><span class="sp b">Luis Moreno</span><span>Before we do, transportation is the one line I'm worried about. The late routes added about four percent.</span></div>
+        <div class="seg"><span class="ts">00:52</span><span class="sp c">Grace Lindqvist</span><span>And I still need to split out the grant positions, or they'll read as general fund.</span></div>
+      </div>
+    </div>
+    <div class="ask"><input placeholder="Ask about this meeting" aria-label="Ask"><button class="btn primary mini" type="button">Ask</button></div>
+  </section>
+
+  <!-- ---------------------------------------------- NAMING / REVIEW -->
+  <section data-show="naming review">
+    <div class="rhead">
+      <div class="grow">
+        <h2 class="rtitle" title="Click to rename">Literacy pilot check-in</h2>
+        <div class="rmeta"><span>Thu, Sep 25, 2026</span> &middot; <span class="mono">52 min</span> &middot; <span class="catchip work">Work</span></div>
+        <div class="who">
+          <span class="nchip">Priya Raman</span><span class="nchip">Tom Keller</span>
+          <span class="nchip" data-show="review">Grace Lindqvist</span>
+          <span class="nchip unk now" data-show="naming">Speaker 58 ?</span>
+          <span class="nchip unk" data-show="naming">Speaker 61 ?</span>
+          <span class="nchip" data-show="review">Marcus Oyelaran</span>
+        </div>
+      </div>
+      <button class="btn ghost" type="button" title="Export, copy, show files, redo, archive, delete">&#8943;</button>
+    </div>
+    <div class="audio"><span class="play">&#9654;</span><span class="wave"><i style="width:27%"></i></span><span class="tm">14:02 / 52:18</span><span class="tm">1&times;</span></div>
+
+    <div class="finish">
+      <div class="fstrip">
+        <span class="fstep done"><span class="no">&#10003;</span>Title</span><span class="fsep">&#8250;</span>
+        <span class="fstep" data-cls-naming="cur" data-cls-review="done"><span class="no" data-review-html="&#10003;">2</span>Voices <span class="c" data-show="naming">2</span></span><span class="fsep">&#8250;</span>
+        <span class="fstep" data-cls-review="cur"><span class="no">3</span>Flags <span class="c">6</span></span><span class="fsep">&#8250;</span>
+        <span class="fstep"><span class="no">4</span>Done</span>
+        <span class="fhint"><kbd>]</kbd> next to finish</span>
+      </div>
+
+      <!-- Voices step, inline: form first, evidence beside it -->
+      <div class="fbody" data-show="naming">
+        <div class="vhead"><h3>Who is Speaker 58?</h3><span class="sub" style="font-size:13px">voice 1 of 2 in this meeting</span>
+          <span class="vq"><i class="cur"></i><i></i></span></div>
+        <div class="vgrid">
+          <div>
+            <input class="namebox" value="Grace Lind" aria-label="This voice belongs to" autofocus>
+            <div class="preview">Names this voice here and in <b>3 other meetings</b></div>
+            <div class="looks">
+              <button class="lchip" type="button"><kbd>1</kbd>Looks like Grace Lindqvist <span class="sc">0.84</span></button>
+              <button class="lchip" type="button"><kbd>2</kbd>Looks like Elena Ruiz <span class="sc">0.71</span></button>
+            </div>
+            <div class="vbtns">
+              <button class="btn primary" type="button">Save and next <kbd style="background:transparent;color:inherit;border-color:currentColor">Enter</kbd></button>
+              <button class="btn" type="button">Skip <kbd>s</kbd></button>
+              <button class="btn ghost" type="button">Not a real speaker</button>
+            </div>
+          </div>
+          <div>
+            <div class="clip">
+              <div class="audio"><span class="play">&#10074;&#10074;</span><span class="wave"><i style="width:48%"></i></span><span class="tm">0:07 / 0:14</span></div>
+              <div class="src">Longest turn here, at 14:02. Plays when the step opens; <kbd>Space</kbd> replays.</div>
+            </div>
+            <div class="said">
+              <p><span class="ts">14:02</span><span>The coaching logs show the second-grade teachers are using the decodable sets about three days a week.</span></p>
+              <p><span class="ts">22:40</span><span>I can pull the running records for the six pilot schools by Friday.</span></p>
+              <p><span class="ts">41:15</span><span>If we extend, I'd want the same coaches, not new ones.</span></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Review step: the docked verdict bar, exactly as today -->
+    <div class="vbar" data-show="review" role="toolbar" aria-label="Step through the flagged lines">
+      <span class="cnt">&#9888; 2 of 6</span>
+      <button class="iconbtn" type="button" title="Previous flag (p)">&#8249;</button>
+      <button class="iconbtn" type="button" title="Next flag (n)">&#8250;</button>
+      <button class="btn mini" type="button">&#9654; Play</button>
+      <button class="btn primary mini" type="button" title="Accept and go to the next flag (Enter or a)">&#10003; Accept</button>
+      <button class="btn mini" type="button" title="Use the second engine's text (u)">Use alt</button>
+      <button class="btn mini ghost" type="button">Skip</button>
+      <button class="btn mini" type="button">&#10003; Accept 20 minor</button>
+      <span class="grow"></span>
+      <button class="btn mini ghost" type="button">Accept all 5 remaining&#8230;</button>
+      <button class="iconbtn" type="button" title="Done (Escape)">&#10005;</button>
+    </div>
+
+    <div class="sect" data-show="naming"><h4>Summary</h4>
+      <p class="summary">Priya Raman reported that pilot classrooms are using the decodable text sets about three days a week, short of the five the design assumes. Tom Keller proposed extending the pilot through winter with the same coaches, and the group agreed to decide after the October running records come in.</p>
+    </div>
+
+    <div class="sect"><h4 data-show="naming">Transcript</h4>
+      <div class="tx">
+        <div class="seg faded" data-show="review"><span class="ts">08:44</span><span class="sp a">Priya Raman</span><span>So the first thing is attendance at the coaching sessions, which has been steady.</span></div>
+        <div class="seg"><span class="ts">13:51</span><span class="sp b">Tom Keller</span><span>Where are we on how often the sets are actually used?</span></div>
+        <div class="seg"><span class="ts">14:02</span><span class="sp c"><span data-show="naming">Speaker 58</span><span data-show="review">Grace Lindqvist</span></span><span>The coaching logs show the second-grade teachers are using the decodable sets about three days a week.</span></div>
+        <div class="seg flag cur" data-show="review"><span class="ts">16:20</span><span class="sp a">Priya Raman</span>
+          <span>That's below the dosage we planned, so the spring comparison might understate it.</span>
+          <div class="fcard"><span class="why">Low confidence, and the second engine heard it differently.</span>
+            <div class="alt">Alt: <b>That's below the dose we planned, so the spring comparison might understate it.</b></div></div>
+        </div>
+        <div class="seg"><span class="ts">16:41</span><span class="sp b">Tom Keller</span><span>Which is an argument for running it through winter before we judge it.</span></div>
+        <div class="seg flag" data-show="review"><span class="ts">19:07</span><span class="sp d">Marcus Oyelaran</span><span>I'd want the pre-K sites in too, if we're extending.</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+
+<!-- key sheet: opened by ? -->
+<div class="veil" id="keys" hidden onclick="this.hidden=true">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <h3>Keys</h3>
+    <dl>
+      <dt><kbd>/</kbd></dt><dd>Search</dd>
+      <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Move through the list; the reader follows</dd>
+      <dt><kbd>Enter</kbd></dt><dd>Accept the current step (title, voice, flag)</dd>
+      <dt><kbd>Space</kbd></dt><dd>Replay the voice clip</dd>
+      <dt><kbd>1</kbd>&#8211;<kbd>3</kbd></dt><dd>Use a "looks like" name</dd>
+      <dt><kbd>s</kbd></dt><dd>Skip this voice</dd>
+      <dt><kbd>a</kbd> <kbd>u</kbd> <kbd>n</kbd> <kbd>p</kbd></dt><dd>Accept, use alt, next, previous flag</dd>
+      <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous or next meeting to finish</dd>
+      <dt><kbd>x</kbd></dt><dd>Select for bulk actions</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Back out one layer</dd>
+    </dl>
+  </div>
+</div>
+
+<!-- mockup-only: switch between the four key states -->
+<div class="mockbar" role="tablist" aria-label="Mockup state">
+  <span class="lab">Mockup state</span>
+  <button type="button" data-go="idle" class="on">Library</button>
+  <button type="button" data-go="recording">Recording</button>
+  <button type="button" data-go="naming">Naming</button>
+  <button type="button" data-go="review">Review</button>
+  <button type="button" onclick="document.getElementById('keys').hidden=false" title="Key sheet (?)">?</button>
+</div>
+
+<script>
+(function(){
+  const PILL={
+    idle:'',
+    recording:'<span class="pseg rec"><span class="recdot"></span>REC <span id="pillClock">12:41</span></span><span class="pseg busy">transcribing 1 &middot; &#8776;6 min</span>',
+    naming:'<span class="pseg">naming 3 of 7</span>',
+    review:'<span class="pseg">naming 7 of 7</span>'
+  };
+  function setState(st){
+    document.body.dataset.state=st;
+    document.querySelectorAll('[data-show]').forEach(el=>{
+      el.hidden=!el.dataset.show.split(' ').includes(st);
+    });
+    document.querySelectorAll('.lrow').forEach(el=>{
+      el.classList.toggle('sel',(el.dataset.sel||'').split(' ').includes(st));
+    });
+    document.querySelectorAll('.sdot').forEach(el=>{
+      el.classList.toggle('cur',el.dataset.cur===st);
+    });
+    document.querySelectorAll('.fstep').forEach(el=>{
+      el.classList.remove('cur');
+      if(el.dataset.clsNaming&&st==='naming')el.classList.add(el.dataset.clsNaming);
+      if(el.dataset.clsReview&&st==='review'){el.classList.remove('done');el.classList.add(el.dataset.clsReview);}
+      else if(el.dataset.clsReview==='done')el.classList.remove('done');
+    });
+    document.querySelectorAll('[data-review-html]').forEach(el=>{
+      if(!el.dataset.orig)el.dataset.orig=el.innerHTML;
+      el.innerHTML=st==='review'?el.dataset.reviewHtml:el.dataset.orig;
+    });
+    const pill=document.getElementById('pill');
+    pill.innerHTML=PILL[st];pill.hidden=!PILL[st];
+    document.title=st==='recording'?'(1) Meetings':'Meetings';
+    document.querySelectorAll('.mockbar [data-go]').forEach(b=>b.classList.toggle('on',b.dataset.go===st));
+    if(st==='naming'){const n=document.querySelector('.namebox');if(n)n.focus({preventScroll:true});}
+  }
+  document.querySelectorAll('.mockbar [data-go]').forEach(b=>b.onclick=()=>setState(b.dataset.go));
+
+  // recording clock ticks in the Now block and the pill
+  let secs=12*60+41;
+  setInterval(()=>{
+    if(document.body.dataset.state!=='recording')return;
+    secs++;const t=Math.floor(secs/60)+':'+String(secs%60).padStart(2,'0');
+    ['recClock','pillClock'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=t;});
+  },1000);
+
+  // theme: auto -> light -> dark, the same data-theme convention as the panel
+  const order=['auto','light','dark'];let ti=0;
+  document.getElementById('themeBtn').onclick=()=>{
+    ti=(ti+1)%3;const t=order[ti];
+    if(t==='auto')delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme=t;
+    document.getElementById('themeBtn').title='Theme: '+t;
+  };
+
+  // mockup keys: ? opens the sheet, 1-4 switch states, Escape closes
+  document.addEventListener('keydown',e=>{
+    const typing=/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if(e.key==='Escape'){document.getElementById('keys').hidden=true;return;}
+    if(typing)return;
+    if(e.key==='?'){document.getElementById('keys').hidden=false;return;}
+    const map={'1':'idle','2':'recording','3':'naming','4':'review'};
+    if(map[e.key])setState(map[e.key]);
+  });
+  const q=new URLSearchParams(location.search).get('theme');
+  if(q==='light'||q==='dark'){document.documentElement.dataset.theme=q;ti=order.indexOf(q);}
+  const h=location.hash.slice(1);
+  setState(['idle','recording','naming','review'].includes(h)?h:'idle');
+})();
+</script>
+</body></html>
