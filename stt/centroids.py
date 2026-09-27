@@ -5,7 +5,10 @@ Naming one person used to spawn `relabel --all`: 99 meetings, ~7 seconds each,
 seven minutes of work to change at most a few transcripts. The centroids are
 already on disk in each meeting's `.diar.npz`; reading all of them every time is
 the only slow part, so they are cached in `centroid_index.npz` under the project
-dir and refreshed per meeting by that cache file's mtime.
+dir and refreshed per meeting by that cache file's mtime. Each meeting's roster
+names ride beside them in `centroid_index.json`, refreshed by the meeting
+json's own mtime, so a name lookup inside an HTTP request never parses a
+multi-megabyte transcript it has already seen.
 
 `targets()` answers "which meetings can this change touch?" from three
 independent signals — a voice that scores near threshold against some cluster, a
@@ -81,6 +84,33 @@ def _save_cache(meta: dict, arrays: dict):
     os.replace(tmpj, meta_path())
 
 
+def _json_stamp(base: str):
+    """[mtime_ns, size] of the meeting json, or None when it cannot be read.
+    Taken BEFORE the json is parsed: a write that lands in between leaves an
+    older stamp beside newer names, which the next pass simply re-reads."""
+    try:
+        st = config.meeting_file(base, ".json").stat()
+    except OSError:
+        return None
+    return [st.st_mtime_ns, st.st_size]
+
+
+def _read_roster(base: str) -> list:
+    """The names on this meeting's speaker roster, sorted. It is the only
+    record of a meeting-local or manually-added name, which no centroid can
+    match. An unreadable json has no names."""
+    try:
+        data = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError):
+        return []
+    speakers = data.get("speakers") if isinstance(data, dict) else None
+    names = set()
+    for s in speakers or []:
+        if isinstance(s, dict) and isinstance(s.get("name"), str) and s["name"]:
+            names.add(s["name"])
+    return sorted(names)
+
+
 def _unpack(entry: dict, arrays: dict):
     vecs = arrays.get(entry.get("key"))
     labels = entry.get("labels") or []
@@ -98,17 +128,24 @@ def index(refresh: bool = True) -> dict:
     the on-disk index is rewritten when any of that changed. With refresh=False
     nothing on disk is touched and only what the cache already holds is
     returned."""
-    meta, arrays = _load_cache()
-    bases = _cached_bases()
     if not refresh:
+        meta, arrays = _load_cache()
         out = {}
-        for base in bases:
+        for base in _cached_bases():
             ent = meta.get(base)
             cents = _unpack(ent, arrays) if ent else None
             if cents is not None:
                 out[base] = cents
         return out
+    return _refresh()[0]
 
+
+def _refresh():
+    """(centroids, meta) with both brought up to date on disk. The meta entry
+    for each base carries its roster names, re-read only when the meeting
+    json's [mtime_ns, size] moved."""
+    meta, arrays = _load_cache()
+    bases = _cached_bases()
     out, new_meta, new_arrays = {}, {}, {}
     recomputed = False
     for base in bases:
@@ -133,7 +170,15 @@ def index(refresh: bool = True) -> dict:
         labels = list(cents.keys())
         vecs = (np.asarray([cents[l] for l in labels], dtype=float)
                 if labels else np.zeros((0, 0)))
-        new_meta[base] = {"mtime": mtime, "key": _key(base), "labels": labels}
+        stamp = _json_stamp(base)
+        names = ent.get("names") if ent is not None else None
+        if (stamp is None or ent is None or ent.get("json") != stamp
+                or not isinstance(names, list)):
+            names = _read_roster(base)
+            if ent is None or ent.get("json") != stamp or ent.get("names") != names:
+                recomputed = True
+        new_meta[base] = {"mtime": mtime, "key": _key(base), "labels": labels,
+                          "json": stamp, "names": names}
         new_arrays[_key(base)] = vecs
         out[base] = cents
     if recomputed or set(new_meta) != set(meta):
@@ -141,37 +186,30 @@ def index(refresh: bool = True) -> dict:
             _save_cache(new_meta, new_arrays)
         except OSError:
             pass  # a cache we could not write is a slow next pass, not an error
-    return out
+    return out, new_meta
 
 
-def _named_bases(names: set, bases) -> set:
-    """Meetings whose roster already carries one of these names. Reading each
-    meeting json is acceptable at this library size (~100 small files) and it is
-    the only record of a meeting-local or manually-added name, which no centroid
-    can match."""
-    hit = set()
-    for base in bases:
-        try:
-            data = json.loads(config.meeting_file(base, ".json").read_text())
-        except (OSError, ValueError):
-            continue
-        for s in data.get("speakers") or []:
-            if isinstance(s, dict) and s.get("name") in names:
-                hit.add(base)
-                break
-    return hit
+def _named_bases(names: set, meta: dict) -> set:
+    """Meetings whose roster already carries one of these names, answered from
+    the roster names cached in the index meta. A transcript json runs to
+    megabytes and this runs inside a naming, rename or merge request, so the
+    json is parsed only when its mtime moved (in _refresh), never here."""
+    return {base for base, ent in meta.items()
+            if isinstance(ent, dict) and names & set(ent.get("names") or [])}
 
 
 def _uid_bases(uids: set) -> set:
     """Meetings an unknown-voice id was heard in, straight from its registry
     entry — the authoritative record, and one no score can reconstruct once the
-    id has been merged or promoted."""
+    id has been merged or promoted. Read through resolved_meetings, so a meeting
+    renamed after the reference was written answers under its live name (its
+    meeting id carries it) instead of being filtered out as unknown."""
     hit = set()
     speakers = (unknowns.load() or {}).get("speakers") or {}
     for uid in uids:
         ent = speakers.get(uid)
         if isinstance(ent, dict):
-            hit.update(str(m) for m in (ent.get("meetings") or []))
+            hit.update(str(m) for m in unknowns.resolved_meetings(ent) if m)
     return hit
 
 
@@ -188,7 +226,7 @@ def targets(vector=None, names=(), uids=()) -> list:
     exactly as `all_bases()` does."""
     names = {str(n) for n in (names or []) if str(n).strip()}
     uids = {str(u) for u in (uids or []) if str(u).strip()}
-    idx = index()
+    idx, meta = _refresh()
     hit = set()
 
     if vector is not None:
@@ -201,7 +239,7 @@ def targets(vector=None, names=(), uids=()) -> list:
                         hit.add(base)
                         break
     if names:
-        hit |= _named_bases(names, idx.keys())
+        hit |= _named_bases(names, meta) & set(idx)
     if uids:
         hit |= _uid_bases(uids) & set(idx)
     return sorted(hit)

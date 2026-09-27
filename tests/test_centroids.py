@@ -170,3 +170,85 @@ def test_the_cache_lives_under_the_project_dir(sandbox):
     assert centroids.index_path().parent == config.PROJECT_DIR
     assert centroids.meta_path().parent == config.PROJECT_DIR
     assert not list(config.MEETINGS_DIR.glob("centroid_index.*"))
+
+
+def _record_transcript_reads(monkeypatch):
+    """Every open of a meeting's main transcript json, by path. Covers
+    Path.read_text / Path.open (pathlib goes through Path.open) and the builtin
+    open, so the test holds whichever way the code reads the file."""
+    import builtins
+    import pathlib
+    opened = []
+
+    def note(path):
+        p = pathlib.Path(path)
+        if p.suffix == ".json" and p.stem == p.parent.name:
+            opened.append(str(p))
+
+    real_path_open = pathlib.Path.open
+    real_open = builtins.open
+
+    def path_open(self, *a, **kw):
+        note(self)
+        return real_path_open(self, *a, **kw)
+
+    def builtin_open(file, *a, **kw):
+        if isinstance(file, (str, pathlib.Path)):
+            note(file)
+        return real_open(file, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "open", path_open)
+    monkeypatch.setattr(builtins, "open", builtin_open)
+    return opened
+
+
+def test_a_second_name_lookup_reads_no_transcript_json(sandbox, monkeypatch):
+    """targets(names=...) runs inside a naming, rename or merge request, and a
+    transcript json runs to megabytes. The roster names are cached beside the
+    centroids and re-read only when that meeting's json changes."""
+    import os
+    _library()
+    assert centroids.targets(names=["Dana Cole"]) == ["Bravo Mtg"]
+
+    # a nested context: undoing it must never undo the sandbox fixture's patches
+    with monkeypatch.context() as mp:
+        opened = _record_transcript_reads(mp)
+        assert centroids.targets(names=["Dana Cole"]) == ["Bravo Mtg"]
+        assert centroids.targets(names=["Nobody At All"]) == []
+    assert opened == [], f"a warm name lookup parsed transcripts: {opened}"
+
+    # a roster edit moves that json's mtime: exactly that meeting is re-read,
+    # and the new name answers at once
+    j = config.meeting_file("Charlie Mtg", ".json")
+    data = json.loads(j.read_text())
+    data["speakers"][0]["name"] = "Dana Cole"
+    j.write_text(json.dumps(data))
+    st = j.stat()
+    os.utime(j, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+    with monkeypatch.context() as mp:
+        opened = _record_transcript_reads(mp)
+        assert centroids.targets(names=["Dana Cole"]) == ["Bravo Mtg", "Charlie Mtg"]
+    assert set(opened) == {str(j)}, opened
+
+
+def test_a_uid_target_follows_a_rename_the_reference_missed(sandbox, monkeypatch):
+    """An unknown's `meetings` list names each meeting as it was called when
+    the voice was heard. When a rename's chase fails, that stored name goes
+    stale — but the aligned meeting id still resolves, and the renamed meeting
+    must still be relabeled when that voice is named."""
+    from stt import review, summarize
+    _library()
+    config.backfill_meeting_ids()
+    mid = config.id_of("Charlie Mtg")
+    unknowns.save({"speakers": {"U001": {
+        "file": "U001.npy", "meetings": ["Charlie Mtg"], "meeting_ids": [mid]}}})
+
+    def boom(*a, **kw):
+        raise RuntimeError("the chase failed")
+    monkeypatch.setattr(unknowns, "rename_meeting_refs", boom)
+    with review.lock_meeting("Charlie Mtg"):
+        summarize._move_folder("Charlie Mtg", "Delta Mtg")
+    assert unknowns.load()["speakers"]["U001"]["meetings"] == ["Charlie Mtg"], \
+        "the stored name IS stale"
+
+    assert centroids.targets(uids=["U001"]) == ["Delta Mtg"]
