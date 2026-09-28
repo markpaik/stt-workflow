@@ -989,7 +989,7 @@ def test_legend_drops_the_question_mark_for_a_dismissed_voice():
         "const box={innerHTML:''};",
         "function $(sel){return sel==='#mlegend'?box:null;}",
         "let S={unknowns:[]};let MP={base:'B',color:{}};",
-        _js_fn("mUnknownUid"), _js_fn("mLegend"),
+        _js_fn("mUnknownUid"), _js_fn("legendVoices"), _js_fn("mLegend"),
         """
 mLegend({speakers:['Alex Rivera','Speaker 2','Speaker 3'],
   speaker_options:[
@@ -1016,7 +1016,7 @@ def test_a_dismissed_voice_offers_the_way_back():
         "const box={innerHTML:''};",
         "function $(sel){return sel==='#mlegend'?box:null;}",
         "let S={unknowns:[]};let MP={base:'B',color:{}};",
-        _js_fn("mUnknownUid"), _js_fn("mLegend"),
+        _js_fn("mUnknownUid"), _js_fn("legendVoices"), _js_fn("mLegend"),
         """
 mLegend({speaker_options:[
     {id:'SPEAKER_02',display:'Voice 2',named:false,dismissed:true}]});
@@ -2230,12 +2230,15 @@ def test_a_locally_named_chip_stays_editable():
     keeps its chip clickable through the same floor-then-confirm flow."""
     assert "o.named&&o.local" in NEW_JS
     assert "Named for this meeting only. Click to change" in NEW_JS
-    # chips are built per CLUSTER off speaker_options, never through a
-    # display-keyed map: two speakers sharing one display name (a local name
-    # matching an enrolled person) must keep their own ids on their own chips
+    # chips are built per VOICE off speaker_options (revised 2026-09-28: a
+    # split voice showed twice), never through a bare display-keyed map: two
+    # speakers sharing one display name (a local name matching an enrolled
+    # person) must keep their own ids on their own chips, so legendVoices
+    # groups inside one chip kind (test_the_legend_shows_one_chip_per_voice)
     assert "opt[o.display]=o" not in NEW_JS
     leg = re.search(r"function mLegend\(d\)\{.*?\n\}", NEW_JS, re.S).group(0)
-    assert "(d.speaker_options||[]).map(o=>" in leg
+    assert "MP.voices=legendVoices(d.speaker_options);" in leg
+    assert "box.innerHTML=MP.voices.map(o=>" in leg
 
 
 def test_a_failed_row_tells_the_truth_about_its_retry():
@@ -6199,3 +6202,294 @@ def test_a_folded_queue_file_leaves_the_selection():
         "applySel();console.log(JSON.stringify([...SEL].sort()));",
     ]))
     assert out == ["W1"]
+
+
+# ---------------------------------------------------------------------------
+# Panel polish (2026-09-28): the reader's header and legend count voices the
+# way the To finish row does, a below-floor voice's lines read their roster
+# label, and a meeting-only name reaches every cluster of a split voice.
+# ---------------------------------------------------------------------------
+def _header_env():
+    return "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("shortDate"),
+        _js_fn("peopleMetaBits"), _js_fn("mMetaBits"), _js_fn("mHeadSync"),
+        _js_fn("_mHeader"),
+        "const bits=h=>{const m=/<span id=\"mmbits\">([\\s\\S]*?)<\\/span>\\s*<button class=\"mcat/.exec(h);"
+        "return m?m[1]:null;};",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_reader_header_names_three_people_and_counts_the_unnamed():
+    """The reader's header meta line listed every raw roster label: "Grace
+    Lindqvist, Elena Ruiz, Voice 2, Speaker 72, Speaker 86, ...". It reads
+    the To finish row's rule now (peopleMetaBits): up to three named people,
+    "+N" for more, then "N unnamed" in the attention teal. The count is the
+    meeting's unnamed_clusters, the set the row's finish.voices counts."""
+    raw = ["Grace Lindqvist", "Elena Ruiz", "Voice 2"] + \
+        [f"Speaker {n}" for n in (72, 86, 68, 68)]
+    out = _run_node(_header_env() + """
+const RAW=""" + json.dumps(raw) + """;
+const m=(named,unn,x)=>Object.assign({base:'B',title:'Board',date:'2026-09-23',minutes:214,
+  speakers:RAW,named,unnamed_clusters:unn,category:null},x||{});
+const U={'Voice 2':'SPEAKER_02','Speaker 72':'SPEAKER_03','Speaker 86':'SPEAKER_04',
+  'Speaker 68':'SPEAKER_05'};
+const board=_mHeader(m(['Grace Lindqvist','Elena Ruiz','Ana Ortiz','Ben Cole','Cy Diaz'],U),'B');
+const two=_mHeader(m(['Grace Lindqvist','Elena Ruiz'],U),'B');
+const done=_mHeader(m(['Grace Lindqvist'],{}),'B');
+const legacy=_mHeader(m(undefined,undefined),'B');
+// the poll keeps the line current: a name lands and the count drops
+const el={dataset:{},innerHTML:''};
+const document={getElementById:id=>id==='mmbits'?el:null};
+let MP={base:'B',built:true},route={view:'meeting',base:'B'};
+mHeadSync({meetings:[m(['Grace Lindqvist'],{'Voice 2':'SPEAKER_02'})]});
+const first=el.innerHTML;el.innerHTML='untouched';
+mHeadSync({meetings:[m(['Grace Lindqvist'],{'Voice 2':'SPEAKER_02'})]});
+const same=el.innerHTML;
+mHeadSync({meetings:[m(['Grace Lindqvist','Ana Ortiz'],{})]});
+console.log(JSON.stringify({board:bits(board),two:bits(two),done:bits(done),
+  legacy:bits(legacy),full:board,first,same,after:el.innerHTML}));
+""")
+    date = out["board"].split(" &middot; ")[0]
+    assert date and "2026" not in date, "the date stays the short form"
+    assert out["board"] == (date + " &middot; 214 min &middot; Grace Lindqvist, Elena Ruiz, "
+                            'Ana Ortiz +2 &middot; <span class="unn">4 unnamed</span>')
+    assert out["two"] == (date + " &middot; 214 min &middot; Grace Lindqvist, Elena Ruiz "
+                          '&middot; <span class="unn">4 unnamed</span>')
+    assert out["done"] == date + " &middot; 214 min &middot; Grace Lindqvist"
+    assert out["legacy"] == date + " &middot; 214 min"
+    for label in ("Voice 2", "Speaker 72", "Speaker 86", "Speaker 68"):
+        assert label not in out["full"], label
+    assert out["first"] == (date + " &middot; 214 min &middot; Grace Lindqvist &middot; "
+                            '<span class="unn">1 unnamed</span>')
+    assert out["same"] == "untouched", "an unchanged line is never rewritten"
+    assert out["after"] == date + " &middot; 214 min &middot; Grace Lindqvist, Ana Ortiz"
+    assert "mHeadSync(S);" in _js_fn("render")
+    # the count wears the attention teal in the header too
+    assert re.search(r"(?m)^\.mmeta \.unn\{[^}]*color:var\(--attn\)", NEW_CSS)
+
+
+def _legend_env():
+    return "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        _js_fn("mUnknownUid"), _js_fn("fsVoicesFrom"), _js_fn("legendVoices"),
+        _js_fn("mVoiceIds"), _js_fn("mLegend"), _js_fn("mRestoreVoice"),
+        _js_fn("openNamePanelByCluster"),
+        "const box={innerHTML:''};",
+        "function $(sel){return sel==='#mlegend'?box:null;}",
+        "let opened=null,posted=[],refreshes=0,reloads=0;",
+        "function openNamePanel(uid,display,cluster,base){opened={uid,display,cluster,base};}",
+        "function api(p,b){posted.push([p,b]);return Promise.resolve({ok:true});}",
+        "function refresh(){refreshes++;}function mReloadSegs(){reloads++;}",
+        "const chips=()=>box.innerHTML.split('<span class=\"msdot\"').slice(1)"
+        ".map(c=>c.replace(/^[^>]*><\\/span>/,''));",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_legend_shows_one_chip_per_voice(running_server):
+    """The board meeting's legend showed "Speaker 68" twice: one chip per
+    CLUSTER, and the diarizer split that person into two clusters carrying
+    U068. The legend now shows one chip per VOICE, grouped exactly as
+    fsVoicesFrom groups them (the uid, or with no uid the display), and the
+    chip's click and "?" reach the whole voice."""
+    split_voice_meeting()
+    from urllib.parse import quote
+    _, _, body = _get(running_server, "/api/transcript?base=" + quote(SPLIT_VOICE_BASE))
+    tr = json.loads(body)
+    _, _, body = _get(running_server, "/api/state")
+    st = json.loads(body)
+    out = _run_node(_legend_env() + """
+let S=""" + json.dumps({"unknowns": st["unknowns"]}) + """;
+let MP={base:""" + json.dumps(SPLIT_VOICE_BASE) + """,color:{}};
+mLegend(""" + json.dumps(tr) + """);
+const board={chips:chips().length,s68:chips().filter(c=>c.startsWith('Speaker 68')).length,
+  s68click:(box.innerHTML.match(/openNamePanelByUid\\('U068','[^']*'\\)/g)||[]).length};
+// the chip kinds, by hand: an enrolled and a meeting-local "Ana" stay apart,
+// a split voice the registry does not list here collapses by display, and a
+// dismissed pair keeps ONE undo chip
+S={unknowns:[{uid:'U068',display:'Speaker 68',meetings:['M']},
+  {uid:'U070',display:'Speaker 70',meetings:['OTHER']}]};
+MP={base:'M',color:{}};
+const o=(id,display,x)=>Object.assign({id,display,named:false,local:false,dismissed:false},x||{});
+const opts=[o('A','Ana Ortiz',{named:true}),o('B','Ana Ortiz',{named:true,local:true}),
+  o('C','Speaker 68'),o('D','Speaker 70'),o('E','Speaker 70'),o('F','Speaker 68'),
+  o('G','Speaker 71',{dismissed:true}),o('H','Speaker 71',{dismissed:true}),
+  o('I','Voice 9'),o('J','Speaker 72',{named:true,local:true}),
+  o('K','Speaker 72',{named:true,local:true})];
+mLegend({speaker_options:opts});
+const hand=chips();
+const byHand=MP.voices.map(v=>[v.display,v.ids]);
+// the voices that ask agree with fsVoicesFrom, cluster for cluster
+const asks=opts.filter(x=>!x.dismissed);
+const same=JSON.stringify(legendVoices(asks).filter(v=>!v.named&&v.id!==v.display)
+  .map(v=>[v.display,v.ids]))===JSON.stringify(fsVoicesFrom(asks).map(v=>[v.display,v.ids]));
+// the no-uid split voice's "?" opens the panel for BOTH clusters
+openNamePanelByCluster('M','D','Speaker 70');
+const panel=opened.cluster;
+openNamePanelByCluster('M','K','Speaker 72',true);
+const local=opened.cluster;
+openNamePanelByCluster('OTHER','D','Speaker 70');
+const elsewhere=opened.cluster.ids;
+(async()=>{
+  await mRestoreVoice('M','G');
+  console.log(JSON.stringify({board,hand,byHand,same,panel,local,elsewhere,posted,refreshes,reloads}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+""")
+    assert "threw" not in out, out
+    # 22 clusters, 21 voices: "Speaker 68" once, and its "?" names U068
+    assert len(tr["speaker_options"]) == 22
+    assert out["board"] == {"chips": 21, "s68": 1, "s68click": 1}
+    assert out["byHand"] == [
+        ["Ana Ortiz", ["A"]], ["Ana Ortiz", ["B"]],     # enrolled vs meeting-local
+        ["Speaker 68", ["C", "F"]],                     # one uid, two clusters
+        ["Speaker 70", ["D", "E"]],                     # no uid here: by display
+        ["Speaker 71", ["G", "H"]],                     # dismissed pair: one undo chip
+        ["Voice 9", ["I"]],
+        ["Speaker 72", ["J", "K"]],                     # one meeting-local name
+    ]
+    assert out["same"] is True
+    assert sum(c.startswith("Speaker 68") for c in out["hand"]) == 1
+    assert out["panel"] == {"meeting": "M", "speaker": "D", "local": False, "ids": ["D", "E"]}
+    assert out["local"] == {"meeting": "M", "speaker": "K", "local": True, "ids": ["J", "K"]}
+    assert out["elsewhere"] == ["D"], "another meeting's cluster is never grouped by this page"
+    # the undo restores every cluster of the voice, then reloads once
+    assert out["posted"] == [
+        ["/api/dismiss_voice", {"base": "M", "speaker": "G", "restore": True}],
+        ["/api/dismiss_voice", {"base": "M", "speaker": "H", "restore": True}]]
+    assert out["refreshes"] == 1 and out["reloads"] == 1
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_meeting_only_name_reaches_every_cluster_of_a_split_voice():
+    """A split voice with no uid is two clusters under one display. The
+    Voices step's meeting-only save sent the first cluster alone (fvSave
+    posted one speaker), so the other still counted as unnamed. The save now
+    sends every cluster in ONE request (`speakers`), from the strip and from
+    the slide-over, and the slide-over's Clear and dismiss reach both. An
+    enrollment still posts one speaker, as before."""
+    out = _run_node(_voices_env() + "\n".join([
+        _js_fn("npSave"), _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
+        _js_fn("npClearName"), _js_fn("npDismiss"),
+        "for(const k of ['#npname','#nperr','#npconfirm','#npsave','#npclear'])"
+        "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false};",
+        "function closeNamePanel(){NP=null;}",
+        """
+(async()=>{
+  const o={};
+  FS.voices=[{id:'D',ids:['D','E'],display:'Speaker 70',uid:null,st:''}];FS.vi=0;
+  els['#fvname'].value='Tom Keller';
+  reply={ok:false,floor:true,error:'Too little speech.'};
+  await fvSave();                       // the enrollment: one speaker, refused
+  reply={ok:true,local:true,applied:true};
+  await fvSave(false,true);             // "Name for this meeting"
+  o.strip=posted.map(x=>x.b);posted=[];
+  // the slide-over, opened from the legend chip with the voice's ids
+  NP={meeting:'M1',speaker:'D',local:false,ids:['D','E']};MP={base:'M1',audio:null};
+  els['#npname'].value='Tom Keller';
+  await npSave(false,true);
+  NP={meeting:'M1',speaker:'D',local:true,ids:['D','E']};
+  await npClearName();
+  NP={meeting:'M1',speaker:'D',local:false,ids:['D','E']};
+  await npDismiss();
+  // a one-cluster voice posts exactly what it always did
+  NP={meeting:'M1',speaker:'F',local:false,ids:['F']};els['#npname'].value='Ann Lee';
+  await npSave(false,true);
+  o.panel=posted.map(x=>[x.p,x.b]);
+  console.log(JSON.stringify(o));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+"""]))
+    assert "threw" not in out, out
+    assert out["strip"] == [
+        {"meeting": "M1", "speaker": "D", "name": "Tom Keller", "confirm": False,
+         "local": False},
+        {"meeting": "M1", "speaker": "D", "name": "Tom Keller", "confirm": False,
+         "local": True, "speakers": ["D", "E"]}]
+    assert out["panel"] == [
+        ["/api/name", {"meeting": "M1", "speaker": "D", "name": "Tom Keller",
+                       "confirm": False, "local": True, "speakers": ["D", "E"]}],
+        ["/api/name", {"meeting": "M1", "speaker": "D", "name": "", "local": True,
+                       "speakers": ["D", "E"]}],
+        ["/api/dismiss_voice", {"base": "M1", "speaker": "D"}],
+        ["/api/dismiss_voice", {"base": "M1", "speaker": "E"}],
+        ["/api/name", {"meeting": "M1", "speaker": "F", "name": "Ann Lee",
+                       "confirm": False, "local": True}]]
+
+
+def _below_floor_meeting(base):
+    """A meeting shaped like the real one that showed "SPEAKER_08": every
+    segment's speaker is on the roster, but the voices below the minting
+    floor (no uid) carry no `display` on their segments, because the
+    pipeline stamps a segment's display only from a name or a uid. The
+    roster reads "Voice 9" (build_speakers' fallback). Beside it: a named
+    person, a registry voice, a dismissed below-floor voice, and a
+    meeting-local name."""
+    from conftest import mfile
+    roster = [
+        {"id": "SPEAKER_00", "name": "Grace Lindqvist", "global_id": None,
+         "display": "Grace Lindqvist"},
+        {"id": "SPEAKER_01", "name": None, "global_id": "U070", "display": "Speaker 70"},
+        {"id": "SPEAKER_03", "name": None, "global_id": None, "display": "Voice 4"},
+        {"id": "SPEAKER_05", "name": "Elena Ruiz", "global_id": None,
+         "display": "Elena Ruiz", "local": True},
+        {"id": "SPEAKER_08", "name": None, "global_id": None, "display": "Voice 9"},
+    ]
+    stamped = {"SPEAKER_00", "SPEAKER_01", "SPEAKER_05"}
+    segs = []
+    for i, s in enumerate(roster):
+        seg = {"start": i * 10.0, "end": i * 10.0 + 4.0, "speaker": s["id"],
+               "name": s["name"], "text": f"budget line number {i} spoken"}
+        if s["id"] in stamped:
+            seg["display"] = s["display"]
+        segs.append(seg)
+    segs.append({"start": 60.0, "end": 62.0, "speaker": "SPEAKER_08", "name": None,
+                 "text": "one more from nine"})
+    d = {"source_file": f"{base}.m4a", "duration_sec": 70.0, "date": "2026-09-23",
+         "speakers": roster, "segments": segs, "words": [],
+         "dismissed_voices": ["SPEAKER_03"], "local_names": {"SPEAKER_05": "Elena Ruiz"}}
+    mfile(base, ".json").write_text(json.dumps(d))
+    mfile(base, ".txt").write_text("stub")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_no_transcript_line_renders_a_raw_diarizer_id(running_server):
+    """On a real meeting one line read "SPEAKER_08" in gray while the legend
+    showed a "Voice 9" chip. The roster held {"id": "SPEAKER_08", "display":
+    "Voice 9", "global_id": null}, and every segment's speaker was on it. The
+    lookup that failed was /api/transcript's per-line label: the segment's
+    own display, else its name, else the RAW id. A voice below the minting
+    floor never gets a display on its segments. A line now reads its roster
+    display, the label its legend chip and colour carry. Search hits too."""
+    from urllib.parse import quote
+    base = "Below Floor Mtg 09232026"
+    _below_floor_meeting(base)
+    _, _, body = _get(running_server, "/api/transcript?base=" + quote(base))
+    tr = json.loads(body)
+    _, _, body = _get(running_server, "/api/search?q=" + quote("from nine"))
+    hits = json.loads(body)["hits"]
+    out = _run_node("\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        re.search(r"(?m)^const HUES=.*;$", NEW_JS).group(0),
+        _js_fn("mSegHTML"), _js_fn("mUnknownUid"), _js_fn("legendVoices"),
+        _js_fn("mLegend"),
+        "const box={innerHTML:''};function $(q){return q==='#mlegend'?box:null;}",
+        "let S={unknowns:[]};",
+        "const d=" + json.dumps(tr) + ";",
+        "let MP={base:d.base,color:{},hasAudio:false};",
+        "(d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);",
+        "mLegend(d);",
+        "const lines=d.segments.map((g,i)=>mSegHTML(g,i));",
+        "const who=h=>/<span class=\"msdot\" style=\"background:([^\"]*)\"><\\/span>([^<]*)/.exec(h);",
+        "console.log(JSON.stringify({lines:lines.map(h=>who(h).slice(1)),",
+        "  legend:box.innerHTML,raw:lines.filter(h=>/SPEAKER_\\d/.test(h.replace(/id=\"mseg\\d+\"/,'')))}));",
+    ]))
+    assert out["raw"] == [], "a line rendered a raw diarizer id"
+    labels = [w for _, w in out["lines"]]
+    assert labels == ["Grace Lindqvist", "Speaker 70", "Voice 4", "Elena Ruiz",
+                      "Voice 9", "Voice 9"]
+    # the below-floor voice's line wears its legend colour, not the gray
+    # fallback for a label the legend does not know
+    colours = dict((w, c) for c, w in out["lines"])
+    assert all(c != "var(--sub)" for c in colours.values()), out["lines"]
+    assert "Voice 9" in out["legend"]
+    assert [h["who"] for h in hits] == ["Voice 9"]

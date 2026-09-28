@@ -18,7 +18,7 @@ from pathlib import Path
 
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
-                 rates, recorder, review, search, status, unknowns)
+                 output, rates, recorder, review, search, status, unknowns)
 
 PORT = 8737
 # The one relabel worker for this panel process, started by start_server(). None
@@ -1899,9 +1899,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 d = json.loads(j.read_text())
                 dism = {str(x) for x in (d.get("dismissed_voices") or [])}
+                roster = output.roster_labels(d.get("speakers", []))
                 segs = [{"index": i, "start": s["start"], "end": s["end"],
                          "speaker": s.get("speaker"),
-                         "who": s.get("display") or s.get("name") or s.get("speaker") or "?",
+                         "who": output.line_label(s, roster),
                          "text": s.get("text", ""),
                          "edited": bool(s.get("text_edited") or s.get("reviewed")),
                          "flags": s.get("flags", [])}
@@ -2202,12 +2203,21 @@ class Handler(BaseHTTPRequestHandler):
                         # The panel offers this after the floor refuses the
                         # real enrollment; re-saving the same cluster is the
                         # typo fix. Only this one meeting rebuilds.
+                        # `speakers`: every cluster of ONE voice. The
+                        # diarizer can split a person into two clusters with
+                        # no uid between them, and a name saved for the first
+                        # alone left the other counted as unnamed. Each gets
+                        # the same label, and the meeting relabels once below.
+                        # Without the list, `speaker` alone, as before.
                         from stt import summarize
-                        res = summarize.set_local_name(
-                            b["meeting"], b["speaker"], name)
-                        if not res.get("ok"):
-                            self._json(res)
-                            return
+                        sids = b.get("speakers")
+                        if not isinstance(sids, list) or not sids:
+                            sids = [b.get("speaker")]
+                        for sid in dict.fromkeys(str(x or "") for x in sids):
+                            res = summarize.set_local_name(b["meeting"], sid, name)
+                            if not res.get("ok"):
+                                self._json(res)
+                                return
                         # ONE meeting rebuilds, and it rebuilds HERE: the pass
                         # takes well under a poll interval, so a spawned one
                         # started and finished between polls and the open page

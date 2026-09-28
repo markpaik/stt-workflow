@@ -1149,7 +1149,7 @@ function relabelWatch(s){
 // one place a finished relabel has to be picked up. With two panes the list
 // beside the reader keeps drawing, and a list with no meeting in the reader
 // opens the default one (readerSync).
-function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawDrawer(S);
+function render(){if(!S)return;relabelWatch(S);mHeadSync(S);drawPill(S);drawRecOk(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   drawChips(S);        // the chip row under the search field, and its counts
   if(route&&route.view==='meeting'){maybeBuildPending();if(!PANES){applySel();return;}}
@@ -2385,11 +2385,30 @@ async function buildMeeting(base){
 }
 
 /* --------------------------------------------------------- header block ---- */
+// the header's meta line: the date, then the To finish row's own rule
+// (peopleMetaBits): the duration, up to three named people with "+N" for the
+// rest, then "N unnamed" in the attention teal. The unnamed count is the
+// meeting's unnamed_clusters, the set the row's finish.voices counts, so a
+// split voice counts once. It listed every raw roster label before: "Grace
+// Lindqvist, Elena Ruiz, Voice 2, Speaker 72, Speaker 86, ..."
+function mMetaBits(m){
+  const bits=m.date?[esc(shortDate(m.date))]:[];
+  return bits.concat(peopleMetaBits({minutes:m.minutes,named:m.named,
+    finish:{voices:Object.keys(m.unnamed_clusters||{}).length}}));
+}
+// the poll keeps that line current: a name saved on the page drops the
+// "N unnamed" count without a rebuild. The last markup rides the element,
+// because innerHTML reads back serialized and never equals the source string.
+function mHeadSync(s){
+  if(!MP||!MP.built||!route||route.view!=='meeting'||route.base!==MP.base)return;
+  const el=document.getElementById('mmbits');
+  const m=((s&&s.meetings)||[]).find(x=>x.base===MP.base);
+  if(!el||!m)return;
+  const h=mMetaBits(m).join(' &middot; ');
+  if(el.dataset.h!==h){el.innerHTML=h;el.dataset.h=h;}
+}
 function _mHeader(m,base){
-  const bits=[];
-  if(m.date)bits.push(esc(shortDate(m.date)));
-  if(m.minutes!=null)bits.push(m.minutes+' min');
-  if(m.speakers&&m.speakers.length)bits.push(esc(m.speakers.join(', ')));
+  const bits=mMetaBits(m);
   const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
   const dotTitle=dot==='work'?'Work':dot==='personal'?'Personal':'Untagged';
   const strict=m.strict?'<span class="mchip">strict</span>':'';
@@ -2403,7 +2422,7 @@ function _mHeader(m,base){
     <button class="iact mhmenu" id="mmenu" type="button" title="Export, copy, rename, redo&#8230;"
       aria-label="Meeting actions" onclick="mMenu(event)">&#8943;</button>
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
-    <div class="mmeta">${bits.join(' &middot; ')}
+    <div class="mmeta"><span id="mmbits">${bits.join(' &middot; ')}</span>
       <button class="mcat ${dot}" id="mcatdot" type="button"
         title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${strict}${flagged}</div>
   </div>`;
@@ -2620,16 +2639,44 @@ function _mTranscriptShell(){
     <div id="mtbody" class="mtbody"><div class="mloading"><span class="spin"></span> Loading transcript&#8230;</div></div>
   </section>`;
 }
+// the legend's voices: one per VOICE, not one per cluster. The diarizer can
+// split one person into two clusters that share a uid (both "Speaker 68"), and
+// the legend showed that voice twice. Clusters collapse exactly as
+// fsVoicesFrom collapses them (the uid, or with no uid the display), and only
+// inside one chip kind: a meeting-local "Ana" never merges with an enrolled
+// "Ana", and a dismissed cluster keeps its own undo chip. Each voice carries
+// `ids`, every cluster it holds, first one first; `id` stays the first.
+function legendVoices(opts){
+  const out=[],by=new Map();
+  for(const o of (opts||[])){
+    const uid=o.named?null:mUnknownUid(o.display);
+    const kind=uid?'uid':(!o.named&&!o.dismissed&&o.id!==o.display)?'cluster'
+      :(o.named&&o.local)?'local':(!o.named&&o.dismissed)?'dismissed':'plain';
+    const k=kind+'\x00'+(uid?'u\x00'+uid:'d\x00'+o.display);
+    if(by.has(k)){by.get(k).ids.push(o.id);continue;}
+    const v=Object.assign({},o,{uid,ids:[o.id]});
+    by.set(k,v);out.push(v);
+  }
+  return out;
+}
+// every cluster of the voice `speaker` belongs to, as the legend on the page
+// groups them: a name, a dismissal, or its undo acts on the whole voice.
+// [speaker] alone when the page shows another meeting.
+function mVoiceIds(meeting,speaker){
+  const v=MP&&MP.base===meeting&&(MP.voices||[]).find(x=>x.ids.includes(speaker));
+  return v?v.ids.slice():[speaker];
+}
 function mLegend(d){
   const box=$('#mlegend');if(!box)return;
-  // one chip per CLUSTER, straight off speaker_options: a display-keyed
-  // lookup collapsed two speakers sharing one name (a local name matching an
+  // one chip per VOICE (legendVoices). Never a bare display-keyed lookup: that
+  // collapsed two speakers sharing one name (a local name matching an
   // enrolled person's) into a single entry, and both chips then opened the
   // naming panel for the same, possibly wrong, cluster
-  box.innerHTML=(d.speaker_options||[]).map(o=>{
+  MP.voices=legendVoices(d.speaker_options);
+  box.innerHTML=MP.voices.map(o=>{
     const w=o.display;
     const dot=`<span class="msdot" style="background:${MP.color[w]}"></span>`;
-    const uid=o.named?null:mUnknownUid(w);
+    const uid=o.uid;
     // an unnamed voice ("Speaker N" with an unknown-registry entry that lists
     // this meeting): its legend chip opens the naming slide-over
     if(uid)return `<button class="mlg unk" type="button" title="Who is this? Listen and name this voice"
@@ -2661,8 +2708,14 @@ function mLegend(d){
     return `<span class="mlg">${dot}${esc(w)}</span>`;
   }).join('');
 }
-async function mRestoreVoice(base,sid){
-  const r=await api('/api/dismiss_voice',{base:base,speaker:sid,restore:true});
+// the undo restores every cluster of the voice, or the one left dismissed
+// splits the chip back into two
+async function mRestoreVoice(base,id){
+  let r=null;
+  for(const sid of mVoiceIds(base,id)){
+    r=await api('/api/dismiss_voice',{base:base,speaker:sid,restore:true});
+    if(!r||!r.ok)break;
+  }
   if(r&&r.ok){refresh();if(MP&&MP.base===base)mReloadSegs();}
 }
 function mUnknownUid(display){
@@ -3671,8 +3724,11 @@ function openNamePanelByUid(uid,base){
 // identified, so "Not a real speaker" is nonsense there (the legend has no
 // named-and-dismissed rendering, so the click produced no visible change at
 // all). It gets Clear name instead, the documented undo.
+// `ids`: every cluster of the voice (mVoiceIds), so a meeting-only name, its
+// Clear, and a dismissal reach a split voice whole
 function openNamePanelByCluster(meeting,speaker,display,local){
-  openNamePanel(null,display,{meeting,speaker,local:!!local});
+  openNamePanel(null,display,{meeting,speaker,local:!!local,
+    ids:mVoiceIds(meeting,speaker)});
 }
 async function openNamePanel(uid,display,cluster,base){
   const panel=$('#namepanel'),veil=$('#nameveil');
@@ -3682,7 +3738,7 @@ async function openNamePanel(uid,display,cluster,base){
   // immediately. It is deliberately NOT `meeting`, which is cluster mode's
   // discriminant (npDismiss guards on it and must keep failing here).
   NP=cluster?{meeting:cluster.meeting,speaker:cluster.speaker,
-              local:!!cluster.local}:{uid,base};
+              local:!!cluster.local,ids:cluster.ids||[cluster.speaker]}:{uid,base};
   veil.hidden=false;panel.hidden=false;
   // FORM FIRST: the name box, the buttons, and the two messages that answer
   // them (the quality-gate confirm and the error line) sit at the top, so the
@@ -3905,9 +3961,9 @@ async function npSave(force,local){
   // and NP would then be null or someone else's identity when the answer lands.
   // The BUTTON too: a fresh lookup after a reopen would re-enable the NEW
   // voice's Save button, and leave this one stuck reading "Saving...".
-  const uid=NP.uid,meeting=NP.meeting||NP.base||'',speaker=NP.speaker;
+  const uid=NP.uid,meeting=NP.meeting||NP.base||'',speaker=NP.speaker,speakers=NP.ids;
   const tok=npToken();   // WHICH panel this save belongs to (see npToken)
-  const r=await saveName({uid,meeting,speaker,force,local,again:'npSave',busy:npBusy,
+  const r=await saveName({uid,meeting,speaker,speakers,force,local,again:'npSave',busy:npBusy,
     ui:{name:$('#npname'),err:$('#nperr'),warn:$('#npconfirm'),warnId:'npconfirm',
         btn:$('#npsave'),label:'Save name'}});
   if(!r)return;
@@ -3951,7 +4007,7 @@ async function saveName(o){
   const n=(ui.name?ui.name.value:'').trim();
   const err=ui.err,warn=ui.warn;
   if(!n){if(err){err.hidden=false;err.textContent='Type a name first.';}return null;}
-  const uid=o.uid,meeting=o.meeting,speaker=o.speaker;
+  const uid=o.uid,meeting=o.meeting,speaker=o.speaker,speakers=o.speakers;
   // the meeting this save relabels first. A cluster save names its own
   // meeting. A uid save names a registry voice, but the page open under it
   // still has to change FIRST: sent along, the server relabels it inside the
@@ -3961,6 +4017,11 @@ async function saveName(o){
   const body=uid?{uid:uid,name:n,confirm:!!force}
     :{meeting:meeting,speaker:speaker,name:n,confirm:!!force,local:!!local};
   if(uid&&here)body.meeting=here;
+  // a meeting-only name for a split voice with no uid names EVERY cluster of
+  // it in one request: sent for the first alone, the other cluster still
+  // counted as unnamed. An enrollment keeps one speaker: the relabel it
+  // triggers finds the twin by its voice.
+  if(!uid&&local&&speakers&&speakers.length>1)body.speakers=speakers.slice();
   const btn=ui.btn;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
   o.busy(true);
   let r=null;
@@ -4018,10 +4079,13 @@ async function saveName(o){
 async function npClearName(){
   if(!NP||!NP.meeting||NPBUSY)return;
   const meeting=NP.meeting,speaker=NP.speaker,tok=npToken();
+  const ids=NP.ids||[speaker];
   const err=$('#nperr');
   npBusy(true);
   let r=null;
-  try{r=await api('/api/name',{meeting:meeting,speaker:speaker,name:'',local:true});}
+  const body={meeting:meeting,speaker:speaker,name:'',local:true};
+  if(ids.length>1)body.speakers=ids.slice();   // the whole voice, as the save named it
+  try{r=await api('/api/name',body);}
   catch(e){r=null;}
   finally{npBusy(false);}
   if(!r||!r.ok){
@@ -4056,9 +4120,18 @@ async function npDismiss(){
   // for a different voice while this request is in flight, and NP would then
   // be null or someone else's identity by the time the response lands
   const meeting=NP.meeting,speaker=NP.speaker,tok=npToken();
+  const ids=NP.ids||[speaker];
   npBusy(true);
   let r=null;
-  try{r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});}
+  try{
+    r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});
+    // every other cluster of the voice, as fvForget does: the one left over
+    // would keep asking under the same chip
+    for(const sid of ids.filter(x=>x!==speaker)){
+      if(!r||!r.ok)break;
+      r=await api('/api/dismiss_voice',{base:meeting,speaker:sid});
+    }
+  }
   catch(e){r=null;}
   finally{npBusy(false);}
   if(!r||!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=(r&&r.error)||'Could not dismiss this voice.';}return;}
@@ -4700,7 +4773,8 @@ async function fvSave(force,local){
   if(!FS||NPBUSY||FS.cur!=='voices')return;
   const v=FS.voices&&FS.voices[FS.vi];if(!v)return;
   const base=FS.base,tok=fvToken();
-  const r=await saveName({uid:v.uid,meeting:base,speaker:v.id,force,local,again:'fvSave',busy:fvBusy,
+  const r=await saveName({uid:v.uid,meeting:base,speaker:v.id,speakers:v.ids,force,local,
+    again:'fvSave',busy:fvBusy,
     ui:{name:$('#fvname'),err:$('#fverr'),warn:$('#fvconfirm'),warnId:'fvconfirm',
         btn:$('#fvsave'),label:'Save and next'}});
   if(!r)return;

@@ -1593,6 +1593,58 @@ def _thin_local_meeting(base="Thin Local Mtg"):
     return base
 
 
+def test_a_meeting_only_name_applies_to_every_cluster_of_a_split_voice(
+        running_server, monkeypatch):
+    """The diarizer split one person into two clusters with no uid between
+    them (both "Speaker 70", a registry voice this meeting's list does not
+    name). A meeting-only name saved for the first cluster alone left the
+    second counted as unnamed. The local branch takes `speakers`, labels
+    each cluster, and relabels the meeting ONCE, inside the request."""
+    import numpy as np
+
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    relabels = []
+    real = srv._relabel_now
+    monkeypatch.setattr(srv, "_relabel_now",
+                        lambda base: relabels.append(base) or real(base))
+    rng = np.random.default_rng(11)
+    base = "Split Local Mtg"
+    _make_meeting_with_cache(base, {"SPEAKER_00": [(0.0, 3.0)],
+                                    "SPEAKER_01": [(5.0, 8.0)]},
+                             {"SPEAKER_00": rng.normal(size=256),
+                              "SPEAKER_01": rng.normal(size=256)})
+    j = mfile(base, ".json")
+    mj = json.loads(j.read_text())
+    mj["speakers"] = [{"id": c, "name": None, "global_id": "U070",
+                       "display": "Speaker 70"} for c in ("SPEAKER_00", "SPEAKER_01")]
+    j.write_text(json.dumps(mj))
+
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "speakers": ["SPEAKER_00", "SPEAKER_01"],
+                      "name": "Jordan Lee", "local": True})
+    assert st == 200 and body["ok"] is True and body.get("applied") is True
+    mj = json.loads(j.read_text())
+    assert mj["local_names"] == {"SPEAKER_00": "Jordan Lee", "SPEAKER_01": "Jordan Lee"}
+    assert relabels == [base], "one relabel for the whole voice"
+    assert [(s["id"], s["display"], s.get("local")) for s in mj["speakers"]] == [
+        ("SPEAKER_00", "Jordan Lee", True), ("SPEAKER_01", "Jordan Lee", True)]
+    meta = srv._meeting_meta(j, config.meetings_dir())
+    assert meta["unnamed_clusters"] == {} and srv._finish(meta)["voices"] == 0
+
+    # Clear name takes the same list, and a junk id anywhere in it is refused
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "speakers": ["SPEAKER_00", "SPEAKER_01"], "name": "", "local": True})
+    assert st == 200 and body["ok"] is True
+    assert "local_names" not in json.loads(j.read_text())
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": "SPEAKER_00",
+                      "speakers": ["SPEAKER_99"], "name": "Jordan Lee", "local": True})
+    assert st == 200 and body["ok"] is False
+    assert "local_names" not in json.loads(j.read_text())
+
+
 def test_a_bulk_item_that_raises_never_stops_the_rest(running_server, monkeypatch):
     """W5: the loop had no per-item guard. One item's exception aborted it, so
     the items before it stayed applied on disk, the items after it were never

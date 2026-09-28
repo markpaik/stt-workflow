@@ -396,6 +396,20 @@ evidence:
   each, inset ground, no chips — a wall of guesses is a decision, and this is a
   glance.
 
+The transcript legend (the chips beside TRANSCRIPT) shows one chip per
+voice, not one per cluster (revised 2026-09-28: a split voice read
+"Speaker 68" twice). Clusters that share a uid, or with no uid a display,
+collapse exactly as the Voices step collapses them, and only inside one chip
+kind: a meeting-local "Ana" never merges with an enrolled "Ana", and a
+dismissed voice keeps its own ↺ undo chip. What a chip opens acts on the
+whole voice: a uid chip names the uid, and a cluster chip's meeting-only
+name, its Clear name, its Not a real speaker, and the ↺ undo reach every
+cluster of it. A meeting-only name for a split voice is one `/api/name`
+request with a `speakers` list, and the meeting relabels once. A transcript
+line's speaker is its roster display, the label its chip and colour carry,
+never a raw diarizer id such as `SPEAKER_08` (a voice below the minting floor
+carries no display on its lines; search hits read the same label).
+
 ### Finish flow (shipped 2026-09-27, phase 1 of docs/ui-refresh)
 
 A meeting page carries one strip at its top, under the header and the docked
@@ -484,7 +498,11 @@ more named people, then `N unnamed` in the attention teal when any voice is
 unnamed (the row's `finish.voices`, the Voices dot's own count):
 `214 min · Ana Ortiz, Ben Cole, Cy Diaz +2 · 21 unnamed`. A raw
 `Speaker N` or `Voice N` label never appears on a To finish row (revised
-2026-09-28: a board meeting's row listed 22 of them). A dot is a 4px chip at 13px
+2026-09-28: a board meeting's row listed 22 of them). The reader's header
+meta line reads by the same rule after the date,
+`Sep 23 · 214 min · Ana Ortiz, Ben Cole, Cy Diaz +2 · 21 unnamed`, its count
+from the meeting's `unnamed_clusters` (the set `finish.voices` counts), and
+the poll keeps it current (revised 2026-09-28: it listed every roster label). A dot is a 4px chip at 13px
 semibold: teal (`--attn` on `--attn-soft`) while open, with its count in
 mono ("Voices 2", "Flags 6"; Title carries no count), green (`--ok` on
 `--ok-soft`) with a check once done ("✓ Title"). White card, 1px `--hair`

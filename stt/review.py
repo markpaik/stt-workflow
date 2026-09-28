@@ -22,7 +22,7 @@ _meeting_lock_depth = threading.local()
 
 
 @contextlib.contextmanager
-def lock_meeting(base: str):
+def lock_meeting(base: str, key: str = None):
     """Serialize a full read-modify-write of one meeting's json between the
     GUI's review edits (this module) and relabel's rebuild (relabel.py) —
     both mutate the SAME file with no other exclusion between them, so a save
@@ -43,8 +43,13 @@ def lock_meeting(base: str):
     name still queue on the same file. It is also why a rename no longer leaves
     an orphan lock behind — the live library had 262 of them against 101
     meetings. A meeting with no id yet (a legacy one the backfill has not
-    reached) locks on its base exactly as before."""
-    key = config.lock_key(base)
+    reached) locks on its base exactly as before.
+
+    `key` names the lock file outright, for a caller that knows the id before
+    the json carries it: the pipeline decides a new meeting's id before its
+    first write, and without this it locked on the base (lock_key finds no
+    json yet), which left a base-named lock the doctor reports as an orphan."""
+    key = key or config.lock_key(base)
     held = getattr(_meeting_lock_depth, "held", None)
     if held is None:
         held = _meeting_lock_depth.held = {}

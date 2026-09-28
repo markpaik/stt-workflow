@@ -303,9 +303,9 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
     real = review.lock_meeting
 
     @contextlib.contextmanager
-    def spy(base):
+    def spy(base, key=None):
         entered.append(base)
-        with real(base):
+        with real(base, key=key):
             yield
     monkeypatch.setattr(review, "lock_meeting", spy)
 
@@ -316,3 +316,41 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                           do_diarize=False, do_verify=False)
     assert "Locked 05012026" in entered
+
+
+def _sine(path, secs=2):
+    import subprocess
+
+    from stt.audio import FFMPEG
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    f"sine=frequency=300:duration={secs}", "-ac", "1",
+                    "-c:a", "aac", str(path)], check=True, capture_output=True)
+
+
+def test_a_new_meeting_leaves_no_base_named_lock(sandbox, monkeypatch, tmp_path):
+    """The pipeline took lock_meeting(base) before the json existed, so
+    lock_key fell back to the base: every newly processed meeting left an
+    empty "<base>.lock" in .locks that the registry doctor then reported as
+    orphan_lock. The id is decided first, and the lock is named for it."""
+    from stt import pipeline, registry_doctor
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    src = tmp_path / "Fresh Mtg 05012026.m4a"
+    _sine(src)
+    out = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    base = out["base"]
+    mid = config.id_of(base)
+    assert mid, "the new meeting carries an id"
+    locks = config.meetings_dir() / ".locks"
+    assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"], \
+        "the one lock file is named for the id the json carries"
+    assert config.orphan_lock_files() == []
+    assert [f for f in registry_doctor.check() if f.kind == "orphan_lock"] == []
+
+    # a Redo keeps its id, and so its lock, exactly as before
+    pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                          do_diarize=False, do_verify=False)
+    assert config.id_of(base) == mid
+    assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"]
