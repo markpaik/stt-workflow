@@ -145,7 +145,7 @@ function grpSet(id,open){GRP[id]=open?'open':'closed';
 // hidden behind a fold. The stored state is not touched -- neither by the
 // filter nor by a click on a header WHILE it is on -- so clearing the filter
 // restores exactly the folds the user left.
-function grpForced(){return $('#search').value.trim().length>0||flaggedOnly;}
+function grpForced(){return $('#search').value.trim().length>0||LF.flags||LF.voices;}
 function grpToggle(id){
   if(grpForced())return;      // already open by the filter: store nothing, redraw nothing
   grpSet(id,!grpOpen(id));
@@ -631,7 +631,8 @@ function secHeadHTML(label,id,acts){
 }
 // the To finish eyebrow's two actions, each only when it applies: "Name N
 // voices" walks the unknown voices meeting by meeting (fsVoicesStart), and
-// "Review flags" toggles the flagged-only filter (pressed while it is on).
+// "Review flags" presses or clears the "Has flags" chip (pressed while it is
+// on).
 // `panel`: no live meeting asks about these voices (each was heard only in
 // archived meetings), so the button opens the naming panel on one at a time
 // and its title says so.
@@ -652,6 +653,174 @@ function finishActsHTML(nVoices,nFlagged,on,panel){
 function headSectionsHTML(nowHTML,fin,acts){
   return (nowHTML?secHeadHTML('Now','sec-now')+nowHTML:'')
     +((fin.length||acts)?secHeadHTML('To finish','sec-fin',acts)+fin.map(finishRowHTML).join(''):'');
+}
+
+/* ================ search chips, Said in, and the setup check ================ *
+ * (docs/ui-refresh phase 4.) The search field sits at the top of the list,
+ * and one row of chips under it replaces the header's two selects and the
+ * "flagged only" chip: All, one chip per category (Work, Personal), "Has
+ * flags N", "Has voices N", and "A-Z", which switches to the by-name
+ * grouping. A pressed chip clears with one click. The category and the
+ * grouping persist in the keys the selects used (stt_mcat, stt_msort), so
+ * nothing resets; Has flags and Has voices last for the session, as the
+ * flagged-only filter did. Full-text hits head the list as "Said in", and an
+ * empty library shows the setup check where the list would be.
+ */
+const CHIP_CATS=[['work','Work'],['personal','Personal']];
+// the saved choices, read the way the selects stored them
+function chipLoad(get){
+  const c=get('stt_mcat'),s=get('stt_msort');
+  return {cat:CHIP_CATS.some(x=>x[0]===c)?c:'',sort:s==='name'?'name':'date',
+    flags:false,voices:false};
+}
+let LF=chipLoad(k=>{try{return localStorage.getItem(k);}catch(e){return null;}});
+// the state after a click on one chip. All clears the three filters (the
+// grouping is not a filter); a pressed chip clears itself.
+function chipNext(st,key){
+  const n={...st};
+  if(key==='all'){n.cat='';n.flags=false;n.voices=false;}
+  else if(CHIP_CATS.some(x=>x[0]===key))n.cat=st.cat===key?'':key;
+  else if(key==='flags')n.flags=!st.flags;
+  else if(key==='voices')n.voices=!st.voices;
+  else if(key==='az')n.sort=st.sort==='name'?'date':'name';
+  return n;
+}
+// the chips filter ready meetings only: Now and a meeting waiting for its
+// title always stay, as they did under the flagged-only filter
+function chipKeeps(r,st){
+  if(!r||r.state!=='ready')return true;
+  if(st.cat&&r.category!==st.cat)return false;
+  if(st.flags&&!(r.review_substantial>0))return false;
+  if(st.voices&&!(r.finish&&r.finish.voices>0))return false;
+  return true;
+}
+// the counts on "Has flags" and "Has voices": the ready meetings each keeps
+function chipCounts(timeline){
+  let flags=0,voices=0;
+  for(const r of timeline||[]){
+    if(!r||r.state!=='ready')continue;
+    if(r.review_substantial>0)flags++;
+    if(r.finish&&r.finish.voices>0)voices++;
+  }
+  return {flags,voices};
+}
+// the chips in their order. A count chip shows while it has something to
+// keep, or while it is pressed (so it can always be cleared).
+function chipList(st,counts){
+  const all=!st.cat&&!st.flags&&!st.voices;
+  const out=[{key:'all',label:'All',on:all,
+    title:all?'Showing every meeting':'Show every meeting: clear the filters'}];
+  for(const [k,l] of CHIP_CATS)out.push({key:k,label:l,on:st.cat===k,
+    title:st.cat===k?`Showing only ${l} meetings. Click to show all.`:`Show only ${l} meetings`});
+  if(counts.flags||st.flags)out.push({key:'flags',label:'Has flags',n:counts.flags,on:st.flags,
+    title:st.flags?'Showing only meetings with flagged lines. Click to clear.'
+      :'Show only meetings with flagged lines to check'});
+  if(counts.voices||st.voices)out.push({key:'voices',label:'Has voices',n:counts.voices,on:st.voices,
+    title:st.voices?'Showing only meetings with a voice to name. Click to clear.'
+      :'Show only meetings with a voice still to name'});
+  out.push({key:'az',label:'A&#8211;Z',on:st.sort==='name',
+    title:st.sort==='name'?'Grouped by name. Click to group by month.':'Group the list by name, A to Z'});
+  return out;
+}
+function chipsHTML(list){
+  return list.map(c=>`<button class="fchip${c.key==='az'?' az':''}" type="button"`
+    +` data-k="${c.key}" aria-pressed="${c.on?'true':'false'}" title="${esc(c.title)}"`
+    +` onclick="chipGo('${c.key}')">${c.label}`
+    +(c.n!=null?` <span class="mono">${c.n}</span>`:'')
+    +(c.on&&c.key!=='all'?' <span class="fx" aria-hidden="true">&#10005;</span>':'')
+    +`</button>`).join('');
+}
+function chipGo(key){
+  LF=chipNext(LF,key);
+  try{localStorage.setItem('stt_mcat',LF.cat);localStorage.setItem('stt_msort',LF.sort);}catch(e){}
+  render();
+}
+// the chip row, redrawn only when a chip or a count changes; a focused chip
+// keeps its focus through the redraw
+function drawChips(s){
+  const box=$('#fchips');if(!box)return;
+  const html=chipsHTML(chipList(LF,chipCounts(s&&s.timeline)));
+  if(box.dataset.sig===html)return;
+  const ae=document.activeElement,k=ae&&box.contains(ae)?ae.dataset.k:null;
+  box.dataset.sig=html;box.innerHTML=html;
+  const b=k&&box.querySelector('[data-k="'+k+'"]');
+  if(b)b.focus({preventScroll:true});
+}
+
+let HITS=null;       // the last /api/search answer: {query, hits, total}
+let SAID_TOP=null;   // the first line the Said in group shows: Enter opens it
+// "Said in": the full-text hits, grouped by meeting in the server's order
+// (newest meeting first). titleOf(base) names the meeting, or answers null
+// for one the chips filter out, whose lines then drop too.
+function saidGroups(hits,titleOf){
+  const out=[],at=new Map();
+  for(const h of hits||[]){
+    const title=titleOf(h.base);
+    if(title==null)continue;
+    if(!at.has(h.base)){at.set(h.base,out.length);out.push({base:h.base,title,hits:[]});}
+    out[at.get(h.base)].hits.push(h);
+  }
+  return out;
+}
+function hitClock(t){
+  t=Math.max(0,Math.floor(t||0));
+  return Math.floor(t/60)+':'+String(t%60).padStart(2,'0');
+}
+// the group's markup: the section eyebrow with the line count, then each
+// meeting's title over its lines. A line is a button: a click or Enter opens
+// the meeting at that moment (openHit, then mSeek).
+function saidInHTML(groups,q,capped){
+  if(!groups.length)return '';
+  const rx=new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig');
+  const hl=t=>esc(t).replace(rx,m=>'<mark>'+m+'</mark>');
+  const n=groups.reduce((a,g)=>a+g.hits.length,0);
+  return secHeadHTML('Said in','sec-said',`<span class="gcount mono">${n}</span>`)
+    +groups.map(g=>`<div class="said"><div class="said-t">${esc(g.title)}</div>`
+      +g.hits.map(h=>`<button class="hit" type="button" title="Open the meeting at this moment"`
+        +` onclick="openHit('${escJs(h.base)}',${Number(h.start)||0})">`
+        +`<span class="hit-t mono">${hitClock(h.start)}</span>`
+        +`<span class="hit-x">${h.who?`<span class="hit-w">${esc(h.who)}</span> `:''}${hl(h.snippet)}</span>`
+        +`</button>`).join('')+`</div>`).join('')
+    +(capped?`<p class="said-more">The newest ${capped[0]} of ${capped[1]} lines. Add a word to narrow them.</p>`:'');
+}
+
+// the library holds no meeting yet (a file in Now does not count)
+function libraryEmpty(timeline){
+  return !(timeline||[]).some(r=>r&&(r.state==='ready'||r.state==='needs_name'));
+}
+// the first-run check: three lines from /api/state, each with the drawer
+// section that fixes it ([section, anchor id])
+function setupCheck(s){
+  s=s||{};
+  const src=(s.paths&&s.paths.source)||'';
+  const me=s.mic_speaker||'';
+  const enrolled=!!me&&(s.enrolled||[]).some(e=>e&&e.name===me);
+  return [
+    {key:'recorder',ok:!!s.recorder_ready,
+      label:s.recorder_ready?'Recorder ready':'Recorder not installed',
+      detail:s.recorder_ready?'The menu-bar recorder is installed.'
+        :'Build it with ./setup.sh, then record from the menu bar.',
+      btn:'Recorder settings',go:['settings','dg-recorder']},
+    {key:'folder',ok:!!src,
+      label:src?'Watched folder set':'No watched folder',
+      detail:src?src.replace(/^\/Users\/[^/]+/,'~'):'New recordings are picked up from a watched folder.',
+      btn:'Folder settings',go:['settings','drow-source']},
+    {key:'voice',ok:enrolled,
+      label:!me?'Your voice is not set':enrolled?'Your voice is enrolled':'Your voice is not enrolled yet',
+      detail:!me?'Pick your name, so recorded calls separate you from the others.'
+        :enrolled?me:`Name ${me} in your first meeting to enroll the voice.`,
+      btn:!me?'Pick your voice':'Speakers',go:!me?['settings','dg-recorder']:['speakers','']},
+  ];
+}
+function setupHTML(items){
+  return `<section class="setup" aria-label="Setup check">`
+    +items.map(it=>`<div class="setrow${it.ok?' ok':''}">`
+      +`<span class="setmark" aria-hidden="true">${it.ok?'&#10003;':'!'}</span>`
+      +`<div class="setbody"><div class="setname">${esc(it.label)}</div>`
+      +`<div class="setsub">${esc(it.detail)}</div></div>`
+      +`<button class="btn mini" type="button" onclick="openDrawerAt('${it.go[0]}','${it.go[1]}')">${esc(it.btn)}</button>`
+      +`</div>`).join('')
+    +`<p class="setdrop">Record from the menu bar, or drop an audio file here.</p></section>`;
 }
 
 // fields that decide whether a rebuild is needed -- elapsed_secs is deliberately
@@ -677,16 +846,14 @@ function sigOf(r){
 
 function drawTimeline(s){
   const tl=$('#timeline');
-  const cat=$('#filter').value;
   const q=$('#search').value.trim().toLowerCase();
-  const sort=$('#sort').value;
+  const sort=LF.sort;
 
   const all=s.timeline||[];
+  // the chips (a category, Has flags, Has voices) filter ready rows only; Now
+  // and the meetings waiting for a title stay visible
   const rows=all.filter(r=>{
-    if(cat&&r.state==='ready'&&r.category!==cat)return false;   // tag filter: ready rows only
-    // "Review flags": ready rows with nothing to check drop out; Now and the
-    // meetings waiting for a title stay visible
-    if(flaggedOnly&&r.state==='ready'&&!(r.review_substantial>0))return false;
+    if(!chipKeeps(r,LF))return false;
     if(q){
       // match the visible name (a needs_name row shows its suggested title) plus speakers
       const hay=((r.title||'')+' '+(r.suggested_title||'')+' '+((r.speakers||[]).join(' '))).toLowerCase();
@@ -711,19 +878,39 @@ function drawTimeline(s){
   // none in a live meeting, the tray's unknown voices, which the button opens
   // one at a time in the naming panel (fsVoicesStart's fallback).
   const vq=voiceQueueCount(s.timeline);
-  const acts=finishActsHTML(vq||trayCount(s,'unknown_voice'),trayCount(s,'review'),
-    flaggedOnly,!vq);
+  const acts=finishActsHTML(vq||trayCount(s,'unknown_voice'),chipCounts(all).flags,
+    LF.flags,!vq);
 
-  // empty states (quiet, centered), rendered inside the timeline under Now
+  // "Said in": the full-text hits for the query in the field, at the top of
+  // the list. A meeting the chips filter out drops its lines too. SAID_TOP is
+  // the line Enter in the search field opens.
+  const byId=new Map(all.map(r=>[r.id,r]));
+  const live=HITS&&q.length>=3&&HITS.query===q?HITS:null;
+  const groups0=live?saidGroups(live.hits,base=>{
+    const r=byId.get(base);
+    if(!r)return base;
+    if(!chipKeeps(r,LF))return null;
+    return (r.state==='needs_name'&&r.suggested_title)||r.title||base;
+  }):[];
+  SAID_TOP=groups0.length?groups0[0].hits[0]:null;
+  const capped=live&&live.total>live.hits.length?[live.hits.length,live.total]:null;
+  const said=saidInHTML(groups0,q,capped);
+  const ssig=groups0.map(g=>g.base+':'+g.hits.length).join(',')+(capped?':'+capped:'');
+  // an empty library: the setup check stands where the list would be
+  const first=libraryEmpty(all);
+  const setup=first?setupHTML(setupCheck(s)):'';
+  const fsig=ssig+'|'+setup;
+  const lfsig=LF.cat+':'+LF.flags+':'+LF.voices;
+
+  // empty states (quiet, centered), rendered inside the timeline under Now.
+  // "No matches." only when the Said in group found nothing either.
   if((all.length===0||rows.length===0)&&!UPLOADS.length){
-    const empty=all.length===0
-      ?'Record a meeting from the menu bar, or drop an audio file here.':'No matches.';
-    const sig=(all.length===0?'EMPTY':'NOMATCH:'+cat+':'+q+':'+flaggedOnly)+'|'+tsig;
+    const empty=first?setup:said?'':'<p class="empty">No matches.</p>';
+    const sig=(first?'EMPTY':'NOMATCH:'+lfsig+':'+q)+'|'+tsig+'|'+fsig;
     $('#rail').hidden=true;
     if(tl.dataset.sig===sig)return;
     tl.dataset.sig=sig;
-    tl.innerHTML=headSectionsHTML(urgent,[],acts)
-      +`<p class="empty">${empty}</p>`;
+    tl.innerHTML=said+headSectionsHTML(urgent,[],acts)+empty;
     return;
   }
 
@@ -774,8 +961,8 @@ function drawTimeline(s){
   // the Now / To finish split: a meeting aging out of To finish moves zones.
   const gsig=sort!=='date'?'':groups.map(g=>g.pinned?'P'+split
     :g.id+':'+(g.open?1:0)+':'+(g.yearOpen?1:0)).join(',');
-  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+cat+'|'+q+'|'+flaggedOnly
-    +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig+'|'+tsig;
+  const sig=JSON.stringify(ordered.map(sigOf))+'|'+sort+'|'+lfsig+'|'+q
+    +'|'+uploadsSig()+'|'+(nest?1:0)+'|'+gsig+'|'+tsig+'|'+fsig;
   if(tl.dataset.sig===sig){drawRail(groups,q.length>0,sort);return;}  // nothing changed
   // never wipe a half-typed title or date (an inline rename in a row); a later
   // unchanged poll (or a blur) lets the rebuild happen. Only INPUT/SELECT
@@ -783,11 +970,11 @@ function drawTimeline(s){
   const ae=document.activeElement;
   if(ae&&tl.contains(ae)&&/^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName))return;
   tl.dataset.sig=sig;
-  tl.innerHTML=sort==='date'
+  tl.innerHTML=said+(sort==='date'
     ?accordionHTML(groups,nest,forced)
     :head+upHTML+groups.map((g,i)=>
       `<div class="mgroup" id="grp-${i}">${esc(g.key)} &middot; ${g.rows.length}</div>`
-      +g.rows.map(rowHTML).join('')).join('');
+      +g.rows.map(rowHTML).join('')).join(''))+setup;
   drawRail(groups,q.length>0,sort);
 }
 
@@ -909,7 +1096,7 @@ function relabelWatch(s){
 // opens the default one (readerSync).
 function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
-  const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
+  drawChips(S);        // the chip row under the search field, and its counts
   if(route&&route.view==='meeting'){maybeBuildPending();if(!PANES){applySel();return;}}
   else if(PANES)readerSync();
   drawTimeline(S);afterRender();}
@@ -997,13 +1184,8 @@ function cycleTheme(){const order=["auto","light","dark"];
   applyTheme(order[(order.indexOf(themeNow())+1)%3]);}
 
 /* ============================ boot / wiring ============================ */
-{const ms=localStorage.getItem('stt_msort');if(ms)$('#sort').value=ms;}
-{const mc=localStorage.getItem('stt_mcat');if(mc)$('#filter').value=mc;}
 applyTheme(themeNow());
-$('#sort').onchange=()=>{localStorage.setItem('stt_msort',$('#sort').value);render();};
-$('#filter').onchange=()=>{localStorage.setItem('stt_mcat',$('#filter').value);render();};
 $('#search').oninput=()=>{render();scheduleSearch();};
-$('#flagchip').onclick=()=>flaggedClear();
 // ready-row click-to-expand: clicking the row body toggles the summary peek;
 // its controls (buttons, links, checkbox, category dot, inputs, the review
 // count, the click-to-edit title and date) never do, and neither does a
@@ -1204,11 +1386,9 @@ function drawProcessPop(s){
 }
 
 /* ---------------------------------------------- tray items + filters ------ */
-// "Review flags" on the To finish eyebrow: only ready rows with lines to check
-// show (Now and To finish stay); the header chip clears it too
-let flaggedOnly=false;
-function flaggedToggle(){flaggedOnly=!flaggedOnly;render();}
-function flaggedClear(){flaggedOnly=false;render();}
+// "Review flags" (the To finish eyebrow) presses or clears the Has flags chip:
+// only ready rows with lines to check show (Now and To finish stay)
+function flaggedToggle(){chipGo('flags');}
 async function trayAct(kind,target){
   if(kind==='recorder_note'||kind==='recorder_stall'){
     // Fix permissions, on the failed recorder note or a live stall: an
@@ -1792,9 +1972,11 @@ function selAllShown(){
 }
 
 /* --------------------------------------------------------------- search ---- *
- * Debounced full-text (>=3 chars) into #searchhits; a hit opens the in-shell
- * meeting page (#m/<base>) and seeks the audio to the hit's moment via mSeek
- * once the page is built. The client-side title filter is A's, on #search. */
+ * Debounced full-text (>=3 chars) into HITS; drawTimeline renders them as the
+ * "Said in" group at the top of the list (docs/ui-refresh phase 4). A hit
+ * opens the in-shell meeting page (#m/<base>) and seeks the audio to the
+ * hit's moment via mSeek once the page is built; with two panes it opens in
+ * the reader beside the list. The client-side title filter is A's, on #search. */
 // a hit carries its start time in seconds (the old page passed the segment
 // index to openTranscript; the new page's mSeek takes the time directly)
 function openHit(base,t){
@@ -1805,21 +1987,13 @@ function openHit(base,t){
 let searchTimer=null;
 function scheduleSearch(){
   clearTimeout(searchTimer);
-  const box=$('#searchhits'),q=$('#search').value.trim();
-  if(q.length<3){box.hidden=true;box.innerHTML='';return;}
+  const q=$('#search').value.trim();
+  if(q.length<3){if(HITS){HITS=null;render();}return;}
   searchTimer=setTimeout(async()=>{
-    const r=await api('/api/search?q='+encodeURIComponent(q));
-    if($('#search').value.trim().toLowerCase()!==r.query)return;   // a stale response
-    const rx=new RegExp(r.query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig');
-    const hl=s=>esc(s).replace(rx,m=>'<mark>'+m+'</mark>');
-    box.hidden=false;
-    if(!r.hits.length){box.innerHTML=`<div class="hitshdr">No transcript matches &#8220;${esc(r.query)}&#8221;.</div>`;return;}
-    box.innerHTML=`<div class="hitshdr">Said in transcripts &middot; ${r.total} match${r.total>1?'es':''}</div>`
-      +r.hits.map(h=>{const mm=Math.floor(h.start/60),ss=String(Math.floor(h.start%60)).padStart(2,'0');
-        return `<div class="hit" onclick="openHit('${escJs(h.base)}',${Number(h.start)||0})" title="Open the transcript at this moment">
-          <span class="hit-t mono">${mm}:${ss}</span>
-          <span class="hit-w">${esc(h.who)}</span>
-          <span class="hit-x">${hl(h.snippet)} <span class="hit-b">${esc(h.base)}</span></span></div>`;}).join('');
+    let r;
+    try{r=await api('/api/search?q='+encodeURIComponent(q));}catch(e){return;}
+    if(!r||$('#search').value.trim().toLowerCase()!==r.query)return;   // a stale response
+    HITS=r;render();
   },250);
 }
 
@@ -4536,6 +4710,18 @@ function openDrawer(section){
   DRAWER.open=true;v.hidden=false;d.hidden=false;
   drawerGo(section||DRAWER.section||'settings');
 }
+// the setup check's buttons: open the drawer at the section that fixes the
+// line, scrolled to its row, with the row's first control focused
+function openDrawerAt(section,anchor){
+  if(section==='settings'&&DRAWER.sub){DRAWER.sub=null;DRAWER.dconfirm=null;}
+  openDrawer(section);
+  const el=anchor&&document.getElementById(anchor);
+  if(!el)return;
+  el.scrollIntoView({block:'start'});
+  const row=el.classList.contains('dgroup')?el.nextElementSibling:el;
+  const c=row&&row.querySelector('select,button,input');
+  if(c)c.focus({preventScroll:true});
+}
 function closeDrawer(){
   if(!DRAWER.open)return;
   DRAWER.open=false;
@@ -4611,8 +4797,8 @@ function dErr(id,r){
  * Order per DESIGN.md: Automation (ONE master switch over the two indented
  * triggers), Transcription (model + cloud keys subview), Summaries and Ask,
  * Recorder (your-voice picker + the stall fix), Housekeeping. */
-function _drow(name,sub,ctrl){
-  return `<div class="drow"><div class="grow"><div class="dname">${name}</div>
+function _drow(name,sub,ctrl,id){
+  return `<div class="drow"${id?` id="${id}"`:''}><div class="grow"><div class="dname">${name}</div>
     ${sub?`<div class="dsub">${sub}</div>`:''}</div>${ctrl||''}</div>`;
 }
 function _dtog(on,call,dis,label){
@@ -4699,7 +4885,7 @@ function dSettingsHTML(s){
       Object.keys(LB).map(b=>`<option value="${b}" ${b===s.llm_backend?'selected':''} ${av[b]?'':'disabled'}>${LB[b]}${av[b]?'':' (no key)'}</option>`).join('')}</select>`);
   h+=`<div id="dllmerr" class="derr" hidden></div>`;
 
-  h+=`<div class="dgroup">Recorder</div>`;
+  h+=`<div class="dgroup" id="dg-recorder">Recorder</div>`;
   // the your-voice picker is an inline enrolled-name select (the old page used
   // a native prompt; the house rule bans those)
   const names=(s.enrolled||[]).map(e=>e.name);
@@ -4728,7 +4914,8 @@ function dSettingsHTML(s){
       :'Estimates use factory measurements until a few runs complete.','');
   const home=p=>esc((p||'').replace(/^\/Users\/[^/]+/,'~'));
   h+=_drow('Watched folder',home(s.paths&&s.paths.source),
-    `<button class="btn mini" type="button" onclick="dPickFolder('source',this)">Change&#8230;</button>`);
+    `<button class="btn mini" type="button" onclick="dPickFolder('source',this)">Change&#8230;</button>`,
+    'drow-source');
   h+=_drow('Transcripts folder',home(s.paths&&s.paths.dest),
     `<button class="btn mini" type="button" onclick="dPickFolder('dest',this)">Change&#8230;</button>`);
   return h;
@@ -5467,7 +5654,8 @@ function archHint(){
    its slash, and Cmd-F, so the dispatcher bows out of everything but Escape
    there. Dropping audio anywhere uploads it through POST /api/upload and a
    synthetic timeline row holds the spot until the REAL waiting row lands.
-   No hint overlay anywhere: the layer stays invisible.
+   The layer stays invisible until asked for: ? opens the key sheet (phase 4),
+   the one place key caps show.
    ============================================================================ */
 
 /* ------------------------------------------------------- keyboard layer ---- *
@@ -5476,17 +5664,43 @@ function archHint(){
  * the ring too: a folded month is otherwise unreachable from the keyboard, and
  * Enter on a header is its own native click. Enter acts by row state, e peeks
  * a ready row, / focuses search, Escape in search clears it back to the list,
- * and Escape on the meeting page (with nothing else open) returns to the list.
+ * Enter in search opens the first Said in line, ? opens the key sheet, and
+ * Escape on the meeting page (with nothing else open) returns to the list.
  * html{scroll-behavior:smooth} owns the scroll feel and the reduced-motion
  * block flips it to auto, so plain scrollIntoView honors both. */
 let kbLast=null;             // the row id that last held the ring
 const KB_RING='#timeline .row[tabindex], #timeline .lrow, #timeline .ghead';
 // the edit layers that slide over the list and the page: the naming panel and
-// the drawer. While either is open it owns every key, so j/k, /, Enter and the
-// page's own keys never reach the rows or the transcript underneath it (focus
-// used to jump off the panel onto a hidden row), and the ring is never put
-// back under it. Escape stays each layer's own, and closes it.
-function kbLayerOpen(){return !!NP||!!(DRAWER&&DRAWER.open);}
+// the drawer, and the key sheet over both. While one is open it owns every
+// key, so j/k, /, Enter and the page's own keys never reach the rows or the
+// transcript underneath it (focus used to jump off the panel onto a hidden
+// row), and the ring is never put back under it. Escape stays each layer's
+// own, and closes it.
+function kbLayerOpen(){return !!NP||!!(DRAWER&&DRAWER.open)||KSHEET;}
+
+/* the key sheet (docs/ui-refresh phase 4): ? opens one card listing the keys
+ * phases 1 to 3 shipped. It never opens while typing (a ? in a field is a
+ * character), under the naming panel or the drawer, or over an open popover.
+ * While it is open it owns every key: Escape or ? closes it, Tab stays on its
+ * close button, and a click outside (the veil) closes it too. Closing hands
+ * focus back to where it was. */
+let KSHEET=false,KSHEET_BACK=null;
+function keySheetKey(e,typing,blocked){
+  return e.key==='?'&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&!typing&&!blocked;
+}
+function keySheetOpen(){
+  const k=$('#keysheet'),v=$('#keyveil');if(!k||!v)return;
+  KSHEET=true;KSHEET_BACK=document.activeElement;
+  v.hidden=false;k.hidden=false;
+  const b=k.querySelector('button');if(b)b.focus();
+}
+function keySheetClose(){
+  if(!KSHEET)return;
+  KSHEET=false;
+  const k=$('#keysheet'),v=$('#keyveil');if(k)k.hidden=true;if(v)v.hidden=true;
+  const b=KSHEET_BACK;KSHEET_BACK=null;
+  if(b&&b.focus&&document.body.contains(b))b.focus({preventScroll:true});
+}
 function kbRows(){return [...document.querySelectorAll(KB_RING)];}
 function kbFocusRow(el){
   if(!el)return;
@@ -5531,16 +5745,31 @@ function kbLand(el){
 }
 function kbKey(e){
   if(e.metaKey||e.ctrlKey||e.altKey)return;
+  // the open key sheet owns every key: Escape or ? closes it, and Tab stays
+  // on its one control
+  if(KSHEET){
+    if(e.key==='Escape'||e.key==='?'||e.key==='Tab')e.preventDefault();
+    if(e.key==='Escape'||e.key==='?')keySheetClose();
+    return;
+  }
   const ae=document.activeElement,se=$('#search');
-  // the ONE typing exception: Escape in the search field clears it and puts
-  // the ring back on the list
+  // the typing exceptions, both in the search field: Escape clears it and
+  // puts the ring back on the list; Enter opens the first line of the Said
+  // in group at its moment, as a click on it does
   if(e.key==='Escape'&&ae===se){
     e.preventDefault();
     se.value='';render();scheduleSearch();se.blur();
     if(route.view==='timeline'||PANES)kbFocusRow(kbRows()[0]);
     return;
   }
+  if(e.key==='Enter'&&ae===se){
+    if(SAID_TOP){e.preventDefault();openHit(SAID_TOP.base,Number(SAID_TOP.start)||0);}
+    return;
+  }
   const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
+  // ? opens the key sheet from the list or the page, never while typing and
+  // never under a layer or a popover
+  if(keySheetKey(e,typing,kbLayerOpen()||!!_popClose)){e.preventDefault();keySheetOpen();return;}
   if(typing)return;   // no shortcut fires while any input has focus
   if(route.view==='meeting'){
     // mKey owns the page's keys (n/p stepping, slash, find): only the Escape

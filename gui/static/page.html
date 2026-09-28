@@ -19,24 +19,8 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
   <button id="pill" class="pill" type="button" hidden aria-live="polite"></button>
   <span class="grow"></span>
   <div class="controls">
-    <!-- filter + sort sit left of search, borderless until hover -->
-    <select id="filter" class="ctl" aria-label="Filter by tag"
-            title="Show every meeting, or only Work / Personal ones">
-      <option value="">all</option>
-      <option value="work">work</option>
-      <option value="personal">personal</option>
-    </select>
-    <!-- flagged-only chip: appears while "Review flags" (the To finish
-         eyebrow) filters the library to rows with lines to check; click clears it -->
-    <button id="flagchip" class="flagchip" type="button" hidden
-            title="Showing only meetings with flagged lines. Click to clear.">flagged only &#10005;</button>
-    <select id="sort" class="ctl" aria-label="Sort and group"
-            title="How the list is ordered and grouped">
-      <option value="date">by month</option>
-      <option value="name">by name</option>
-    </select>
-    <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
-           placeholder="Search titles and words" aria-label="Search meetings">
+    <!-- the search field and the filter chips live at the top of the list
+         (docs/ui-refresh phase 4), not in the header -->
     <!-- Process popover trigger. Builder B wires the popover open/close + actions. -->
     <button id="processBtn" class="btn process" type="button"
             aria-haspopup="true" aria-expanded="false"
@@ -55,6 +39,17 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
 
 <main class="wrap">
 
+  <!-- the list's search (docs/ui-refresh phase 4): the field at the top of the
+       list, then one row of filter chips under it (All, Work, Personal, Has
+       flags, Has voices, A-Z), built by app.js. Full-text hits render as the
+       "Said in" section at the top of the timeline. -->
+  <div class="lsearch">
+    <input id="search" class="search" type="search" autocomplete="off" spellcheck="false"
+           placeholder="Search titles and words" aria-label="Search meetings"
+           title="Search titles and words (/). Enter opens the first line it was said in.">
+    <div id="fchips" class="fchips" role="group" aria-label="Filter the list"></div>
+  </div>
+
   <!-- the recorder's SUCCESS note ("Saved X - processing"): good news, so a
        quiet sub-styled line right under the header, never an ask.
        It disappears on its own when the server-side TTL drops it from state.
@@ -62,9 +57,6 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
        (it asks for a decision). The tray band that once sat here is gone:
        its items live in the Now and To finish sections. -->
   <div id="recok" class="recok" hidden aria-live="polite"></div>
-
-  <!-- quiet full-text search sub-list under the search field (Builder B) -->
-  <div id="searchhits" class="searchhits" hidden></div>
 
   <!-- inline dismissible note for non-audio drops: names the accepted
        extensions (filled by app.js, dismissed by its x) -->
@@ -106,6 +98,30 @@ if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;})();
      by app.js; veil click / Escape / Cancel close it. -->
 <div id="nameveil" class="nveil" hidden onclick="closeNamePanel()"></div>
 <aside id="namepanel" class="npanel" hidden aria-label="Name this voice"></aside>
+
+<!-- the key sheet (docs/ui-refresh phase 4): ? opens it from anywhere except
+     a text field; Escape, ? again, or a click outside closes it. The keys are
+     the ones phases 1 to 3 shipped; they stay invisible until asked for. -->
+<div id="keyveil" class="dveil" hidden onclick="keySheetClose()"></div>
+<aside id="keysheet" class="popover keysheet" aria-labelledby="kstitle" hidden>
+  <div class="kshead">
+    <h2 id="kstitle" class="kstitle">Keys</h2>
+    <button class="iact" type="button" onclick="keySheetClose()"
+            aria-label="Close" title="Close (Escape)">&#10005;</button>
+  </div>
+  <dl class="kslist">
+    <dt><kbd>/</kbd></dt><dd>Search the list, or find in the open meeting</dd>
+    <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Move through the list; the reader follows</dd>
+    <dt><kbd>x</kbd></dt><dd>Select the focused row for bulk actions</dd>
+    <dt><kbd>Enter</kbd></dt><dd>Open the row, or accept the step (title, voice, flag)</dd>
+    <dt><kbd>Space</kbd></dt><dd>Replay the voice clip</dd>
+    <dt><kbd>1</kbd>&#8211;<kbd>3</kbd></dt><dd>Use a &#8220;looks like&#8221; name</dd>
+    <dt><kbd>s</kbd></dt><dd>Skip this voice</dd>
+    <dt><kbd>a</kbd> <kbd>u</kbd> <kbd>n</kbd> <kbd>p</kbd></dt><dd>Accept, use alt, next, previous flag</dd>
+    <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous or next meeting to finish</dd>
+    <dt><kbd>Esc</kbd></dt><dd>Back out one layer</dd>
+  </dl>
+</aside>
 
 <!-- full-page drop affordance: shown by window dragenter/over while files are
      dragged, hidden on leave/drop; pointer-events none so the drop lands on

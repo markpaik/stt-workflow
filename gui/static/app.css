@@ -170,23 +170,25 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 .pill .pseg{display:inline-flex;align-items:center;gap:7px}
 .pill .pseg+.pseg{border-left:1px solid var(--line);padding-left:8px}
 
-/* filter + sort: borderless until hover; native search field */
-.ctl{font:500 13px/1 var(--sans);color:var(--sub);background:transparent;
-  border:1px solid transparent;border-radius:6px;padding:6px 8px;cursor:pointer}
-.ctl:hover{border-color:var(--line);color:var(--ink)}
-.search{font:400 13px/1.2 var(--sans);color:var(--ink);background:var(--card);
-  border:1px solid var(--line);border-radius:6px;padding:7px 11px;
-  width:clamp(140px,28vw,280px)}
+/* the list's search (docs/ui-refresh phase 4): the native search field at
+   the top of the list, full width, then one row of filter chips under it.
+   The header's two selects and the "flagged only" chip retired into these. */
+.lsearch{padding:14px 0 2px}
+.search{display:block;width:100%;font:400 14px/1.2 var(--sans);color:var(--ink);
+  background:var(--card);border:1px solid var(--line);border-radius:6px;padding:9px 12px}
 .search::placeholder{color:var(--sub)}
-
-/* "flagged only" chip beside the category filter: visible only while "Review
-   flags" (the To finish eyebrow) is filtering the library; clicking it clears it */
-.flagchip{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
-  font:500 13px/1 var(--sans);font-variant-numeric:tabular-nums;
-  color:var(--attn);background:var(--attn-soft);
-  border:1px solid color-mix(in srgb,var(--attn) 38%,var(--hair));
-  border-radius:4px;padding:6px 10px;cursor:pointer}
-.flagchip:hover{border-color:var(--attn)}
+.fchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.fchips:empty{display:none}
+/* a chip: 4px, a --hair border firming on hover; pressed, the accent pair
+   (indigo acts) with a quiet x that says one click clears it. The count is
+   mono (true data). A-Z sits at the row's right end. */
+.fchip{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+  font:500 13px/1.3 var(--sans);color:var(--sub);background:var(--card);
+  border:1px solid var(--hair);border-radius:4px;padding:3px 9px;cursor:pointer}
+.fchip:hover{border-color:var(--line);color:var(--ink)}
+.fchip[aria-pressed="true"]{color:var(--accent-text);background:var(--accent-soft);
+  border-color:transparent;font-weight:600}
+.fchip.az{margin-left:auto}
 
 /* buttons: 6px, a 1px --line border, and no shadow anywhere. The primary is
    the accent fill; its Boardroom accent glow retired with the shadows. */
@@ -284,7 +286,6 @@ body{font:14.5px/1.5 var(--sans);background:var(--paper);color:var(--ink);
 /* ------------------------------------------------- timeline + rail -------- */
 .timelinewrap{display:flex;gap:14px;align-items:flex-start;margin-top:6px}
 .timeline{flex:1;min-width:0}
-.searchhits{margin:10px 0}
 
 .rail{display:flex;flex-direction:column;gap:1px;flex:none;padding-top:14px;
   position:sticky;top:74px;max-height:calc(100vh - 96px);overflow-y:auto;
@@ -507,14 +508,14 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 @media(prefers-reduced-motion:reduce){
   *{scroll-behavior:auto!important}
   .pill .recdot,.row[data-state="recording"] .capdot{animation:none}
-  .row,.row.updated,.lrow,.lrow.updated,.ractions,.row .chk,.btn,.themedot,.ctl,.rexp,
+  .row,.row.updated,.lrow,.lrow.updated,.ractions,.row .chk,.btn,.themedot,.rexp,
   .row[data-state="processing"] .progress{transition:none}
 }
 
 /* narrow (a phone, a slim window): nothing forces a sideways scroll and no
-   word is cut. A 16px gutter replaces the 94vw cap. The controls take their
-   own line and the search field grows to fill it, so its placeholder reads
-   whole. The pill may wrap, its two segments stacked over a hairline. A Now
+   word is cut. A 16px gutter replaces the 94vw cap. The search field is the
+   list's own, full width, so its placeholder reads whole; the chips under
+   it wrap. The pill may wrap, its two segments stacked over a hairline. A Now
    row's detail wraps under its title instead of ending in an ellipsis after
    a word or two. A row whose right rail cannot sit beside ~160px of title
    (a live stage, the hover actions) drops the rail under the text rather
@@ -524,8 +525,6 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
   body{max-width:none;padding:0 16px 64px}
   .rail{display:none!important}
   .wordmark{font-size:20px}
-  .controls{flex:1 1 100%}
-  .search{flex:1 1 180px;width:auto;min-width:0}
   .pill{max-width:100%;white-space:normal;line-height:1.3}
   .pill:has(.pseg){flex-direction:column;align-items:flex-start;gap:5px}
   .pill .pseg+.pseg{align-self:stretch;border-left:0;padding-left:0;
@@ -614,19 +613,56 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
 .nameerr{flex-basis:100%;color:var(--rec-text);
   font:400 13px/1.35 var(--sans);margin-top:2px}
 
-/* full-text search hits under the search field */
-.searchhits .hitshdr{font:600 13px/1.2 var(--sans);letter-spacing:.08em;
-  text-transform:uppercase;color:var(--sub);padding:8px 2px 4px}
-.searchhits .hit{display:flex;gap:10px;align-items:baseline;padding:8px 12px;
-  border-radius:6px;cursor:pointer;background:var(--card);
-  border:1px solid var(--hair);margin-bottom:6px}
-.searchhits .hit:hover{border-color:var(--line)}
-.searchhits .hit-t{color:var(--accent-text);flex:none;min-width:40px;font-size:13px}
-.searchhits .hit-w{font:500 13px/1.4 var(--sans);color:var(--ink);flex:none;
-  max-width:22%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.searchhits .hit-x{font:400 13px/1.45 var(--sans);color:var(--sub);min-width:0}
-.searchhits .hit-b{font-size:13px;color:var(--sub)}
-.searchhits mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;padding:0 1px}
+/* "Said in" (docs/ui-refresh phase 4): the full-text hits as the first
+   section of the list, under the house eyebrow with a mono line count. Each
+   meeting's title sits over its lines; a line is a button (mono timestamp,
+   the speaker, the snippet with the match marked) that opens the meeting at
+   that moment. */
+.said{margin:0 0 10px}
+.said-t{font:600 13px/1.35 var(--sans);color:var(--ink);padding:0 2px 6px;
+  overflow-wrap:break-word}
+.hit{display:flex;gap:10px;align-items:baseline;width:100%;text-align:left;
+  padding:8px 12px;margin:0 0 6px;border-radius:6px;cursor:pointer;
+  background:var(--card);border:1px solid var(--hair);color:var(--ink);font:inherit}
+.hit:hover{border-color:var(--line)}
+.hit-t{color:var(--accent-text);flex:none;min-width:40px;font-size:13px}
+.hit-x{font:400 13px/1.45 var(--sans);color:var(--sub);min-width:0;overflow-wrap:break-word}
+.hit-w{font-weight:600;color:var(--ink)}
+.hit mark{background:var(--accent-soft);color:var(--accent-text);border-radius:3px;padding:0 1px}
+.said-more{font:400 13px/1.4 var(--sans);color:var(--sub);padding:0 2px 12px}
+
+/* the setup check (docs/ui-refresh phase 4): an empty library shows three
+   lines on one card where the list would be, each with the drawer button
+   that fixes it, then the drop line. Green done, teal asks. */
+.setup{max-width:620px;margin:24px auto 0;background:var(--card);
+  border:1px solid var(--hair);border-radius:6px;padding:2px 18px 0}
+.setrow{display:flex;align-items:center;gap:12px;padding:14px 0;
+  border-bottom:1px solid var(--hair)}
+.setmark{flex:none;width:22px;height:22px;border-radius:50%;display:inline-flex;
+  align-items:center;justify-content:center;font:700 13px/1 var(--sans);
+  color:var(--attn);background:var(--attn-soft)}
+.setrow.ok .setmark{color:var(--ok);background:var(--ok-soft)}
+.setbody{flex:1;min-width:0}
+.setname{font:600 14.5px/1.3 var(--sans);color:var(--ink)}
+.setsub{font:400 13px/1.4 var(--sans);color:var(--sub);overflow-wrap:break-word}
+.setrow .btn{flex:none}
+.setdrop{text-align:center;font:400 15.5px/1.5 var(--sans);color:var(--sub);
+  padding:20px 8px 22px}
+
+/* the key sheet (docs/ui-refresh phase 4): one popover card, centered over
+   the drawer's veil. Its keys are the one place key caps show: sans, on the
+   inset well, a --line border, 4px. */
+.popover.keysheet{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+  z-index:58;width:min(520px,calc(100vw - 32px));max-width:none;
+  max-height:calc(100vh - 32px);overflow-y:auto;padding:14px 20px 18px}
+.kshead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.kstitle{font:600 15px/1.3 var(--sans);color:var(--ink)}
+.kslist{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;align-items:baseline}
+.kslist dt{text-align:right;white-space:nowrap}
+.kslist dd{font:400 13.5px/1.4 var(--sans);color:var(--ink)}
+.kslist kbd{display:inline-block;min-width:24px;padding:1px 6px;text-align:center;
+  font:600 13px/1.4 var(--sans);color:var(--ink);background:var(--inset);
+  border:1px solid var(--line);border-radius:4px}
 
 /* ============================================================================
    Builder A: THE MEETING PAGE (hash route #m/<base>). One scrollable document
@@ -639,8 +675,7 @@ button.nchip:hover{border-color:var(--attn);color:var(--attn)}
    the pill in the shell header and the 2s poll stay live. Two panes keep the
    list beside the meeting instead (see "Two panes" at the foot of the sheet). */
 body.route-meeting:not(.panes) .wrap{display:none}
-body.route-meeting:not(.panes) .bulkbar,
-body.route-meeting:not(.panes) #searchhits{display:none!important}
+body.route-meeting:not(.panes) .bulkbar{display:none!important}
 
 .mpage{padding:4px 0 120px}          /* clearance for the pinned ask bar */
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);

@@ -124,10 +124,11 @@ and hover lifts; honor `prefers-reduced-motion`.
 ## Anatomy
 
 Header (sticky, paper ground, hairline bottom): sans-semibold wordmark "Meetings" ·
-status pill · search field (right-aligned) · Process ▾ · theme dot · gear
-(opens the drawer). At 720px and below the controls take their own line and
-the search field grows to fill it, so its hint reads whole (see "Phone
-width" under To finish and Now).
+status pill · Process ▾ · theme dot · gear (opens the drawer). The search
+field left the header for the top of the list (revised 2026-09-27, see
+"Search chips and first run"). At 720px and below the header wraps only as
+it must: the controls follow the wordmark and the pill, and drop to a line
+of their own only when the pill leaves them no room.
 
 Status pill: the ONLY place pipeline state appears. Mono, in two segments
 (revised 2026-09-27). The pipeline segment shows one state, by priority:
@@ -154,9 +155,10 @@ expanding (2026-07-12). Every kind it offered has a home in the list now:
 - "N voices need names": the To finish eyebrow's "Name N voices"; each voice
   is also in the drawer's Speakers section;
 - "Flagged lines in N meetings": the To finish eyebrow's "Review flags",
-  which toggles the same flagged-only FILTER at any count (full-size rows; the
-  "flagged only ✕" chip beside the category filter clears it too). There is
-  never a second, smaller library.
+  which presses the "Has flags" chip, a FILTER at any count (full-size rows;
+  the chip itself clears it too; revised 2026-09-27, it was a "flagged only ✕"
+  chip beside the category select). There is never a second, smaller
+  library.
 
 Timeline: a centered list on paper in three zones (revised 2026-09-27; see
 "To finish and Now" under the Finish flow). First "Now": recording,
@@ -248,16 +250,22 @@ This popover is the ONLY machinery surface in the shell.
 transcript · Show files · Rename… · Redo… · Archive · Delete…. All existing
 endpoints; Redo and Delete keep their confirm steps.
 
-Search: client filter + debounced full-text at ≥3 chars;
-full-text hits render as a quiet sub-list under the search field, mono
-timestamps, click opens the meeting page at that moment (#m route + seek). Filter select (all /
-work / personal) and sort (by month / by name) sit left of the search field,
-borderless until hover.
+Search (revised 2026-09-27, see "Search chips and first run"): the field
+sits at the top of the list, with one row of filter chips under it. Typing
+filters the list by title and speakers; at 3 characters a debounced
+full-text search fills the "Said in" group at the top of the list, mono
+timestamps, and Enter or a click opens the meeting at that moment (the #m
+route and a seek). The filter select (all / work / personal) and the sort
+select (by month / by name) that sat left of a header search field are
+retired into the chips.
 
-Empty states, in sub text, centered: library empty → "Record a meeting from
-the menu bar, or drop an audio file here."; search empty → "No matches.". A
-section with nothing in it renders nothing; Now's urgent rows and the To
-finish actions stay above an empty state, in either sort.
+Empty states: library empty → the setup check, ending on "Record from the
+menu bar, or drop an audio file here." (it read "Record a meeting from the
+menu bar, …" before 2026-09-27); a search that matches no title and no line
+said → "No matches.", in sub text, centered. A search whose words were said
+but match no title shows its Said in group and no "No matches.". A section
+with nothing in it renders nothing; Now's urgent rows and the To finish
+actions stay above an empty state, in either sort.
 
 ## Reviewing and editing on the meeting page
 
@@ -279,7 +287,8 @@ position. Bar actions are verdicts and AUTO-ADVANCE to the next unresolved
 flag (stepping wraps at both ends; ✕ or Escape exits and the strip returns).
 Keyboard, never while typing: Enter or `a` accepts-and-advances, `u` takes
 the second engine, n/p step, Escape exits; keys appear as title-attribute
-hints only, never visible clutter.
+hints only, never visible clutter (the `?` key sheet, asked for, is the one
+place key caps show).
 
 Card actions are work at a spot the user chose and NEVER advance: the inline
 card keeps the flag reason, alt preview, speaker + text editing, and Save,
@@ -465,9 +474,10 @@ unreachable.
   only in archived meetings) N is the tray's count instead, the button's
   title says "Heard only in archived meetings: name them one at a time", and
   it opens the naming panel on the first voice, as the tray did.
-- **Review flags** toggles the flagged-only filter, at any count. While the
-  filter is on it reads "Review flags ✕" in the attention pair and is
-  pressed (`aria-pressed`).
+- **Review flags** presses or clears the "Has flags" chip (revised
+  2026-09-27; it toggled a flagged-only filter of its own), at any count.
+  While the chip is pressed it reads "Review flags ✕" in the attention pair
+  and is pressed (`aria-pressed`), and the chip wears its pressed state too.
 
 Status. The pill's naming segment (see the Anatomy) says what a naming is
 doing while anything else runs. The tab title reads `(N) Meetings` while the
@@ -487,15 +497,17 @@ open popover holds the plain keys the same way (see "Two panes").
 
 Phone width (720px and below; checked at 420px and 375px in both themes,
 revised 2026-09-27 after QA). Nothing forces a sideways scroll and no word
-is cut. A 16px gutter replaces the 94vw cap. The header's controls take
-their own line, the search field filling it. The pill wraps, its segments
-stacked. A Now row's detail wraps under its title and verbs, and the To
-finish eyebrow wraps its actions if it must. A row whose right rail cannot
-sit beside about 160px of title (a live stage, the hover actions) drops the
-rail under the text, right-aligned, instead of squeezing the title to a few
-letters. Row titles, meta lines, and To finish titles and meta wrap instead
-of ending in an ellipsis; the summary preview keeps its one line.
-On the meeting page an empty match count gives its width to the find field.
+is cut. A 16px gutter replaces the 94vw cap. The search field fills the
+list's width and the chips under it wrap (revised 2026-09-27: the header's
+controls no longer force a line of their own, since the field left the
+header). The pill wraps, its segments stacked. A Now row's detail wraps
+under its title and verbs, and the To finish eyebrow wraps its actions if it
+must. A row whose right rail cannot sit beside about 160px of title (a live
+stage, the hover actions) drops the rail under the text, right-aligned,
+instead of squeezing the title to a few letters. Row titles, meta lines, and
+To finish titles and meta wrap instead of ending in an ellipsis; the summary
+preview keeps its one line. On the meeting page an empty match count gives
+its width to the find field.
 
 ### Two panes (shipped 2026-09-27, phase 3 of docs/ui-refresh)
 
@@ -567,10 +579,94 @@ count, a rail that cannot sit beside about 160px of title drops under it
 section headers sit 18px apart. Under 1100px the Voices step stacks its
 evidence under the form and the transcript's speaker column narrows to 110px.
 
+### Search chips and first run (shipped 2026-09-27, phase 4 of docs/ui-refresh)
+
+The search field is the first thing in the list (the list pane with two
+panes, the page's column in one): full width, 14px, a 1px `--line` border,
+6px, the placeholder "Search titles and words". Under it sits one row of
+chips, left to right: **All**, one chip per category the filter offered
+(**Work**, **Personal**), **Has flags N**, **Has voices N**, and **A–Z** at
+the row's right end. A chip is 13px on the card ground with a `--hair`
+border that firms on hover, 4px radius, no shadow. A pressed chip wears the
+accent pair (`--accent-text` on `--accent-soft`, 600) and a quiet ✕, and one
+click clears it. Counts are mono.
+
+- **All** is pressed while no filter is on; a click clears the category, Has
+  flags, and Has voices at once. The grouping is not a filter, so A–Z stays.
+- **Work** and **Personal** keep one category at a time, as the select did.
+- **Has flags N** keeps the ready meetings with substantial flags; **Has
+  voices N** keeps the ready meetings with an unnamed voice (the row's
+  `finish.voices`). N counts exactly the meetings each keeps. A count chip
+  with nothing to keep steps aside unless it is pressed, so it can always be
+  cleared. The To finish eyebrow's "Review flags" presses the same chip.
+- **A–Z** switches the list to the by-name grouping; a second click returns
+  it to months.
+- Every chip filters ready meetings only. Now and a meeting waiting for its
+  title always stay, as they did under the flagged-only filter.
+
+The category and the grouping persist in `stt_mcat` and `stt_msort`, the
+keys the two selects wrote, so a reload keeps them. Has flags and Has voices
+last for the session, as the flagged-only filter did. The chip row redraws
+only when a chip or a count moves, and a focused chip keeps its focus.
+
+**Said in.** From 3 characters the full-text hits head the list, above Now,
+under the house eyebrow "Said in" with the line count in mono. The hits
+group by meeting in the server's order (newest meeting first): the
+meeting's title at 13px semibold, then its lines. A line is a card-ground
+button with a `--hair` border: the timestamp in mono accent text, the
+speaker in ink semibold, the snippet in sub with the match marked in the
+accent pair. A click, or Enter on the focused line, opens the meeting at
+that moment through the #m route and mSeek (with two panes, in the reader
+beside the list). Enter in the search field opens the first line. The chips
+filter the lines too: a meeting the chips hide drops its lines. When the
+server stopped at its limit, one sub line closes the group: "The newest 40
+of 212 lines. Add a word to narrow them." A search with no line said
+renders no group.
+
+**First run.** An empty library (no meeting yet: a file in Now does not
+count) shows the setup check as one white card where the list would be,
+max 620px, centered, under Now when a file is already processing. Three
+lines, each a round mark (green ✓ when done, teal ! when not), a 14.5px
+semibold label, a 13px sub detail, and a mini button that opens the drawer
+at the row that fixes it:
+
+- **Recorder**: `recorder_ready`. "Recorder ready", or "Recorder not
+  installed" with "Build it with ./setup.sh, then record from the menu
+  bar." Button: Recorder settings (Settings, the Recorder group).
+- **Watched folder**: `paths.source`. "Watched folder set" with the path
+  (`~` for the home folder), or "No watched folder". Button: Folder settings
+  (Settings, the Watched folder row).
+- **Your voice**: `mic_speaker` against `enrolled`. "Your voice is not set"
+  (button: Pick your voice, the Recorder group's your-voice picker), "Your
+  voice is not enrolled yet" with "Name <name> in your first meeting to
+  enroll the voice." (button: Speakers), or "Your voice is enrolled" with
+  the name (button: Speakers).
+
+The drawer opens scrolled to that row with its first control focused. Under
+the three lines, centered sub text: "Record from the menu bar, or drop an
+audio file here." An empty library has no meeting to read, so it keeps the
+one column (see "Two panes"): the check stands in the page's column at every
+width, not in a reader pane. No panel Record button: recording stays in the
+menu bar until someone confirms the macOS microphone grant lets the server
+signal the menu-bar recorder.
+
+**The key sheet.** `?` opens one popover card, centered over the drawer's
+veil, width min(520px, 100vw − 32px), that lists the keys phases 1 to 3
+shipped: `/`, `j` `k`, `x`, Enter, Space, `1`–`3`, `s`, `a` `u` `n` `p`, `[`
+`]`, and Esc, each with one line. It is the one place key caps show: sans
+13px semibold on the inset well, a `--line` border, 4px. It never opens
+while typing (a `?` in a field is a character), under the naming panel or
+the drawer, or over an open popover. While it is open it owns every key:
+Escape or `?` closes it, Tab stays on its close button, and nothing reaches
+the list or the reader under it. A click outside closes it, and closing hands
+focus back to where it was.
+
 ## What deliberately does not exist in the new shell
 
 No Queue card, Processing card, Recent results, or naming inbox (row states
-replace all four). No Speakers card (the To finish eyebrow's "Name N voices"
+replace all four). No filter or sort select (the chips replaced them,
+2026-09-27). No panel Record button until the microphone grant is confirmed
+(docs/ui-refresh phase 4). No Speakers card (the To finish eyebrow's "Name N voices"
 surfaces unknown voices; management lives in the drawer). No tray band
 (retired 2026-09-27). No permanent run-option checkboxes. No status text
 beyond the pill and the tab title's count. No notification banners of any
@@ -664,8 +760,9 @@ Grouping, the year-to-month accordion (replaces flat month headers):
 - State persists per section in localStorage (`stt_groups`, keyed by the
   section id, values open or closed), survives polls and reloads, and a
   new month appearing opens by default.
-- Search or the flagged filter expands every section holding a match and
-  restores the persisted state when the filter clears. Nothing is written
+- Search, "Has flags", or "Has voices" expands every section holding a
+  match and restores the persisted state when the filter clears (a category
+  chip does not: it hides rows, and the folds stay as they were). Nothing is written
   to that state while a filter is on, including a click on a header the
   filter forced open. A jump-rail click expands the target section and its
   year before scrolling.

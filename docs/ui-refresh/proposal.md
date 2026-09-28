@@ -194,3 +194,14 @@ Sonnet runs QA and the full suite, then review and commit.
    setup check. A panel Record button waits until someone confirms the macOS
    microphone grant lets the server signal the menu-bar recorder; until then
    recording stays in the menu bar.
+   Shipped 2026-09-27: the search field at the top of the list with one row
+   of chips under it (All, Work, Personal, "Has flags N", "Has voices N",
+   and A–Z for the by-name grouping), the category and the grouping kept in
+   `stt_mcat` and `stt_msort`; full-text hits as a "Said in" group at the top
+   of the list, grouped by meeting with mono timestamps, where Enter or a
+   click opens the meeting at that moment; the three-line setup check an
+   empty library shows, each line opening the drawer at its fix; "No
+   matches." for an empty search; and the `?` key sheet. An empty library
+   keeps the one column, so the check stands in the page's column, not in a
+   reader pane. No panel Record button. See "Search chips and first run" in
+   `gui/DESIGN.md`.

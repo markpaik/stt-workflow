@@ -289,9 +289,11 @@ def test_phone_width_forces_no_sideways_scroll_and_cuts_no_word():
     b = _narrow_block()
     # a 16px gutter replaces the 94vw cap
     assert "body{max-width:none;padding:0 16px 64px}" in b
-    # the controls take their own line and the search field grows to fill it
-    assert ".controls{flex:1 1 100%}" in b
-    assert ".search{flex:1 1 180px;width:auto;min-width:0}" in b
+    # the search field is the list's own now (docs/ui-refresh phase 4), full
+    # width at every size, so the header no longer gives it a line of its
+    # own, and no phone rule narrows it back
+    assert re.search(r"(?m)^\.search\{display:block;width:100%;", NEW_CSS)
+    assert ".controls{" not in b and ".search{" not in b
     # the pill wraps; its two segments stack over a hairline, not side by side
     assert ".pill{max-width:100%;white-space:normal;" in b
     assert ".pill:has(.pseg){flex-direction:column;" in b
@@ -318,20 +320,24 @@ def test_phone_width_forces_no_sideways_scroll_and_cuts_no_word():
 
 
 def test_flagged_aggregate_filters_the_library_not_the_tray():
-    # "Review flags" on the To finish eyebrow toggles a library filter (never
-    # a second, smaller list; the tray band that once expanded one is gone);
-    # the chip beside the category filter clears it
+    # "Review flags" on the To finish eyebrow presses the "Has flags" chip, a
+    # library filter (never a second, smaller list; the tray band that once
+    # expanded one is gone). The header's "flagged only" chip, the selects,
+    # and the flaggedOnly flag retired into the chip row (docs/ui-refresh
+    # phase 4).
     assert "TRAY_EXPAND_MAX" not in NEW_JS and "trayExpand" not in NEW_JS
     assert 'onclick="flaggedToggle()"' in _js_fn("finishActsHTML")
-    assert re.search(r"function\s+flaggedToggle\s*\(", NEW_JS)
-    assert re.search(r"function\s+flaggedClear\s*\(", NEW_JS)
+    assert "function flaggedToggle(){chipGo('flags');}" in NEW_JS
+    assert "flaggedOnly" not in NEW_JS and "flaggedClear" not in NEW_JS
+    for gone in ('id="flagchip"', "flagged only", 'id="filter"', 'id="sort"',
+                 'id="searchhits"'):
+        assert gone not in NEW_PAGE, gone
     # ready rows without substantial flags drop out; pinned states are untouched
-    assert re.search(r"flaggedOnly&&r\.state==='ready'&&!\(r\.review_substantial>0\)", NEW_JS)
-    # the chip markup lives beside the #filter select in the header
-    assert 'id="flagchip"' in NEW_PAGE
-    assert "flagged only" in NEW_PAGE
-    # the filter state folds into both signatures so polls preserve it
-    assert NEW_JS.count("flaggedOnly") >= 6
+    assert "if(st.flags&&!(r.review_substantial>0))return false;" in _js_fn("chipKeeps")
+    # the chip state folds into both signatures so polls preserve it
+    draw = _js_fn("drawTimeline")
+    assert "const lfsig=LF.cat+':'+LF.flags+':'+LF.voices;" in draw
+    assert draw.count("lfsig") == 3
 
 
 def test_ready_row_click_expands_the_summary_in_place():
@@ -1224,7 +1230,11 @@ def _layer_env():
     panel and the drawer) as plain flags."""
     return "\n".join([
         _js_oneline("kbLayerOpen"), _js_fn("kbKey"), _js_fn("kbRestore"), _js_fn("mKey"),
-        "let NP=null,_popClose=null,MR=null,kbLast=null;",
+        _js_fn("keySheetKey"),
+        "let NP=null,_popClose=null,MR=null,kbLast=null,KSHEET=false,SAID_TOP=null;",
+        "function keySheetOpen(){KSHEET=true;log.push('keys');}",
+        "function keySheetClose(){KSHEET=false;log.push('keys:close');}",
+        "function openHit(b,t){log.push('hit:'+b+'@'+t);}",
         "const DRAWER={open:false};",
         "let route={view:'timeline'};",
         "class Element{}",
@@ -1376,8 +1386,9 @@ def test_upload_ext_const_mirrors_the_server_allowlist():
 
 
 def test_library_empty_state_regains_the_drop_line():
-    line = "Record a meeting from the menu bar, or drop an audio file here."
-    assert line in NEW_JS
+    # the setup check ends on the line (docs/ui-refresh phase 4)
+    line = "Record from the menu bar, or drop an audio file here."
+    assert line in _js_fn("setupHTML")
     # DESIGN.md's empty-state sentence reached its final form with the endpoint
     design = (Path(srv.__file__).resolve().parent / "DESIGN.md").read_text(encoding="utf-8")
     assert "or drop an audio file here." in design
@@ -2889,7 +2900,7 @@ def _acc_env(store="{}", search="", flagged="false", today=ACC_TODAY):
         "setItem:(k,v)=>{if(k==='stt_groups')STORE.v=v;}};",
         "const SEARCH=" + json.dumps(search) + ";",
         "function $(sel){return sel==='#search'?{value:SEARCH}:null;}",
-        "let flaggedOnly=" + flagged + ";",
+        "let LF={cat:'',sort:'date',flags:" + flagged + ",voices:false};",
         "let S=null;let DRAWS=0;function drawTimeline(){DRAWS++;}",
         "function esc(s){return (s??'').toString().replace(/[&<>\"]/g,"
         "c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));}",
@@ -3786,7 +3797,7 @@ def _voices_env():
         _js_fn("fsKey"), _js_fn("fvUse"), _js_fn("fvSkip"), _js_fn("fvNext"),
         _js_fn("fvSave"), _js_fn("saveName"), _js_fn("namedToast"), _js_fn("fvBusy"),
         _js_fn("fvToken"), _js_oneline("_fsOpenVoices"), _js_fn("fsGo"),
-        _js_oneline("kbLayerOpen"), "const DRAWER={open:false};",
+        _js_oneline("kbLayerOpen"), "const DRAWER={open:false};let KSHEET=false;",
         "let NP=null,_popClose=null,MR=null,NPBUSY=false,MP={base:'M1',audio:null};",
         "let route={view:'meeting',base:'M1'};",
         "const location={hash:'#m/M1'};",
@@ -4096,12 +4107,16 @@ def _timeline_env(sort="date", search="", flagged="false"):
     return "\n".join([
         _sections_env(),
         "const els={'#timeline':{dataset:{},innerHTML:'',contains:()=>false},"
-        "'#rail':{hidden:true,innerHTML:''},'#filter':{value:''},"
-        "'#search':{value:" + json.dumps(search) + "},'#sort':{value:" + json.dumps(sort) + "}};",
+        "'#rail':{hidden:true,innerHTML:''},"
+        "'#search':{value:" + json.dumps(search) + "}};",
         "function $(q){return els[q]||null;}",
         "const document={activeElement:null};",
         "const localStorage={getItem:()=>null,setItem:()=>{}};",
-        "let flaggedOnly=" + flagged + ";",
+        "let LF={cat:'',sort:" + json.dumps(sort) + ",flags:" + flagged + ",voices:false};",
+        "let HITS=null,SAID_TOP=null;",
+        _js_fn("chipKeeps"), _js_fn("chipCounts"), _js_fn("saidGroups"), _js_fn("hitClock"),
+        _js_fn("saidInHTML"), _js_fn("libraryEmpty"),
+        _js_fn("setupCheck"), _js_fn("setupHTML"),
         "let S=null,LAST_GROUPS=[],LAST_NEST=false;",
         "const OPEN=new Set();function meetingByBase(){return null;}",
         "function _isoLocal(){return '2026-09-27';}",
@@ -4181,7 +4196,7 @@ const nomatch=html();
 els['#search'].value='';els['#timeline'].dataset.sig='';
 drawTimeline({timeline:[],tray:[""" + stall + "," + voice + """]});
 const empty=html();
-els['#sort'].value='name';els['#timeline'].dataset.sig='';
+LF.sort='name';els['#timeline'].dataset.sig='';
 const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
 drawTimeline({timeline:[{id:'B',state:'ready',title:'Budget',when:recent,finish:fin(true,1,0)},
   {id:'A',state:'needs_name',title:'Alpha',when:recent,finish:fin(false,0,0)}],
@@ -4194,7 +4209,8 @@ console.log(JSON.stringify({nomatch,empty,byName}));
         assert 'id="sec-now"' in h and 'class="trayrow"' in h, key
         assert "Name 1 voice" in h, key
     assert "No matches." in out["nomatch"]
-    assert "Record a meeting from the menu bar" in out["empty"]
+    assert "Record from the menu bar, or drop an audio file here." in out["empty"]
+    assert 'class="setup"' in out["empty"]
     # by name: Now's urgent row and the To finish actions head the letter
     # groups; the rows themselves stay alphabetical, and a meeting waiting for
     # its title is the compact row there too
@@ -4810,7 +4826,7 @@ def test_the_css_lays_out_two_panes_only_while_a_meeting_is_open():
     assert re.search(r"body\.panes\.route-meeting \.bulkbar\{[^}]*max-width:calc\(var\(--listw\)", sec)
     # one column: the list and its floating surfaces hide behind a meeting
     assert "body.route-meeting:not(.panes) .wrap{display:none}" in NEW_CSS
-    assert "body.route-meeting:not(.panes) #searchhits{display:none!important}" in NEW_CSS
+    assert "body.route-meeting:not(.panes) .bulkbar{display:none!important}" in NEW_CSS
     assert "body.route-meeting .wrap{display:none}" not in NEW_CSS
     # the back link still renders; the width decides whether it shows
     assert 'class="mback"' in _js_fn("_mHeader")
@@ -5026,8 +5042,10 @@ def _panes_keys_env():
     each handler did."""
     return "\n".join([
         _js_oneline("kbLayerOpen"), _js_fn("kbKey"), _js_fn("kbMove"), _js_fn("kbLand"),
-        _js_fn("mKey"), _js_fn("fsKey"), _js_fn("rowOpens"),
+        _js_fn("mKey"), _js_fn("fsKey"), _js_fn("rowOpens"), _js_fn("keySheetKey"),
         "let NP=null,_popClose=null,kbLast=null,FS=null,PANES=true,RSEL='M1';",
+        "let KSHEET=false,SAID_TOP=null;function keySheetOpen(){KSHEET=true;log.push('keys');}"
+        "function keySheetClose(){KSHEET=false;}function openHit(){}",
         "let MR={active:true,items:[{}],i:0};",
         "const DRAWER={open:false};",
         "let route={view:'meeting',base:'M1'};",
@@ -5268,3 +5286,432 @@ def test_the_selected_row_wears_the_sel_token_in_both_themes():
     # the painter keys the one selected row and says so to assistive tech
     paint = _js_fn("selPaint")
     assert "classList.add('sel')" in paint and "setAttribute('aria-current','true')" in paint
+
+
+# ---------------------------------------------------------------------------
+# Search chips and first run (docs/ui-refresh/proposal.md, phase 4): the
+# search field and one row of filter chips at the top of the list, the "Said
+# in" group, the setup check an empty library shows, and the ? key sheet.
+# Pure functions and key handling run through node over the extracted
+# source; placement is regex over the files.
+# ---------------------------------------------------------------------------
+def _chips_env():
+    return "\n".join([
+        _js_oneline("esc"), _js_const("CHIP_CATS"),
+        _js_fn("chipLoad"), _js_fn("chipNext"), _js_fn("chipKeeps"),
+        _js_fn("chipCounts"), _js_fn("chipList"), _js_fn("chipsHTML"), _js_fn("chipGo"),
+        "const STORE={};let renders=0;function render(){renders++;}",
+        "const localStorage={getItem:k=>(k in STORE?STORE[k]:null),"
+        "setItem:(k,v)=>{STORE[k]=String(v);}};",
+        "let LF=chipLoad(k=>localStorage.getItem(k));",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_chips_read_and_write_the_keys_the_selects_used():
+    """The category and the grouping persist in stt_mcat and stt_msort, the
+    keys the two selects wrote, so a reload keeps them. Has flags and Has
+    voices last for the session, as the flagged-only filter did."""
+    out = _run_node(_chips_env() + """
+const o={};
+o.fresh=LF;
+o.saved=chipLoad(k=>({stt_mcat:'personal',stt_msort:'name'})[k]);
+o.junk=chipLoad(k=>({stt_mcat:'bogus',stt_msort:'bogus'})[k]);
+chipGo('work');chipGo('az');chipGo('flags');
+o.after={LF,STORE:{...STORE},renders};
+o.reload=chipLoad(k=>localStorage.getItem(k));
+chipGo('work');chipGo('az');
+o.cleared={...STORE};
+console.log(JSON.stringify(o));
+""")
+    assert out["fresh"] == {"cat": "", "sort": "date", "flags": False, "voices": False}
+    assert out["saved"] == {"cat": "personal", "sort": "name", "flags": False, "voices": False}
+    assert out["junk"] == out["fresh"], "an unknown saved value falls back, never sticks"
+    assert out["after"]["LF"] == {"cat": "work", "sort": "name", "flags": True, "voices": False}
+    assert out["after"]["STORE"] == {"stt_mcat": "work", "stt_msort": "name"}
+    assert out["after"]["renders"] == 3
+    # a reload keeps the category and the grouping, not the session filters
+    assert out["reload"] == {"cat": "work", "sort": "name", "flags": False, "voices": False}
+    # clearing writes the selects' own defaults back
+    assert out["cleared"] == {"stt_mcat": "", "stt_msort": "date"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_each_pressed_chip_clears_with_one_click_and_all_clears_the_filters():
+    out = _run_node(_chips_env() + """
+const base={cat:'',sort:'date',flags:false,voices:false};
+const busy={cat:'work',sort:'name',flags:true,voices:true};
+console.log(JSON.stringify({
+  work:chipNext(base,'work'),
+  workAgain:chipNext(chipNext(base,'work'),'work'),
+  swap:chipNext(chipNext(base,'work'),'personal'),
+  flags:chipNext(chipNext(base,'flags'),'flags'),
+  voices:chipNext(base,'voices'),
+  az:chipNext(base,'az'),
+  azAgain:chipNext(chipNext(base,'az'),'az'),
+  all:chipNext(busy,'all'),
+  untouched:busy,
+}));
+""")
+    assert out["work"]["cat"] == "work"
+    assert out["workAgain"]["cat"] == "", "a pressed chip clears itself"
+    assert out["swap"]["cat"] == "personal", "one category at a time, as the select was"
+    assert out["flags"]["flags"] is False and out["voices"]["voices"] is True
+    assert out["az"]["sort"] == "name" and out["azAgain"]["sort"] == "date"
+    # All clears the three filters; the grouping is not a filter
+    assert out["all"] == {"cat": "", "sort": "name", "flags": False, "voices": False}
+    assert out["untouched"]["flags"] is True, "chipNext never mutates the state it reads"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_chip_row_lists_all_the_categories_the_counts_and_a_to_z():
+    out = _run_node(_chips_env() + """
+const tl=[
+  {id:'R',state:'recording'},
+  {id:'N',state:'needs_name',review_substantial:4,finish:{voices:2}},
+  {id:'A',state:'ready',category:'work',review_substantial:3,finish:{voices:1}},
+  {id:'B',state:'ready',category:'personal',review_substantial:0,finish:{voices:2}},
+  {id:'C',state:'ready',review_substantial:2,finish:{voices:0}},
+  {id:'D',state:'ready'},
+];
+const st={cat:'work',sort:'name',flags:true,voices:false};
+const keys=l=>l.map(c=>c.key+(c.on?'*':'')+(c.n!=null?'='+c.n:''));
+const keep=f=>tl.filter(r=>chipKeeps(r,f)).map(r=>r.id);
+console.log(JSON.stringify({
+  counts:chipCounts(tl),
+  idle:keys(chipList({cat:'',sort:'date',flags:false,voices:false},chipCounts(tl))),
+  busy:keys(chipList(st,chipCounts(tl))),
+  zero:keys(chipList({cat:'',sort:'date',flags:false,voices:false},{flags:0,voices:0})),
+  pressedAtZero:keys(chipList({cat:'',sort:'date',flags:true,voices:true},{flags:0,voices:0})),
+  html:chipsHTML(chipList(st,chipCounts(tl))),
+  keepAll:keep({cat:'',flags:false,voices:false}),
+  keepWork:keep({cat:'work',flags:false,voices:false}),
+  keepFlags:keep({cat:'',flags:true,voices:false}),
+  keepVoices:keep({cat:'',flags:false,voices:true}),
+  keepBoth:keep({cat:'personal',flags:true,voices:false}),
+}));
+""")
+    # the counts are the ready meetings each chip keeps
+    assert out["counts"] == {"flags": 2, "voices": 2}
+    assert out["idle"] == ["all*", "work", "personal", "flags=2", "voices=2", "az"]
+    assert out["busy"] == ["all", "work*", "personal", "flags*=2", "voices=2", "az*"]
+    # a count chip with nothing to keep steps aside, unless it is pressed
+    assert out["zero"] == ["all*", "work", "personal", "az"]
+    assert out["pressedAtZero"] == ["all", "work", "personal", "flags*=0", "voices*=0", "az"]
+    h = out["html"]
+    assert ('<button class="fchip" type="button" data-k="flags" aria-pressed="true"'
+            in h)
+    assert "onclick=\"chipGo('flags')\">Has flags <span class=\"mono\">2</span>" in h
+    # a pressed chip wears the quiet x; All never does
+    assert h.count('class="fx"') == 3
+    assert '<button class="fchip az" type="button" data-k="az" aria-pressed="true"' in h
+    assert ">A&#8211;Z " in h
+    # the chips filter ready meetings only: Now and a title waiting stay
+    assert out["keepAll"] == ["R", "N", "A", "B", "C", "D"]
+    assert out["keepWork"] == ["R", "N", "A"]
+    assert out["keepFlags"] == ["R", "N", "A", "C"]
+    assert out["keepVoices"] == ["R", "N", "A", "B"]
+    assert out["keepBoth"] == ["R", "N"]
+
+
+def test_the_search_and_the_chips_sit_at_the_top_of_the_list():
+    """The search field left the header for the top of the list pane, and the
+    chip row replaced the two selects and the flagged-only chip."""
+    hdr = NEW_PAGE[NEW_PAGE.index('<header class="hdr">'):NEW_PAGE.index("</header>")]
+    assert 'id="search"' not in hdr
+    wrap = NEW_PAGE[NEW_PAGE.index('<main class="wrap">'):NEW_PAGE.index("</main>")]
+    assert wrap.index('id="search"') < wrap.index('id="fchips"') < wrap.index('id="timeline"')
+    assert 'role="group" aria-label="Filter the list"' in wrap
+    # the chip row redraws with every poll, only when a chip or count moved
+    assert "drawChips(S);" in _js_fn("render")
+    draw = _js_fn("drawChips")
+    assert "if(box.dataset.sig===html)return;" in draw
+    assert "b.focus({preventScroll:true})" in draw, "a focused chip keeps its focus"
+    # the chip styles: 4px, 13px, the accent pair when pressed; the count is
+    # mono through the .mono class, never a rule of its own
+    fchip = re.search(r"(?m)^\.fchip\{[^}]*\}", NEW_CSS).group(0)
+    assert "border-radius:4px" in fchip and "font:500 13px/" in fchip
+    assert re.search(r'(?m)^\.fchip\[aria-pressed="true"\]\{color:var\(--accent-text\);'
+                     r'background:var\(--accent-soft\)', NEW_CSS)
+    assert "box-shadow" not in fchip
+
+
+def _said_env():
+    return "\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        _js_fn("secHeadHTML"), _js_fn("saidGroups"), _js_fn("hitClock"), _js_fn("saidInHTML"),
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_said_in_groups_the_hits_by_meeting_with_mono_timestamps():
+    out = _run_node(_said_env() + """
+const hits=[
+  {base:'B1',start:754.2,who:'Grace',snippet:'the budget line for coaches'},
+  {base:'A1',start:65,who:'',snippet:'a budget question'},
+  {base:'B1',start:3725,who:'Tom',snippet:'Budget again'},
+  {base:'GONE',start:5,who:'X',snippet:'budget in an unknown meeting'},
+  {base:'HID',start:9,who:'Y',snippet:'budget in a filtered meeting'},
+];
+const titles={B1:'Budget Review',A1:'Literacy pilot',HID:null};
+const titleOf=b=>(b in titles?titles[b]:b);
+const g=saidGroups(hits,titleOf);
+console.log(JSON.stringify({
+  groups:g.map(x=>[x.base,x.title,x.hits.map(h=>h.start)]),
+  html:saidInHTML(g,'budget',null),
+  capped:saidInHTML(g,'budget',[40,212]),
+  none:saidInHTML([],'budget',null),
+  clocks:[0,59.9,60,754.2,3725].map(hitClock),
+}));
+""")
+    # grouped by meeting in the server's order; a filtered meeting drops its
+    # lines, an unknown one keeps them under its folder name
+    assert out["groups"] == [["B1", "Budget Review", [754.2, 3725]],
+                             ["A1", "Literacy pilot", [65]],
+                             ["GONE", "GONE", [5]]]
+    h = out["html"]
+    # the house eyebrow, with the line count in mono, heads the group
+    assert h.startswith('<div class="mgroup sechead" id="sec-said"><span class="glabel">Said in'
+                        '</span><span class="grule" aria-hidden="true"></span>'
+                        '<span class="gcount mono">4</span></div>')
+    assert h.index('<div class="said-t">Budget Review</div>') \
+        < h.index('<div class="said-t">Literacy pilot</div>')
+    # a line is a button that opens the meeting at its moment (openHit, then
+    # mSeek); the timestamp is mono, the match marked, the speaker named
+    assert ('<button class="hit" type="button" title="Open the meeting at this moment"'
+            ' onclick="openHit(\'B1\',754.2)"><span class="hit-t mono">12:34</span>') in h
+    assert '<span class="hit-w">Grace</span> the <mark>budget</mark> line' in h
+    assert "<mark>Budget</mark> again" in h, "the match is marked case-blind"
+    assert '<span class="hit-t mono">1:05</span><span class="hit-x">a <mark>budget</mark>' in h
+    assert "said-more" not in h
+    assert ('<p class="said-more">The newest 40 of 212 lines. Add a word to narrow them.</p>'
+            in out["capped"])
+    # a section with nothing in it renders nothing
+    assert out["none"] == ""
+    assert out["clocks"] == ["0:00", "0:59", "1:00", "12:34", "62:05"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_said_in_heads_the_list_and_only_an_empty_search_reads_no_matches():
+    """The group is the list's first section, above Now. A query whose words
+    were said but match no title shows the group, not "No matches."; a stale
+    answer for an earlier query shows nothing; the chips filter the lines."""
+    stall = ("{kind:'recorder_stall',title:'Recording',detail:'no audio',"
+             "target:'rec:x',count:1}")
+    out = _run_node(_timeline_env(search="coach") + """
+const o={};
+const tl=[{id:'P',state:'processing',when:'2026-09-27T09:00:00'},
+  {id:'W1',state:'ready',title:'Budget Review',category:'work',date:'2026-09-01',when:'2026-09-01T09:00:00',finish:fin(true,0,0)},
+  {id:'P1',state:'ready',title:'Dentist',category:'personal',date:'2026-08-01',when:'2026-08-01T09:00:00',finish:fin(true,0,0)}];
+HITS={query:'coach',total:3,hits:[{base:'W1',start:30,who:'Grace',snippet:'the coach said'},
+  {base:'P1',start:40,who:'',snippet:'coach at noon'},{base:'W1',start:90,who:'',snippet:'coach two'}]};
+drawTimeline({timeline:tl,tray:[""" + stall + """]});
+o.said=order(html());o.top=SAID_TOP;o.h=html();
+LF.cat='work';els['#timeline'].dataset.sig='';
+drawTimeline({timeline:tl,tray:[]});
+o.work=html();
+LF.cat='';HITS={query:'coa',total:1,hits:[{base:'W1',start:1,who:'',snippet:'coa'}]};
+els['#timeline'].dataset.sig='';
+drawTimeline({timeline:tl,tray:[]});
+o.stale=html();o.staleTop=SAID_TOP;
+HITS={query:'coach',total:0,hits:[]};els['#timeline'].dataset.sig='';
+drawTimeline({timeline:tl,tray:[]});
+o.nothing=html();
+console.log(JSON.stringify(o));
+""")
+    # Said in first, then Now (the stall row, the live row); no title matched,
+    # yet the words were said, so no "No matches."
+    assert out["said"][:2] == ['"sec-said"', '"sec-now"']
+    assert "No matches." not in out["h"]
+    assert out["top"] == {"base": "W1", "start": 30, "who": "Grace", "snippet": "the coach said"}
+    # the Work chip drops the personal meeting's line from the group
+    assert "openHit('W1',30)" in out["work"] and "openHit('P1',40)" not in out["work"]
+    assert '<span class="gcount mono">2</span>' in out["work"]
+    # an answer for an earlier query never paints under the new one
+    assert "sec-said" not in out["stale"] and out["staleTop"] is None
+    assert "No matches." in out["stale"]
+    # a search with no line said and no title reads "No matches."
+    assert "sec-said" not in out["nothing"] and "No matches." in out["nothing"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_enter_in_the_search_field_opens_the_first_said_in_line():
+    out = _run_node(_layer_env() + """
+const o={};
+document.activeElement=se;
+o.none=press(kbKey,'Enter');
+SAID_TOP={base:'B1',start:754.2};
+o.top=press(kbKey,'Enter');
+o.typed=press(kbKey,'j');
+console.log(JSON.stringify(o));
+""")
+    assert out["none"] == {"log": [], "prevented": False}
+    assert out["top"] == {"log": ["hit:B1@754.2"], "prevented": True}
+    assert out["typed"] == {"log": [], "prevented": False}, "j in the field is a character"
+    # the scheduler feeds HITS and redraws; the stale-answer guard stays
+    sched = _js_fn("scheduleSearch")
+    assert "HITS=r;render();" in sched
+    assert "$('#search').value.trim().toLowerCase()!==r.query" in sched
+    assert "if(q.length<3){if(HITS){HITS=null;render();}return;}" in sched
+
+
+def _setup_env():
+    return "\n".join([_js_oneline("esc"), _js_fn("libraryEmpty"), _js_fn("setupCheck"),
+                      _js_fn("setupHTML")])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_setup_check_reads_three_lines_from_the_state():
+    """Recorder ready (recorder_ready), watched folder set (paths.source), and
+    your own voice enrolled (mic_speaker against enrolled), each with the
+    drawer button that fixes it. The voice line has three states: not set,
+    set but not enrolled, enrolled."""
+    out = _run_node(_setup_env() + """
+const line=it=>[it.key,it.ok,it.label,it.detail,it.btn,it.go];
+console.log(JSON.stringify({
+  bare:setupCheck({}).map(line),
+  unset:setupCheck({recorder_ready:false,paths:{source:''},mic_speaker:null,enrolled:[]}).map(line),
+  notEnrolled:setupCheck({recorder_ready:true,paths:{source:'/Users/mark/Recordings'},
+    mic_speaker:'Mark Paik',enrolled:[{name:'Grace Lindqvist'}]}).map(line),
+  ready:setupCheck({recorder_ready:true,paths:{source:'/Volumes/X/in'},
+    mic_speaker:'Mark Paik',enrolled:[{name:'Mark Paik'}]}).map(line),
+  html:setupHTML(setupCheck({recorder_ready:true,paths:{source:'/Users/mark/in'},mic_speaker:null})),
+  empty:[libraryEmpty([]),libraryEmpty([{state:'processing'},{state:'failed'}]),
+    libraryEmpty([{state:'needs_name'}]),libraryEmpty([{state:'ready'}])],
+}));
+""")
+    assert out["bare"] == out["unset"], "missing keys read as not ready, never throw"
+    rec, folder, voice = out["unset"]
+    assert rec == ["recorder", False, "Recorder not installed",
+                   "Build it with ./setup.sh, then record from the menu bar.",
+                   "Recorder settings", ["settings", "dg-recorder"]]
+    assert folder[:3] == ["folder", False, "No watched folder"]
+    assert folder[4:] == ["Folder settings", ["settings", "drow-source"]]
+    assert voice == ["voice", False, "Your voice is not set",
+                     "Pick your name, so recorded calls separate you from the others.",
+                     "Pick your voice", ["settings", "dg-recorder"]]
+    rec, folder, voice = out["notEnrolled"]
+    assert rec[:3] == ["recorder", True, "Recorder ready"]
+    assert folder[:4] == ["folder", True, "Watched folder set", "~/Recordings"]
+    assert voice == ["voice", False, "Your voice is not enrolled yet",
+                     "Name Mark Paik in your first meeting to enroll the voice.",
+                     "Speakers", ["speakers", ""]]
+    rec, folder, voice = out["ready"]
+    assert folder[3] == "/Volumes/X/in"
+    assert voice == ["voice", True, "Your voice is enrolled", "Mark Paik",
+                     "Speakers", ["speakers", ""]]
+    h = out["html"]
+    assert h.startswith('<section class="setup" aria-label="Setup check">')
+    assert h.count('class="setrow') == 3 and h.count('class="setrow ok"') == 2
+    assert "onclick=\"openDrawerAt('settings','dg-recorder')\">Recorder settings</button>" in h
+    assert "onclick=\"openDrawerAt('settings','drow-source')\">Folder settings</button>" in h
+    assert h.endswith('<p class="setdrop">Record from the menu bar, or drop an audio file'
+                      ' here.</p></section>')
+    # a file in Now is not a meeting: the library is empty until one lands
+    assert out["empty"] == [True, True, False, False]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_an_empty_library_shows_the_setup_check_in_the_list():
+    out = _run_node(_timeline_env() + """
+const o={};
+const st={recorder_ready:true,paths:{source:'/x'},mic_speaker:null,enrolled:[],tray:[]};
+drawTimeline({...st,timeline:[]});
+o.empty=html();
+els['#timeline'].dataset.sig='';
+drawTimeline({...st,timeline:[{id:'P',state:'processing',when:'2026-09-27T09:00:00'}]});
+o.nowOnly=order(html());o.nowHtml=html();
+const s0=els['#timeline'].dataset.sig;
+drawTimeline({...st,recorder_ready:false,timeline:[{id:'P',state:'processing',when:'2026-09-27T09:00:00'}]});
+o.moved=els['#timeline'].dataset.sig!==s0;
+els['#timeline'].dataset.sig='';
+drawTimeline({...st,timeline:[{id:'D',state:'ready',date:'2026-09-01',when:'2026-09-01T09:00:00',finish:fin(true,0,0)}]});
+o.library=html();
+console.log(JSON.stringify(o));
+""")
+    assert 'class="setup"' in out["empty"] and "No matches." not in out["empty"]
+    # a file processing on the first run: Now, then the check under it
+    assert out["nowOnly"][:2] == ['"sec-now"', '"P"']
+    assert out["nowHtml"].index('id="sec-now"') < out["nowHtml"].index('class="setup"')
+    assert out["moved"], "a line turning ready or not must rebuild the list"
+    assert "setup" not in out["library"]
+
+
+def test_the_setup_buttons_open_the_drawer_at_the_row_that_fixes_them():
+    at = _js_fn("openDrawerAt")
+    assert "openDrawer(section);" in at and "el.scrollIntoView({block:'start'});" in at
+    assert "c.focus({preventScroll:true})" in at
+    # the anchors the check names exist in the drawer's settings
+    settings = _js_fn("dSettingsHTML")
+    assert '<div class="dgroup" id="dg-recorder">Recorder</div>' in settings
+    assert "'drow-source');" in settings
+    assert "id=\"${id}\"" in _js_fn("_drow")
+    # a setup mark is a circle in the house pairs: teal asks, green is done
+    mark = re.search(r"(?m)^\.setmark\{[^}]*\}", NEW_CSS).group(0)
+    assert "color:var(--attn);background:var(--attn-soft)" in mark
+    assert ".setrow.ok .setmark{color:var(--ok);background:var(--ok-soft)}" in NEW_CSS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_key_sheet_opens_on_question_mark_and_never_while_typing():
+    out = _run_node(_layer_env() + """
+const o={};
+const k=(key,mods)=>Object.assign({key,metaKey:false,ctrlKey:false,altKey:false},mods||{});
+o.guard={
+  free:keySheetKey(k('?'),false,false),
+  typing:keySheetKey(k('?'),true,false),
+  layer:keySheetKey(k('?'),false,true),
+  cmd:keySheetKey(k('?',{metaKey:true}),false,false),
+  ctrl:keySheetKey(k('?',{ctrlKey:true}),false,false),
+  alt:keySheetKey(k('?',{altKey:true}),false,false),
+  slash:keySheetKey(k('/'),false,false),
+};
+document.activeElement=se;o.inSearch=press(kbKey,'?');
+document.activeElement={tagName:'TEXTAREA'};o.inTextarea=press(kbKey,'?');
+document.activeElement={tagName:'DIV',isContentEditable:true};o.inEditable=press(kbKey,'?');
+document.activeElement=body;
+NP={uid:'U1'};o.underPanel=press(kbKey,'?');NP=null;
+DRAWER.open=true;o.underDrawer=press(kbKey,'?');DRAWER.open=false;
+_popClose=()=>{};o.underPopover=press(kbKey,'?');_popClose=null;
+o.open=press(kbKey,'?');o.isOpen=KSHEET;
+// open, it owns every key: j stays put, Tab stays on its control, the
+// meeting page's keys stand back, Escape closes it
+o.j=press(kbKey,'j');o.tab=press(kbKey,'Tab');
+route={view:'meeting',base:'M1'};MR={active:true,items:[],i:0};
+o.pageN=press(mKey,'n');o.pageA=press(mKey,'a');
+o.esc=press(kbKey,'Escape');o.closed=KSHEET;
+o.again=press(kbKey,'?');o.q=press(kbKey,'?');o.closedByQ=KSHEET;
+console.log(JSON.stringify(o));
+""")
+    assert out["guard"] == {"free": True, "typing": False, "layer": False, "cmd": False,
+                            "ctrl": False, "alt": False, "slash": False}
+    quiet = {"log": [], "prevented": False}
+    for where in ("inSearch", "inTextarea", "inEditable", "underPanel", "underDrawer",
+                  "underPopover"):
+        assert out[where] == quiet, f"? opened the sheet {where}: {out[where]}"
+    assert out["open"] == {"log": ["keys"], "prevented": True} and out["isOpen"] is True
+    assert out["j"] == {"log": [], "prevented": False}
+    assert out["tab"] == {"log": [], "prevented": True}
+    assert out["pageN"] == quiet and out["pageA"] == quiet
+    assert out["esc"] == {"log": ["keys:close"], "prevented": True} and out["closed"] is False
+    # from the meeting page too, and ? again closes it
+    assert out["again"] == {"log": ["keys"], "prevented": True}
+    assert out["q"] == {"log": ["keys:close"], "prevented": True} and out["closedByQ"] is False
+
+
+def test_the_key_sheet_lists_the_keys_phases_one_to_three_shipped():
+    sheet = NEW_PAGE[NEW_PAGE.index('<aside id="keysheet"'):]
+    sheet = sheet[:sheet.index("</aside>")]
+    keys = re.findall(r"<dt>(.*?)</dt>", sheet)
+    caps = [re.findall(r"<kbd>(.*?)</kbd>", k) for k in keys]
+    assert caps == [["/"], ["j", "k"], ["x"], ["Enter"], ["Space"], ["1", "3"], ["s"],
+                    ["a", "u", "n", "p"], ["[", "]"], ["Esc"]]
+    # a card over the drawer's veil; a click outside closes it
+    assert '<div id="keyveil" class="dveil" hidden onclick="keySheetClose()"></div>' in NEW_PAGE
+    assert 'class="popover keysheet" aria-labelledby="kstitle" hidden' in sheet
+    # its caps are sans on the inset well, never mono (mono is true data)
+    kbd = re.search(r"(?m)^\.kslist kbd\{[^}]*\}", NEW_CSS).group(0)
+    assert "var(--sans)" in kbd and "var(--mono)" not in kbd
+    # the sheet is the one place key caps show; it opens only on ?
+    assert "keySheetOpen();" in _kb_body()
+    assert NEW_JS.count("keySheetOpen();") == 1
