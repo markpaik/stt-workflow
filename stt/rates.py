@@ -14,6 +14,10 @@ a median taken mostly from short meetings estimated a 4.5 h board meeting about
 samples whose durations span FIT_MIN_SPAN); b is clamped to FIT_B_RANGE.
 Otherwise the estimate is the MEDIAN rate of the last few samples, as before,
 and the hand-measured config.EST_RATES defaults until real data exists.
+Writing is the exception: merge + punctuation + output is roughly flat by
+design, a slope floored at 0.8 cannot describe it, so it always keeps its
+median seconds (on the real log the fit overshot files of 90 min or more by
+139 percent against 69 percent for the median).
 tools/eta_backtest.py replays rates.jsonl to compare the two models.
 
 Every model also carries a TAIL: how far past its prediction a stage tends to
@@ -185,7 +189,10 @@ def _learn(rows) -> dict:
            "tail": {"asr": {}, "diarize": {}}}
     for name, flat in (("convert", False), ("writing", True)):
         out[name], out["tail"][name] = _median_model(b[name], flat)
-        out["fit"][name] = _fit(b[name])
+        # a flat stage is never fitted: FIT_B_RANGE floors the slope at 0.8,
+        # so a fit cannot say "flat" and inflated a 4.5 h meeting's writing
+        # estimate about 5x over its median on the real rates.jsonl
+        out["fit"][name] = None if flat else _fit(b[name])
         if out["fit"][name]:
             out["tail"][name] = out["fit"][name]["tail"]
     for group in ("asr", "diarize"):

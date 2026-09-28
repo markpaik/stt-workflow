@@ -186,3 +186,29 @@ def test_each_model_carries_a_tail_from_its_own_residuals(sandbox):
     assert rates.TAIL_RANGE[0] < t < 0.5, t
     # a stage that always lands on its prediction still gets the floor
     assert rates.stage_tail("transcribing", 1, "parakeet") == rates.TAIL_RANGE[0]
+
+
+def test_writing_stays_flat_so_long_meetings_do_not_inflate_it(
+        sandbox, monkeypatch):
+    """Writing is merge + punctuation + output, roughly flat by design
+    (config writing_fixed_sec). The power law's slope is floored at 0.8, so
+    it cannot say "flat": fitted, a 4.5 h meeting's writing estimate came out
+    near five times the median on the real rates.jsonl. Writing keeps its
+    median seconds however long the meeting, while diarizing on the same
+    samples still gets its curve."""
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    durs = [600, 1200, 1800, 2400, 3000, 3600, 10800]
+    for d, w in zip(durs, [9, 11, 10, 12, 8, 10, 11]):
+        rates.record(d, {"transcribing": d / 60, "diarizing": 0.1 * d ** 1.25,
+                         "writing": w}, "parakeet", 1)
+    L = rates.learned()
+    assert "1" in L["fit"]["diarize"]          # the fit still runs where it fits
+    assert not L["fit"].get("writing")
+    long = 4.5 * 3600
+    for dur in (600, 3600, long):
+        assert rates.predict(L, "writing", dur, 1, "parakeet") == 10
+        assert status.stage_estimates(dur)["writing"] == 10
+    # its tail comes from its own flat residuals, not a fit's
+    assert rates.stage_tail("writing", 1, "parakeet") == L["tail"]["writing"]
+    assert L["tail"]["writing"] == rates._median_model(
+        rates._samples(rates._rows())["writing"], flat=True)[1]
