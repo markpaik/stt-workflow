@@ -646,7 +646,8 @@ def test_save_captures_its_identity_before_the_await():
     assert "threw" not in out, out
     assert out["posted"]["p"] == "/api/name"
     assert out["posted"]["body"] == {"uid": "U049", "name": "Priya Shah",
-                                     "confirm": False}, \
+                                     "confirm": False,
+                                     "meeting": "LT Meeting 05212026"}, \
         "the save posted the voice the panel was reopened for, not the one saved"
     # ...and it must NOT close the panel it found open, because that panel is
     # showing a DIFFERENT voice by now (W14). Closing it here wiped a name the
@@ -3368,34 +3369,123 @@ def test_the_dark_token_block_stops_at_its_own_closing_brace():
 def test_save_says_how_many_other_meetings_are_updating():
     """A naming used to answer with a note the panel threw away, and the user
     watched a spinner for seven minutes with no idea what was happening. The
-    response now carries the target list, and the save says what it did and
-    where. Driven through node against the real tail of npSave."""
-    src = _js_fn("npSave")
-    i = src.index("  // the response says what it did and WHERE")
-    tail = src[i:].rstrip()
-    assert tail.endswith("}")
-    tail = tail[:-1]            # drop npSave's own closing brace
-
-    fixture = "\n".join([
-        "let MP=null,out=[];",
-        "function npToken(){return 'tok';}",
-        "function closeNamePanel(){}",
-        "function refresh(){}",
-        "function mReloadSegs(){}",
-        "function toast(m){out.push(m);}",
+    response carries the target list, and the save says what it did and
+    where. "here" only when the server APPLIED the meeting the save was made
+    from: a uid save used to toast "Named here." while the open page was
+    merely queued."""
+    out = _run_node("\n".join([
+        "let out=[];function toast(m){out.push(m);}",
         _js_fn("namedToast"),
-        "function tail(r,meeting,tok){" + tail + "}",
-        "tail({ok:true,applied:'A',targets:['B','C','D']},'A','tok');",
-        "tail({ok:true,applied:'A',targets:[]},'A','tok');",
-        "tail({ok:true},'A','tok');",
-        "console.log(JSON.stringify(out));",
-    ])
-    r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == [
+        """
+namedToast({ok:true,applied:'A',targets:['B','C','D']},'A');
+namedToast({ok:true,applied:'A',targets:['B']},'A');
+namedToast({ok:true,applied:'A',targets:[]},'A');
+namedToast({ok:true,applied:null,targets:['A','B']},'A');
+namedToast({ok:true,applied:null,targets:['A']},'A');
+namedToast({ok:true,applied:null,targets:['B','C']},'');
+namedToast({ok:true,applied:'A',targets:['B']},'Z');
+namedToast({ok:true,applied:null,targets:[]},'');
+namedToast({ok:true,applied:'A',targets:['--all']},'A');
+namedToast({ok:true,applied:null,targets:['--all']},'A');
+namedToast({ok:true},'A');
+namedToast(null,'A');
+console.log(JSON.stringify(out));
+"""]))
+    assert out == [
         "Named here. Updating 3 other meetings.",
+        "Named here. Updating 1 other meeting.",
         "Named here.",
-    ], "an empty list says only that this meeting is done; no list says nothing"
+        "Named. Updating 2 meetings.",
+        "Named. Updating 1 meeting.",
+        "Named. Updating 2 meetings.",
+        "Named. Updating 1 meeting.",
+        "Named.",
+        "Named here. Updating all meetings.",
+        "Named. Updating all meetings.",
+    ], "no targets field says nothing; an applied meeting that is not the " \
+       "one open is not 'here'; the fallback pass is 'all meetings'"
+
+
+def _save_env(reply):
+    """The real saveName and namedToast, with the slide-over's elements and
+    a server that answers `reply` to every post."""
+    return "\n".join([
+        "const els={};",
+        "for(const k of ['#npname','#nperr','#npconfirm','#npsave'])"
+        "els[k]={value:'',hidden:true,textContent:'',innerHTML:'',disabled:false};",
+        "els['#npname'].value='Priya Shah';",
+        "function $(sel){return els[sel]||null;}",
+        "function esc(s){return s;}",
+        "let posted=[],toasts=[],MP=null;",
+        "function toast(m){toasts.push(m);}",
+        "function api(p,b){posted.push(b);return Promise.resolve("
+        + json.dumps(reply) + ");}",
+        "function busy(){}",
+        "const ui={name:els['#npname'],err:els['#nperr'],warn:els['#npconfirm'],"
+        "warnId:'npconfirm',btn:els['#npsave'],label:'Save name'};",
+        _js_fn("saveName"), _js_fn("namedToast"),
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_uid_save_sends_the_open_meeting_and_says_here_only_when_applied():
+    """A uid save sent no meeting, so the server relabeled nothing inside the
+    response, and the page the user had open was only queued while the toast
+    said "Named here." The open page now rides along, and the toast reads the
+    response: "here" only when `applied` IS that page."""
+    out = _run_node(_save_env({"ok": True, "applied": "M1",
+                               "targets": ["M2", "M3"]}) + """
+(async()=>{
+  const o={};
+  // a meeting page is open: the uid save carries it
+  MP={base:'M1'};
+  const p=saveName({uid:'U058',meeting:'',speaker:undefined,busy,again:'npSave',ui});
+  MP={base:'Elsewhere'};                 // navigated away mid-flight
+  o.r=await p;
+  o.withPage={posted:posted.slice(),toasts:toasts.slice()};
+  // the drawer with no page open: no meeting, and never "here"
+  posted=[];toasts=[];MP=null;
+  await saveName({uid:'U058',busy,again:'npSave',ui});
+  o.noPage={posted:posted.slice(),toasts:toasts.slice()};
+  // a cluster save is unchanged: its own meeting, which the server applies
+  posted=[];toasts=[];MP={base:'M1'};
+  await saveName({uid:null,meeting:'M1',speaker:'SPEAKER_01',busy,again:'npSave',ui});
+  o.cluster={posted:posted.slice(),toasts:toasts.slice()};
+  console.log(JSON.stringify(o));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+""")
+    assert "threw" not in out, out
+    assert out["r"]["applied"] == "M1", "saveName still resolves to the response"
+    assert out["withPage"]["posted"] == [{"uid": "U058", "name": "Priya Shah",
+                                          "confirm": False, "meeting": "M1"}], \
+        "the page open when Save was pressed, captured before the await"
+    assert out["withPage"]["toasts"] == ["Named here. Updating 2 other meetings."]
+    assert out["noPage"]["posted"] == [{"uid": "U058", "name": "Priya Shah",
+                                        "confirm": False}]
+    assert out["noPage"]["toasts"] == ["Named. Updating 2 meetings."], \
+        "no page open: nothing was applied here, so the toast must not say so"
+    assert out["cluster"]["posted"] == [{"meeting": "M1", "speaker": "SPEAKER_01",
+                                         "name": "Priya Shah", "confirm": False,
+                                         "local": False}]
+    assert out["cluster"]["toasts"] == ["Named here. Updating 2 other meetings."]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_uid_save_whose_open_meeting_was_only_queued_does_not_say_here():
+    """The relabel lock was busy: the server queued the open page with the
+    rest (applied null, the page first in targets). The toast counts it among
+    the meetings updating, and never calls it done."""
+    out = _run_node(_save_env({"ok": True, "applied": None,
+                               "targets": ["M1", "M2"]}) + """
+(async()=>{
+  MP={base:'M1'};
+  await saveName({uid:'U058',busy,again:'npSave',ui});
+  console.log(JSON.stringify({posted,toasts}));
+})().catch(e=>{console.log(JSON.stringify({threw:String(e)}));});
+""")
+    assert "threw" not in out, out
+    assert out["posted"][0]["meeting"] == "M1"
+    assert out["toasts"] == ["Named. Updating 2 meetings."]
 
 
 # ---------------------------------------------------------------------------
@@ -3494,7 +3584,7 @@ def test_a_link_merges_the_two_unknown_ids_and_says_what_it_reached():
         "function refresh(){refreshes++;}",
         "async function api(p,b){posted.push([p,b]);"
         "return {ok:true,targets:['B','C','D']};}",
-        _js_fn("dLinkUnknown"),
+        _js_fn("dLinkUnknown"), _js_fn("namedToast"),
         """
 dLinkUnknown('U050','U012').then(()=>{
   console.log(JSON.stringify({posted,toasts,refreshes,err:DRAWER.spkErr}));
@@ -3502,8 +3592,9 @@ dLinkUnknown('U050','U012').then(()=>{
 """]))
     assert out["posted"] == [["/api/merge_speakers",
                               {"src": "uid:U050", "dst": "uid:U012"}]]
-    assert out["toasts"] == ["Named here. Updating 3 other meetings."], \
-        "the same sentence a save gets, from the same field"
+    assert out["toasts"] == ["Named. Updating 3 meetings."], \
+        "the same sentence a save gets, and never 'here': a merge applies " \
+        "no meeting inside the request"
     assert out["refreshes"] == 1
     assert out["err"] is None
 
@@ -3808,7 +3899,7 @@ def _voices_env():
         "function $(q){return els[q]||null;}",
         "const body={tagName:'BODY'};",
         "const document={activeElement:body,getElementById:()=>null};",
-        "let posted=[],reply={ok:true,targets:['X','Y']},toasts=[],shows=[],reloads=0,refreshes=0;",
+        "let posted=[],reply={ok:true,applied:'M1',targets:['X','Y']},toasts=[],shows=[],reloads=0,refreshes=0;",
         "function api(p,b){posted.push({p,b});return Promise.resolve(reply);}",
         "function toast(m){toasts.push(m);}",
         "function refresh(){refreshes++;}",
@@ -3892,7 +3983,8 @@ def test_the_voices_step_keys_pick_save_and_skip():
     # the save goes through the shared saveName, by uid for a registry voice
     assert out["posted"] == [{"p": "/api/name",
                               "b": {"uid": "U058", "name": "Grace Lindqvist",
-                                    "confirm": False}}]
+                                    "confirm": False, "meeting": "M1"}}], \
+        "a uid save carries the open page, so the server relabels it first"
     assert out["toasts"] == ["Named here. Updating 2 other meetings."]
     s = out["afterSave"]
     assert s["st"] == "named" and s["vi"] == 1, "the strip advances to the next voice"

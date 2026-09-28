@@ -1442,7 +1442,7 @@ def _relabel_bases_background(bases, reason: str):
 
 
 def _relabel_targets(vector=None, names=(), uids=(), first=None,
-                     reason="identity change") -> dict:
+                     reason="identity change", bases=()) -> dict:
     """Apply an identity change to exactly the meetings it can affect.
 
     Every naming, rename, merge and sample edit used to spawn `relabel --all`:
@@ -1452,11 +1452,25 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None,
     panel can reload against the new roster on its very next poll, and the rest
     go to the relabel queue as one job.
 
+    `bases` are meetings the CALLER already knows the change reaches, unioned
+    into that list: a retired unknown's own `meetings`, read before promote()
+    deleted the uid. Nothing else finds a meeting whose row left the uid's
+    MAX_SAMPLES window, since the uid is gone and its cluster may no longer
+    score against the rows that were kept.
+
     Returns {"applied": the base done synchronously or None,
              "targets": the bases handed to the background pass}."""
     try:
         from stt import centroids
-        rest = list(centroids.targets(vector=vector, names=names, uids=uids))
+        # only meetings a relabel pass can rebuild, the same filter
+        # centroids.targets applies to its own answer: a reference to a
+        # meeting that was deleted, or never diarized, is not a target
+        lib = set(config.meeting_bases())
+        known = {str(x) for x in (bases or [])
+                 if x and str(x) in lib
+                 and config.meeting_file(str(x), ".diar.npz").exists()}
+        rest = sorted(known | set(centroids.targets(
+            vector=vector, names=names, uids=uids)))
     except Exception:
         # the index is a cache, never the source of truth: if it cannot be
         # built, the change still has to land everywhere it might matter, so
@@ -2135,6 +2149,26 @@ class Handler(BaseHTTPRequestHandler):
                         if warns:
                             self._json(_warn_payload(min(warns, key=lambda w: w["own"])))
                             return
+                    # the meeting page open under the panel, when the panel
+                    # sends one: it relabels HERE, inside the response, as a
+                    # cluster naming's meeting does, so the page the user is
+                    # reading is done and not merely queued. Context only, never
+                    # identity: the drawer names with no page open, and a page
+                    # that went stale (renamed in another tab) must not block
+                    # naming the voice. A base that is not a real meeting is
+                    # dropped here and never reaches a file path, and so is
+                    # one with no diarization cache: relabel skips it, so
+                    # calling it applied would be the same false "here".
+                    if (_known_base(b.get("meeting")) and config.meeting_file(
+                            b["meeting"], ".diar.npz").exists()):
+                        tgt["first"] = b["meeting"]
+                    # promote() RETIRES the uid, and its `meetings` list with
+                    # it. Read the list NOW. Only the newest MAX_SAMPLES rows
+                    # survive in the stack, so an early meeting's cluster may
+                    # no longer score against them, and nothing else finds
+                    # that meeting afterwards: it kept a retired "Speaker N".
+                    heard = unknowns.resolved_meetings(
+                        unknowns.load()["speakers"].get(b["uid"]) or {})
                     if not unknowns.promote(b["uid"], name):
                         # samples existed a moment ago: another tab/relabel got
                         # there first. Still not a success, and still no relabel.
@@ -2142,12 +2176,12 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": "Could not save this voice. It may "
                                              "have been renamed already."})
                         return
-                    # promote() RETIRES the uid, so its meetings list is gone by
-                    # now. The samples it carried are this person's voiceprint
-                    # as of this instant, and they came from exactly those
-                    # meetings' clusters — so the stack finds them all by score.
+                    # the samples it carried are this person's voiceprint as of
+                    # this instant, so the stack finds the meetings that still
+                    # score against them. The list read above covers the rest.
                     tgt["vector"] = identify.load_voiceprints().get(name)
                     tgt["uids"] = [b["uid"]]
+                    tgt["bases"] = heard
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
@@ -2282,7 +2316,13 @@ class Handler(BaseHTTPRequestHandler):
                 # src/dst are "uid:U003" or "name:Jordan"
                 st_, sv = b["src"].split(":", 1)
                 dt_, dv = b["dst"].split(":", 1)
+                heard = []
                 if st_ == "uid" and dt_ == "name":
+                    # read BEFORE promote() retires the uid (see /api/name):
+                    # a meeting whose row left the kept stack is found by
+                    # nothing else afterwards
+                    heard = unknowns.resolved_meetings(
+                        unknowns.load()["speakers"].get(sv) or {})
                     ok = unknowns.promote(sv, dv)
                 elif st_ == "uid" and dt_ == "uid":
                     ok = unknowns.merge(sv, dv)
@@ -2294,16 +2334,18 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": ok})
                     return
                 # both sides of the merge, by whichever handle each one has.
-                # A retired src uid resolves to nothing (merge folded its
-                # meetings into dst, promote consumed it entirely), so the
-                # destination's post-merge samples carry the rest.
+                # A retired src uid resolves to nothing: merge folded its
+                # meetings into dst, and promote consumed it entirely, so its
+                # own list rides in as `bases` and the destination's
+                # post-merge samples carry the rest.
                 pairs = ((st_, sv), (dt_, dv))
                 vec = (identify.load_voiceprints().get(dv) if dt_ == "name"
                        else unknowns.samples_of(dv))
                 self._json({"ok": ok, **_relabel_targets(
                     vector=vec,
                     names=[v for t, v in pairs if t == "name"],
-                    uids=[v for t, v in pairs if t == "uid"])})
+                    uids=[v for t, v in pairs if t == "uid"],
+                    bases=heard)})
             elif u.path == "/api/rename":
                 if not self._require_base(b.get("base")):
                     return
