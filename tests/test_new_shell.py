@@ -977,8 +977,12 @@ def test_meeting_header_gains_the_row_menu_and_a_cyclable_dot():
     assert re.search(r"function\s+mCycleCat\s*\(", NEW_JS)
     assert NEW_JS.count("api('/api/set_category'") >= 2
     assert 'id="mcatdot"' in NEW_JS
-    # page-owning actions return to the library when their meeting disappears
-    assert "if(route.view==='meeting'&&route.base===id)location.hash=''" in NEW_JS
+    # page-owning actions leave the page when their meeting disappears (revised
+    # in docs/ui-refresh phase 3): one column returns to the library as before,
+    # and two panes open the default meeting, so the reader is never left empty
+    assert NEW_JS.count(
+        "if(route.view==='meeting'&&route.base===id)readerLeave(id);") == 2
+    assert "if(!PANES){location.hash='';return;}" in _js_fn("readerLeave")
 
 
 # ---------------------------------------------------------------------------
@@ -2893,6 +2897,9 @@ def _acc_env(store="{}", search="", flagged="false", today=ACC_TODAY):
         ".replace(/'/g,\"\\\\'\");}",
         "function rowHTML(r){return '<div class=\"row\" data-id=\"'+r.id+'\"></div>';}",
         "function afterRender(){}",
+        # one column: a rail jump scrolls the window (two panes: the list pane)
+        "let PANES_ON=false,paneJumps=[];function paned(){return PANES_ON;}",
+        "function paneReveal(el,start){paneJumps.push([el.id,!!start]);}",
         "const TODAY=" + json.dumps(today) + ";",
         # curMonths() derives the current month from _isoLocal(new Date());
         # freezing _isoLocal at the stubbed TODAY freezes the whole default
@@ -3736,7 +3743,7 @@ def test_the_strip_stays_away_from_a_meeting_already_finished():
         _js_fn("fsInit"), _js_fn("fsShow"), _js_fn("fsRender"), _js_fn("fsTitleHTML"),
         _js_fn("fsFlagsHTML"), _js_fn("fsLeftHTML"), _js_fn("fsNext"),
         "function srcStem(n){return n.replace(/\\.[^.]+$/,'');}",
-        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[]},route={base:null};",
+        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[]},route={base:null},RQUIET=null;",
         "const box={hidden:true,innerHTML:''};",
         "const document={getElementById:id=>id==='mfinish'?box:null};",
         "let focused=0;function $(q){return q==='#fstitle'?{focus(){focused++;}}:null;}",
@@ -3750,6 +3757,9 @@ ROWS.New={id:'New',state:'needs_name',when:new Date().toISOString().slice(0,19),
   suggested_title:'Budget Review',suggested_date:'2026-09-26',
   source_file:'Recording 0926.m4a',finish:fin(false,1,0)};
 fsInit('New');out.open={cur:FS.cur,live:FS.live,hidden:box.hidden,html:box.innerHTML,focused};
+// two panes: a j/k walk mounts the meeting quietly -- the strip, no focus
+RQUIET='New';fsInit('New');out.quiet={cur:FS.cur,live:FS.live,hidden:box.hidden,focused,
+  cleared:RQUIET};
 FS_CARRY={base:'Done',past:[],live:true,keep:true};
 fsInit('Done');out.carried={hidden:box.hidden,html:box.innerHTML,carry:FS_CARRY};
 console.log(JSON.stringify(out));
@@ -3763,6 +3773,10 @@ console.log(JSON.stringify(out));
     assert 'class="dateinput" id="fsdate" type="date" value="2026-09-26"' in o["html"]
     assert 'onclick="fsAccept()"' in o["html"] and "Use the file name" in o["html"]
     assert o["focused"] == 1, "a meeting to finish takes the keyboard on open"
+    # docs/ui-refresh phase 3: a quiet mount (a j/k walk, the default open)
+    # renders the same strip but leaves the keyboard with the list
+    assert out["quiet"] == {"cur": "title", "live": False, "hidden": False,
+                            "focused": 1, "cleared": None}
     assert 'class="doneline"' in out["carried"]["html"]
     assert out["carried"]["carry"] is None, "a carry is consumed once"
 
@@ -4257,7 +4271,8 @@ def _voice_queue_env():
         _js_fn("nextVoiceMeeting"), _js_fn("fsVoicesStart"), _js_fn("fsVoiceCarry"),
         _js_fn("fsVoiceGo"),
         "function srcStem(n){return (n||'').replace(/\\.[^.]+$/,'');}",
-        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[],tray:[]},route={base:null};",
+        "let FS=null,FS_CARRY=null,MR=null,S={timeline:[],tray:[]},route={base:null},"
+        "RQUIET=null;",
         "const box={hidden:true,innerHTML:''};",
         "const document={getElementById:id=>id==='mfinish'?box:null};",
         "function $(q){return null;}",
@@ -4665,3 +4680,479 @@ def test_phase_two_styles_ride_the_tokens():
     assert ":where(button,select,input,.row,.lrow,.railbtn):focus-visible" in NEW_CSS
     assert ".lrow,.lrow.updated," in NEW_CSS     # the reduced-motion transition kill
     assert re.search(r"(?m)^\.lrow \.ltitle\{[^}]*font:600 15px", NEW_CSS)
+
+
+# ---------------------------------------------------------------------------
+# docs/ui-refresh phase 3: two panes. At 900px and wider the list keeps the
+# left pane and the meeting page mounts beside it, in the reader; below 900px
+# the page is today's one column. The deciders and the selection machinery
+# run under node over the extracted source, with fake timers and a location
+# that records every push and replace (hashchange fires on flush(), after the
+# handler that moved the hash returns, as a browser fires it). Placement and
+# type sizes are regex over the files.
+# ---------------------------------------------------------------------------
+def _panes_env():
+    """The TWO PANES section, the route, and the section builder it reads,
+    over a stubbed browser. Everything runs inside one function scope, so the
+    fake setTimeout never replaces node's own."""
+    return "\n".join([
+        _js_const("FINISH_DAYS"), _js_fn("toFinish"),
+        _js_const("PIN_ORDER"), _js_const("NOW_STATES"),
+        re.search(r"(?m)^function dateKey\(.*$", NEW_JS).group(0),
+        _js_fn("timelineSections"), _js_fn("parseHash"), _js_fn("applyRoute"),
+        _js_region("const PANES_MIN=900;",
+                   "/* ------------------------------------------------------ build the page"),
+        """
+let route={view:'timeline',base:null},S=null,MP=null,FS_CARRY=null,kbLast=null,NP=null;
+let LAYER=false;function kbLayerOpen(){return LAYER;}
+const log=[];
+let NOW_T=0;const timers=[];
+function setTimeout(f,ms){const t={f,at:NOW_T+ms,live:true};timers.push(t);return t;}
+function clearTimeout(t){if(t)t.live=false;}
+function tick(ms){NOW_T+=ms;for(const t of timers.slice())if(t.live&&t.at<=NOW_T){t.live=false;t.f();}}
+const nav=[];let pending=0;
+const location={_h:'',get hash(){return this._h;},
+  set hash(v){const n=(v===''||v==='#')?'':(v[0]==='#'?v:'#'+v);if(n===this._h)return;
+    this._h=n;nav.push('push:'+decodeURIComponent(n));pending++;},
+  replace(v){this._h=v;nav.push('replace:'+decodeURIComponent(v));pending++;}};
+function flush(){while(pending){pending--;route=parseHash();applyRoute();}}
+function closeNamePanel(){} function dupeDisarm(){}
+function enterMeeting(b){log.push('mount:'+b+(RQUIET===b?':quiet':''));
+  RQUIET=null;MP={base:b,built:true};}
+function exitMeeting(){log.push('exit');MP=null;}
+function mStickyTop(){} let renders=0;function render(){renders++;}
+function fsWake(){log.push('wake');return true;}
+const CSS={escape:s=>s};
+const PANE={scrollTop:0,getBoundingClientRect:()=>({top:64,bottom:1000})};
+function mkRow(id,state,top){const cls=new Set();return {dataset:{id,state},cls,
+  classList:{add:c=>cls.add(c),remove:c=>cls.delete(c),contains:c=>cls.has(c)},
+  attrs:{},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},
+  closest:q=>q==='.wrap'?PANE:(q==='#timeline'?{}:null),blur(){log.push('blur:'+id);},
+  getBoundingClientRect:()=>({top:top||0,bottom:(top||0)+60})};}
+let ROWS=[];
+const bodyCls=new Set();
+const document={activeElement:null,
+  body:{classList:{toggle:(c,on)=>{on?bodyCls.add(c):bodyCls.delete(c);},contains:c=>bodyCls.has(c)}},
+  querySelector(q){const m=q.match(/data-id="([^"]*)"/);
+    return m?ROWS.find(r=>r.dataset.id===m[1])||null:null;},
+  querySelectorAll(q){return q==='#timeline .sel'?ROWS.filter(r=>r.cls.has('sel')):[];}};
+const window={innerWidth:1440};
+const sel=()=>ROWS.filter(r=>r.cls.has('sel')).map(r=>r.dataset.id);
+const ago=h=>new Date(Date.now()-h*3600e3).toISOString().slice(0,19);
+const fin=(title,voices,flags)=>({title,voices,flags,done:title&&!voices&&!flags});
+""",
+    ])
+
+
+def _panes_run(body):
+    return _run_node("(function(){\n" + _panes_env() + "\n" + body + "\n})();")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_two_panes_from_900px_and_the_narrow_fallback_below():
+    """The narrow fallback decision: two panes from 900px up, one column
+    below. One column keeps today's page: no row wears --sel, a walk never
+    mounts the reader, no hash opens nothing, and a meeting that leaves
+    returns to the list."""
+    out = _panes_run("""
+const o={};
+o.edge=[420,899,900,1100,1440].map(w=>twoPanes(w));
+S={timeline:[{id:'A',state:'ready',date:'2026-09-01',when:ago(500),finish:fin(true,0,0)}]};
+ROWS=[mkRow('A','ready',100)];
+// wide: the class goes on, the list redraws beside the reader
+window.innerWidth=1440;paneSync();
+o.wide={PANES,cls:[...bodyCls],renders};
+// no hash in two panes: the default opens, quietly, replacing the empty entry
+o.wideSync=readerSync();flush();
+o.wideNav=nav.slice();o.wideLog=log.slice();o.wideSel=sel();
+// narrowing: the class comes off, a pending walk dies, --sel goes
+selectRow('A',true);
+window.innerWidth=800;paneSync();
+o.narrow={PANES,cls:[...bodyCls],sel:sel(),walkLive:timers.some(t=>t.live)};
+// one column: no hash opens nothing, and a meeting that leaves goes to the list
+route={view:'timeline',base:null};nav.length=0;log.length=0;
+o.narrowSync=readerSync();
+route={view:'meeting',base:'A'};location._h='#m/A';
+readerLeave('A');flush();
+o.narrowLeave={nav:nav.slice(),log:log.slice()};
+console.log(JSON.stringify(o));
+""")
+    assert out["edge"] == [False, False, True, True, True]
+    assert out["wide"]["PANES"] is True and out["wide"]["cls"] == ["panes"]
+    assert out["wide"]["renders"] == 1, "the list comes back beside the reader"
+    assert out["wideSync"] is True
+    assert out["wideNav"] == ["replace:#m/A"], "the default replaces, never pushes"
+    assert out["wideLog"] == ["mount:A:quiet"]
+    assert out["wideSel"] == ["A"]
+    assert out["narrow"] == {"PANES": False, "cls": [], "sel": [], "walkLive": False}
+    assert out["narrowSync"] is False
+    assert out["narrowLeave"] == {"nav": ["push:"], "log": ["exit"]}
+
+
+def test_the_css_lays_out_two_panes_only_while_a_meeting_is_open():
+    """The list pane is 380px (330px under 1100px) with its own scroll, sticky
+    under the header; the reader is the meeting page on the card ground.
+    One column hides the list behind a meeting and keeps the back link."""
+    sec = NEW_CSS[NEW_CSS.index("   Two panes (docs/ui-refresh/proposal.md, phase 3)"):]
+    assert "body.panes{--listw:380px}" in sec
+    m = re.search(r"@media\(max-width:1099px\)\{([^@]*)\n\}", sec)
+    assert m and "body.panes{--listw:330px}" in m.group(1)
+    assert re.search(r"body\.panes\.route-meeting\{[^}]*display:grid;[^}]*"
+                     r"grid-template-columns:var\(--listw\) minmax\(0,1fr\)", sec)
+    wrap = re.search(r"body\.panes\.route-meeting \.wrap\{[^}]*\}", sec).group(0)
+    for frag in ("position:sticky", "top:var(--hdrh,64px)", "overflow-y:auto",
+                 "height:calc(100vh - var(--hdrh,64px))", "border-right:1px solid var(--hair)"):
+        assert frag in wrap, frag
+    assert re.search(r"body\.panes\.route-meeting \.mpage\{[^}]*background:var\(--card\)", sec)
+    assert "body.panes .mback{display:none}" in sec
+    # the ask bar and the bulk bar keep to their own panes
+    assert re.search(r"body\.panes\.route-meeting \.maskbar\{left:var\(--listw\);right:0;", sec)
+    assert re.search(r"body\.panes\.route-meeting \.bulkbar\{[^}]*max-width:calc\(var\(--listw\)", sec)
+    # one column: the list and its floating surfaces hide behind a meeting
+    assert "body.route-meeting:not(.panes) .wrap{display:none}" in NEW_CSS
+    assert "body.route-meeting:not(.panes) #searchhits{display:none!important}" in NEW_CSS
+    assert "body.route-meeting .wrap{display:none}" not in NEW_CSS
+    # the back link still renders; the width decides whether it shows
+    assert 'class="mback"' in _js_fn("_mHeader")
+    # the header height feeds the pane's sticky top, from the live header
+    assert "setProperty('--hdrh',top+'px')" in _js_fn("mStickyTop")
+    assert "paneSync();" in NEW_JS[NEW_JS.index("addEventListener('resize'"):][:80]
+    # the section adds no colour of its own
+    assert not re.findall(r"#[0-9A-Fa-f]{3,6}\b", sec), "no new colors"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_reader_opens_the_first_to_finish_row_else_the_newest():
+    out = _panes_run("""
+const tl=[
+  {id:'P',state:'processing',when:ago(1)},
+  {id:'Old',state:'ready',date:'2026-06-01',when:ago(900),finish:fin(true,2,0)},
+  {id:'Name',state:'needs_name',date:'2026-09-20',when:ago(30),finish:fin(false,0,0)},
+  {id:'Voices',state:'ready',date:'2026-09-25',when:ago(10),finish:fin(true,1,0)},
+  {id:'New',state:'ready',date:'2026-09-26',when:ago(5),finish:fin(true,0,0)},
+  {id:'Mid',state:'ready',date:'2026-09-10',when:ago(400),finish:fin(true,0,0)}];
+const done=tl.map(r=>r.finish?Object.assign({},r,{state:'ready',finish:fin(true,0,0)}):r);
+console.log(JSON.stringify({
+  first:readerDefault(tl),
+  skip:readerDefault(tl,undefined,'Name'),
+  newest:readerDefault(done),
+  newestSkip:readerDefault(done,undefined,'New'),
+  nowOnly:readerDefault([{id:'P',state:'processing'},{id:'W',state:'waiting'}]),
+  empty:readerDefault(null),
+  opens:['ready','needs_name','processing','waiting','held','failed','recording'].map(rowOpens),
+  lost:[readerLost(tl,'New'),readerLost(tl,'Gone'),readerLost(null,'New')],
+}));
+""")
+    assert out["first"] == "Name", "the first To finish row, in timeline order"
+    assert out["skip"] == "Voices", "a meeting that just left is never the default"
+    assert out["newest"] == "New", "no To finish row: the newest meeting"
+    assert out["newestSkip"] == "Voices", "the next newest by meeting date"
+    assert out["nowOnly"] is None and out["empty"] is None
+    assert out["opens"] == [True, True, False, False, False, False, False]
+    assert out["lost"] == [False, True, True]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_click_selects_at_once_and_a_walk_mounts_the_reader_when_it_pauses():
+    """Selection: the row wears --sel the moment it is chosen. A click mounts
+    the reader at once; j/k mount it once the walk pauses for about 150ms, so
+    holding j never rebuilds the reader on every row, and the walk's mount is
+    quiet (no focus, no clip)."""
+    out = _panes_run("""
+const o={};
+window.innerWidth=1440;paneSync();
+ROWS=['A','B','C','D','E'].map((id,i)=>mkRow(id,'ready',100+i*60));
+location._h='#m/A';route={view:'meeting',base:'A'};MP={base:'A',built:true};RSEL='A';
+// a click: at once, one push, one mount, not quiet
+selectRow('B');flush();
+o.click={sel:sel(),nav:nav.slice(),log:log.slice(),aria:ROWS[1].attrs['aria-current']};
+nav.length=0;log.length=0;
+// a held j: three rows inside 150ms, the highlight follows each at once
+selectRow('C',true);o.sel1=sel();tick(40);
+selectRow('D',true);tick(40);
+selectRow('E',true);o.sel3=sel();
+tick(149);flush();o.early={nav:nav.slice(),log:log.slice()};
+tick(1);flush();o.paused={nav:nav.slice(),log:log.slice(),sel:sel()};
+nav.length=0;log.length=0;
+// walking back to the reader's own row before the pause mounts nothing
+selectRow('D',true);tick(60);selectRow('E',true);tick(300);flush();
+o.back={nav:nav.slice(),log:log.slice(),sel:sel()};
+// a click on the reader's own row changes nothing in the route
+selectRow('E');flush();o.same={nav:nav.slice(),log:log.slice()};
+console.log(JSON.stringify(o));
+""")
+    assert out["click"] == {"sel": ["B"], "nav": ["push:#m/B"], "log": ["mount:B"],
+                            "aria": "true"}
+    assert out["sel1"] == ["C"] and out["sel3"] == ["E"]
+    assert out["early"] == {"nav": [], "log": []}, "no mount while the walk is moving"
+    assert out["paused"] == {"nav": ["push:#m/E"], "log": ["mount:E:quiet"], "sel": ["E"]}
+    assert out["back"] == {"nav": [], "log": [], "sel": ["E"]}
+    assert out["same"] == {"nav": [], "log": []}
+    # the walk's pause is the declared constant, about 150ms
+    assert "const WALK_MS=150;" in NEW_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_hash_moves_the_selection_and_a_lost_meeting_opens_the_default():
+    """Hash-to-selection sync: a deep link, the back button, and ] or [ move
+    --sel to the reader's row and cancel a pending walk. A walk that is still
+    moving past the step whose mount just landed keeps its own row. A reader
+    meeting that leaves the library opens the default, skipping it."""
+    out = _panes_run("""
+const o={};
+window.innerWidth=1440;paneSync();
+ROWS=['A','B','C','D'].map((id,i)=>mkRow(id,'ready',100+i*60));
+// a deep link (or the back button): the row follows the hash
+location.hash='#m/B';flush();
+o.deep={sel:sel(),RSEL,log:log.slice()};
+// ] mid-walk: the route wins and the walk dies
+selectRow('C',true);location.hash='#m/D';flush();tick(400);flush();
+o.bracket={sel:sel(),nav:nav.slice(-1)};
+// a walk still moving when its own earlier mount lands keeps its row
+nav.length=0;log.length=0;
+selectRow('A',true);tick(150);        // A's mount is on its way...
+selectRow('B',true);flush();          // ...and j already moved on to B
+o.moving={sel:sel(),log:log.slice()};
+tick(150);flush();
+o.settled={sel:sel(),nav:nav.slice(),log:log.slice()};
+// the reader's meeting leaves the library: the default opens in its place
+S={timeline:[{id:'C',state:'ready',date:'2026-09-01',when:ago(500),finish:fin(true,0,0)},
+             {id:'D',state:'ready',date:'2026-09-02',when:ago(400),finish:fin(true,0,0)}]};
+nav.length=0;log.length=0;
+FS_CARRY={base:'Z'};readerKeep();o.carry=nav.slice();FS_CARRY=null;
+LAYER=true;readerKeep();o.layer=nav.slice();LAYER=false;
+readerKeep();flush();o.kept={nav:nav.slice(),log:log.slice(),sel:sel()};
+// archive from the reader: replace with the default, skipping the one leaving
+nav.length=0;log.length=0;
+readerLeave('D');flush();o.leave={nav:nav.slice(),log:log.slice()};
+// nothing left to read: back to the list alone
+S={timeline:[]};nav.length=0;log.length=0;
+readerLeave('C');flush();o.empty={nav:nav.slice(),log:log.slice(),sel:sel()};
+// a list edit re-stamped the reader's meeting: the reader follows it
+location._h='#m/C';route={view:'meeting',base:'C'};nav.length=0;
+readerFollow('C','C2');readerFollow('D','D2');readerFollow('C',null);
+o.follow=nav.slice();
+console.log(JSON.stringify(o));
+""")
+    assert out["deep"] == {"sel": ["B"], "RSEL": "B", "log": ["mount:B"]}
+    assert out["bracket"] == {"sel": ["D"], "nav": ["push:#m/D"]}
+    assert out["moving"] == {"sel": ["B"], "log": ["mount:A:quiet"]}
+    assert out["settled"] == {"sel": ["B"], "nav": ["push:#m/A", "push:#m/B"],
+                              "log": ["mount:A:quiet", "mount:B:quiet"]}
+    assert out["carry"] == [] and out["layer"] == []
+    assert out["kept"] == {"nav": ["replace:#m/D"], "log": ["mount:D:quiet"], "sel": ["D"]}
+    assert out["leave"] == {"nav": ["replace:#m/C"], "log": ["mount:C:quiet"]}
+    assert out["empty"] == {"nav": ["push:"], "log": ["exit"], "sel": []}
+    assert out["follow"] == ["replace:#m/C2"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_list_pane_scrolls_itself_and_never_the_reader():
+    out = _panes_run("""
+const o={};
+const at=(top)=>{PANE.scrollTop=100;const r=mkRow('X','ready',top);return r;};
+let r=at(300);paneReveal(r);o.inside=PANE.scrollTop;
+r=at(20);paneReveal(r);o.above=PANE.scrollTop;
+r=at(980);paneReveal(r);o.below=PANE.scrollTop;
+r=at(500);paneReveal(r,true);o.start=PANE.scrollTop;
+paneReveal(null);paneReveal({closest:()=>null});
+console.log(JSON.stringify(o));
+""")
+    assert out["inside"] == 100, "a row already in view stays put"
+    assert out["above"] == 100 - (64 + 8 - 20)
+    assert out["below"] == 100 + (980 + 60 - 1000 + 8)
+    assert out["start"] == 100 + (500 - 64 - 8), "a rail jump lands the header at the top"
+    # the ring and the rail use it in two panes; one column keeps the window's scroll
+    assert "if(paned())paneReveal(el);" in _js_fn("kbFocusRow")
+    assert "scrollIntoView({block:'nearest'})" in _js_fn("kbFocusRow")
+    assert "paneReveal(el,true)" in _js_fn("railJump")
+
+
+def _panes_keys_env():
+    """kbKey, kbMove, and the real mKey / fsKey over a stub page in two panes:
+    a focused list row, the reader's stepper active, and recorders for what
+    each handler did."""
+    return "\n".join([
+        _js_oneline("kbLayerOpen"), _js_fn("kbKey"), _js_fn("kbMove"), _js_fn("kbLand"),
+        _js_fn("mKey"), _js_fn("fsKey"), _js_fn("rowOpens"),
+        "let NP=null,_popClose=null,kbLast=null,FS=null,PANES=true,RSEL='M1';",
+        "let MR={active:true,items:[{}],i:0};",
+        "const DRAWER={open:false};",
+        "let route={view:'meeting',base:'M1'};",
+        "const log=[];",
+        "class Element{closest(q){return this._closest(q);}matches(q){return this._matches(q);}}",
+        "const CSS={escape:s=>s};",
+        "const KB_RING='#timeline .row[tabindex], #timeline .lrow, #timeline .ghead';",
+        "function mkEl(tag,id,state,inList,isRow){const e=new Element();e.tagName=tag;"
+        "e.dataset={id,state};e._closest=q=>q==='.wrap'?(inList?{}:null)"
+        ":(q.includes('.row[tabindex]')&&isRow?e:(q===KB_RING&&isRow?e:null));"
+        "e._matches=q=>isRow&&q.includes('.row[tabindex]');"
+        "e.querySelector=q=>q==='.chk:not(.spacer)'?{}:null;"
+        "e.focus=()=>{document.activeElement=e;log.push('ring:'+id);};"
+        "e.getBoundingClientRect=()=>({top:100,bottom:160});return e;}",
+        "const row1=mkEl('DIV','M1','ready',true,true),row2=mkEl('DIV','M2','ready',true,true);",
+        "const body=new Element();body.tagName='BODY';body._closest=()=>null;body._matches=()=>false;",
+        "const se={tagName:'INPUT',value:'',focus(){log.push('search');},blur(){}};",
+        "const mf={tagName:'INPUT',focus(){log.push('find');},select(){}};",
+        "const document={activeElement:body,body,getElementById:()=>null,"
+        "querySelectorAll:()=>[row1,row2],querySelector:()=>row1};",
+        "const location={hash:'#m/M1'};",
+        "function $(q){return q==='#search'?se:(q==='#mfind'?mf:(q==='.hdr'?{offsetHeight:64}:null));}",
+        "function kbRows(){return [row1,row2];}",
+        "function kbFocusRow(el){if(el){el.focus();kbLast=el.dataset.id;}}",
+        "function selRowEl(){return RSEL==='M1'?row1:row2;}",
+        "function render(){} function scheduleSearch(){}",
+        "function openMeeting(){log.push('open');} function toggleExpand(){log.push('peek');}",
+        "function readerOpen(id){log.push('readerOpen:'+id);}",
+        "function selectRow(id,walk){log.push('select:'+id+(walk?':walk':''));}",
+        "const SEL=new Set();function toggleSel(id,on){log.push('bulk:'+id+':'+on);on?SEL.add(id):SEL.delete(id);}",
+        "function reviewGo(d){log.push('reviewGo:'+d);} function reviewStep(){log.push('reviewStep');}",
+        "function reviewApply(v){log.push('apply:'+v);} function reviewUseAltGo(){}",
+        "function reviewExit(){log.push('exit');} function mCloseCard(){}",
+        "function fsGo(d){log.push('fsGo:'+d);return true;}",
+        # both listeners see the SAME event, in registration order, as a browser runs them
+        "function press(k,target){log.length=0;const ev={key:k,metaKey:false,ctrlKey:false,"
+        "altKey:false,target:target||document.activeElement,defaultPrevented:false,"
+        "preventDefault(){this.defaultPrevented=true;}};kbKey(ev);mKey(ev);"
+        "return {log:log.slice(),prevented:ev.defaultPrevented};}",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_list_keys_in_two_panes_never_reach_the_reader():
+    """Two panes put the list's keys and the reader's on one page. A key the
+    list takes (its Enter, x, j, k, and / from the list) is never also the
+    reader's: Enter on a focused row selects it and never accepts a flag or
+    saves a voice. The reader's own keys (n, a, ]) still work from the list,
+    Escape in the reader puts the ring on the reader's row, and one column
+    keeps today's Escape back to the list."""
+    out = _run_node(_panes_keys_env() + """
+const o={};
+document.activeElement=row2;
+o.enter=press('Enter',row2);
+o.x=press('x',row2);o.x2=press('x',row2);
+o.j=press('j');
+o.slashList=press('/',row2);
+document.activeElement=body;
+o.slashReader=press('/',body);
+o.n=press('n',body);o.a=press('a',body);o.bracket=press(']',body);
+MR=null;o.esc=press('Escape',body);
+PANES=false;o.escNarrow=press('Escape',body);o.jNarrow=press('j',body);
+console.log(JSON.stringify(o));
+""")
+    assert out["enter"] == {"log": ["readerOpen:M2"], "prevented": True}, \
+        "the list's Enter must never also accept the flag under it"
+    assert out["x"] == {"log": ["bulk:M2:true"], "prevented": True}
+    assert out["x2"] == {"log": ["bulk:M2:false"], "prevented": True}
+    assert out["j"]["log"][-1] == "select:M2:walk" and out["j"]["prevented"] is True
+    assert out["slashList"] == {"log": ["search"], "prevented": True}
+    assert out["slashReader"] == {"log": ["find"], "prevented": True}
+    assert out["n"] == {"log": ["reviewGo:1"], "prevented": True}
+    assert out["a"] == {"log": ["apply:accept"], "prevented": True}
+    assert out["bracket"] == {"log": ["fsGo:1"], "prevented": True}
+    assert out["esc"] == {"log": ["ring:M1"], "prevented": True}
+    assert out["escNarrow"]["prevented"] is True and out["escNarrow"]["log"] == []
+    assert out["jNarrow"] == {"log": [], "prevented": False}, \
+        "one column: the meeting page owns the keys, as before"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_walk_mounts_quietly_and_enter_on_the_readers_row_takes_the_keyboard():
+    """A j/k walk (and the default open) mounts a meeting to finish without
+    taking focus or playing its clip, so the next j walks on. Enter or a
+    click on the reader's own row hands the keyboard to the reader: the ring
+    lets go and the step's input takes focus, the voice clip plays, or the
+    flags start stepping."""
+    out = _run_node("\n".join([
+        _js_fn("fsWake"), _js_region("function readerTake(){", "\n}\n") + "\n}",
+        "let FS=null,MR=null,kbLast='M1';const log=[];",
+        "const els={'#fstitle':{focus(){log.push('focus:title');}},"
+        "'#fvname':{focus(){log.push('focus:name');}}};",
+        "function $(q){return els[q]||null;}",
+        "function fvPlay(){log.push('clip');} function reviewStart(){log.push('stepping');}",
+        "const row={closest:q=>q==='#timeline'?{}:null,blur(){log.push('blur');}};",
+        "const document={activeElement:row};",
+        """
+const o={};
+o.none=fsWake();
+FS={cur:'title',live:false};readerTake();o.title={log:log.splice(0),live:FS.live,kbLast};
+FS={cur:'voices',live:false};fsWake();o.voices=log.splice(0);
+FS={cur:'flags',live:false};fsWake();o.flags=log.splice(0);
+MR={active:true};fsWake();o.stepping=log.splice(0);
+console.log(JSON.stringify(o));
+"""]))
+    assert out["none"] is False
+    assert out["title"] == {"log": ["blur", "focus:title"], "live": True, "kbLast": None}
+    assert out["voices"] == ["focus:name", "clip"]
+    assert out["flags"] == ["stepping"]
+    assert out["stepping"] == [], "an active stepper is left alone"
+    # the quiet mount: fsInit reads the walk's flag and clears it
+    init = _js_fn("fsInit")
+    assert "const quiet=RQUIET===base;" in init and "RQUIET=null;" in init
+    assert "(toFinish(row)&&!quiet)" in init
+    # the walk sets it, the default open and a lost meeting's default too
+    assert "if(walk)RQUIET=id;" in _js_fn("selectRow")
+    assert "RQUIET=id;" in _js_fn("readerSync") and "RQUIET=next;" in _js_fn("readerLeave")
+
+
+def test_the_reader_keeps_its_menu_and_the_list_keeps_drawing_beside_it():
+    """Two panes rebuild the list on every poll while a meeting is open. The
+    header's ⋯ menu must not be re-anchored to (or closed for) the list row,
+    the row flash reaches the list, and render() draws it beside the reader."""
+    assert "pop.dataset.page='1';" in _js_fn("mMenu")
+    assert "&&!rm.dataset.page){" in _js_fn("afterRender")
+    assert "el.dataset.page='';" in _js_fn("openPop")
+    body = _js_fn("render")
+    assert "if(route&&route.view==='meeting'){maybeBuildPending();if(!PANES){applySel();return;}}" \
+        in body
+    assert "else if(PANES)readerSync();" in body
+    ref = _js_fn("refresh")
+    assert "if(!route||route.view!=='meeting'||PANES)flashRows(stampsMoved(prev,S));" in ref
+    assert "readerKeep();" in ref
+    # the route: the selection follows every hash change, after the mount
+    route = _js_fn("applyRoute")
+    assert route.index("enterMeeting(route.base)") < route.index("selFollow();")
+    assert "else if(!readerSync())exitMeeting();" in route
+    # a click on a row: two panes select into the reader; one column peeks
+    click = NEW_JS[NEW_JS.index("$('#timeline').addEventListener('click'"):]
+    click = click[:click.index("\n});")]
+    assert "if(PANES){" in click and "readerOpen(el.dataset.id)" in click
+    assert click.index("readerOpen") < click.index("toggleExpand(row.dataset.id)")
+    # the title and date: the first click selects, a second edits in place
+    assert "if(inList&&listPick(id))return;" in _js_fn("rowTitleEdit")
+    assert "if(listPick(id))return;" in _js_fn("rowDateEdit")
+    assert "const onPage=!inRow&&route.view==='meeting'&&route.base===id;" in _js_fn("rmRename")
+
+
+def test_list_rows_are_denser_and_the_reader_title_is_22px():
+    """docs/ui-refresh phase 3: list rows carry a 15px title, a 13px meta
+    line, and ONE 13px summary line; the 17.5px row title moved to the
+    reader header at 22px. The 13px floor holds (test_css_type_floor_is_13px)."""
+    assert re.search(r"(?m)^\.rtitle\{font:600 15px/", NEW_CSS)
+    assert re.search(r"(?m)^\.rmeta\{font:400 13px/", NEW_CSS)
+    rs = re.search(r"(?m)^\.rsummary\{[^}]*\}", NEW_CSS).group(0)
+    assert "font:400 13px/" in rs and "white-space:nowrap" in rs \
+        and "text-overflow:ellipsis" in rs
+    assert "line-clamp" not in rs, "one line, not two clamped ones"
+    assert re.search(r"(?m)^\.lrow \.ltitle\{[^}]*font:600 15px", NEW_CSS)
+    assert re.search(r"(?m)^\.lrow \.lmeta\{font:400 13px", NEW_CSS)
+    assert re.search(r"(?m)^\.mtitle\{font:600 22px/", NEW_CSS)
+
+
+def test_the_selected_row_wears_the_sel_token_in_both_themes():
+    """--sel is the selected row's ground (accent-soft, lightened hue-true in
+    light so --sub clears 4.5:1 on it) with a 3px inset accent edge: an edge
+    marker, not a lift, so the no-shadow audit still passes."""
+    from tools.token_contrast import BLOCKS, audit, read_tokens
+
+    for label, pattern in BLOCKS:
+        assert "sel" in read_tokens(NEW_CSS, pattern), f"{label} lacks --sel"
+    m = re.search(r"(?m)^\.row\.sel,\.lrow\.sel\{[^}]*\}", NEW_CSS)
+    assert m and "background:var(--sel)" in m.group(0)
+    assert "box-shadow:inset 3px 0 0 var(--accent)" in m.group(0)
+    measured = {(r.fg, r.bg) for r in audit()}
+    assert {("ink", "sel"), ("sub", "sel"), ("attn", "sel")} <= measured
+    assert all(r.ok for r in audit() if r.bg == "sel")
+    # the painter keys the one selected row and says so to assistive tech
+    paint = _js_fn("selPaint")
+    assert "classList.add('sel')" in paint and "setAttribute('aria-current','true')" in paint

@@ -10,8 +10,9 @@ deleted 2026-07-12 after the shell reached full parity.
 A meeting is one object. Its row is its queue entry, its progress bar, and
 its transcript link. The default screen is what is happening Now, what is
 left To finish, and then the library (revised 2026-09-27: the amber tray that
-once headed the screen folded into those two sections). All machinery lives
-behind one popover (runs) and one drawer (settings).
+once headed the screen folded into those two sections). At 900px and wider an
+open meeting reads beside that list instead of replacing it (see "Two panes").
+All machinery lives behind one popover (runs) and one drawer (settings).
 
 ## Shell mechanics
 
@@ -40,8 +41,11 @@ vendored locally as the OFL-licensed variable woff2 in gui/static/ (its
 OFL.txt alongside; loaded via @font-face, served by the panel itself, never a
 CDN; -apple-system remains the fallback stack). Weight does the hierarchy:
 titles 600, wordmark 700, body 400-500, letter-spacing -0.005em at 16px+.
-Sizes keep the calibrated middle landing: titles 17.5px, meta 13px, summary
-previews 14.5px at two clamped lines, floor 13px (test-enforced). Mono
+Sizes keep the calibrated middle landing, revised 2026-09-27 for denser
+list rows (docs/ui-refresh phase 3): row titles 15px, meta 13px, summary
+previews one 13px line, the meeting page's title 22px, floor 13px
+(test-enforced). They were titles 17.5px and previews 14.5px at two clamped
+lines. Mono
 (`ui-monospace`, SF Mono) stays demoted to true data only: timestamps,
 durations, live clocks, the status pill, and the group counts. Nothing is
 serif. Group eyebrows carry .08em tracking, not the .06em of the Boardroom
@@ -107,12 +111,13 @@ state and destructive confirmation buttons.
 Rhythm: 8px grid. Layout stays as this section sets it (fluid
 min(1360px, 94vw) cap, card rows with 10px gaps); surfaces are governed by
 Indigo Blueprint (6px card radius, 1px hairline borders, no card shadow);
-type sizes by its Type section (titles 17.5px,
-meta 13px, summaries 14.5px at two clamped lines, floor 13px,
+type sizes by its Type section (row titles 15px,
+meta 13px, summaries one 13px line, floor 13px,
 test-enforced). Superseded for the record: the 920px reading column and
 18.5px titles of the Newsprint/Signal era. Rows keep 15-16px vertical
-padding inside their cards; month headers carry ~30px top margin so months
-read as chapters. Mark's display is the calibration target, not preview
+padding inside their cards in one column (10px in the two-pane list, see
+"Two panes"); month headers carry ~30px top margin so months read as
+chapters (18px in the two-pane list). Mark's display is the calibration target, not preview
 screenshots taken in narrow tabs. Motion 150-200ms ease for state morphs
 and hover lifts; honor `prefers-reduced-motion`.
 
@@ -200,7 +205,10 @@ The right rail's pill is the state:
               Escape cancels, and hover marks both targets with an edit
               cursor plus a subtle underline. Neither click expands the row.
               The meeting page's header title renames inline the same way
-              (it shares the row's rename path). Clicking the row body (not its controls)
+              (it shares the row's rename path). With two panes (see
+              "Two panes") a click on the row selects it into the reader
+              instead, and its title and date edit in place once the
+              reader shows it. In one column, clicking the row body (not its controls)
               expands it in place: full summary + committed next steps +
               an "Open transcript →" link, collapse on second click,
               multiple rows may stay open, expansion survives polls, height
@@ -225,7 +233,8 @@ filled dots): hollow dot = untagged; tagged rows wear the colored chip (Work
 violet, Personal orange) in the right rail. Click cycles either form,
 optimistic update (same /api/set_category endpoint as ever).
 
-Bulk bar: floats bottom-center when selection ≥ 1 (card, shadow): count,
+Bulk bar: floats bottom-center when selection ≥ 1 (card, shadow; with two
+panes, at the bottom of the list pane and no wider than it): count,
 Work · Personal · Clear tag · Rename… · Set date… · Archive · Delete audio… ·
 Delete… · Select all shown · ✕. All through the same `/api/bulk` endpoint.
 
@@ -387,13 +396,16 @@ its own:
 
 A meeting is to finish when its title is open, or when any step is open and it
 was processed in the last 14 days. Only those take the keyboard and play the
-clip on their own; an older meeting with open steps shows the strip and waits.
+clip on their own; an older meeting with open steps shows the strip and waits,
+and so does one that a j/k walk or the default open put in the two-pane reader
+until Enter or a click on its row hands it the keyboard (see "Two panes").
 A meeting whose record was already done when the page opened shows no strip,
 so a finished meeting reads as it did before. Keys, never while typing: Enter
 accepts the step, Space replays the clip, `1` to `3` fill the box from a chip,
 `s` skips a voice (and leaves the box unfocused, so a second `s` skips again),
 `]` and `[` open the next or previous meeting to finish by the `#m/<base>`
-route. Escape in a step's input releases the keyboard to these keys. Key hints
+route (with two panes the list's selection moves with them). Escape in a
+step's input releases the keyboard to these keys. Key hints
 live in title attributes, never as visible key caps.
 
 ### To finish and Now (shipped 2026-09-27, phase 2 of docs/ui-refresh)
@@ -481,8 +493,73 @@ finish eyebrow wraps its actions if it must. A row whose right rail cannot
 sit beside about 160px of title (a live stage, the hover actions) drops the
 rail under the text, right-aligned, instead of squeezing the title to a few
 letters. Row titles, meta lines, and To finish titles and meta wrap instead
-of ending in an ellipsis; the summary preview keeps its two clamped lines.
+of ending in an ellipsis; the summary preview keeps its one line.
 On the meeting page an empty match count gives its width to the find field.
+
+### Two panes (shipped 2026-09-27, phase 3 of docs/ui-refresh)
+
+At 900px and wider, while a meeting is open, the page is two panes under the
+full-width header. The list keeps the left pane: 380px (330px under 1100px),
+paper ground, a `--hair` rule down its right edge, its own scroll, sticky
+under the header (app.js hands the header's live height to the sheet as
+`--hdrh`). The reader is the rest: the meeting page whole (header with inline
+rename, docked audio, finish strip, summary and next steps, transcript,
+verdict bar, ask bar) on the card ground, its scroll the window's, so the
+audio bar and the verdict bar dock exactly as before. The ask bar pins to the
+reader's width, the bulk bar floats at the foot of the list pane, the jump
+rail sticks to the top of the list pane, and the back link hides: the list is
+right there. With no meeting to read (an empty library) the list keeps the
+one column.
+
+Below 900px the page is as before: the list, or the meeting page at full
+width with its back link. A row click peeks, j/k move only the ring, and no
+hash opens nothing. Crossing 900px either way re-lays the page in place.
+
+Selection. The reader's meeting wears `--sel` in the list: the `--sel` ground
+(accent-soft, lightened hue-true in light) with a 3px inset accent edge, an
+edge marker and never a lift, plus `aria-current`. A click on a meeting row
+(a library row or a To finish row) or Enter on a focused one selects it and
+mounts it in the reader at once. j/k move the selection with the ring: the
+highlight at once, the reader once the walk pauses for 150ms, so holding j
+never rebuilds the reader on every row. The first click on another row's
+title or date selects that row; once it is in the reader they edit in place,
+as before. Every selection is the `#m/<base>` route, so deep links, reload,
+and the back button work, and every hash change (`]` and `[`, the back
+button, a deep link) moves the selection, scrolling the list pane alone to
+show it. The list keeps its scroll through all of it. A row inside a folded
+month is not highlighted until its month opens.
+
+No hash opens the first To finish row, else the newest meeting, replacing the
+empty history entry so the back button never lands on an empty reader. A
+meeting that leaves from the reader (Archive or Delete in its ⋯ menu, or a
+poll that no longer lists it, such as after a bulk archive) opens the same
+default in its place, never an empty reader. A row rename or date change that
+re-stamps the reader's meeting takes the reader to the new folder. The
+reader's ⋯ menu stays anchored to its header while the list redraws beside it.
+
+Keys. A j/k walk and the default open mount a meeting quietly: the finish
+strip shows but takes no focus and plays no clip, so the next j walks on.
+Enter on the reader's own row (or a click on it) hands the keyboard to the
+reader: the ring lets go, and the current step's input takes focus, the voice
+clip plays, or the flags start stepping. Escape in the reader, with nothing
+else open, puts the ring back on the reader's row. The list's keys are j, k,
+x (the focused row joins or leaves the bulk selection, as its checkbox does,
+in either layout), Enter and e on a focused row, and `/` from the list (its
+search). A key the list takes never also reaches the reader, so Enter on a
+row never accepts a flag or saves a voice. Every other key is the reader's
+from anywhere: n and p, a and u, Space, s, `1` to `3`, `]` and `[`, and `/`
+from the reader (its find).
+
+Density. List rows carry a 15px semibold title, a 13px meta line, and one
+13px summary line ending in an ellipsis, in either layout; the reader's title
+is 22px (the meeting page's was 25.5px). In the list pane rows tighten
+further: 10px vertical padding, a Now row's empty checkbox gutter goes, the
+resting "ready" pill steps aside (every library row is ready, and hover still
+brings the actions), the right rail stacks the category chip over the review
+count, a rail that cannot sit beside about 160px of title drops under it
+(the phone-width rule), titles and meta wrap instead of cutting a word, and
+section headers sit 18px apart. Under 1100px the Voices step stacks its
+evidence under the form and the transcript's speaker column narrows to 110px.
 
 ## What deliberately does not exist in the new shell
 
@@ -509,8 +586,10 @@ a two-level year-to-month accordion for a library past 100 meetings. Every
 anatomy rule above still holds; this section governs color, surface,
 geometry, and grouping where they disagree.
 
-Type stays Figtree at the calibrated sizes (titles 17.5px, meta 13px,
-summaries 14.5px at two clamped lines, floor 13px, test-enforced). Group
+Type stays Figtree at the calibrated sizes (row titles 15px, meta 13px,
+summaries one 13px line, the meeting page's title 22px, floor 13px,
+test-enforced; revised 2026-09-27 from 17.5px titles and two 14.5px summary
+lines). Group
 eyebrows are uppercase with .08em tracking; counts are mono, tabular.
 
 Light theme tokens (text pairs verified 4.5:1 programmatically, adjusting
@@ -527,6 +606,9 @@ hue-true when a pair misses, exactly as the Signal and Boardroom rounds did):
                         the busy state (busy shares the accent hue)
     --acc-ink #FFFFFF   --accent-soft #E6EAFB   --accent-text: the accent,
                         darkened hue-true only if it misses 4.5:1 on ground
+    --sel     #EBEEFC   the selected list row's ground (2026-09-27): the
+                        accent-soft lightened hue-true, because --sub measures
+                        4.49:1 on accent-soft itself and 4.65:1 on this
     --ok      #1E7B45 on #E3F4EA      ready pill
     --busy    = accent on accent-soft  transcribing pill and progress hairline
     --attn    #0B7285 on #DDF2F6      attention: the Now rows' edge (the
@@ -542,9 +624,9 @@ hue-true when a pair misses, exactly as the Signal and Boardroom rounds did):
 
 Dark theme: ground #0F1320, cards #161B2B, ink #E8EBF5, sub #98A2BF, hair
 #232A3D, line #33405A, accent #8B9DFF (text on accent #0E1330, accent-soft
-#232C55), ok #5BC98C on #16291E, attention #5FD0E3 on #0F2A33, personal
-#E58BC4 on #331A2A, rec #F0605A on #34191B. Verified the same way; adjust
-hue-true.
+#232C55, which is also --sel there: --sub measures 5.28:1 on it), ok #5BC98C
+on #16291E, attention #5FD0E3 on #0F2A33, personal #E58BC4 on #331A2A, rec
+#F0605A on #34191B. Verified the same way; adjust hue-true.
 
 Surfaces, geometric: cards are white with a 1px --hair border and a 6px
 radius, NO drop shadow (the border does the separating; shadows survive only

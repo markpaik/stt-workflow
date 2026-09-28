@@ -179,6 +179,13 @@ Sonnet runs QA and the full suite, then review and commit.
 3. **Two panes.** The reader mounts beside the list at 900px and up; the
    `#m/<base>` route stays for deep links and narrow windows. Node tests on
    selection and routing; the size and contrast gates update.
+   Shipped 2026-09-27: the list pane (380px, 330px under 1100px) and the
+   reader side by side at 900px and up, selection by click, Enter, and j/k
+   (the reader mounts once a walk pauses, about 150ms), the hash and the
+   selection kept in step both ways, the default reader (the first To finish
+   row, else the newest meeting), x for bulk selection, and denser rows
+   (15px title, one 13px summary line, a 22px reader title). Below 900px the
+   page is unchanged. See "Two panes" in `gui/DESIGN.md`.
 4. **Search chips and first run.** Filter chips, the "Said in" group, the
    setup check. A panel Record button waits until someone confirms the macOS
    microphone grant lets the server signal the menu-bar recorder; until then

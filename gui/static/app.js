@@ -272,7 +272,7 @@ function _trayRow(title,detail,verb){
 // because the signature was computed before the flag flipped and the next
 // poll rebuilt the list over it.
 let DUPE_ARMED=false,DUPE_ERR='';
-function nowRedraw(){if(S&&route.view==='timeline'){drawTimeline(S);afterRender();}}
+function nowRedraw(){if(S&&(route.view==='timeline'||PANES)){drawTimeline(S);afterRender();}}
 function dupeArm(on){DUPE_ARMED=!!on;if(on)DUPE_ERR='';nowRedraw();}
 // the armed state belongs to the dupe_files row that armed it. Arm the sweep,
 // walk away without confirming, and the flagged file leaves the queue by
@@ -870,7 +870,8 @@ function railJump(i){
     if(S){drawTimeline(S);afterRender();}
   }
   const el=document.getElementById('grp-'+i);
-  if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
+  if(el&&paned())paneReveal(el,true);   // two panes: the list scrolls, the reader stays
+  else if(el)el.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 /* ============================ render loop ============================ */
@@ -903,11 +904,14 @@ function relabelWatch(s){
 // live (drawPill/applySel) but must NOT rebuild the meeting document
 // (guard on route); a pending deep-link build completes once S has arrived.
 // relabelWatch runs FIRST, before that early return: the meeting view is the
-// one place a finished relabel has to be picked up.
+// one place a finished relabel has to be picked up. With two panes the list
+// beside the reader keeps drawing, and a list with no meeting in the reader
+// opens the default one (readerSync).
 function render(){if(!S)return;relabelWatch(S);drawPill(S);drawRecOk(S);drawDrawer(S);
   drawProcessPop(S);   // an open Process popover refreshes in place with the poll
   const fc=$('#flagchip');if(fc)fc.hidden=!flaggedOnly;
-  if(route&&route.view==='meeting'){applySel();maybeBuildPending();return;}
+  if(route&&route.view==='meeting'){maybeBuildPending();if(!PANES){applySel();return;}}
+  else if(PANES)readerSync();
   drawTimeline(S);afterRender();}
 /* The row flash. A relabel rewrites transcripts the user is not looking at, and
  * in a list of a hundred rows a name quietly changing three cards down is
@@ -970,8 +974,10 @@ async function refresh(){try{
   tabWatch(S);
   render();
   // the list view only: the meeting page answers a moved stamp by reloading
-  // itself (relabelWatch), which is a louder signal than a tint
-  if(!route||route.view!=='meeting')flashRows(stampsMoved(prev,S));
+  // itself (relabelWatch), which is a louder signal than a tint. Two panes
+  // show the list beside it, so its rows flash there too.
+  if(!route||route.view!=='meeting'||PANES)flashRows(stampsMoved(prev,S));
+  readerKeep();
 }catch(e){}}
 
 /* ============================ theme (reused convention) ============================ *
@@ -1002,7 +1008,20 @@ $('#flagchip').onclick=()=>flaggedClear();
 // its controls (buttons, links, checkbox, category dot, inputs, the review
 // count, the click-to-edit title and date) never do, and neither does a
 // click that is selecting text
+// Two panes: a click on a meeting row (a To finish link included) selects it
+// into the reader instead, and on the reader's own row wakes its finish flow.
+// A modified click on a To finish link keeps the browser's own (a new tab).
 $('#timeline').addEventListener('click',e=>{
+  if(PANES){
+    const el=e.target.closest('.row, .lrow');
+    const own=el&&el.classList.contains('lrow');
+    if(el&&rowOpens(el.dataset.state)&&!(own&&(e.metaKey||e.ctrlKey||e.shiftKey||e.button))
+       &&!e.target.closest(own?'button,input':'button,a,input,select,textarea,label,.rev,.rname,.rdate')
+       &&!(window.getSelection&&String(window.getSelection()))){
+      e.preventDefault();readerOpen(el.dataset.id);
+    }
+    return;
+  }
   const row=e.target.closest('.row');
   if(!row||row.dataset.state!=='ready')return;
   if(e.target.closest('button,a,input,select,textarea,label,.rev,.rname,.rdate'))return;
@@ -1073,7 +1092,7 @@ function openPop(el,anchor,fill,ignoreSel){
     el.hidden=true;el.dataset.open='';el.innerHTML='';
     _bulkPop=null;   // a selection-scoped confirm dies with its popover
     if(el.id==='processPop')$('#processBtn').setAttribute('aria-expanded','false');
-    if(el.id==='rowmenu'){el.dataset.rowid='';rowActing(null);}
+    if(el.id==='rowmenu'){el.dataset.rowid='';el.dataset.page='';rowActing(null);}
   };
 }
 
@@ -1414,12 +1433,14 @@ function rmAsk(id){
 function rmReveal(id){api('/api/export',{base:id,fmt:'reveal'});closePop();}
 function rmArchive(id){api('/api/archive_meeting',{base:id}).then(()=>{closePop();
   // archived from its own page: the page is gone, return to the library
-  if(route.view==='meeting'&&route.base===id)location.hash='';
+  // (two panes: the reader opens the default meeting, never an empty pane)
+  if(route.view==='meeting'&&route.base===id)readerLeave(id);
   archHint();   // the quiet "archived · view" note pointing at the drawer's Archive
   refresh();});}
-function rmRename(id){                    // inline: the title becomes an input,
+function rmRename(id,inRow){              // inline: the title becomes an input,
   closePop();                             // on the row OR on the meeting page
-  const onPage=route.view==='meeting'&&route.base===id;
+  // two panes show both at once: the list row's own title renames the row
+  const onPage=!inRow&&route.view==='meeting'&&route.base===id;
   const titleEl=onPage
     ?document.querySelector('#meetingpage .mtitle')
     :(r=>r&&r.querySelector('.rtitle'))(document.querySelector('.row[data-id="'+CSS.escape(id)+'"]'));
@@ -1427,7 +1448,7 @@ function rmRename(id){                    // inline: the title becomes an input,
   const cur=(meetingByBase(id)||{}).title||titleEl.textContent||'';
   titleEl.innerHTML=`<input class="renameinput" type="text" value="${esc(cur)}" aria-label="Rename meeting">`;
   const inp=titleEl.querySelector('input');inp.focus();inp.select();
-  let done=false;
+  let done=false,moved=null;
   const finish=async save=>{
     if(done)return;done=true;
     const nm=inp.value.trim();
@@ -1446,11 +1467,12 @@ function rmRename(id){                    // inline: the title becomes an input,
       // a rename re-stamps the folder, so the base CHANGES: re-route the open
       // page to the new base (the hashchange handler rebuilds it there)
       if(onPage&&r.base&&r.base!==id){location.hash='#m/'+encodeURIComponent(r.base);return;}
+      moved=r.base;
       const r0=rowById(id);if(r0)r0.title=nm;          // optimistic, pre-poll
       const m0=meetingByBase(id);if(m0)m0.title=nm;
     }
     if(onPage)titleEl.textContent=saved?nm:cur;   // cancelled / unchanged: restore
-    else{inp.blur();redrawRows();}    // rebuild the row from S: the .rname span returns
+    else{inp.blur();redrawRows();readerFollow(id,moved);}   // the .rname span returns
     refresh();
   };
   inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(true);}else if(e.key==='Escape'){e.preventDefault();finish(false);}};
@@ -1461,9 +1483,16 @@ function rmRename(id){                    // inline: the title becomes an input,
 // swaps it for a date input. Both stop the click so the row never expands
 // (the timeline guard also excludes .rname/.rdate), and both survive the 2s
 // poll through drawTimeline's focused-input guard.
-function rowTitleEdit(ev,id){if(ev)ev.stopPropagation();rmRename(id);}
+// Two panes: the first click on a row selects it into the reader, and its
+// title and date edit in place once the reader shows it (listPick). The
+// reader's own header title renames through here too, on the page.
+function rowTitleEdit(ev,id){if(ev)ev.stopPropagation();
+  const inList=!!(ev&&ev.target&&ev.target.closest&&ev.target.closest('#timeline'));
+  if(inList&&listPick(id))return;
+  rmRename(id,inList);}
 function rowDateEdit(ev,id){
   if(ev)ev.stopPropagation();
+  if(listPick(id))return;
   const rowEl=document.querySelector('.row[data-id="'+CSS.escape(id)+'"]');
   const span=rowEl&&rowEl.querySelector('.rdate');
   if(!span||rowEl.querySelector('.dateinput'))return;    // already editing
@@ -1491,6 +1520,7 @@ function rowDateEdit(ev,id){
       // optimistically move the date so the row regroups NOW, and let the
       // refresh right below bring the re-stamped id
       const r0=rowById(id);if(r0)r0.date=d;
+      readerFollow(id,r.base);        // two panes: the reader moves with it
     }
     inp.blur();redrawRows();refresh();
   };
@@ -1502,7 +1532,7 @@ function rowDateEdit(ev,id){
 function redrawRows(){
   const tl=$('#timeline');if(!tl)return;
   tl.dataset.sig='';
-  if(S&&route.view!=='meeting'){drawTimeline(S);afterRender();}
+  if(S&&(route.view!=='meeting'||PANES)){drawTimeline(S);afterRender();}
 }
 async function rmRedo(id){                // mirrors the old redo dialog, as a confirm popover
   const m=meetingByBase(id)||{};
@@ -1552,7 +1582,8 @@ async function rmDeleteGo(id){
   }
   closePop();
   // deleted from its own page: the page is gone, return to the library
-  if(route.view==='meeting'&&route.base===id)location.hash='';
+  // (two panes: the reader opens the default meeting, never an empty pane)
+  if(route.view==='meeting'&&route.base===id)readerLeave(id);
   refresh();
 }
 
@@ -1800,8 +1831,11 @@ function afterRender(){
   applySel();
   bulkPopSync();     // an open bulk confirm re-reads the live selection
   kbRestore();
+  selAfter();        // two panes: the reader's row wears --sel again
   const rm=$('#rowmenu');
-  if(rm.dataset.open&&rm.dataset.rowid){
+  // a menu opened from the reader's header stays there (two panes rebuild the
+  // list beside it on every poll, and its row may sit in a folded month)
+  if(rm.dataset.open&&rm.dataset.rowid&&!rm.dataset.page){
     rowActing(rm.dataset.rowid);   // the rebuilt row regains .acting first, so
                                    // its action cluster has geometry to anchor to
     const anchor=document.querySelector('.row[data-id="'+CSS.escape(rm.dataset.rowid)+'"] .rslot .iact:last-child');
@@ -1842,7 +1876,8 @@ function applyRoute(){
   if(NP)closeNamePanel();          // a route change closes the naming slide-over
   dupeDisarm();                    // and disarms the no-undo duplicate sweep
   if(route.view==='meeting')enterMeeting(route.base);
-  else exitMeeting();
+  else if(!readerSync())exitMeeting();   // two panes: no hash opens the default meeting
+  selFollow();                     // two panes: the list's selection follows the hash
 }
 function _instantScroll(y){
   const el=document.documentElement,prev=el.style.scrollBehavior;
@@ -1882,6 +1917,167 @@ function maybeBuildPending(){
   if(!MP||MP.base!==route.base||MP.pending)buildMeeting(route.base);
 }
 function mBack(ev){if(ev)ev.preventDefault();location.hash='';}   // fires hashchange -> timeline
+
+/* ============================================================================
+   TWO PANES (docs/ui-refresh/proposal.md, phase 3). At 900px and wider the
+   list keeps the left pane and the meeting page above mounts beside it, in
+   the reader, instead of replacing it. The #m/<base> route is unchanged: a
+   selected row sets the hash, and a hash change selects the row, so deep
+   links, reload, and the back button work as before. Below 900px nothing
+   here changes the page: the list, or the meeting page with its back link.
+   app.js decides the width (paneSync sets body.panes); the stylesheet lays
+   the panes out from that class while a meeting is open (body.route-meeting).
+   ============================================================================ */
+const PANES_MIN=900;       // the narrow fallback's edge (px of viewport width)
+const WALK_MS=150;         // j/k: the reader mounts once the walk pauses this long
+let PANES=false;           // two panes at this width (paneSync keeps it current)
+let RSEL=null;             // the row that wears --sel: the reader's meeting, or the
+                           // row a j/k walk is on before the reader catches up
+let RQUIET=null;           // the base the next mount opens quietly: a j/k walk or
+                           // the default open never takes focus or plays a clip
+let WALK_T=null,WALK_GO=null;   // the walk's pending mount, and the base it set
+let SEL_REVEAL=false;      // a route change still owes the list a scroll to its row
+
+// the narrow fallback decision: two panes from 900px up, one column below
+function twoPanes(width){return width>=PANES_MIN;}
+// the list is a pane right now: two panes and a meeting in the reader. With
+// no meeting to read (an empty library) the list keeps today's one column.
+function paned(){return PANES&&route.view==='meeting';}
+// a row that opens in the reader: a meeting, ready or waiting for its title
+function rowOpens(state){return state==='ready'||state==='needs_name';}
+// the reader with no hash: the first To finish row, else the newest meeting.
+// `skip` is a meeting that just left (archived or deleted from the reader).
+function readerDefault(timeline,now,skip){
+  const sec=timelineSections((timeline||[]).filter(r=>r&&r.id!==skip),now);
+  const r=sec.fin[0]||sec.rest.find(x=>rowOpens(x.state));
+  return r?r.id:null;
+}
+// the reader's meeting is no longer in the library at all
+function readerLost(timeline,base){return !(timeline||[]).some(r=>r&&r.id===base);}
+
+function paneSync(){
+  const two=twoPanes(window.innerWidth);
+  if(two===PANES&&document.body.classList.contains('panes')===two)return;
+  PANES=two;
+  document.body.classList.toggle('panes',two);
+  if(!two){clearTimeout(WALK_T);WALK_T=null;}
+  mStickyTop();
+  selPaint();
+  if(S)render();       // the list returns beside the reader, or steps aside
+}
+// the row the reader's meeting holds in the list (none while its month is folded)
+function selRowEl(){
+  if(!RSEL)return null;
+  const k=CSS.escape(RSEL);
+  return document.querySelector('#timeline .row[data-id="'+k+'"], #timeline .lrow[data-id="'+k+'"]');
+}
+// --sel on exactly one row: accent-soft ground and a 3px inset accent edge
+function selPaint(){
+  document.querySelectorAll('#timeline .sel').forEach(el=>{
+    el.classList.remove('sel');el.removeAttribute('aria-current');});
+  const el=PANES?selRowEl():null;
+  if(el){el.classList.add('sel');el.setAttribute('aria-current','true');}
+}
+// after a rebuild: paint again, and pay a route change's scroll once its row
+// exists. Before the first poll there is no list yet, so the debt waits; a
+// row in a folded month never appears, so a drawn list settles it.
+function selAfter(){
+  selPaint();
+  if(!SEL_REVEAL||!paned())return;
+  const el=selRowEl();
+  if(el)paneReveal(el);
+  if(el||S)SEL_REVEAL=false;
+}
+// the list pane scrolls on its own: bring a row into it without touching the
+// window, whose scroll is the reader's. `start` puts it at the top (a rail jump).
+function paneReveal(el,start){
+  const pane=el&&el.closest?el.closest('.wrap'):null;
+  if(!pane)return;
+  const r=el.getBoundingClientRect(),p=pane.getBoundingClientRect(),m=8;
+  if(start||r.top<p.top+m)pane.scrollTop+=r.top-p.top-m;
+  else if(r.bottom>p.bottom-m)pane.scrollTop+=r.bottom-p.bottom+m;
+}
+// select a list row: it wears --sel at once, and the reader follows by the #m
+// route, at once (a click, Enter) or when a j/k walk pauses for WALK_MS, so a
+// held j never rebuilds the reader on every row it passes
+function selectRow(id,walk){
+  RSEL=id;selPaint();
+  clearTimeout(WALK_T);WALK_T=null;
+  if(route.view==='meeting'&&route.base===id)return;   // the reader shows it already
+  const go=()=>{
+    WALK_T=null;
+    if(route.view==='meeting'&&route.base===id)return;
+    WALK_GO=id;if(walk)RQUIET=id;
+    location.hash='#m/'+encodeURIComponent(id);
+  };
+  if(walk)WALK_T=setTimeout(go,WALK_MS);else go();
+}
+// the hash moved (a selection, ] or [, the back button, a deep link): the
+// list's selection follows it. A walk still pending past the step that set
+// this hash keeps its own row; any other route change cancels the walk.
+function selFollow(){
+  const own=WALK_GO!=null&&route.view==='meeting'&&route.base===WALK_GO;
+  WALK_GO=null;
+  if(!(own&&WALK_T)){
+    clearTimeout(WALK_T);WALK_T=null;
+    RSEL=route.view==='meeting'?route.base:null;
+  }
+  SEL_REVEAL=true;
+  selAfter();
+}
+// two panes and no meeting in the reader: open the default one, replacing the
+// empty history entry so the back button never lands on an empty reader
+function readerSync(){
+  if(!PANES||!S||route.view==='meeting')return false;
+  const id=readerDefault(S.timeline);
+  if(!id)return false;
+  RQUIET=id;
+  location.replace('#m/'+encodeURIComponent(id));
+  return true;
+}
+// the reader's meeting is gone (archived, deleted): one column goes back to
+// the list, as before; two panes open the default meeting instead
+function readerLeave(id){
+  if(!PANES){location.hash='';return;}
+  const next=readerDefault(S&&S.timeline,undefined,id);
+  if(next){RQUIET=next;location.replace('#m/'+encodeURIComponent(next));}
+  else location.hash='';
+}
+// a poll no longer lists the reader's meeting (a bulk archive, a bulk rename
+// that re-stamped it): open the default rather than keep a stale page. A
+// hand-off in flight (FS_CARRY) re-routes on its own; an open layer waits.
+function readerKeep(){
+  if(!PANES||!S||route.view!=='meeting'||!MP||!MP.built||MP.base!==route.base)return;
+  if(FS_CARRY||kbLayerOpen())return;
+  if(readerLost(S.timeline,route.base))readerLeave(route.base);
+}
+// a list edit re-stamped the reader's meeting (a row rename or date): follow it
+function readerFollow(from,to){
+  if(PANES&&to&&to!==from&&route.view==='meeting'&&route.base===from)
+    location.replace('#m/'+encodeURIComponent(to));
+}
+// two panes: a click on a row whose meeting is not in the reader selects it
+// (true); the reader's own row answers false, so the click does its own work
+function listPick(id){
+  if(!PANES||(route.view==='meeting'&&route.base===id))return false;
+  selectRow(id);return true;
+}
+// a click or Enter on a meeting row: the reader shows it now; on the reader's
+// own row the keyboard moves into the reader (readerTake)
+function readerOpen(id){
+  const same=route.view==='meeting'&&route.base===id;
+  selectRow(id);
+  if(same)readerTake();
+}
+// the keyboard leaves the list for the reader: the ring lets go (and the next
+// rebuild does not restore it), so Enter, n, and a are the reader's, and the
+// finish flow a j/k walk mounted quietly wakes. Escape brings the ring back.
+function readerTake(){
+  kbLast=null;
+  const ae=document.activeElement;
+  if(ae&&ae.closest&&ae.closest('#timeline'))ae.blur();
+  fsWake();
+}
 
 /* ------------------------------------------------------ build the page ----- */
 async function buildMeeting(base){
@@ -2005,6 +2201,7 @@ function mMenu(ev){
   const anchor=(ev&&ev.currentTarget)||$('#mmenu');
   const pop=$('#rowmenu');pop.dataset.rowid=MP.base;
   openPop(pop,anchor,()=>fillRowMenu(pop,MP.base));
+  pop.dataset.page='1';   // anchored in the reader: a list rebuild never moves it
 }
 
 /* ---------------------------------------------------- docked audio bar ----- *
@@ -2345,6 +2542,8 @@ function mKey(e){
   // while it is open: n/p, /, the stepper's keys and the finish flow's stay put
   if(kbLayerOpen())return;
   if(fsKey(e))return;    // the finish flow's keys: ] [ and the Voices step's
+  // two panes: the list took this key (its Enter, e, x, /, j, k) before us
+  if(e.defaultPrevented)return;
   const ae=document.activeElement,typing=ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&document.getElementById('mcard')){
     // Cmd/Ctrl+Enter saves the open card from anywhere inside it, textarea
@@ -2455,6 +2654,8 @@ function mStickyTop(){
   // stepping) docks under the audio bar, or under the header when audioless
   const hdr=$('.hdr'),bar=$('#maudio'),rb=document.getElementById('mrevbar');
   const top=hdr?hdr.offsetHeight:56;
+  // the list pane sticks under the header and fills the rest of the window
+  document.documentElement.style.setProperty('--hdrh',top+'px');
   if(bar)bar.style.top=top+'px';
   if(rb)rb.style.top=(top+(bar?bar.offsetHeight+6:6))+'px';
 }
@@ -3886,7 +4087,8 @@ function fsNext(dir){
 // the page opened: build the flow from the row's finish record, or none at all
 function fsInit(base){
   const carry=FS_CARRY&&FS_CARRY.base===base?FS_CARRY:null;
-  FS_CARRY=null;FS=null;
+  const quiet=RQUIET===base;   // two panes: a j/k walk or the default open
+  FS_CARRY=null;FS=null;RQUIET=null;
   const row=rowById(base),box=document.getElementById('mfinish');
   if(!row||!row.finish||(row.finish.done&&!(carry&&carry.keep))){
     if(box){box.hidden=true;box.innerHTML='';}
@@ -3894,7 +4096,7 @@ function fsInit(base){
   }
   FS={base,row,fin:{title:!!row.finish.title,voices:row.finish.voices||0,flags:row.finish.flags||0},
       past:(carry&&carry.past)||[],voices:null,vi:0,cur:null,
-      live:!!(carry&&carry.live)||toFinish(row),hand:!!(carry&&carry.live),
+      live:!!(carry&&carry.live)||(toFinish(row)&&!quiet),hand:!!(carry&&carry.live),
       looks:[],clip:null,busy:false,first:true,
       // the voice queue: its mode, the meetings it has visited, the uids it
       // has named or dropped so far, and the uids it has skipped
@@ -4009,6 +4211,18 @@ function fsFlagsSync(){
   if(fb)fb.textContent=`${FS.fin.flags} flagged line${FS.fin.flags!==1?'s':''} to check.`;
 }
 function fsFlagsStart(){if(MP&&MP.built)reviewStart(0);}
+// two panes: Enter (or a click) on the reader's own row, after a j/k walk
+// mounted it quietly. The flow takes the keyboard as if the meeting had just
+// been opened: the step's input takes focus, the voice clip plays, the flags
+// start stepping. Nothing typed is re-rendered away.
+function fsWake(){
+  if(!FS)return false;
+  FS.live=true;
+  if(FS.cur==='title'){const t=$('#fstitle');if(t)t.focus({preventScroll:true});return true;}
+  if(FS.cur==='voices'){const b=$('#fvname');if(b){b.focus({preventScroll:true});fvPlay();}return true;}
+  if(FS.cur==='flags'&&!(MR&&MR.active)){reviewStart(0);return true;}
+  return false;
+}
 function fsResume(){
   if(!FS)return;
   FS.past=[];
@@ -4054,6 +4268,7 @@ function fsGo(dir){
 // panel, a popover, or an edit card is open; the flag keys stay mKey's.
 function fsKey(e){
   if(!route||route.view!=='meeting'||e.metaKey||e.ctrlKey||e.altKey)return false;
+  if(e.defaultPrevented)return false;   // two panes: the list took it (Enter on a row)
   const ae=document.activeElement;
   const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
   if(typing||kbLayerOpen()||_popClose||document.getElementById('mcard'))return false;
@@ -4265,7 +4480,8 @@ async function fvForget(){
 
 /* --------------------------------------------------------- route wiring ---- */
 window.addEventListener('hashchange',()=>{route=parseHash();applyRoute();});
-window.addEventListener('resize',()=>{if(route.view==='meeting')mStickyTop();});
+window.addEventListener('resize',()=>{paneSync();if(route.view==='meeting')mStickyTop();});
+paneSync();     // two panes or one, before the first route decides what to mount
 route=parseHash();
 applyRoute();   // deep link (#m/<base>) opens here; if S is not ready yet, render()
                 // finishes the build via maybeBuildPending once the first poll lands
@@ -5272,13 +5488,14 @@ function kbFocusRow(el){
   if(!el)return;
   el.focus({preventScroll:true});
   kbLast=el.dataset.id||null;     // a header carries no id: the ring is not restored to it
-  el.scrollIntoView({block:'nearest'});
+  if(paned())paneReveal(el);      // two panes: the list pane scrolls, never the reader
+  else el.scrollIntoView({block:'nearest'});
 }
 // a 2s rebuild wipes the DOM (and the ring with it): put the ring back on the
 // remembered row when focus fell to <body>. A real click clears the memory,
 // so the ring never fights the mouse.
 function kbRestore(){
-  if(!kbLast||route.view!=='timeline'||kbLayerOpen())return;
+  if(!kbLast||(route.view!=='timeline'&&!PANES)||kbLayerOpen())return;
   if(document.activeElement&&document.activeElement!==document.body)return;
   const k=CSS.escape(kbLast);
   const el=document.querySelector('#timeline .row[data-id="'+k+'"], #timeline .lrow[data-id="'+k+'"]');
@@ -5290,14 +5507,23 @@ function kbMove(d){
   const ae=document.activeElement;
   let i=rows.indexOf(ae&&ae.closest?ae.closest(KB_RING):null);
   if(i<0&&kbLast)i=rows.findIndex(r=>r.dataset.id===kbLast);
+  // two panes: j/k move the selection, so a ring that is elsewhere (a click
+  // in the reader clears it) starts from the reader's own row
+  if(i<0&&PANES&&RSEL)i=rows.findIndex(r=>r.dataset.id===RSEL);
   if(i<0){
     // nothing holds the ring yet: land on the first row in view, so j
     // mid-page never yanks the list back to the top
     const top=($('.hdr')||{}).offsetHeight||64;
     i=rows.findIndex(r=>r.getBoundingClientRect().bottom>top);
-    kbFocusRow(rows[i<0?0:i]);return;
+    kbLand(rows[i<0?0:i]);return;
   }
-  kbFocusRow(rows[Math.max(0,Math.min(rows.length-1,i+d))]);
+  kbLand(rows[Math.max(0,Math.min(rows.length-1,i+d))]);
+}
+// the ring lands on a row; with two panes a meeting row is selected as well,
+// and the reader follows once the walk pauses (selectRow's WALK_MS)
+function kbLand(el){
+  kbFocusRow(el);
+  if(PANES&&el&&el.dataset&&el.dataset.id&&rowOpens(el.dataset.state))selectRow(el.dataset.id,true);
 }
 function kbKey(e){
   if(e.metaKey||e.ctrlKey||e.altKey)return;
@@ -5307,23 +5533,45 @@ function kbKey(e){
   if(e.key==='Escape'&&ae===se){
     e.preventDefault();
     se.value='';render();scheduleSearch();se.blur();
-    if(route.view==='timeline')kbFocusRow(kbRows()[0]);
+    if(route.view==='timeline'||PANES)kbFocusRow(kbRows()[0]);
     return;
   }
   const typing=ae&&(/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)||ae.isContentEditable);
   if(typing)return;   // no shortcut fires while any input has focus
   if(route.view==='meeting'){
     // mKey owns the page's keys (n/p stepping, slash, find): only the Escape
-    // cascade's LAST step lives here -- nothing else open means back to the list
+    // cascade's LAST step lives here -- nothing else open means back to the
+    // list. Two panes: the list never left, so the ring goes to its row.
     if(e.key==='Escape'&&!e.defaultPrevented&&!_popClose&&!NP&&!DRAWER.open
        &&!(MR&&MR.active)&&!document.getElementById('mcard')){
-      e.preventDefault();location.hash='';
+      e.preventDefault();
+      if(PANES)kbFocusRow(selRowEl());else location.hash='';
+      return;
     }
-    return;
+    if(!PANES)return;
   }
   if(kbLayerOpen())return;   // the naming panel or the drawer owns the keys
-  if(e.key==='/'){e.preventDefault();se.focus();return;}
+  // two panes: / is the list's search from the list, the reader's find elsewhere
+  const inList=!!(ae&&ae.closest&&ae.closest('.wrap'));
+  if(e.key==='/'){
+    if(route.view==='meeting'&&!inList)return;
+    e.preventDefault();se.focus();return;}
   if(e.key==='j'||e.key==='k'){e.preventDefault();kbMove(e.key==='j'?1:-1);return;}
+  // x: the focused row joins or leaves the bulk selection (its checkbox)
+  if(e.key==='x'){
+    const r=(e.target instanceof Element)?e.target.closest('#timeline .row[tabindex]'):null;
+    if(r&&r.querySelector('.chk:not(.spacer)')){
+      e.preventDefault();toggleSel(r.dataset.id,!SEL.has(r.dataset.id));}
+    return;
+  }
+  // two panes: Enter on a meeting row (a To finish link too) selects it into
+  // the reader, or wakes the reader's own; the list takes the key, so the
+  // reader's Enter (a flag accept, a voice save) never fires with it
+  if(PANES&&e.key==='Enter'&&e.target instanceof Element
+     &&e.target.matches('#timeline .row[tabindex], #timeline .lrow')
+     &&rowOpens(e.target.dataset.state)){
+    e.preventDefault();readerOpen(e.target.dataset.id);return;
+  }
   // a section header holds the ring too: Enter on one is the button's own
   // click (grpToggle), so stand back and let the browser fire it
   if(e.key==='Enter'&&e.target instanceof Element

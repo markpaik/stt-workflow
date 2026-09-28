@@ -54,6 +54,10 @@ PAIRS = (
     ("rec-text", "rec-soft"), ("rec-text", "card"), ("rec-text", "paper"),
     ("work", "work-soft"),
     ("personal", "personal-soft"), ("personal", "card"),
+    # the selected list row (docs/ui-refresh phase 3): its title, meta, and
+    # teal review count sit on --sel, a ground set by class, not by the rule
+    # that sets the text colour, so the scan below cannot find these
+    ("ink", "sel"), ("sub", "sel"), ("attn", "sel"),
 )
 
 
