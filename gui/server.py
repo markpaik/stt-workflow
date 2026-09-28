@@ -18,7 +18,7 @@ from pathlib import Path
 
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
-                 rates, recorder, review, search, status, unknowns)
+                 queue_order, rates, recorder, review, search, status, unknowns)
 
 PORT = 8737
 # The one relabel worker for this panel process, started by start_server(). None
@@ -220,31 +220,11 @@ def write_schedule(hh, mm):
     write_automation(hour=hh, minute=mm)
 
 
-_dur_cache = {}
-
-
 def _est_duration(p: Path):
-    """Audio seconds for a queued file: exact (ffprobe) when the bytes are local,
-    size-based estimate (~1 MB/min for voice memos) for dataless iCloud files —
-    probing those would force a download."""
-    try:
-        key = (str(p), p.stat().st_mtime)
-    except FileNotFoundError:
-        return None
-    if key in _dur_cache:
-        return _dur_cache[key]
-    dur = None
-    try:
-        from stt import audio as A, icloud
-        if icloud._fully_present(p):
-            dur = A.duration_sec(p)
-        else:
-            rate = 6.0 if p.suffix.lower() in config.VIDEO_EXTS else 1.0  # MB/min
-            dur = (p.stat().st_size / 1e6) / rate * 60.0
-    except Exception:
-        pass
-    _dur_cache[key] = dur
-    return dur
+    """Audio seconds for a queued file: stt.queue_order.duration, the same
+    helper run_batch orders its picks by (exact when local, size-based for
+    dataless iCloud files, cached by path and mtime)."""
+    return queue_order.duration(p)
 
 
 _meet_cache = {}
@@ -777,9 +757,30 @@ def _finish(meta, uid_of=None) -> dict:
             "voice_uids": uids}
 
 
-def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
+def _run_order(queue, pending, sweep):
+    """{name: position} for the waiting files, in the order the batch will
+    run them: shortest first by stt.queue_order's length, ties by name. A run
+    that sweeps the folders (and the next automatic run, when idle) re-picks
+    the shortest file left before every file, so every waiting file takes its
+    place by length. A run over its own list (--files, a queued job) runs
+    that list first, in the order status.json's `pending` gives."""
+    at = {n: i for i, n in enumerate(pending or [])}
+
+    def key(f):
+        d = f.get("dur_sec")
+        by_length = (d if d is not None else float("inf"), f["name"])
+        if not sweep and f["name"] in at:
+            return (0, at[f["name"]], by_length)
+        return (1, 0, by_length)
+    waiting = [f for f in queue if not f.get("processed") and not f.get("held")]
+    return {f["name"]: i for i, f in enumerate(sorted(waiting, key=key))}
+
+
+def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=None):
     """(timeline, tray) — the unified per-meeting feed (newest first) and the
-    ranked attention tray, built entirely from gather_state's own locals."""
+    ranked attention tray, built entirely from gather_state's own locals.
+    `order` is _run_order's answer: each waiting row carries its place in
+    it as `run_order`, and Now lists the waiting rows by it."""
     from datetime import datetime as _dt
     timeline, failed_entries = [], []
     # sources already owned by another row: never emit a duplicate history-only
@@ -815,7 +816,8 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
             "title": _display_title(base) if base else name,
             "date": dates.meeting_date(base or name),
             "when": e.get("since") or status._now(),
-            "stage": e.get("stage"), "pct": e.get("pct"), "eta": e.get("eta_sec")})
+            "stage": e.get("stage"), "pct": e.get("pct"), "eta": e.get("eta_sec"),
+            "over": e.get("over_sec")})
 
     # --- meetings: needs_name (awaiting a human name/date) or ready. A meeting
     # being reprocessed shows as its processing row above, not twice. ---
@@ -900,6 +902,8 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
             failed_entries.append(row)
         else:
             row["state"] = "waiting"
+            if order and name in order:
+                row["run_order"] = order[name]
         timeline.append(row)
 
     # --- history-only failures: a file that failed and is no longer queued (and
@@ -1037,6 +1041,9 @@ def _queue_and_dupes():
                               "video": p.suffix.lower() in config.VIDEO_EXTS,
                               "processed": done, "est_min": est_min,
                               "mtime": p.stat().st_mtime,  # timeline sort key
+                              # the length the batch orders its picks by
+                              # (shortest first): the run order below
+                              "dur_sec": dur,
                               "held": p.name in _held, "est_detail": est_detail})
                 if not done:
                     _qpaths[p.name] = p    # for the duplicate check below
@@ -1185,12 +1192,16 @@ def gather_state():
     n_active = max(1, len(active))
     active_out, active_eta_sum = {}, 0.0
     for name, entry in active.items():
-        pct, eta = status.estimate_progress(entry, n_active)
+        det = status.progress_detail(entry, n_active)
         e = dict(entry)
-        if pct is not None:
-            e["pct"] = round(pct * 100)
-            e["eta_sec"] = round(eta)
-            active_eta_sum += eta
+        if det is not None:
+            e["pct"] = round(det["pct"] * 100)
+            e["eta_sec"] = round(det["eta"])
+            # past the stage's estimate: the row and the pill say "running
+            # long · +Xm" instead of counting down, and eta_sec is the tail
+            if det["over"] is not None:
+                e["over_sec"] = round(det["over"])
+            active_eta_sum += det["eta"]
         bd = status.stage_breakdown(entry, n_active)
         if bd:
             e["stages"] = bd
@@ -1204,7 +1215,10 @@ def gather_state():
                 pend_secs += f["est_min"] * 60
         overall_eta = round((active_eta_sum + pend_secs) / n_active) if (active_eta_sum or pend_secs) else None
     rec_state = _recording_state()  # resolved once: reused by the live banner AND the timeline
-    timeline, tray = _timeline_tray(st, queue, meetings, active_out, unknown_list, rec_state)
+    order = _run_order(queue, st.get("pending", []) if running else [],
+                       sweep=not running or bool(st.get("sweep")))
+    timeline, tray = _timeline_tray(st, queue, meetings, active_out, unknown_list,
+                                    rec_state, order)
     relabel_jobs = (RELABEL_QUEUE.snapshot() if RELABEL_QUEUE is not None
                     else jobqueue.empty_snapshot())
     return {"running": running,

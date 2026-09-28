@@ -961,3 +961,107 @@ def test_rows_name_their_people_once_most_talk_first(sandbox):
         # Elena 50s, Grace 10s + 30s = 40s, Marcus 5s
         assert r["named"] == ["Elena Ruiz", "Grace Lindqvist", "Marcus Hale"], base
         assert r["finish"]["voices"] == 1
+
+
+# ---------- running long, and the order the queue runs in (scheduling) ----------
+
+def test_a_stage_past_its_estimate_reports_its_overrun_on_the_row(sandbox, monkeypatch):
+    """A 4-hour board meeting's diarization runs past its estimate. The row
+    and the active entry say by how much (the panel shows "running long ·
+    +Xm" in place of a frozen countdown), and the queue total carries a tail
+    for the file that is a fraction of its elapsed stage time."""
+    _source("Board 09232026.m4a")
+    _source("Standup 09242026.m4a")
+    status.start_run(["Board 09232026.m4a", "Standup 09242026.m4a"])
+    status.set_stage("Board 09232026.m4a", "diarizing", duration=4 * 3600.0,
+                     progress=0.87, base="Board 09232026")
+    est = status.stage_estimates(4 * 3600.0)
+    d = status.read()
+    entry = d["active"]["Board 09232026.m4a"]
+    entry["stage_since"] = time.monotonic() - (est["diarizing"] + 1800)   # 30 min over
+    entry["progress_at"] = time.time() - 3600                             # hook silent
+    status.STATUS_PATH.write_text(json.dumps(d))
+    monkeypatch.setattr(srv, "_est_duration", lambda p: 1200.0)
+    _running(monkeypatch)
+    st = srv.gather_state()
+    a = st["active"]["Board 09232026.m4a"]
+    assert 1795 <= a["over_sec"] <= 1805
+    r = _row(st, source_file="Board 09232026.m4a")
+    assert r["state"] == "processing" and r["over"] == a["over_sec"]
+    elapsed = est["diarizing"] + 1800
+    tail = status.stage_tail("diarizing") * elapsed
+    assert abs(a["eta_sec"] - (tail + est["writing"])) < 5
+    waiting = [f for f in st["queue"] if f["name"] == "Standup 09242026.m4a"][0]
+    assert abs(st["overall_eta_sec"] - (a["eta_sec"] + waiting["est_min"] * 60)) < 5
+    # within its estimate a row counts down and carries no overrun
+    entry["stage_since"] = time.monotonic() - 60
+    status.STATUS_PATH.write_text(json.dumps(d))
+    st = srv.gather_state()
+    assert "over_sec" not in st["active"]["Board 09232026.m4a"]
+    assert _row(st, source_file="Board 09232026.m4a")["over"] is None
+
+
+def _lengths(monkeypatch, secs):
+    """Stub the shared length helper by file name (seconds of audio)."""
+    from pathlib import Path
+
+    from stt import queue_order
+    monkeypatch.setattr(queue_order, "duration", lambda p: secs.get(Path(p).name))
+
+
+def test_waiting_rows_carry_the_order_they_will_run_in(sandbox, monkeypatch):
+    """Idle, or under a run that sweeps the folders, every waiting file runs
+    shortest first: the rows carry that place as run_order. Ties break by
+    name, a held file has no place, and an unknown length goes last."""
+    _lengths(monkeypatch, {"Board A.m4a": 3 * 3600, "Check-in.m4a": 1200,
+                           "Board B.m4a": 3 * 3600, "Budget.m4a": 5400,
+                           "Parked.m4a": 60})
+    for n in ("Board A.m4a", "Check-in.m4a", "Board B.m4a", "Budget.m4a",
+              "Mystery.m4a"):
+        _source(n)
+    _source("Parked.m4a", held=True)
+    st = srv.gather_state()
+    order = {r["source_file"]: r.get("run_order") for r in st["timeline"]
+             if r["state"] in ("waiting", "held")}
+    ranked = sorted((v, k) for k, v in order.items() if v is not None)
+    assert [k for _, k in ranked] == ["Check-in.m4a", "Budget.m4a", "Board A.m4a",
+                                      "Board B.m4a", "Mystery.m4a"]
+    assert order["Parked.m4a"] is None
+
+    # a sweeping run: a file that landed mid-run takes its place by length
+    status.start_run(["Budget.m4a", "Board A.m4a", "Board B.m4a"], sweep=True)
+    status.set_stage("Check-in.m4a", "transcribing", duration=1200.0)
+    _source("Quick note.m4a")
+    _lengths(monkeypatch, {"Board A.m4a": 3 * 3600, "Board B.m4a": 3 * 3600,
+                           "Budget.m4a": 5400, "Quick note.m4a": 300})
+    _running(monkeypatch)
+    st = srv.gather_state()
+    ranked = sorted((r["run_order"], r["source_file"]) for r in st["timeline"]
+                    if r["state"] == "waiting")
+    assert [k for _, k in ranked][:4] == ["Quick note.m4a", "Budget.m4a",
+                                          "Board A.m4a", "Board B.m4a"]
+
+
+def test_a_run_over_its_own_list_keeps_that_list_first(sandbox, monkeypatch):
+    """A queued job or --files run processes its own files, in its pending
+    order, and then ends: the folder's other files wait for the next run."""
+    _lengths(monkeypatch, {"Long job.m4a": 7200, "Short job.m4a": 1800,
+                           "Tiny other.m4a": 120})
+    for n in ("Long job.m4a", "Short job.m4a", "Tiny other.m4a"):
+        _source(n)
+    status.start_run(["Short job.m4a", "Long job.m4a"], sweep=False)
+    _running(monkeypatch)
+    st = srv.gather_state()
+    assert st["pending"] == ["Short job.m4a", "Long job.m4a"]
+    ranked = sorted((r["run_order"], r["source_file"]) for r in st["timeline"]
+                    if r["state"] == "waiting")
+    assert [k for _, k in ranked] == ["Short job.m4a", "Long job.m4a", "Tiny other.m4a"]
+
+
+def test_the_panel_reads_lengths_from_the_shared_helper(sandbox, monkeypatch):
+    """The panel's estimate and the batch's order read one helper
+    (stt.queue_order), so the list can never disagree with the run."""
+    from stt import queue_order
+    _source("one.m4a")
+    monkeypatch.setattr(queue_order, "duration", lambda p: 1234.0)
+    assert srv._est_duration(config.source_dir() / "one.m4a") == 1234.0

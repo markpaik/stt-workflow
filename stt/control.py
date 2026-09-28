@@ -60,6 +60,36 @@ def stopping_recently(within: float = STOP_WINDOW) -> bool:
         return False
 
 
+# ---------- finish the current file, then stop ----------
+#
+# A running batch reads neither the pause flag (automatic triggers only check
+# it before they start) nor any other flag between files, and Stop kills the
+# file in flight. This flag is the gentle stop: run_batch checks it before it
+# starts each file, starts nothing new once it exists, lets the file (or the
+# --parallel files) in flight finish, and ends the run cleanly. The run
+# removes the flag as it honors it, and a run removes a stale one as it
+# starts, so setting it while nothing runs never cuts short a later run.
+# Resolved per call, like the relabel paths below, so a test sandbox's
+# PROJECT_DIR covers it.
+
+
+def finish_flag_path():
+    return config.PROJECT_DIR / "stop_after_file.flag"
+
+
+def request_finish():
+    """Ask the running batch to finish its current file and then stop."""
+    finish_flag_path().write_text(datetime.now().isoformat(timespec="seconds"))
+
+
+def finish_requested() -> bool:
+    return finish_flag_path().exists()
+
+
+def clear_finish():
+    finish_flag_path().unlink(missing_ok=True)
+
+
 # ---------- relabel: the lock, and an honest "is one running right now?" ----
 #
 # relabel.py serializes itself with an flock on relabel.lock. The panel needs to

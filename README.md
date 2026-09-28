@@ -127,7 +127,13 @@ Four per-run options, from the Process popover:
   the speaker library and no voice samples are kept for them
 
 While a run is live, the row shows the current stage, percent, and a time
-estimate calibrated from your machine's measured throughput on past runs.
+estimate calibrated from your machine's measured times on past runs, as a
+curve of the meeting's length (speaker separation slows down on long
+meetings). A stage that runs past its estimate says "running long · +12m"
+instead of freezing on its last minutes. The queue runs the shortest
+meeting first and re-picks after every file, so a short recording never
+waits behind a backlog of board meetings. To let a run finish its current
+file and then stop, create `stop_after_file.flag` in the project folder.
 Stop kills the whole process group and verifies nothing is left. Runs are
 idempotent by manifest: the original is deleted only after outputs are
 verified, and a run interrupted mid-file simply re-runs that file next time.

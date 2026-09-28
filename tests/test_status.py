@@ -171,11 +171,18 @@ def test_eta_trusts_wall_clock_when_the_hook_goes_silent(sandbox, monkeypatch):
     pct, eta = st.estimate_progress(entry)
     assert 250 < eta < 350
 
-    # past the estimate: the hook's own remainder is all that's left, and it
-    # never claims done while the stage runs
+    # past the estimate the stage is RUNNING LONG: no remainder pinned at 3%
+    # of the stage (it froze the countdown for hours); the tail is a fraction
+    # of the elapsed stage time, so it grows as the stage runs on, and the
+    # stage is still never claimed done
+    monkeypatch.setattr(st, "stage_tail", lambda stage, n_active=1: 0.2)
     t["now"] = 2500.0
-    pct, eta = st.estimate_progress(entry)
-    assert 20 <= eta <= 160 and pct < 1.0
+    d = st.progress_detail(entry)
+    assert d["over"] == 500.0
+    assert d["eta"] == 0.2 * 1500.0 and d["pct"] < 1.0
+    t["now"] = 3100.0
+    later = st.progress_detail(entry)
+    assert later["over"] == 1100.0 and later["eta"] == 0.2 * 2100.0
 
 
 def test_verify_timings_calibrate_the_secondary_engine(sandbox):
@@ -281,10 +288,12 @@ def test_stalled_hook_keeps_the_countdown_moving(sandbox):
     frac_live, _ = status.estimate_progress(live)
     stalled_frac, _ = status.estimate_progress(entry)
     assert frac_live < stalled_frac
-    # and the stage is never declared done from the clock alone
+    # and the stage is never declared done from the clock alone: five times
+    # its estimate in, it is running long, with time still on the clock
     entry["stage_since"] = _t.monotonic() - 5.0 * est
     frac_cap, eta_cap = status.estimate_progress(entry)
     assert frac_cap < 1.0 and eta_cap > 0
+    assert status.progress_detail(entry)["over"] > 3.9 * est
 
 
 def test_finished_stage_actuals_accumulate(sandbox):
@@ -384,3 +393,87 @@ def test_history_log_is_trimmed_when_it_grows_too_large(sandbox, monkeypatch):
     assert len(lines) <= 3                                   # bounded, not 50
     assert json.loads(lines[-1])["name"] == "m49.m4a"        # kept the most recent
     assert status.history()[0]["name"] == "m49.m4a"          # still browsable
+
+
+def _diarizing_clock(monkeypatch, est=20000.0, tail=0.2):
+    """A 4-hour file 'in' diarizing, stalled hook, with the monotonic clock
+    under the test's control. Returns (entry, clock)."""
+    from stt import status as st
+    t = {"now": 0.0}
+    monkeypatch.setattr(st._time, "monotonic", lambda: t["now"])
+    monkeypatch.setattr(st, "stage_estimates",
+                        lambda dur, n_active=1, verify=False, diarize=True:
+                        {"downloading": 0.0, "converting": 0.0, "transcribing": 0.0,
+                         "diarizing": est, "writing": 0.0})
+    monkeypatch.setattr(st, "stage_tail", lambda stage, n_active=1: tail)
+    entry = {"stage": "diarizing", "duration": 4 * 3600.0, "progress": 0.87,
+             "progress_at": st._time.time() - 3600, "stage_since": 0.0}
+    return entry, t
+
+
+def test_the_countdown_never_sits_still_for_two_minutes(sandbox, monkeypatch):
+    """A 4-hour board meeting showed "10-11 min" for hours: once the elapsed
+    time passed 97 percent of the estimate, the stage was pinned at 97 percent
+    and 3 percent of a long stage stayed on the clock. Read every minute from
+    the start of the stage to twice its estimate, the value the panel shows
+    (the countdown's minutes, or the overrun's minutes past the estimate)
+    must change at least every two minutes."""
+    from stt import status as st
+    entry, t = _diarizing_clock(monkeypatch)
+    entry["stage_since"] = 1.0          # truthy, like a real monotonic stamp
+    shown = []
+    for minute in range(0, int(2 * 20000 / 60)):
+        t["now"] = 1.0 + minute * 60.0
+        d = st.progress_detail(entry)
+        shown.append(("over", int(d["over"] // 60)) if d["over"] is not None
+                     else ("eta", round(d["eta"] / 60)))
+    for i in range(2, len(shown)):
+        assert not (shown[i] == shown[i - 1] == shown[i - 2]), \
+            f"frozen at minute {i}: {shown[i]}"
+    # the countdown reaches the estimate, then the overrun takes over
+    assert shown[330] == ("eta", 3) and shown[334][0] == "over"
+
+
+def test_running_long_reports_the_overrun_and_a_growing_tail(sandbox, monkeypatch):
+    """Past the estimate: `over` is the seconds past it, the file's ETA is the
+    model's tail times the elapsed stage time plus the stages still ahead, and
+    the overall fraction never steps back at the estimate and never reaches
+    done."""
+    from stt import status as st
+    entry, t = _diarizing_clock(monkeypatch, est=1000.0, tail=0.25)
+    entry["stage_since"] = 1.0
+    t["now"] = 1.0 + 999.0
+    edge = st.progress_detail(entry)
+    assert edge["over"] is None                            # within: counting down
+    t["now"] = 1.0 + 1600.0
+    a = st.progress_detail(entry)
+    t["now"] = 1.0 + 2400.0
+    b = st.progress_detail(entry)
+    assert a["over"] == 600.0 and b["over"] == 1400.0
+    assert a["eta"] == 0.25 * 1600.0 and b["eta"] == 0.25 * 2400.0
+    assert edge["pct"] <= a["pct"] <= b["pct"] < 1.0
+
+
+def test_the_tail_comes_from_the_models_residuals(sandbox, monkeypatch):
+    """No stub on the tail: a stage past its estimate is given the learned
+    model's own overrun fraction, which moves with the samples."""
+    from stt import rates
+    from stt import status as st
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    import time as _t
+    entry = {"stage": "diarizing", "duration": 3600.0, "progress": 0.87,
+             "progress_at": _t.time() - 600}
+    est = st.stage_estimates(3600.0)["diarizing"]
+    entry["stage_since"] = _t.monotonic() - 2 * est
+    d = st.progress_detail(entry)
+    assert abs(d["eta"] - (rates.DEFAULT_TAIL * 2 * est + st.stage_estimates(3600.0)["writing"])) < 5
+    # samples that overran their prediction by 60 percent, three in ten
+    for i, dur in enumerate([600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3600]):
+        rates.record(dur, {"diarizing": dur * (1.6 if i in (2, 5, 8) else 1.0),
+                           "writing": 10}, "parakeet", 1)
+    tail = st.stage_tail("diarizing")
+    assert tail == rates.learned()["tail"]["diarize"]["1"] and tail > rates.DEFAULT_TAIL
+    est = st.stage_estimates(3600.0)["diarizing"]
+    entry["stage_since"] = _t.monotonic() - 2 * est
+    d = st.progress_detail(entry)
+    assert abs(d["eta"] - (tail * 2 * est + st.stage_estimates(3600.0)["writing"])) < 5

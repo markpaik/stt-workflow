@@ -135,7 +135,14 @@ Status pill: the ONLY place pipeline state appears. Mono, in two segments
 `● REC 12:41` (rec red, ticking; `⏸ REC 12:41`, still, while the recording
 is paused) → `speakers 1 · ≈41h 55m` (accent) →
 `⏸ paused · 3 waiting` (amber, always with the waiting count when nonzero) →
-`3 waiting`. The running state names the active files' own stage, lowercased
+`3 waiting`. When a file's stage runs past its estimate, the running state
+drops the countdown and says so: `speakers 1 · running long · +12m`, the
+minutes past the estimate (`+1h 05m` past an hour), growing as it runs; with
+files waiting behind it the queue total follows, `· ≈3h 10m in all`, and
+that total carries a tail for the long file that grows with its elapsed
+time (revised 2026-09-28: the old estimate pinned the stage at 97% and left
+about ten minutes on the clock, frozen, for hours on a 4-hour board meeting).
+The running state names the active files' own stage, lowercased
 from STAGE_NICE (`downloading`, `preparing`, `transcribing`, `speakers`,
 `verifying`, `writing`, `summary`), when every active file is in that stage;
 files in different stages, or a stage not reported yet, read `processing N`
@@ -205,7 +212,10 @@ The right rail's pill is the state:
 - held        the same line with `❚❚ held` before the numbers and [release]
               in place of [hold]; the tooltip adds that automatic runs skip
               it until released
-- processing  stage + % + eta in a busy-blue pill, tabular numerals; 2px
+- processing  stage + % + eta in a busy-blue pill, tabular numerals; once
+              the stage passes its estimate the eta gives way to
+              `running long · +12m` (minutes past the estimate), never a
+              countdown frozen at its last minutes; 2px
               busy-blue hairline progress bar along the card's bottom edge
               (Boardroom; supersedes the accent progress); no actions (Stop
               lives in the Process ▾ popover)
@@ -459,7 +469,11 @@ nothing, not even its eyebrow.
   tray wore. A Fix outcome ("Done ✓", the reset message, or Retry with the
   error) is state, so the list's 2s rebuild never wipes it. Then any drop
   uploads, then the recording, processing, failed, held, and waiting rows.
-  A failed file appears once, as its row. Held and waiting files are the
+  A failed file appears once, as its row. Waiting files are listed in the
+  order they will run: shortest first, the order the batch picks by
+  (revised 2026-09-28; a run that sweeps the folders re-picks the shortest
+  file left before every file, so a short recording that lands mid-run moves
+  ahead of queued board meetings). Held and waiting files are the
   compact one-line rows (see the Anatomy's rail list), and past three of
   them the rest fold under one quiet line, `▸ 2 more waiting · ≈1h 21m`
   (the hidden files' count and summed estimate, in mono), which a click or

@@ -774,3 +774,287 @@ def test_naming_a_held_file_overrides_the_park_and_clears_it(sandbox, monkeypatc
 
     assert seen == ["one.m4a"]
     assert holds.items() == set()
+
+
+# ---------- the order the queue runs in: shortest first, re-picked per file ----------
+
+def _lengths(monkeypatch, secs):
+    """Stub the shared length helper by file name (seconds of audio)."""
+    from stt import queue_order
+    monkeypatch.setattr(queue_order, "duration",
+                        lambda p: secs.get(__import__("os").path.basename(str(p))))
+
+
+def _drive(monkeypatch, argv, on_file=None):
+    """Run the REAL main() with the pipeline stubbed. Returns (rc, seen,
+    pending_at_start): the files in the order they started, and status.json's
+    pending list at the moment each one started. on_file(name) runs inside
+    each file, for a test to change the world mid-run."""
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, status, summarize
+
+    seen, pend = [], []
+
+    def fake_process_one(src_str, dest_str, opts):
+        src = Path(src_str)
+        seen.append(src.name)
+        pend.append(list(status.read().get("pending", [])))
+        if on_file:
+            on_file(src.name)
+        return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime,
+                "outputs": [], "summary": "1 speaker(s)", "who": "",
+                "base": src.stem, "duration_sec": 1.0, "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)] + argv)
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    return rc, seen, pend
+
+
+def _drop(*names):
+    from stt import config
+    for n in names:
+        (config.ICLOUD_DIR / n).write_bytes(b"\x00" * 64)
+
+
+def test_the_shortest_meeting_runs_first_and_pending_says_so(sandbox, monkeypatch):
+    """Name order put three multi-hour board meetings ahead of a 20-minute
+    check-in. Every run takes the shortest file first (ties by name), and
+    status.json's pending lists the rest in the order they will run."""
+    _lengths(monkeypatch, {"A Board.m4a": 3 * 3600, "B Board.m4a": 4 * 3600,
+                           "C Budget.m4a": 5400, "D Check-in.m4a": 1200,
+                           "E Check-in.m4a": 1200})
+    _drop("A Board.m4a", "B Board.m4a", "C Budget.m4a", "D Check-in.m4a",
+          "E Check-in.m4a")
+    rc, seen, pend = _drive(monkeypatch, [])
+    assert rc == 0
+    assert seen == ["D Check-in.m4a", "E Check-in.m4a", "C Budget.m4a",
+                    "A Board.m4a", "B Board.m4a"]
+    assert pend[0] == ["E Check-in.m4a", "C Budget.m4a", "A Board.m4a", "B Board.m4a"]
+    assert pend[2] == ["A Board.m4a", "B Board.m4a"]
+    assert pend[4] == []
+
+
+def test_a_dry_run_lists_the_files_in_the_order_they_will_run(sandbox, monkeypatch, capsys):
+    import sys
+
+    from stt import config
+    _lengths(monkeypatch, {"a long.m4a": 7200, "b short.m4a": 600})
+    _drop("a long.m4a", "b short.m4a")
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    assert run_batch.main() == 0
+    out = capsys.readouterr().out
+    assert out.index("[would process] b short.m4a") < out.index("[would process] a long.m4a")
+
+
+def test_a_short_recording_that_lands_mid_run_jumps_the_queue(sandbox, monkeypatch):
+    """The list is not fixed when the run starts: after every file the run
+    re-reads the folders and takes the shortest file left, so a quick
+    recording that arrives during a check-in runs before the queued board
+    meetings, not hours later."""
+    _lengths(monkeypatch, {"Board 1.m4a": 3 * 3600, "Board 2.m4a": 3 * 3600,
+                           "Check-in.m4a": 1200, "Quick note.m4a": 300})
+    _drop("Board 1.m4a", "Board 2.m4a", "Check-in.m4a")
+
+    def arrive(name):
+        if name == "Check-in.m4a":
+            _drop("Quick note.m4a")
+    rc, seen, pend = _drive(monkeypatch, [], on_file=arrive)
+    assert rc == 0
+    assert seen == ["Check-in.m4a", "Quick note.m4a", "Board 1.m4a", "Board 2.m4a"]
+    assert pend[1] == ["Board 1.m4a", "Board 2.m4a"]
+
+
+def test_a_jobs_own_files_run_shortest_first_and_take_in_nothing_else(
+        sandbox, monkeypatch):
+    """A queued job (--files) runs exactly its own list, shortest first; a
+    recording that lands meanwhile waits for the next run."""
+    _lengths(monkeypatch, {"Long.m4a": 7200, "Short.m4a": 900, "Other.m4a": 60})
+    _drop("Long.m4a", "Short.m4a")
+
+    def arrive(name):
+        _drop("Other.m4a")
+    rc, seen, pend = _drive(monkeypatch, ["--files", "Long.m4a,Short.m4a"],
+                            on_file=arrive)
+    assert rc == 0 and seen == ["Short.m4a", "Long.m4a"]
+    assert pend[0] == ["Long.m4a"]
+
+
+def test_each_parallel_worker_takes_the_shortest_file_left(sandbox, monkeypatch):
+    """--parallel 2: a free worker takes the shortest file left at that
+    moment, and a recording that lands mid-run goes ahead of longer ones
+    still waiting."""
+    import concurrent.futures as cf
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, summarize
+
+    _lengths(monkeypatch, {"A.m4a": 4000, "B.m4a": 3000, "C.m4a": 2000,
+                           "D.m4a": 1000, "New.m4a": 10})
+    _drop("A.m4a", "B.m4a", "C.m4a", "D.m4a")
+    submitted, ran = [], []
+
+    class _Fut:
+        def __init__(self, fn, a):
+            self._fn, self._a = fn, a
+
+        def result(self):
+            return self._fn(*self._a)
+
+    class _Pool:
+        def __init__(self, max_workers=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *a):
+            submitted.append(Path(a[0]).name)
+            return _Fut(fn, a)
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", _Pool)
+    monkeypatch.setattr(cf, "as_completed", lambda futs: list(futs))
+
+    def stub(src_str, dest_str, opts):
+        name = Path(src_str).name
+        ran.append(name)
+        if name == "D.m4a":
+            _drop("New.m4a")
+        return {"ok": True, "key": name, "mtime": Path(src_str).stat().st_mtime,
+                "outputs": [], "summary": "s", "who": "", "duration_sec": 1.0,
+                "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", stub)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize", "--parallel", "2",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    # D and C fill the two workers; D finishes first and New lands, so the
+    # freed worker takes New, not B; then B, then A
+    assert submitted == ["D.m4a", "C.m4a", "New.m4a", "B.m4a", "A.m4a"]
+    assert sorted(ran) == sorted(submitted)
+
+
+# ---------- finishing the current file, then stopping ----------
+
+def test_a_stop_after_flag_ends_the_run_after_the_current_file(sandbox, monkeypatch):
+    """A running batch reads no pause flag between files, and Stop kills the
+    file in flight. stop_after_file.flag is the gentle stop: the file in
+    flight finishes, nothing new starts, the run ends cleanly, the flag is
+    consumed, and no queued job is chained after it."""
+    from stt import control, jobs, status
+    _lengths(monkeypatch, {"one.m4a": 60, "two.m4a": 120, "three.m4a": 180})
+    _drop("one.m4a", "two.m4a", "three.m4a")
+    jobs.add({"files": ["later.m4a"], "label": "later"})
+    chained = []
+    monkeypatch.setattr(run_batch, "spawn_chained_job", lambda j: chained.append(j))
+
+    def ask(name):
+        control.request_finish()
+    rc, seen, _ = _drive(monkeypatch, [], on_file=ask)
+    assert rc == 0 and seen == ["one.m4a"]
+    assert not control.finish_requested(), "the honored flag must be consumed"
+    assert status.read()["running"] is False
+    assert chained == [], "stopping means no chained job either"
+    assert len(jobs.items()) == 1, "the queued job stays queued"
+
+
+def test_a_stale_stop_after_flag_never_cuts_a_new_run_short(sandbox, monkeypatch):
+    from stt import control
+    _lengths(monkeypatch, {"one.m4a": 60, "two.m4a": 120})
+    _drop("one.m4a", "two.m4a")
+    control.request_finish()          # left over from a run that had ended
+    rc, seen, _ = _drive(monkeypatch, [])
+    assert rc == 0 and seen == ["one.m4a", "two.m4a"]
+    assert not control.finish_requested()
+
+
+def test_under_parallel_the_stop_flag_lets_the_files_in_flight_finish(
+        sandbox, monkeypatch):
+    """--parallel 2 with the flag set while two files run: both finish and
+    are recorded, and no third file starts."""
+    import concurrent.futures as cf
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, control, manifest, summarize
+
+    _lengths(monkeypatch, {"a.m4a": 60, "b.m4a": 120, "c.m4a": 180})
+    _drop("a.m4a", "b.m4a", "c.m4a")
+    started = []
+
+    class _Fut:
+        def __init__(self, fn, a):
+            self._fn, self._a = fn, a
+
+        def result(self):
+            return self._fn(*self._a)
+
+    class _Pool:
+        def __init__(self, max_workers=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *a):
+            started.append(Path(a[0]).name)
+            return _Fut(fn, a)
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", _Pool)
+    monkeypatch.setattr(cf, "as_completed", lambda futs: list(futs))
+
+    def stub(src_str, dest_str, opts):
+        name = Path(src_str).name
+        control.request_finish()
+        return {"ok": True, "key": name, "mtime": Path(src_str).stat().st_mtime,
+                "outputs": [], "summary": "s", "who": "", "duration_sec": 1.0,
+                "stage_secs": {}}
+
+    monkeypatch.setattr(run_batch, "process_one", stub)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize", "--parallel", "2",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert started == ["a.m4a", "b.m4a"]
+    m = manifest.load()
+    assert set(m["processed"]) == {"a.m4a", "b.m4a"}
+    assert not control.finish_requested()

@@ -42,6 +42,13 @@ function clock(secs){secs=Math.max(0,Math.floor(secs||0));
 function fmtEta(sec){if(sec==null)return'';if(sec<90)return'1 min';
   if(sec<3600)return Math.round(sec/60)+' min';
   return Math.floor(sec/3600)+'h '+String(Math.round(sec%3600/60)).padStart(2,'0')+'m';}
+// a stage past its estimate: "running long · +12m" in place of a countdown,
+// the minutes past the estimate, whole and growing (never "+0m"); past an
+// hour "+1h 05m", the countdown's own form
+function fmtOver(sec){
+  const m=Math.max(1,Math.floor((sec||0)/60));
+  return 'running long &middot; +'+(m<60?m+'m':Math.floor(m/60)+'h '+String(m%60).padStart(2,'0')+'m');
+}
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',
   diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 function shortDate(iso){if(!iso)return'';
@@ -192,7 +199,15 @@ function pillParts(s){
   }else if(s.running){
     cls='pill accent';
     const n=Object.keys(s.active||{}).length||1;
-    const eta=s.overall_eta_sec!=null?` &middot; &#8776;${fmtEta(s.overall_eta_sec)}`:'';
+    // a file past its stage's estimate says so in place of the countdown
+    // (the longest overrun when two run); the queue total, which carries
+    // that file's tail, follows only when other files wait behind it
+    const over=Object.values(s.active||{}).reduce((a,e)=>
+      e&&e.over_sec!=null&&(a==null||e.over_sec>a)?e.over_sec:a,null);
+    const eta=over!=null
+      ?` &middot; ${fmtOver(over)}`+((s.pending||[]).length&&s.overall_eta_sec!=null
+        ?` &middot; &#8776;${fmtEta(s.overall_eta_sec)} in all`:'')
+      :s.overall_eta_sec!=null?` &middot; &#8776;${fmtEta(s.overall_eta_sec)}`:'';
     // runs requested while this one holds the lock wait in the job queue; the
     // pill carries their count so a queued Redo is never invisible
     const qj=(s.queued_jobs||[]).length;
@@ -504,7 +519,9 @@ function bodyAndSlot(row){
 
     case 'processing':{
       const pct=row.pct!=null?row.pct:null;
-      const eta=row.eta!=null?` &middot; &#8776;${fmtEta(row.eta)} left`:'';
+      // past the stage's estimate: how far past, never a frozen remainder
+      const eta=row.over!=null?` &middot; ${fmtOver(row.over)}`
+        :row.eta!=null?` &middot; &#8776;${fmtEta(row.eta)} left`:'';
       return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div></div>
         <div class="rslot"><span class="rstate spill busy">${esc(STAGE_NICE[row.stage]||row.stage||'working')}${pct!=null?' '+pct+'%':''}${eta}</span></div>
         ${pct!=null?`<span class="progress" style="width:${pct}%"></span>`:''}`;
@@ -615,7 +632,10 @@ function timelineSections(rows,now){
     else if(r.state==='needs_name'||toFinish(r,now))out.fin.push(r);
     else out.rest.push(r);
   }
+  // waiting files in the order they will run (the server's run_order:
+  // shortest first); everything else newest first
   out.now.sort((a,b)=>(PIN_ORDER[a.state]-PIN_ORDER[b.state])
+    ||((a.run_order!=null?a.run_order:1e9)-(b.run_order!=null?b.run_order:1e9))
     ||(b.when||'').localeCompare(a.when||''));
   // To finish keeps the timeline's own order: it is the order ] walks
   out.rest.sort((a,b)=>dateKey(b).localeCompare(dateKey(a))
@@ -881,7 +901,7 @@ function setupHTML(items){
 function sigOf(r){
   const open=r.state==='ready'&&OPEN.has(r.id);
   const m=open?(meetingByBase(r.id)||{}):null;
-  return [r.id,r.state,r.title,r.date,r.pct,r.stage,r.eta,r.category,
+  return [r.id,r.state,r.title,r.date,r.pct,r.stage,r.eta,r.over,r.category,
   // the duplicate flag lands a poll or two AFTER the row first painted (the
   // check hashes on a size collision), so it has to be part of the signature or
   // the chip never appears on a row that is already on screen

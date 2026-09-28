@@ -86,7 +86,11 @@ def _lock():
                 lk.close()
 
 
-def start_run(pending):
+def start_run(pending, sweep=False):
+    """`pending` is the files this run will process, in the order it will
+    run them (shortest first). `sweep` marks a run that re-reads the watched
+    folders before every file, so a file that lands mid-run joins it by
+    length: the panel orders every waiting file that way while it runs."""
     # pgid lets the stop path find and kill the WHOLE process group — including
     # parallel workers whose command lines don't mention run_batch.py — even
     # after the parent has died.
@@ -101,10 +105,20 @@ def start_run(pending):
         # `recording` (a capture in progress in the menu bar, whose banner must
         # survive a batch kicking off mid-recording).
         _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
-                "active": {}, "pending": list(pending),
+                "active": {}, "pending": list(pending), "sweep": bool(sweep),
                 "recent": prev.get("recent", []),
                 "recording": prev.get("recording"),
                 "recorder_note": prev.get("recorder_note")})
+
+
+def set_pending(pending):
+    """Replace the files still to run, in the order they will run. The batch
+    re-picks the shortest file left before every file it starts, so this
+    order changes as files arrive and finish."""
+    with _lock():
+        d = read()
+        d["pending"] = list(pending)
+        _write(d)
 
 
 def set_recorder_note(ok, text):
@@ -238,39 +252,62 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
 def stage_estimates(duration: float, n_active: int = 1, verify: bool = False,
                     diarize: bool = True) -> dict:
     """Expected wall seconds per stage for `duration` seconds of audio.
-    Rates are auto-calibrated medians from past runs (stt.rates), keyed by the
-    CURRENTLY selected ASR model (read fresh from stt.env on every call) and
-    worker count; config defaults until real measurements exist. diarize/verify
-    control whether those stages are budgeted for AT ALL — a --no-diarize or
-    non-verify run must never have their time counted in the total."""
+    Each stage is auto-calibrated from past runs (stt.rates: a power law of
+    the duration where the samples support one, else the median rate), keyed
+    by the CURRENTLY selected ASR model (read fresh from stt.env on every call)
+    and worker count; config defaults until real measurements exist.
+    diarize/verify control whether those stages are budgeted for AT ALL — a
+    --no-diarize or non-verify run must never have their time counted in the
+    total."""
     from . import rates
+    asr = rates.current_asr_key()
     est = {
         "downloading": 5.0,  # usually instant; real downloads show as slow stage
-        "converting": duration / rates.convert_rate(),
-        "transcribing": duration / rates.asr_rate(n_active=n_active),
-        "writing": rates.writing_secs(),
+        "converting": rates.stage_secs("converting", duration, n_active, asr),
+        "transcribing": rates.stage_secs("transcribing", duration, n_active, asr),
+        "writing": rates.stage_secs("writing", duration, n_active, asr),
     }
     if diarize:
-        est["diarizing"] = duration / rates.diarize_rate(n_active)
+        est["diarizing"] = rates.stage_secs("diarizing", duration, n_active, asr)
     if verify:
-        sec = "mlxwhisper:turbo" if rates.current_asr_key() == "parakeet" else "parakeet"
-        est["verifying"] = duration / rates.asr_rate(sec, n_active)
+        est["verifying"] = rates.stage_secs("transcribing", duration, n_active,
+                                            _verify_engine(asr))
     return est
+
+
+def _verify_engine(asr):
+    return "mlxwhisper:turbo" if asr == "parakeet" else "parakeet"
+
+
+def stage_tail(stage: str, n_active: int = 1) -> float:
+    """The fraction of its elapsed time a stage that has run past its estimate
+    is still expected to take: the stage model's own recent overrun (see
+    stt.rates._tail), never a fixed remainder."""
+    from . import rates
+    asr = rates.current_asr_key()
+    if stage == "verifying":
+        return rates.stage_tail("transcribing", n_active, _verify_engine(asr))
+    if stage == "downloading":
+        return rates.DEFAULT_TAIL
+    return rates.stage_tail(stage, n_active, asr)
 
 
 STAGE_ORDER = ["downloading", "converting", "transcribing", "diarizing",
                "verifying", "writing"]
 
 
-def estimate_progress(entry: dict, n_active: int = 1):
-    """(overall_fraction 0..1, eta_seconds) for one active file, from its known
-    audio duration, current stage, and within-stage progress. None if unknowable."""
+def progress_detail(entry: dict, n_active: int = 1):
+    """{"pct": 0..1, "eta": seconds, "over": seconds or None} for one active
+    file, from its known audio duration, current stage, and within-stage
+    progress. None if unknowable. `over` is how far the current stage has run
+    past its estimate: the panel shows "running long · +Xm" in place of a
+    countdown once it is set."""
     dur = entry.get("duration")
     if not dur:
-        return None, None
+        return None
     stage = entry.get("stage", "downloading")
     if stage not in STAGE_ORDER:
-        return None, None
+        return None
     # this file's ACTUAL settings, known from the start — not inferred from
     # whichever stage it happens to be in right now
     diarize = entry.get("diarize", True)
@@ -279,6 +316,7 @@ def estimate_progress(entry: dict, n_active: int = 1):
     total = sum(est.values())
     idx = STAGE_ORDER.index(stage)
     done = sum(est.get(s, 0.0) for s in STAGE_ORDER[:idx])
+    after = sum(est.get(s, 0.0) for s in STAGE_ORDER[idx + 1:])
     frac_in = entry.get("progress")
     if frac_in is None:
         frac_in = 0.5  # mid-stage assumption when the engine gives no callback
@@ -296,7 +334,21 @@ def estimate_progress(entry: dict, n_active: int = 1):
         # clock must not make the stage look "almost done" when little real work
         # happened. monotonic is system-wide per boot, so cross-process (worker
         # writes it, GUI reads it) comparison stays valid.
-        wall_frac = min((_time.monotonic() - ss) / est_stage, 0.97)
+        elapsed = max(0.0, _time.monotonic() - ss)
+        if elapsed > est_stage:
+            # RUNNING LONG. The old answer pinned the stage at 97% here, which
+            # left a constant 3% of it on the clock: about ten minutes on a
+            # long board meeting, frozen for hours. Now the stage has taken
+            # `elapsed` so far and is given a tail that grows with it (the
+            # model's own recent overrun), and the panel says how far past the
+            # estimate it is instead of counting down.
+            # The fraction leaves the tail out, so the bar never steps back
+            # at the estimate: the work done over the work known so far.
+            tail = stage_tail(stage, n_active) * elapsed
+            done += elapsed
+            return {"pct": min(0.99, done / (done + after)),
+                    "eta": tail + after, "over": elapsed - est_stage}
+        wall_frac = elapsed / est_stage
         pa = entry.get("progress_at")
         if (pa is not None and _time.time() - pa > 20.0
                 and wall_frac > frac_in):
@@ -304,17 +356,26 @@ def estimate_progress(entry: dict, n_active: int = 1):
             # minutes) and the monotonic clock has genuinely passed its frozen
             # value — min(hook, wall) froze the countdown there and then
             # collapsed the ETA all at once when the stage flipped. Follow the
-            # elapsed clock so the ETA keeps counting down, but never claim
-            # the stage done: its actual end is the only honest 100%. Both
-            # conditions matter: staleness alone is wall-clock (progress_at)
-            # and an NTP jump can fake it, but wall_frac is monotonic, so a
-            # faked stall with little real elapsed keeps the brake on.
-            frac_in = min(wall_frac, 0.97)
+            # elapsed clock so the ETA keeps counting down to the estimate;
+            # past it, the stage is running long (above). Both conditions
+            # matter: staleness alone is wall-clock (progress_at) and an NTP
+            # jump can fake it, but wall_frac is monotonic, so a faked stall
+            # with little real elapsed keeps the brake on.
+            frac_in = wall_frac
         else:
             frac_in = min(frac_in, wall_frac)
     done += est_stage * min(1.0, max(0.0, frac_in))
-    overall = min(0.99, done / total)
-    return overall, max(0.0, total - done)
+    return {"pct": min(0.99, done / total), "eta": max(0.0, total - done),
+            "over": None}
+
+
+def estimate_progress(entry: dict, n_active: int = 1):
+    """(overall_fraction 0..1, eta_seconds) for one active file — see
+    progress_detail. (None, None) if unknowable."""
+    d = progress_detail(entry, n_active)
+    if d is None:
+        return None, None
+    return d["pct"], d["eta"]
 
 
 def stage_breakdown(entry: dict, n_active: int = 1):

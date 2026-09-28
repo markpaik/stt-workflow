@@ -6199,3 +6199,78 @@ def test_a_folded_queue_file_leaves_the_selection():
         "applySel();console.log(JSON.stringify([...SEL].sort()));",
     ]))
     assert out == ["W1"]
+
+
+# ---------- running long, and the order the queue runs in (scheduling) ----------
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_processing_row_past_its_estimate_says_running_long():
+    """A 4-hour board meeting's row read "Speakers 97% · ≈10 min left" for
+    hours. Past the stage's estimate the row says how far past it is, in
+    place of the countdown, and that number grows as the stage runs."""
+    out = _run_node("\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
+        _js_region("function fmtEta(", "const STAGE_NICE"),
+        "const STAGE_NICE={diarizing:'Speakers'};",
+        "function clock(){return '0:00';}function catDot(){return '';}",
+        "function shortDate(d){return d;}function meetingByBase(){return null;}",
+        _js_fn("slotActions"), _js_fn("queueName"), _js_fn("queueBodyAndSlot"),
+        _js_fn("bodyAndSlot"),
+        """
+const p=(over,eta)=>bodyAndSlot({state:'processing',id:'P',title:'Board',stage:'diarizing',
+  pct:99,eta,over});
+console.log(JSON.stringify({counting:p(null,600),justOver:p(20,300),twelve:p(12*60+59,4000),
+  hour:p(65*60,9000)}));
+"""]))
+    assert "Speakers 99% &middot; &#8776;10 min left" in out["counting"]
+    assert "running long" not in out["counting"]
+    # never "+0m": the first minute past the estimate already reads +1m
+    assert "Speakers 99% &middot; running long &middot; +1m</span>" in out["justOver"]
+    assert "running long &middot; +12m</span>" in out["twelve"]
+    assert "left" not in out["twelve"], "the countdown gives way, it does not sit beside it"
+    assert "running long &middot; +1h 05m</span>" in out["hour"]
+    # the overrun folds into the row signature, or +Xm would never repaint
+    assert "r.over," in _js_fn("sigOf")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_pill_says_running_long_and_keeps_the_queue_total_when_files_wait():
+    """The pill's countdown froze with the row's. Past the estimate it says
+    "running long · +Xm" (the longest overrun when two files run); when other
+    files wait behind it, the queue total, which carries the long file's
+    tail, follows."""
+    out = _run_node(_pill_env().replace(
+        "function fmtEta(x){return Math.round(x/60)+' min';}",
+        "function fmtEta(x){return Math.round(x/60)+' min';}" + _js_fn("fmtOver")) + """
+const run=(active,eta,pending)=>pill({running:true,active,overall_eta_sec:eta,pending});
+console.log(JSON.stringify({
+  alone:run({a:{stage:'diarizing',over_sec:1500}},900,[]),
+  queued:run({a:{stage:'diarizing',over_sec:1500}},9000,['b.m4a']),
+  two:run({a:{stage:'diarizing',over_sec:300},b:{stage:'diarizing'}},9000,[]),
+  counting:run({a:{stage:'diarizing'}},900,['b.m4a']),
+}));
+""")
+    assert out["alone"] == ["pill accent", "speakers 1 &middot; running long &middot; +25m"]
+    assert out["queued"] == ["pill accent", "speakers 1 &middot; running long &middot; +25m"
+                             " &middot; &#8776;150 min in all"]
+    assert out["two"] == ["pill accent", "speakers 2 &middot; running long &middot; +5m"]
+    assert out["counting"] == ["pill accent", "speakers 1 &middot; &#8776;15 min"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_now_lists_the_waiting_files_in_the_order_they_will_run():
+    """The batch runs the shortest file first; Now used to list the waiting
+    files newest first, which said nothing about what runs next. Waiting rows
+    follow the server's run_order; the other Now states keep their order."""
+    out = _run_node(_sections_env() + """
+const rows=[
+  {id:'P',state:'processing',when:'2026-09-27T09:00:00'},
+  {id:'Wnew',state:'waiting',when:'2026-09-27T08:00:00',run_order:2},
+  {id:'Wold',state:'waiting',when:'2026-09-01T08:00:00',run_order:0},
+  {id:'Wmid',state:'waiting',when:'2026-09-15T08:00:00',run_order:1},
+  {id:'H',state:'held',when:'2026-09-20T08:00:00'},
+  {id:'Wnone',state:'waiting',when:'2026-09-26T08:00:00'},
+];
+console.log(JSON.stringify(timelineSections(rows,NOW).now.map(r=>r.id)));
+""")
+    assert out == ["P", "H", "Wold", "Wmid", "Wnew", "Wnone"]

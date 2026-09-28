@@ -94,3 +94,95 @@ def test_summary_shape(sandbox):
     _reset_cache()
     s = rates.summary()
     assert s["runs"] == 1 and "Parakeet" in s["text"]
+
+
+# ---- the power law (A1): diarization's cost grows faster than the audio ----
+
+def _diar_samples(durs, b=1.25, a=0.1, jitter=None):
+    """One rate sample per duration whose diarizing seconds follow
+    a * duration^b (times an optional per-sample factor)."""
+    for i, d in enumerate(durs):
+        f = jitter[i] if jitter else 1.0
+        rates.record(d, {"transcribing": d / 60, "diarizing": a * d ** b * f,
+                         "writing": 10}, "parakeet", 1)
+
+
+def test_diarizing_follows_a_power_law_so_long_meetings_are_not_short_changed(
+        sandbox, monkeypatch):
+    """The panel estimated a 4.5 h board meeting about 25 percent short: one
+    median rate, taken mostly from short meetings, cannot describe a stage
+    whose cost grows faster than the audio. With samples that span the
+    lengths, the estimate follows secs = a * duration^b instead."""
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    _diar_samples([1200, 1500, 1800, 2400, 2700, 3000, 3600, 10800])
+    long = 4.5 * 3600
+    truth = 0.1 * long ** 1.25
+    est = status.stage_estimates(long)["diarizing"]
+    assert abs(est - truth) / truth < 0.02
+    # the old model (one median rate) is what left it short
+    old = long / rates.diarize_rate(1)
+    assert old < 0.8 * truth
+    f = rates.learned()["fit"]["diarize"]["1"]
+    assert abs(f["b"] - 1.25) < 0.01 and f["n"] == 8
+    # the summary the settings row reads keeps its shape
+    assert set(rates.summary()) == {"runs", "text"}
+
+
+def test_the_fit_needs_six_samples_spanning_a_factor_of_two(sandbox, monkeypatch):
+    """A slope read off too few samples, or off a narrow band of lengths, is
+    noise: the estimate stays on the median rate until both hold."""
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    _diar_samples([1200, 1800, 2400, 3000, 3600])            # five samples
+    assert "1" not in rates.learned()["fit"]["diarize"]
+    med = rates.diarize_rate(1)
+    assert abs(status.stage_estimates(7200)["diarizing"] - 7200 / med) < 1
+
+    _reset_cache()
+    rates.RATES_LOG.unlink()
+    _diar_samples([2000, 2200, 2400, 2600, 2800, 3000, 3200, 3400])   # span 1.7
+    assert "1" not in rates.learned()["fit"]["diarize"]
+    med = rates.diarize_rate(1)
+    assert abs(status.stage_estimates(7200)["diarizing"] - 7200 / med) < 1
+
+    _reset_cache()
+    _diar_samples([7000])          # the ninth sample widens the span past 2
+    assert "1" in rates.learned()["fit"]["diarize"]
+
+
+def test_the_exponent_is_clamped(sandbox):
+    """A handful of odd files must not bend the curve into nonsense: b stays
+    in [0.8, 1.6], and the intercept is refitted for the clamped slope."""
+    _diar_samples([600, 900, 1200, 1800, 2400, 3600], b=2.5, a=1e-5)
+    assert rates.learned()["fit"]["diarize"]["1"]["b"] == 1.6
+    _reset_cache()
+    rates.RATES_LOG.unlink()
+    _diar_samples([600, 900, 1200, 1800, 2400, 3600], b=0.3, a=50)
+    f = rates.learned()["fit"]["diarize"]["1"]
+    assert f["b"] == 0.8
+    # refitted intercept: the prediction passes through the middle of the data
+    mid = rates.predict(rates.learned(), "diarizing", 1470, 1, "parakeet")
+    assert 0.5 < mid / (50 * 1470 ** 0.3) < 2.0
+
+
+def test_the_fit_uses_only_the_most_recent_samples(sandbox):
+    """The machine changes (a new model, a new OS): the fit follows the last
+    FIT_SAMPLES samples, not the whole history."""
+    _diar_samples([600, 900, 1200, 1800, 2400, 3600] * 5, b=1.0, a=5.0)   # old, slow
+    _diar_samples([600, 900, 1200, 1800, 2400, 3600] * 4, b=1.0, a=1.0)   # the last 24
+    got = rates.predict(rates.learned(), "diarizing", 3600, 1, "parakeet")
+    assert abs(got - 3600) < 1
+
+
+def test_each_model_carries_a_tail_from_its_own_residuals(sandbox):
+    """The tail is how far past its prediction a stage tends to run: the 80th
+    percentile of actual over predicted, minus one, floored. Never one
+    constant for every stage and every machine."""
+    assert rates.stage_tail("diarizing", 1, "parakeet") == rates.DEFAULT_TAIL
+    # every sample 1.0x except two slow ones: the 80th percentile sits in them
+    jit = [1.0] * 8 + [1.5, 1.5]
+    _diar_samples([600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3600],
+                  b=1.0, a=1.0, jitter=jit)
+    t = rates.stage_tail("diarizing", 1, "parakeet")
+    assert rates.TAIL_RANGE[0] < t < 0.5, t
+    # a stage that always lands on its prediction still gets the floor
+    assert rates.stage_tail("transcribing", 1, "parakeet") == rates.TAIL_RANGE[0]

@@ -14,6 +14,16 @@ next start); scratch cleanup at start.
 Selection & throughput: --files picks exact files (GUI picker); --parallel 2 runs
 two files at once (each worker loads its own models; ~1.6-1.8x throughput on the
 M5 Pro — diarization is CPU-bound at ~5 cores per file).
+
+Order: the SHORTEST file left runs next (stt.queue_order), chosen before every
+file rather than fixed when the run starts. A plain run re-reads the watched
+folders at each pick, so a short recording that lands mid-run goes ahead of
+queued multi-hour meetings; each --parallel worker takes the shortest file left.
+
+Stop after the current file: `stop_after_file.flag` in the project folder
+(stt.control.request_finish) is read before every file. Once it exists the run
+starts nothing new, lets the file in flight finish, and ends cleanly (no
+chained job). The pause flag, by contrast, only gates a run's START.
 """
 import argparse
 import fcntl
@@ -42,7 +52,7 @@ def _load_env_file():
 
 _load_env_file()
 
-from stt import config, control, icloud, jobs, manifest, rates, status  # noqa: E402
+from stt import config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
 
 
 def acquire_lock():
@@ -537,6 +547,9 @@ def main():
             continue
         todo.append(src)
 
+    # shortest first: a short recording never waits behind multi-hour board
+    # meetings that happen to sort first by name (stt.queue_order)
+    todo = queue_order.shortest_first(todo)
     if args.dry_run:
         for src in todo:
             print(f"[would process] {src.name}")
@@ -550,7 +563,12 @@ def main():
         # kept only long enough to re-queue on a SIGTERM (see _terminate above)
         claimed_job = job_spec_from_args(args, todo)
 
-    status.start_run([s.name for s in todo])
+    # a plain run re-reads the watched folders before every file it picks, so
+    # a recording that lands mid-run joins the queue by its length. A run over
+    # its own list (--files/--paths/--only/--force) runs exactly that list.
+    sweep = not (args.paths or args.files or args.only or args.force)
+    control.clear_finish()  # a stale "stop after this file" never cuts this run short
+    status.start_run([s.name for s in todo], sweep=sweep)
     base_opts = {"do_diarize": not args.no_diarize,
                  "strict": args.strict or config.STRICT,
                  "verify": args.verify or config.VERIFY,
@@ -625,40 +643,116 @@ def main():
             failed_names.add(res["key"])
             failed += 1
 
-    def run_todo(batch):
-        # the parks are re-read here, at the last moment before any of these
-        # files starts -- never from the snapshot the todo list was built with
-        keep = []
-        for src in batch:
+    queue = list(todo)       # files still to start, re-sorted before every pick
+    in_flight = set()        # names started and not yet finished (--parallel)
+    finish = {"asked": False}
+
+    def arrivals():
+        """Files in the watched folders that this run has not queued, started,
+        finished, or failed: recordings that landed WHILE it ran. Their
+        WatchPaths trigger hit our lock and exited, so the run takes them in
+        itself (plain runs only)."""
+        if not sweep:
+            return []
+        have = {s.name for s in queue} | in_flight
+        held = holds.items()    # re-read: a hold placed mid-run counts
+        out = []
+        for src in iter_sources(source):
+            # never a file that already failed this run: nothing marks it
+            # processed, so a permanently failing file (corrupt audio, a stuck
+            # iCloud placeholder) would otherwise be retried forever
+            if src.name in have or src.name in failed_names or src.name in held:
+                continue
+            try:
+                if manifest.is_processed(m, src.name, src.stat().st_mtime):
+                    continue
+            except OSError:
+                continue
+            out.append(src)
+        return out
+
+    def pick():
+        """The next file to start: the SHORTEST one left, chosen now, not when
+        the run began, so a short recording that arrives mid-run runs before
+        queued multi-hour meetings. None when nothing is left, or when a
+        "stop after this file" flag asks the run to start nothing new."""
+        while True:
+            if control.finish_requested():
+                if not finish["asked"]:
+                    print("Stop after the current file requested — starting no "
+                          "new files.", flush=True)
+                finish["asked"] = True
+                return None
+            queue[:] = queue_order.shortest_first(queue + arrivals())
+            if not queue:
+                return None
+            src = queue.pop(0)
+            # status.json's pending is the rest, in the order they will run
+            status.set_pending([s.name for s in queue])
+            # the parks are re-read here, at the last moment before the file
+            # starts -- never from the snapshot the todo list was built with
             if hold_skips(src):
                 announce_hold(src.name)
-            else:
-                keep.append(src)
-        batch = keep
-        if not batch:
-            return
-        # the concurrency actually used for THIS batch — a solo/short batch runs
-        # single-worker even under --parallel 2, so rate samples must be tagged
-        # with the real n_active, not the outer run's initial worker count.
-        n_used = args.parallel if (args.parallel > 1 and len(batch) > 1) else 1
-        if args.parallel > 1 and len(batch) > 1:
-            from concurrent.futures import ProcessPoolExecutor, as_completed
-            from concurrent.futures.process import BrokenProcessPool
+                continue
+            return src
+
+    def run_one_at_a_time():
+        while True:
+            src = pick()
+            if src is None:
+                return
+            print(f"[processing] {src.name}", flush=True)
+            try:
+                _record(process_one(str(src), str(dest), opts_for(src)), 1)
+            except Exception as e:
+                traceback.print_exc()
+                nonlocal_fail(src.name, e)
+
+    def run_in_parallel():
+        """Up to args.parallel files at once. Each free worker takes the
+        shortest file left at that moment (pick), not a list fixed up front."""
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool
+        while True:
             broken = []
+            pool_ok = True
             with ProcessPoolExecutor(max_workers=args.parallel) as ex:
-                futs = {ex.submit(process_one, str(s), str(dest), opts_for(s)): s for s in batch}
-                for fut in as_completed(futs):
-                    src = futs[fut]
-                    print(f"[processing] {src.name}", flush=True)
+                # future -> [src, the most files in flight while it ran]: the
+                # concurrency each rate sample is tagged with. A file that ran
+                # alone (the last of the queue) records n_active=1.
+                futs = {}
+                while True:
+                    while pool_ok and len(futs) < args.parallel:
+                        src = pick()
+                        if src is None:
+                            break
+                        print(f"[processing] {src.name}", flush=True)
+                        try:
+                            fut = ex.submit(process_one, str(src), str(dest), opts_for(src))
+                        except BrokenProcessPool:
+                            broken.append(src)
+                            pool_ok = False
+                            break
+                        futs[fut] = [src, 0]
+                        in_flight.add(src.name)
+                        for v in futs.values():
+                            v[1] = max(v[1], len(futs))
+                    if not futs:
+                        break
+                    fut = next(iter(as_completed(list(futs))))
+                    src, peak = futs.pop(fut)
+                    in_flight.discard(src.name)
                     try:
-                        _record(fut.result(), n_used)
+                        _record(fut.result(), peak)
                     except BrokenProcessPool:
                         # a DIFFERENT file's worker crashed (segfault/OOM-kill)
                         # and took the shared pool down with it — this file was
                         # never actually attempted, so don't blame it for
                         # someone else's crash; retry it alone once the broken
-                        # pool is fully torn down below
+                        # pool is fully torn down below, and start nothing
+                        # more in this pool
                         broken.append(src)
+                        pool_ok = False
                     except Exception as e:
                         nonlocal_fail(src.name, e)
             if broken:
@@ -683,19 +777,9 @@ def main():
                     except Exception as e:
                         traceback.print_exc()
                         nonlocal_fail(src.name, e)
-        else:
-            for src in batch:
-                # re-read again per file: this loop can run for hours, and a
-                # park placed on file 3 while file 1 transcodes must be honored
-                if hold_skips(src):
-                    announce_hold(src.name)
-                    continue
-                print(f"[processing] {src.name}", flush=True)
-                try:
-                    _record(process_one(str(src), str(dest), opts_for(src)), n_used)
-                except Exception as e:
-                    traceback.print_exc()
-                    nonlocal_fail(src.name, e)
+            if pool_ok:
+                return
+            # the pool broke: the files not yet started run in a fresh one
 
     def nonlocal_fail(name, e):
         nonlocal failed
@@ -704,25 +788,11 @@ def main():
         print(f"   FAILED: {name}: {e}  (original preserved)", file=sys.stderr, flush=True)
         status.finish_file(name, False, str(e))
 
-    run_todo(todo)
+    if args.parallel > 1:
+        run_in_parallel()
+    else:
+        run_one_at_a_time()
     claimed_job = None  # the work is done — a stray late SIGTERM must not re-queue it
-
-    # recordings that landed WHILE we processed: their WatchPaths trigger hit our
-    # lock and exited, so sweep again until the folder is quiet (plain runs only)
-    if not (args.paths or args.files or args.only or args.force):
-        while True:
-            # exclude files that already failed this run: nothing marks them
-            # processed, so without this a permanently-failing file (corrupt
-            # audio, stuck iCloud placeholder) would loop the rescan forever.
-            more = [src for src in iter_sources(source)
-                    if src.name not in failed_names
-                    and src.name not in holds.items()  # re-read: held mid-run counts
-                    and not manifest.is_processed(m, src.name, src.stat().st_mtime)]
-            if not more:
-                break
-            print(f"[rescan] {len(more)} new recording(s) arrived during the run", flush=True)
-            status.start_run([s.name for s in more])
-            run_todo(more)
 
     if not args.dry_run and succeeded:
         n_sum = auto_summarize(succeeded)
@@ -747,6 +817,10 @@ def main():
 
     status.end_run()
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
+    if finish["asked"]:
+        control.clear_finish()  # honored: the next run starts normally
+        print("Stopped after the current file, as asked.", flush=True)
+        return 1 if failed else 0   # stopping means no chained job either
 
     # chain into the next panel-queued job (a Redo clicked during this run).
     # Release our lock FIRST so the child can take it; if something else wins
