@@ -132,13 +132,15 @@ of their own only when the pill leaves them no room.
 
 Status pill: the ONLY place pipeline state appears. Mono, in two segments
 (revised 2026-09-27). The pipeline segment shows one state, by priority:
-`● REC 12:41` (rec red, ticking) → `speakers 1 · ≈41h 55m` (accent) →
+`● REC 12:41` (rec red, ticking; `⏸ REC 12:41`, still, while the recording
+is paused) → `speakers 1 · ≈41h 55m` (accent) →
 `⏸ paused · 3 waiting` (amber, always with the waiting count when nonzero) →
 `3 waiting`. The running state names the active files' own stage, lowercased
-from STAGE_NICE (`preparing`, `transcribing`, `speakers`, `verifying`,
-`writing`, `summary`), when every active file is in that stage; files in
-different stages, or a stage not reported yet, read `processing N` (revised
-2026-09-28: it said `transcribing 1` while the one file was diarizing). The
+from STAGE_NICE (`downloading`, `preparing`, `transcribing`, `speakers`,
+`verifying`, `writing`, `summary`), when every active file is in that stage;
+files in different stages, or a stage not reported yet, read `processing N`
+(revised 2026-09-28: it said `transcribing 1` while the one file was
+diarizing). Runs asked for while one holds the lock add `· 2 queued`. The
 naming segment sits beside it, split by a `--line` hairline:
 `naming 3 of 7`, so a naming never hides behind a transcription. Either
 segment alone renders alone; with neither, the pill disappears (idle needs

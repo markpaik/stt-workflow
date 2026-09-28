@@ -937,6 +937,38 @@ console.log(JSON.stringify({
         assert out[k] == ["pill accent", "processing 1"], k
 
 
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_design_md_lists_every_stage_word_the_pill_can_show():
+    """gui/DESIGN.md's Status pill paragraph named six stage words and left
+    out `downloading`, which the pill shows while an iCloud file comes down.
+    Drive the real pillStage over every stage the pipeline reports, plus one
+    it does not, and require each word it prints in that paragraph, with the
+    paused-recording and queued-run wordings beside them."""
+    root = Path(srv.__file__).resolve().parent.parent
+    src = "".join((root / p).read_text(encoding="utf-8")
+                  for p in ("stt/pipeline.py", "run_batch.py"))
+    reported = sorted(set(re.findall(
+        r'\b(?:report|set_stage)\(\s*(?:\w+\s*,\s*)?"([a-z]+)"', src)))
+    # the scan must find the pipeline's stages, or the test proves nothing
+    assert set(reported) >= {"downloading", "converting", "transcribing",
+                             "diarizing", "verifying", "writing", "summarizing"}
+    out = _run_node(_pill_env() + f"""
+const ks={json.dumps(reported + ["mystery"])};
+console.log(JSON.stringify(ks.map(k=>pillStage({{a:{{stage:k}}}}))));
+""")
+    # every stage the pipeline reports has its own word, never the fallback
+    assert "processing" not in out[:-1], dict(zip(reported, out))
+    assert out[-1] == "processing"
+    design = (Path(srv.__file__).resolve().parent / "DESIGN.md").read_text(encoding="utf-8")
+    para = re.search(r"(?ms)^Status pill: the ONLY place.*?^Clicking the pill opens",
+                     design).group(0)
+    missing = [w for w in sorted(set(out)) if not re.search(r"`" + w + r"[ `]", para)]
+    assert not missing, f"DESIGN.md's Status pill paragraph omits {missing}"
+    # and the pill's two other wordings (pinned in pillParts' own tests): a
+    # paused recording, and runs queued behind the lock
+    assert "`⏸ REC " in para and " queued`" in para
+
+
 def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
     body = _js_fn("render")
     assert "relabelWatch(S);" in body
