@@ -7,7 +7,7 @@ to the moment in the transcript viewer.
 """
 import json
 
-from . import config
+from . import config, output
 
 _cache = {}  # path -> (mtime, [(seg_index, start, who, text_lower, text)])
 
@@ -31,8 +31,10 @@ def _segments(jpath):
         return hit[1]
     try:
         d = json.loads(jpath.read_text())
-        rows = [(i, s["start"],
-                 s.get("display") or s.get("name") or s.get("speaker") or "?",
+        # the roster's label, as the transcript shows it: a below-floor
+        # voice's lines carry no display, and a hit read "SPEAKER_08"
+        roster = output.roster_labels(d.get("speakers", []))
+        rows = [(i, s["start"], output.line_label(s, roster),
                  s.get("text", "").lower(), s.get("text", ""))
                 for i, s in enumerate(d.get("segments", []))
                 if s.get("text", "").strip()]

@@ -303,9 +303,9 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
     real = review.lock_meeting
 
     @contextlib.contextmanager
-    def spy(base):
+    def spy(base, key=None):
         entered.append(base)
-        with real(base):
+        with real(base, key=key):
             yield
     monkeypatch.setattr(review, "lock_meeting", spy)
 
@@ -316,3 +316,114 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                           do_diarize=False, do_verify=False)
     assert "Locked 05012026" in entered
+
+
+def _sine(path, secs=2):
+    import subprocess
+
+    from stt.audio import FFMPEG
+    subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
+                    f"sine=frequency=300:duration={secs}", "-ac", "1",
+                    "-c:a", "aac", str(path)], check=True, capture_output=True)
+
+
+def test_a_new_meeting_leaves_no_base_named_lock(sandbox, monkeypatch, tmp_path):
+    """The pipeline took lock_meeting(base) before the json existed, so
+    lock_key fell back to the base: every newly processed meeting left an
+    empty "<base>.lock" in .locks that the registry doctor then reported as
+    orphan_lock. The id is decided first, and the lock is named for it."""
+    from stt import pipeline, registry_doctor
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+
+    src = tmp_path / "Fresh Mtg 05012026.m4a"
+    _sine(src)
+    out = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    base = out["base"]
+    mid = config.id_of(base)
+    assert mid, "the new meeting carries an id"
+    locks = config.meetings_dir() / ".locks"
+    assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"], \
+        "the one lock file is named for the id the json carries"
+    assert config.orphan_lock_files() == []
+    assert [f for f in registry_doctor.check() if f.kind == "orphan_lock"] == []
+
+    # a Redo keeps its id, and so its lock, exactly as before
+    pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                          do_diarize=False, do_verify=False)
+    assert config.id_of(base) == mid
+    assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"]
+
+
+def test_two_first_runs_of_one_new_meeting_queue_on_one_lock(sandbox, monkeypatch, tmp_path):
+    """Two first runs of the SAME new recording (a file listed twice in one
+    batch, or two batches on one file) each found no json, so each minted its
+    own id and took a lock named for it. Both were inside the write at once,
+    and whichever write landed last silently won. A new meeting's id is now
+    decided under one shared lock that is held through the write, so the
+    second run waits, finds the id the first one wrote, and queues on it."""
+    import threading
+    import time
+    from pathlib import Path
+
+    from stt import output, pipeline
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    # no ffmpeg: both runs share one scratch wav, and the race under test is
+    # the write lock, not the conversion
+    monkeypatch.setattr(pipeline.audio, "to_wav16k", lambda s, w: Path(w).touch())
+    monkeypatch.setattr(pipeline.audio, "duration_sec", lambda p: 2.0)
+
+    # a run that mints an id waits (briefly) for the other run to reach the
+    # same point, so both decide before either writes when nothing stops them
+    gate = threading.Barrier(2)
+    real_mint = config.new_meeting_id
+
+    def mint():
+        try:
+            gate.wait(timeout=1.0)
+        except threading.BrokenBarrierError:
+            pass
+        return real_mint()
+    monkeypatch.setattr(config, "new_meeting_id", mint)
+
+    inside, peak, count = [0], [0], threading.Lock()
+    real_write = output.write_json
+
+    def write_json(*a, **k):
+        with count:
+            inside[0] += 1
+            peak[0] = max(peak[0], inside[0])
+        try:
+            time.sleep(0.3)
+            return real_write(*a, **k)
+        finally:
+            with count:
+                inside[0] -= 1
+    monkeypatch.setattr(output, "write_json", write_json)
+
+    src = tmp_path / "Twice Mtg 05012026.m4a"
+    src.write_bytes(b"not audio: conversion and probing are stubbed")
+    out, errs = [], []
+
+    def run():
+        try:
+            out.append(pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                             do_diarize=False, do_verify=False))
+        except Exception as e:     # surfaced below, not lost in the thread
+            errs.append(e)
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errs, f"the two writes collided: {errs!r}"
+    assert len(out) == 2
+    assert {o["base"] for o in out} == {"Twice Mtg 05012026"}
+    assert peak[0] == 1, "the two writes of one meeting never overlap"
+    mid = config.id_of("Twice Mtg 05012026")
+    locks = config.meetings_dir() / ".locks"
+    assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"], \
+        "both runs queued on the one lock named for the id the json carries"
+    assert config.orphan_lock_files() == []

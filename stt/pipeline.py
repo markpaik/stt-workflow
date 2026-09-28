@@ -3,6 +3,7 @@
 This never touches the iCloud original; the batch orchestrator owns the
 copy/move/delete lifecycle. Output writes are atomic (see output._atomic_write).
 """
+import contextlib
 import datetime as _dt
 import os
 from pathlib import Path
@@ -231,6 +232,35 @@ def _plan_channels(base, src, mic_speaker):
     return "stereo_channel_aware", wav_mic, wav_sys, plan, stats
 
 
+@contextlib.contextmanager
+def _write_lock(base: str, json_path: Path, dest_dir):
+    """This meeting's write lock, named for its id from the start. Yields the
+    id (None for a legacy json that carries none).
+
+    A Redo keeps the id its json already carries. A new meeting has no json,
+    so lock_key would fall back to the base, and that base-named lock outlived
+    the write as an orphan the moment the json carried an id. So the id is
+    minted here, before the lock.
+
+    Two first runs of the SAME recording (a file listed twice, two batches on
+    one file) must not each mint one: each would lock its own name, and both
+    would write at once. The mint happens under review.lock_new_meeting, held
+    through the write, so the second run waits, reads the id the first run
+    wrote, and queues on that lock as a Redo does. A legacy json with no id
+    keeps its base lock (key None): every other caller still locks on that
+    name until this write stamps the id."""
+    from . import review
+    with contextlib.ExitStack() as held:
+        mid = config.id_of(base, dest_dir)
+        if mid is None and not json_path.exists():
+            held.enter_context(review.lock_new_meeting())
+            mid = config.id_of(base, dest_dir)   # a first run ahead wrote it
+            if mid is None and not json_path.exists():
+                mid = config.new_meeting_id()
+        held.enter_context(review.lock_meeting(base, key=mid))
+        yield mid
+
+
 def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                  strict=None, allowed_names=None, report=None, do_verify=None,
                  num_speakers=None, min_speakers=None, max_speakers=None,
@@ -363,8 +393,10 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # — all of which take this exact lock — so whichever write landed last
     # silently won, or a rename moved the folder out from under these writes.
     # The lock spans only this fast tail, never the minutes of ASR/diarization.
+    # The id is decided BEFORE the lock, so the lock is named for it from the
+    # start, and a new meeting's two first runs queue on one lock (_write_lock).
     from . import review
-    with review.lock_meeting(base):
+    with _write_lock(base, json_path, dest_dir) as meeting_id:
         # human-owned flags survive a Redo exactly like the corrected date: the
         # Work/Personal category and the reviewed state were set in the panel, and
         # rebuilding the meta from scratch must not silently clear them.
@@ -373,7 +405,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # unannounced into a list of a hundred. (Meetings processed before this
         # existed carry NO reviewed key at all, and the panel treats a missing key
         # as already-reviewed — so nothing retroactively floods the inbox.)
-        category, reviewed, meeting_id = None, False, None
+        category, reviewed = None, False
         try:
             import json as _json
             prev = _json.loads(json_path.read_text())
@@ -382,13 +414,14 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # a Redo re-transcribes the SAME meeting: it keeps its id, or every
             # registry reference, lock and queued job pointing at this meeting
             # would be orphaned by a reprocess
-            meeting_id = prev.get("meeting_id") or None
+            meeting_id = prev.get("meeting_id") or meeting_id
         except (OSError, ValueError):
             pass
         meta = {
-            # immutable identity: minted once here, never rewritten, and FIRST
-            # in the file so config.id_of finds it in a bounded read of a
-            # transcript that may run to megabytes
+            # immutable identity: minted once, never rewritten, and FIRST in
+            # the file so config.id_of finds it in a bounded read of a
+            # transcript that may run to megabytes. A new meeting takes the id
+            # its lock is named for.
             "meeting_id": meeting_id or config.new_meeting_id(),
             "source_file": src.name,
             # identity, not display: resolve_base matches (name, mtime) to tell

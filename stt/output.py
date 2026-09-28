@@ -38,6 +38,24 @@ def speaker_display(label, name=None) -> str:
         return str(label)
 
 
+def roster_labels(speakers) -> dict:
+    """{cluster id: display} for a meeting's roster, for line_label."""
+    return {s.get("id"): s.get("display") for s in speakers or [] if s.get("display")}
+
+
+def line_label(seg, roster) -> str:
+    """A transcript line's speaker label for the panel: its roster entry's
+    display, the label the legend chip and its colour carry. A voice below
+    the minting floor gets no uid, so the pipeline never stamps a display on
+    its segments: the roster read "Voice 9" (build_speakers' fallback) while
+    each line carried only "SPEAKER_08", and the panel's old chain (display,
+    name, raw id) rendered that raw id. A line off the roster takes the
+    .txt's own fallback, so a raw diarizer id never reaches the page."""
+    sid = seg.get("speaker")
+    return (roster.get(sid) or seg.get("display") or seg.get("name")
+            or (speaker_display(sid) if sid else "?"))
+
+
 def txt_header(source_file, duration_sec, speakers, strict=False,
                processed_at=None) -> str:
     """The one canonical .txt header line (pipeline, relabel, and review all

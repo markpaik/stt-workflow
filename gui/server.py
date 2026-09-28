@@ -18,7 +18,8 @@ from pathlib import Path
 
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
-                 queue_order, rates, recorder, review, search, status, unknowns)
+                 output, queue_order, rates, recorder, review, search, status,
+                 unknowns)
 
 PORT = 8737
 # The one relabel worker for this panel process, started by start_server(). None
@@ -677,6 +678,16 @@ def _dismissed_failures() -> dict:
         return json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
     except (OSError, ValueError):
         return {}
+
+
+def _voice_ids(b: dict):
+    """The clusters a per-meeting voice request acts on: the body's
+    `speakers` list (every cluster of one split voice) when it sends one,
+    else its single `speaker`, as before the list existed."""
+    sids = b.get("speakers")
+    if isinstance(sids, list) and sids:
+        return sids
+    return b.get("speaker", "")
 
 
 _dismiss_lock = threading.Lock()
@@ -1913,9 +1924,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 d = json.loads(j.read_text())
                 dism = {str(x) for x in (d.get("dismissed_voices") or [])}
+                roster = output.roster_labels(d.get("speakers", []))
                 segs = [{"index": i, "start": s["start"], "end": s["end"],
                          "speaker": s.get("speaker"),
-                         "who": s.get("display") or s.get("name") or s.get("speaker") or "?",
+                         "who": output.line_label(s, roster),
                          "text": s.get("text", ""),
                          "edited": bool(s.get("text_edited") or s.get("reviewed")),
                          "flags": s.get("flags", [])}
@@ -2216,9 +2228,16 @@ class Handler(BaseHTTPRequestHandler):
                         # The panel offers this after the floor refuses the
                         # real enrollment; re-saving the same cluster is the
                         # typo fix. Only this one meeting rebuilds.
+                        # `speakers`: every cluster of ONE voice. The
+                        # diarizer can split a person into two clusters with
+                        # no uid between them, and a name saved for the first
+                        # alone left the other counted as unnamed. ONE call
+                        # checks every id and labels them all or none, and the
+                        # meeting relabels once below. Without the list,
+                        # `speaker` alone, as before.
                         from stt import summarize
                         res = summarize.set_local_name(
-                            b["meeting"], b["speaker"], name)
+                            b["meeting"], _voice_ids(b), name)
                         if not res.get("ok"):
                             self._json(res)
                             return
@@ -2314,10 +2333,13 @@ class Handler(BaseHTTPRequestHandler):
                 # and leaves every attributed line exactly where it is.
                 if not self._require_base(b.get("base")):
                     return
+                # `speakers`, as /api/name's local branch takes it: every
+                # cluster of one split voice, dismissed or restored in ONE
+                # write, all or none
                 from stt import summarize
                 fn = (summarize.restore_voice if b.get("restore")
                       else summarize.dismiss_voice)
-                self._json(fn(b["base"], b.get("speaker", "")))
+                self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:

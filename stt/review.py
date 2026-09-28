@@ -22,7 +22,7 @@ _meeting_lock_depth = threading.local()
 
 
 @contextlib.contextmanager
-def lock_meeting(base: str):
+def lock_meeting(base: str, key: str = None):
     """Serialize a full read-modify-write of one meeting's json between the
     GUI's review edits (this module) and relabel's rebuild (relabel.py) —
     both mutate the SAME file with no other exclusion between them, so a save
@@ -43,8 +43,13 @@ def lock_meeting(base: str):
     name still queue on the same file. It is also why a rename no longer leaves
     an orphan lock behind — the live library had 262 of them against 101
     meetings. A meeting with no id yet (a legacy one the backfill has not
-    reached) locks on its base exactly as before."""
-    key = config.lock_key(base)
+    reached) locks on its base exactly as before.
+
+    `key` names the lock file outright, for a caller that knows the id before
+    the json carries it: the pipeline decides a new meeting's id before its
+    first write, and without this it locked on the base (lock_key finds no
+    json yet), which left a base-named lock the doctor reports as an orphan."""
+    key = key or config.lock_key(base)
     held = getattr(_meeting_lock_depth, "held", None)
     if held is None:
         held = _meeting_lock_depth.held = {}
@@ -64,6 +69,33 @@ def lock_meeting(base: str):
             yield
         finally:
             held[key] = 0
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def lock_new_meeting():
+    """Serialize the id decision for a meeting that has no json yet.
+
+    A new meeting's lock is named for an id nobody else knows until its json
+    lands (lock_meeting's `key`). Two first runs of the SAME recording (a file
+    listed twice, two batches on one file) would each mint their own id and
+    each hold a lock of their own, so both wrote at once and the last write
+    silently won. The pipeline takes this lock before it mints and holds it
+    through the write: the second run then finds the first run's id and queues
+    on that meeting's lock.
+
+    One fixed file in the state root, like relabel.lock and llm.lock. It is
+    never under .locks, because the doctor reads every lock there as a meeting
+    key, and nothing ever unlinks it. The pipeline takes it before any
+    meeting lock and nothing takes it inside one, so the order cannot
+    deadlock."""
+    p = config.PROJECT_DIR / "new_meeting.lock"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 

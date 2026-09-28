@@ -43,7 +43,10 @@ def test_stt_home_backwards_compatible():
     """Unset STT_HOME => paths are the real defaults, exactly as before."""
     p = _run_config({})
     assert p["home"] is None
-    assert p["project"].endswith("STT_workflow")
+    # the checkout itself, under whatever name its folder carries: it was
+    # "STT_workflow" once and is "stt_workflow" now, and a worktree is named
+    # for its branch. PROJECT_DIR defaults to the folder holding stt/.
+    assert Path(p["project"]).name == REPO.name
     assert "Projects/brain/meetings" in p["meetings"]      # real default, not under a home
     assert Path(p["voiceprints"]).name == "voiceprints"
 
