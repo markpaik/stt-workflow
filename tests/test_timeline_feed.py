@@ -13,7 +13,7 @@ import time
 from gui import server as srv
 from stt import (archive, config, control, holds, manifest, recorder, status,
                  summarize, unknowns)
-from conftest import mfile
+from conftest import SPLIT_VOICE_BASE, SPLIT_VOICE_UID, mfile, split_voice_meeting
 
 # the top-level /api/state keys that existed BEFORE the timeline/tray were added
 BASELINE_KEYS = {
@@ -917,3 +917,47 @@ def test_finish_names_the_registry_voices_among_the_open_ones(sandbox):
     assert _finish_of("Board Prep 09252026")["voice_uids"] == ["U012"]
     assert _finish_of("Vendor Demo 09262026")["voice_uids"] == ["U007"]
 
+
+
+def test_finish_counts_a_split_voice_once(sandbox):
+    """A board meeting's strip read "Voices 22" while its To finish row read
+    "Voices 21". The diarizer split one person into two clusters that carry
+    one global id, so both display "Speaker 68", and naming that id names
+    both: one voice. The row's count (finish.voices) is 21 voices in 22
+    unnamed clusters, the uid is listed once, and the strip's own count over
+    the same meeting is pinned to this number in tests/test_new_shell.py."""
+    clusters, _ = split_voice_meeting()
+    d = json.loads(mfile(SPLIT_VOICE_BASE, ".json").read_text())
+    assert len([s for s in d["speakers"] if not s.get("name")]) == clusters == 22
+    st = srv.gather_state()
+    f = _row(st, id=SPLIT_VOICE_BASE)["finish"]
+    assert f["voices"] == 21
+    assert f["voice_uids"].count(SPLIT_VOICE_UID) == 1
+    assert len(f["voice_uids"]) == 17          # 18 registry clusters, 17 uids
+    # the voice queue's "Name N voices" counts the same 21: 17 registry voices
+    # and the 4 transcript-local ones
+    assert f["voices"] - len(f["voice_uids"]) == 4
+
+
+def test_rows_name_their_people_once_most_talk_first(sandbox):
+    """A To finish row lists named people, never raw labels, so the row
+    carries them: each name once (a named split voice is two clusters with
+    one name, a manual line's person counts too), the most talk first, and
+    no unnamed, dismissed, or raw-id cluster."""
+    spk = [{"id": "SPEAKER_00", "display": "Grace Lindqvist", "name": "Grace Lindqvist"},
+           {"id": "SPEAKER_01", "display": "Elena Ruiz", "name": "Elena Ruiz"},
+           {"id": "SPEAKER_02", "display": "Grace Lindqvist", "name": "Grace Lindqvist"},
+           {"id": "SPEAKER_03", "display": "Speaker 7"},
+           {"id": "SPEAKER_04", "display": "SPEAKER_04"},
+           {"id": "MANUAL_1", "display": "Marcus Hale", "name": "Marcus Hale"}]
+    seg = lambda sp, a, b: {"start": a, "end": b, "speaker": sp, "text": "words"}
+    segs = [seg("SPEAKER_00", 0, 10), seg("SPEAKER_01", 10, 60), seg("SPEAKER_02", 60, 90),
+            seg("SPEAKER_03", 90, 300), seg("MANUAL_1", 300, 305)]
+    _meeting("People Ready 09232026", speakers=spk, segments=segs)
+    _meeting("People Waiting 09232026", speakers=spk, segments=segs, reviewed=False)
+    st = srv.gather_state()
+    for base in ("People Ready 09232026", "People Waiting 09232026"):
+        r = _row(st, id=base)
+        # Elena 50s, Grace 10s + 30s = 40s, Marcus 5s
+        assert r["named"] == ["Elena Ruiz", "Grace Lindqvist", "Marcus Hale"], base
+        assert r["finish"]["voices"] == 1

@@ -52,3 +52,41 @@ def sandbox(tmp_path, monkeypatch):
     # Tests exercising group logic use the sandboxed status.json pgid path.
     monkeypatch.setattr(control, "_parent_pids", lambda: [])
     return d
+
+
+# The board meeting that showed "Voices 22" on the strip and "Voices 21" on its
+# To finish row: 22 unnamed diarizer clusters, two of which carry one global
+# unknown id (the diarizer split one person) and so both display "Speaker 68".
+# Naming U068 names both clusters, so it is ONE voice: 21 voices in 22
+# clusters. Four clusters are transcript-local "Voice N" labels with no uid.
+# Shared by the gather_state test (tests/test_timeline_feed.py) and the strip
+# test (tests/test_new_shell.py), so both count the same meeting.
+SPLIT_VOICE_BASE = "Board Meeting 09232026"
+SPLIT_VOICE_UID = "U068"
+
+
+def split_voice_meeting(base=SPLIT_VOICE_BASE):
+    """Write the meeting (json, txt, audio) and its unknown registry into the
+    sandbox. Returns (clusters, voices): 22 and 21."""
+    import json
+
+    from stt import unknowns
+    uids = ["U068", "U068"] + [f"U{n:03d}" for n in range(70, 86)]
+    speakers = [{"id": f"SPEAKER_{i:02d}", "name": None, "global_id": u,
+                 "display": unknowns.display(u)} for i, u in enumerate(uids)]
+    speakers += [{"id": f"SPEAKER_{i:02d}", "name": None, "global_id": None,
+                  "display": f"Voice {i - 17}"} for i in range(18, 22)]
+    segments = [{"start": i * 10.0, "end": i * 10.0 + 4.0, "speaker": s["id"],
+                 "display": s["display"], "text": f"line from {s['id']}"}
+                for i, s in enumerate(speakers)]
+    d = {"source_file": f"{base}.m4a", "duration_sec": 7200.0,
+         "date": "2026-09-23", "speakers": speakers, "segments": segments,
+         "words": []}
+    mfile(base, ".json").write_text(json.dumps(d))
+    mfile(base, ".txt").write_text("stub")
+    mfile(base, ".m4a").write_bytes(b"audio")
+    reg = {"speakers": {u: {"file": f"{u}.npy", "meetings": [base]}
+                        for u in dict.fromkeys(uids)}}
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(reg))
+    return len(speakers), len({s["display"] for s in speakers})
+

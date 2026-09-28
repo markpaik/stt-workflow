@@ -130,7 +130,7 @@ function grpDefaultOpen(id){
   if(id.slice(0,2)==='y-'){const y=id.slice(2);
     return y===cm.year||y===cm.prev.slice(0,4);}
   if(id==='m-today'||id==='m-yesterday')return true;
-  if(id==='m-undated')return false;
+  if(id==='m-undated'||id==='q-more')return false;   // q-more: Now's queue fold
   const ym=id.slice(2);
   return ym===cm.month||ym===cm.prev;
 }
@@ -166,10 +166,18 @@ function grpStates(groups,nest,forced){
 /* ============================ status pill ============================ *
  * The ONLY place pipeline state appears. Two segments, each shown only when it
  * has something to say (docs/ui-refresh phase 2): the pipeline, by priority,
- *   REC ticking  ->  transcribing N  ->  paused N waiting  ->  N waiting
+ *   REC ticking  ->  <stage> N  ->  paused N waiting  ->  N waiting
  * and beside it the naming, "naming 3 of 7" -- its own segment, so a naming
  * never hides behind a transcription. Nothing to say hides the pill.
  */
+// the running segment's word: the active files' own stage ("speakers" while
+// diarizing), "transcribing" only while transcribing. Files in different
+// stages, or a stage not reported yet, read "processing".
+function pillStage(active){
+  const st=new Set(Object.values(active||{}).map(e=>e&&e.stage));
+  const one=st.size===1?[...st][0]:null;
+  return one&&STAGE_NICE[one]?STAGE_NICE[one].toLowerCase():'processing';
+}
 function pillParts(s){
   const tl=s.timeline||[];
   const rec=s.recording;
@@ -188,7 +196,7 @@ function pillParts(s){
     // runs requested while this one holds the lock wait in the job queue; the
     // pill carries their count so a queued Redo is never invisible
     const qj=(s.queued_jobs||[]).length;
-    pipe=`transcribing ${n}${eta}${qj?` &middot; ${qj} queued`:''}`;
+    pipe=`${pillStage(s.active)} ${n}${eta}${qj?` &middot; ${qj} queued`:''}`;
   }else if(s.paused){
     cls='pill amber';
     pipe=`&#9208; paused${queued?` &middot; ${queued} waiting`:''}`;
@@ -440,6 +448,44 @@ function srcStem(name){
   return i>0?name.slice(0,i):name;
 }
 
+// A queued file's name in two parts: when its last word is short (the date
+// and extension, "... Meeting 09102026.mp4") that word stays whole and the
+// head ends in the ellipsis, so recordings that share a long prefix still
+// read apart in the narrow list pane. A name with no such word is one part.
+function queueName(name){
+  const t=String(name||''),i=t.lastIndexOf(' ');
+  if(i<=0||t.length-i>18)return `<span class="qhead">${esc(t)}</span>`;
+  return `<span class="qhead">${esc(t.slice(0,i))}</span><span class="qtail">&nbsp;${esc(t.slice(i+1))}</span>`;
+}
+// A waiting or held file is ONE compact line: the file name, then its size
+// and estimate in mono at the right, and the same hover actions it always had.
+// Five multi-hour board recordings as full rows pushed To finish below the
+// fold. The name's tooltip carries what the line leaves out: the whole name,
+// its size, the per-stage split of the estimate, and what held means. A
+// duplicate still says so on the line (dupNote), since it can save hours of
+// transcription.
+function queueBodyAndSlot(row){
+  const held=row.state==='held',id=escJs(row.id);
+  const size=row.size_mb!=null?row.size_mb+' MB':'';
+  const est=row.est_minutes?'&#8776;'+fmtEta(row.est_minutes*60):'';
+  const tip=[row.title,size,row.est_detail,held?'Held: automatic runs skip this until you release it':'']
+    .filter(Boolean).map(esc).join('&#10;');
+  // the size is its own span: the narrow list pane shows the estimate alone
+  const info=(size||est)?`<span class="mono">${size?`<span class="qsize">${size}${est?' &middot; ':''}</span>`:''}${est}</span>`:'';
+  const state=held?`<span class="qheld">&#10073;&#10073; held</span>${info?' '+info:''}`
+    :(info||'waiting');
+  return `<div class="rbody"><div class="rtitle" title="${tip}">${queueName(row.title)}</div>${dupNote(row)}</div>
+        <div class="rslot">
+          <span class="rstate qinfo yields">${state}</span>
+          ${slotActions(
+            `<button class="iact play" type="button" onclick="rowListen('${id}')" title="Listen">&#9654;</button>
+             ${held?`<button class="iact" type="button" onclick="rowRelease('${id}')">Release</button>`
+               :`<button class="iact" type="button" onclick="rowHold('${id}')" title="Hold">&#10073;&#10073;</button>`}
+             <button class="iact" type="button" onclick="rowProcess('${id}')">Process</button>
+             <button class="iact" type="button" onclick="rowDelete('${id}',event)" title="Delete">&#10005;</button>`)}
+        </div>`;
+}
+
 function bodyAndSlot(row){
   switch(row.state){
 
@@ -452,37 +498,9 @@ function bodyAndSlot(row){
         <div class="rslot"><span class="rstate spill rec">${state}</span></div>`;
     }
 
-    case 'waiting':{
-      const bits=[];
-      if(row.size_mb!=null)bits.push(row.size_mb+' MB');
-      if(row.est_minutes)bits.push('&#8776;'+row.est_minutes+' min');
-      // the split the total hides: transcription and speaker separation
-      // dominate and scale differently per file. The server computes it on
-      // every poll, so it renders rather than being thrown away.
-      const det=row.est_detail
-        ?`<div class="rmeta estdetail">${esc(row.est_detail)}</div>`:'';
-      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${det}${dupNote(row)}</div>
-        <div class="rslot">
-          <span class="rstate spill yields">${bits.join(' &middot; ')||'waiting'}</span>
-          ${slotActions(
-            `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
-             <button class="iact" type="button" onclick="rowHold('${escJs(row.id)}')" title="Hold">&#10073;&#10073;</button>
-             <button class="iact" type="button" onclick="rowProcess('${escJs(row.id)}')">Process</button>
-             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Delete">&#10005;</button>`)}
-        </div>`;
-    }
-
+    case 'waiting':
     case 'held':
-      return `<div class="rbody"><div class="rtitle">${esc(row.title)}</div>${dupNote(row)}
-          <div class="rmeta">automatic runs skip this until you release it</div></div>
-        <div class="rslot">
-          <span class="rstate spill yields">&#10073;&#10073; held</span>
-          ${slotActions(
-            `<button class="iact play" type="button" onclick="rowListen('${escJs(row.id)}')" title="Listen">&#9654;</button>
-             <button class="iact" type="button" onclick="rowRelease('${escJs(row.id)}')">Release</button>
-             <button class="iact" type="button" onclick="rowProcess('${escJs(row.id)}')">Process</button>
-             <button class="iact" type="button" onclick="rowDelete('${escJs(row.id)}',event)" title="Delete">&#10005;</button>`)}
-        </div>`;
+      return queueBodyAndSlot(row);
 
     case 'processing':{
       const pct=row.pct!=null?row.pct:null;
@@ -577,7 +595,8 @@ function rowHTML(row){
   // sort: the finish strip's Title step names it, so the list never holds a form
   if(row.state==='needs_name')return finishRowHTML(row);
   const open=row.state==='ready'&&OPEN.has(row.id);
-  return `<div class="row${open?' open':''}" data-state="${esc(row.state)}" data-id="${esc(row.id)}" tabindex="0">`
+  const q=row.state==='waiting'||row.state==='held';
+  return `<div class="row${open?' open':''}${q?' qrow':''}" data-state="${esc(row.state)}" data-id="${esc(row.id)}" tabindex="0">`
     +gutter(row)+bodyAndSlot(row)+`</div>`;
 }
 
@@ -603,6 +622,27 @@ function timelineSections(rows,now){
     ||(b.when||'').localeCompare(a.when||''));
   return out;
 }
+// Now's queue: past three waiting or held files, the rest fold under ONE
+// line, "N more waiting · ≈Xh" (their count and summed estimate), which a
+// click opens. The fold persists as the accordion's do (stt_groups, id
+// q-more; folded by default), and a search or a filter forces it open, as it
+// forces every section, so a match is never hidden. The queue rows sit last
+// in Now (PIN_ORDER), so the fold is always the tail of the section.
+// Answers the markup and the ids the fold hides (the selection drops them).
+const QUEUE_SHOW=3,QUEUE_FOLD='q-more';
+function nowRowsHTML(rows,open){
+  const q=(rows||[]).filter(r=>r.state==='waiting'||r.state==='held');
+  if(q.length<=QUEUE_SHOW)return {html:(rows||[]).map(rowHTML).join(''),hidden:[]};
+  const rest=q.slice(QUEUE_SHOW),keep=rows.slice(0,rows.length-rest.length);
+  const mins=rest.reduce((a,r)=>a+(r.est_minutes||0),0);
+  const line=`<button class="ghead qmore" type="button" id="qmore" aria-expanded="${open?'true':'false'}"`
+    +` onclick="grpToggle('${QUEUE_FOLD}')" title="${open?'Fold the rest of the queue':'Show the rest of the queue'}"`
+    +`><span class="gchev" aria-hidden="true">${open?'&#9662;':'&#9656;'}</span`
+    +`><span class="glabel"><span class="mono">${rest.length}</span> more waiting`
+    +(mins?` &middot; <span class="mono">&#8776;${fmtEta(mins*60)}</span>`:'')+`</span></button>`;
+  return {html:keep.map(rowHTML).join('')+line+(open?rest.map(rowHTML).join(''):''),
+    hidden:open?[]:rest.map(r=>r.id)};
+}
 // the three steps as dots: done green with a check, open teal with its count
 function finishDotsHTML(row){
   return `<span class="steps">`+finishSteps(row).slice(0,3).map(st=>{
@@ -611,13 +651,24 @@ function finishDotsHTML(row){
     return `<span class="sdot${done?' done':''}">${done?'&#10003; ':''}${st.label}${c}</span>`;
   }).join('')+`</span>`;
 }
+// the meta line of a compact row: the duration, up to three named people
+// (the server's `named`, the most talk first) with "+N" for the rest, then
+// the unnamed voices as ONE teal count, the same finish.voices the Voices dot
+// and the strip show. A raw "Speaker N" or "Voice N" label never appears: a
+// board meeting's row listed 22 of them.
+function peopleMetaBits(row){
+  const bits=[],named=row.named||[],n=(row.finish&&row.finish.voices)||0;
+  if(row.minutes!=null)bits.push(row.minutes+' min');
+  if(named.length)bits.push(esc(named.slice(0,3).join(', '))
+    +(named.length>3?` +${named.length-3}`:''));
+  if(n>0)bits.push(`<span class="unn">${n} unnamed</span>`);
+  return bits;
+}
 // one compact row: the title and date, one meta line, the step dots. The row
 // is a link to the meeting, where the finish strip takes over.
 function finishRowHTML(row){
   const title=(row.state==='needs_name'&&row.suggested_title)||row.title||'';
-  const bits=[];
-  if(row.minutes!=null)bits.push(row.minutes+' min');
-  if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
+  const bits=peopleMetaBits(row);
   return `<a class="lrow" href="#m/${encodeURIComponent(row.id)}" data-id="${esc(row.id)}"`
     +` data-state="${esc(row.state)}"><span class="lt"><span class="ltitle">${esc(title)}</span>`
     +(row.date?`<span class="ldate">${esc(shortDate(row.date))}</span>`:'')+`</span>`
@@ -838,7 +889,7 @@ function sigOf(r){
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
   r.est_detail,
   r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
-  (r.speakers||[]).join(','),
+  (r.speakers||[]).join(','),(r.named||[]).join(','),
   // the finish record paints a To finish row's dots, and moves as voices are
   // named and flags checked while nothing else on the row changes
   r.finish?[r.finish.title,r.finish.voices,r.finish.flags].join(','):'',
@@ -935,10 +986,14 @@ function drawTimeline(s){
     }
   }else{
     const sec=timelineSections(rows);
-    const top=headSectionsHTML(urgent+upHTML+sec.now.map(rowHTML).join(''),sec.fin,acts);
-    // the pinned group carries its own markup: the two sections, whole
-    if(top)groups.push({key:'',pinned:true,rows:sec.now.concat(sec.fin),html:top});
-    split=sec.now.length+':'+sec.fin.length;
+    const qopen=grpForced()||grpOpen(QUEUE_FOLD);
+    const nowRows=nowRowsHTML(sec.now,qopen);
+    const top=headSectionsHTML(urgent+upHTML+nowRows.html,sec.fin,acts);
+    // the pinned group carries its own markup: the two sections, whole. The
+    // queue fold's hidden rows ride it, so the selection can drop them.
+    if(top)groups.push({key:'',pinned:true,rows:sec.now.concat(sec.fin),html:top,
+      folded:nowRows.hidden});
+    split=sec.now.length+':'+sec.fin.length+':'+(qopen?1:0);
     for(const r of sec.rest){
       const key=dateBucket(dateKey(r));
       const last=groups[groups.length-1];
@@ -1793,7 +1848,7 @@ function applySel(){                       // reapply after any rebuild; prune s
   // can see. A search or category filter is different: it narrows the view on
   // purpose and the selection survives it, as it always has.
   const folded=new Set();
-  for(const g of LAST_GROUPS){if(g.pinned)continue;
+  for(const g of LAST_GROUPS){if(g.pinned){(g.folded||[]).forEach(id=>folded.add(id));continue;}
     if(g.open===false||g.yearOpen===false)g.rows.forEach(r=>folded.add(r.id));}
   [...SEL].forEach(id=>{if(!live.has(id)||folded.has(id))SEL.delete(id);});
   document.querySelectorAll('#timeline .row .chk').forEach(c=>{
@@ -4179,9 +4234,11 @@ function fsVoiceOrder(voices,segs,resolved,passed){
   const done=new Set(resolved||[]),again=new Set(passed||[]),talk={};
   for(const g of segs||[])
     talk[g.speaker]=(talk[g.speaker]||0)+Math.max(0,(g.end||0)-(g.start||0));
+  // a voice split over clusters talks for all of them
+  const t=v=>(v.ids||[v.id]).reduce((a,id)=>a+(talk[id]||0),0);
   return (voices||[]).filter(v=>!(v.uid&&done.has(v.uid)))
     .map(v=>v.uid&&again.has(v.uid)?Object.assign({},v,{st:'skip'}):v)
-    .sort((a,b)=>(talk[b.id]||0)-(talk[a.id]||0));
+    .sort((a,b)=>t(b)-t(a));
 }
 
 /* ------------------------------------------------------------- markup ---- */
@@ -4363,10 +4420,22 @@ function _fsSubstantial(){
 }
 // the voices this meeting still asks about, straight off the transcript's
 // speaker options: the same set the legend's "?" chips and the server's
-// finish count read (unnamed, not dismissed, id not its own display)
+// finish count read (unnamed, not dismissed, id not its own display). One
+// VOICE, not one cluster: the diarizer can split one person into two
+// clusters that carry the same global id (both "Speaker 68"), and naming
+// that id names both, so they are one voice to ask about. Clusters sharing
+// a uid, or with no uid the same display, collapse into one entry whose
+// `ids` lists every cluster. The server's finish count keys by display, so
+// the strip and the To finish row count the same voices.
 function fsVoicesFrom(opts){
-  return (opts||[]).filter(o=>!o.named&&!o.dismissed&&o.id!==o.display)
-    .map(o=>({id:o.id,display:o.display,uid:mUnknownUid(o.display),st:''}));
+  const out=[],by=new Map();
+  for(const o of (opts||[]).filter(o=>!o.named&&!o.dismissed&&o.id!==o.display)){
+    const v={id:o.id,ids:[o.id],display:o.display,uid:mUnknownUid(o.display),st:''};
+    const k=v.uid?'u\x00'+v.uid:'d\x00'+v.display;
+    if(by.has(k)){by.get(k).ids.push(o.id);continue;}
+    by.set(k,v);out.push(v);
+  }
+  return out;
 }
 function _fsOpenVoices(){return FS.voices?FS.voices.filter(v=>!v.st||v.st==='skip').length:FS.fin.voices;}
 // the transcript (re)loaded: the page's own segments are the freshest truth
@@ -4381,8 +4450,9 @@ function fsSegsLoaded(){
     if(FS.mode==='voices'&&FS.voices.length&&!FS.voices.some(v=>!v.st)
        &&!FS.past.includes('voices'))FS.past.push('voices');
   }else{
-    const live=new Set(fresh.map(v=>v.id));
-    FS.voices.forEach(v=>{if((!v.st||v.st==='skip')&&!live.has(v.id))v.st='gone';});
+    // a voice is gone once none of its clusters still asks
+    const live=new Set([].concat(...fresh.map(v=>v.ids)));
+    FS.voices.forEach(v=>{if((!v.st||v.st==='skip')&&!(v.ids||[v.id]).some(id=>live.has(id)))v.st='gone';});
   }
   FS.fin.voices=_fsOpenVoices();
   FS.fin.flags=_fsSubstantial();
@@ -4562,14 +4632,18 @@ async function fvPreview(v,tok){
     looks.hidden=false;
   }
 }
+// every cluster of the voice: a split voice's longest turn and its lines may
+// sit in either cluster, so the lines of all of them merge, longest first
 async function fvLines(v,tok){
-  let r;
-  try{r=await api('/api/voice_lines?base='+encodeURIComponent(FS.base)
-    +'&speaker='+encodeURIComponent(v.id));}
+  let rs;
+  try{rs=await Promise.all((v.ids||[v.id]).map(id=>
+    api('/api/voice_lines?base='+encodeURIComponent(FS.base)+'&speaker='+encodeURIComponent(id))));}
   catch(e){return;}
   if(!FS||fvToken()!==tok)return;
   const clip=$('#fvclip'),said=$('#fvsaid');
-  if(!r||r.error||!Array.isArray(r.lines)){if(clip)clip.innerHTML='';return;}
+  if(rs.some(r=>!r||r.error||!Array.isArray(r.lines))){if(clip)clip.innerHTML='';return;}
+  const r={lines:[].concat(...rs.map(x=>x.lines))
+    .sort((a,b)=>(+b.dur||0)-(+a.dur||0))};
   if(!r.lines.length){
     if(clip)clip.innerHTML='<span class="src">No transcript text was attributed to this voice.</span>';
     return;
@@ -4648,10 +4722,14 @@ async function fvForget(){
   const base=FS.base,tok=fvToken();
   fvBusy(true);
   let r=null;
+  // every cluster of a split voice is dismissed here, or the one left over
+  // keeps the voice counted
+  const ids=v.ids||[v.id];
   try{
     r=v.uid?await api('/api/forget',{uid:v.uid})
-           :await api('/api/dismiss_voice',{base:base,speaker:v.id});
-    if(r&&r.ok&&v.uid)await api('/api/dismiss_voice',{base:base,speaker:v.id});
+           :await api('/api/dismiss_voice',{base:base,speaker:ids[0]});
+    if(r&&r.ok)for(const id of v.uid?ids:ids.slice(1))
+      await api('/api/dismiss_voice',{base:base,speaker:id});
   }catch(e){r=r&&r.ok?r:null;}
   finally{fvBusy(false);}
   if(!r||!r.ok){

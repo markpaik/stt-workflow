@@ -132,12 +132,17 @@ of their own only when the pill leaves them no room.
 
 Status pill: the ONLY place pipeline state appears. Mono, in two segments
 (revised 2026-09-27). The pipeline segment shows one state, by priority:
-`● REC 12:41` (rec red, ticking) → `transcribing 2 · ≈14 min` (accent) →
+`● REC 12:41` (rec red, ticking) → `speakers 1 · ≈41h 55m` (accent) →
 `⏸ paused · 3 waiting` (amber, always with the waiting count when nonzero) →
-`3 waiting`. The naming segment sits beside it, split by a `--line`
-hairline: `naming 3 of 7`, so a naming never hides behind a transcription.
-Either segment alone renders alone; with neither, the pill disappears (idle
-needs no announcement). The pill's colour is the pipeline segment's. At
+`3 waiting`. The running state names the active files' own stage, lowercased
+from STAGE_NICE (`preparing`, `transcribing`, `speakers`, `verifying`,
+`writing`, `summary`), when every active file is in that stage; files in
+different stages, or a stage not reported yet, read `processing N` (revised
+2026-09-28: it said `transcribing 1` while the one file was diarizing). The
+naming segment sits beside it, split by a `--line` hairline:
+`naming 3 of 7`, so a naming never hides behind a transcription. Either
+segment alone renders alone; with neither, the pill disappears (idle needs
+no announcement). The pill's colour is the pipeline segment's. At
 720px and below the pill may wrap, and the two segments stack, the same
 `--line` hairline running across between them instead of down.
 Clicking the pill opens the Process ▾ popover.
@@ -183,8 +188,21 @@ dot while untagged) with the amber check-count beneath it.
 The right rail's pill is the state:
 
 - recording   `● capturing` in rec red, elapsed ticking; title "Recording now…"
-- waiting     `size · ≈est min` + hover actions [▶ listen] [hold ❚❚] [Process] [✕]
-- held        `❚❚ held` + same hover actions with [release]
+- waiting     ONE compact line (revised 2026-09-28): the file name (500
+              weight, 8px padding, 6px apart), then `812 MB · ≈41h 55m` in
+              mono sub at the right, no pill; hover actions [▶ listen]
+              [hold ❚❚] [Process] [✕] take its place, and the row keeps its
+              height. The name's head takes the ellipsis while its last word
+              (the date and extension, when that word is short) stays whole:
+              `Board o… 09102026.mp4`. The name's tooltip carries the whole
+              name, the size, and the per-stage split of the estimate. In
+              the two-pane list the line shows the estimate alone, or the
+              name would get about 60px; at phone width the name wraps, as
+              every title does there. A duplicate's "already processed" note
+              sits beside the name on the same line.
+- held        the same line with `❚❚ held` before the numbers and [release]
+              in place of [hold]; the tooltip adds that automatic runs skip
+              it until released
 - processing  stage + % + eta in a busy-blue pill, tabular numerals; 2px
               busy-blue hairline progress bar along the card's bottom edge
               (Boardroom; supersedes the accent progress); no actions (Stop
@@ -397,7 +415,13 @@ its own:
   Beside it, the voice's longest turn (played through the page's own span
   playback) and up to three of its lines with timestamps. The save is the
   naming panel's own (`saveName`), floor and warn confirms included. A skipped
-  voice keeps Voices open and the strip moves on past it.
+  voice keeps Voices open and the strip moves on past it. A voice is a
+  person, not a diarizer cluster (revised 2026-09-28): clusters that share a
+  registry uid, or with no uid a display label, are one voice, because
+  naming the uid names every cluster that carries it. Its clip and lines
+  draw from all of its clusters, Not a real speaker dismisses all of them,
+  and the strip's Voices count equals the To finish row's (a board
+  meeting's strip read 22 against the row's 21).
 - **Flags.** The verdict bar, unchanged, from the first flag in document
   order. A review that ends with no substantial flag left moves to Done.
 - **Done.** The strip becomes one green line, "Finished: title, voices, and
@@ -432,8 +456,18 @@ nothing, not even its eyebrow.
   Duplicates). Each is a white card with the 4px `--attn` left edge the
   tray wore. A Fix outcome ("Done ✓", the reset message, or Retry with the
   error) is state, so the list's 2s rebuild never wipes it. Then any drop
-  uploads, then the recording, processing, failed, held, and waiting rows,
-  unchanged. A failed file appears once, as its row.
+  uploads, then the recording, processing, failed, held, and waiting rows.
+  A failed file appears once, as its row. Held and waiting files are the
+  compact one-line rows (see the Anatomy's rail list), and past three of
+  them the rest fold under one quiet line, `▸ 2 more waiting · ≈1h 21m`
+  (the hidden files' count and summed estimate, in mono), which a click or
+  Enter opens (revised 2026-09-28: five multi-hour board recordings as full
+  rows pushed To finish below the fold at 1440x1000). The line is a section
+  header by class, so j/k reach it; it sits tight under the rows with no
+  rule. The fold persists in `stt_groups` as `q-more` (folded by default), a
+  search, "Has flags", or "Has voices" forces it open as it forces every
+  section, and a file it hides leaves the selection, as a folded month's
+  rows do.
 - **To finish.** Every meeting with an open step: its title not yet
   accepted, or any open step on a meeting processed in the last 14 days
   (`toFinish`). Rows keep the timeline's order, the order `]` walks. A
@@ -441,8 +475,14 @@ nothing, not even its eyebrow.
 
 A To finish row is compact and is one link to `#m/<base>`, where the finish
 strip takes over: the title at 15px semibold (the suggested title while the
-title is open) with the date right-aligned at 13px sub, one 13px meta line
-(`47 min · speakers`), then the step dots. A dot is a 4px chip at 13px
+title is open) with the date right-aligned at 13px sub, one 13px meta line,
+then the step dots. The meta line reads the duration, up to three named
+people (the row's `named`: each name once, the most talk first), `+N` for
+more named people, then `N unnamed` in the attention teal when any voice is
+unnamed (the row's `finish.voices`, the Voices dot's own count):
+`214 min · Ana Ortiz, Ben Cole, Cy Diaz +2 · 21 unnamed`. A raw
+`Speaker N` or `Voice N` label never appears on a To finish row (revised
+2026-09-28: a board meeting's row listed 22 of them). A dot is a 4px chip at 13px
 semibold: teal (`--attn` on `--attn-soft`) while open, with its count in
 mono ("Voices 2", "Flags 6"; Title carries no count), green (`--ok` on
 `--ok-soft`) with a check once done ("✓ Title"). White card, 1px `--hair`

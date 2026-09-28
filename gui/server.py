@@ -542,6 +542,14 @@ def _meeting_meta(j: Path, dst_dir: Path):
             if seg.get("text", "").strip():
                 talk[seg.get("speaker")] = talk.get(seg.get("speaker"), 0.0) + max(
                     0.0, float(seg.get("end") or 0) - float(seg.get("start") or 0))
+        # the NAMED people, each once (a split voice once named is two
+        # clusters with one name), the most talk first, ties in roster order.
+        # A To finish row lists up to three of these and never a raw
+        # "Speaker N" / "Voice N" label: a board meeting listed 22 of them.
+        named = {}
+        for s in d.get("speakers", []):
+            if s.get("name"):
+                named[s["display"]] = named.get(s["display"], 0.0) + talk.get(s["id"], 0.0)
         meta = {"base": j.stem,
                 "date": iso,
                 # display name: the folder carries the date so recurring
@@ -550,6 +558,7 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "title": _display_title(j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
+                "named": sorted(named, key=lambda k: -named[k]),
                 # {display: cluster id} for the voices this meeting heard but
                 # never named. The unknown registry does not track all of them
                 # (the minting floor keeps one-off voices transcript-local, and
@@ -848,11 +857,13 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec):
                         "suggested_date": meta["date"],
                         "has_audio": bool(meta["audio"]),
                         "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "named": meta["named"],
                         "unnamed_clusters": meta["unnamed_clusters"],
                         "summary": _preview(meta["summary"])})
         else:
             row.update({"id": meta["base"], "state": "ready",
                         "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "named": meta["named"],
                         "category": meta["category"],
                         "review_substantial": meta["flagged"],
                         "review_minor": meta["flagged_minor"],

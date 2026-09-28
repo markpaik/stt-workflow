@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from gui import server as srv
+from conftest import SPLIT_VOICE_BASE, SPLIT_VOICE_UID, split_voice_meeting
 
 NODE = shutil.which("node")
 STATIC = Path(srv.__file__).resolve().parent / "static"
@@ -830,7 +831,8 @@ def _pill_env():
     return "\n".join([
         "function clock(x){return '0:'+String(x).padStart(2,'0');}",
         "function fmtEta(x){return Math.round(x/60)+' min';}",
-        _js_fn("pillParts"),
+        re.search(r"(?m)^const STAGE_NICE=\{[\s\S]*?\};$", NEW_JS).group(0),
+        _js_fn("pillStage"), _js_fn("pillParts"),
         "const pill=s=>{const p=pillParts(s);return p?[p.cls,p.html]:null;};",
     ])
 
@@ -869,9 +871,10 @@ def test_the_pill_gives_naming_its_own_segment_beside_the_pipeline():
     out = _run_node(_pill_env() + """
 const j={running:{kind:'relabel',total:7,done:2}};
 const tl=[{state:'waiting'},{state:'held'},{state:'ready'}];
+const tr={a:{stage:'transcribing'}};
 console.log(JSON.stringify({
-  both:pill({running:true,active:{a:{}},overall_eta_sec:360,relabel_running:true,jobs:j}),
-  runOnly:pill({running:true,active:{a:{}},overall_eta_sec:360,queued_jobs:[{}]}),
+  both:pill({running:true,active:tr,overall_eta_sec:360,relabel_running:true,jobs:j}),
+  runOnly:pill({running:true,active:tr,overall_eta_sec:360,queued_jobs:[{}]}),
   rec:pill({recording:{elapsed_secs:5},running:true,relabel_running:true,jobs:j}),
   recPaused:pill({recording:{elapsed_secs:5,paused:true}}),
   paused:pill({paused:true,timeline:tl,relabel_pending:true,jobs:{running:null}}),
@@ -899,6 +902,39 @@ console.log(JSON.stringify({
     assert re.search(r"(?m)^\.pill \.pseg\+\.pseg\{[^}]*border-left:1px solid var\(--line\)",
                      NEW_CSS)
     assert "drawPill(S)" in _js_fn("render")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_pill_names_the_stage_the_active_file_is_in():
+    """The pill said "transcribing 1" while the one active file was
+    diarizing a multi-hour board recording. One active file names its real
+    stage from STAGE_NICE; "transcribing" means the transcribing stage only.
+    Several files in different stages, or a stage not reported yet, read
+    "processing N"."""
+    out = _run_node(_pill_env() + """
+const run=(active,eta)=>pill({running:true,active,overall_eta_sec:eta});
+console.log(JSON.stringify({
+  diar:run({a:{stage:'diarizing'}},150900),
+  trans:run({a:{stage:'transcribing'}},360),
+  prep:run({a:{stage:'converting'}},null),
+  sum:run({a:{stage:'summarizing'}},null),
+  mixed:run({a:{stage:'transcribing'},b:{stage:'diarizing'}},720),
+  same:run({a:{stage:'diarizing'},b:{stage:'diarizing'}},720),
+  unreported:run({a:{}},null),
+  empty:run({},null),
+  odd:run({a:{stage:'mystery'}},null),
+}));
+""")
+    assert out["diar"] == ["pill accent", "speakers 1 &middot; &#8776;2515 min"]
+    assert out["trans"] == ["pill accent", "transcribing 1 &middot; &#8776;6 min"]
+    assert out["prep"] == ["pill accent", "preparing 1"]
+    assert out["sum"] == ["pill accent", "summary 1"]
+    assert out["mixed"] == ["pill accent", "processing 2 &middot; &#8776;12 min"]
+    assert out["same"] == ["pill accent", "speakers 2 &middot; &#8776;12 min"]
+    # no stage yet, no active entry, or a stage STAGE_NICE does not know:
+    # never a guess at "transcribing"
+    for k in ("unreported", "empty", "odd"):
+        assert out[k] == ["pill accent", "processing 1"], k
 
 
 def test_the_relabel_watcher_runs_before_the_meeting_view_early_return():
@@ -1636,12 +1672,13 @@ def test_needs_name_row_escapes_hostile_filenames_and_speaker_names():
     fixture = "\n".join([
         _finish_env(), _js_fn("srcStem"), _js_fn("fsTitleHTML"),
         "function shortDate(d){return d;}",
-        _js_fn("finishDotsHTML"), _js_fn("finishRowHTML"),
+        _js_fn("finishDotsHTML"), _js_fn("peopleMetaBits"), _js_fn("finishRowHTML"),
         r"""
 const row={state:'needs_name', id:"o'brien<b>", date:'2026-09-26',
   source_file: "Mark C. Ashby <sync> \"weird\".m4a",
   suggested_title: 'Something <i>else</i>', title: 'Something else',
   speakers: ["Ashby <script>alert(1)</script>"],
+  named: ["Ashby <script>alert(1)</script>"],
   finish: fin(false,1,0)};
 console.log(JSON.stringify({row:finishRowHTML(row), title:fsTitleHTML(row)}));
 """])
@@ -2017,9 +2054,11 @@ def test_a_waiting_row_says_when_it_was_already_processed():
     # everything user-derived is escaped, and the matched meeting is one click
     assert "esc(row.dup_title||row.dup_of)" in body
     assert "#m/${encodeURIComponent(row.dup_of)}" in body
-    # both queue states carry it (a held file is still worth flagging)
-    waiting = NEW_JS.split("case 'waiting':", 1)[1].split("case 'held':", 1)
-    assert "dupNote(row)" in waiting[0] and "dupNote(row)" in waiting[1][:900]
+    # both queue states carry it (a held file is still worth flagging): both
+    # render through the one compact queue line, which carries the note
+    assert re.search(r"case 'waiting':\s*case 'held':\s*return queueBodyAndSlot\(row\);",
+                     _js_fn("bodyAndSlot"))
+    assert "dupNote(row)" in _js_fn("queueBodyAndSlot")
     # ...and the flag is part of the row signature: the check hashes on a size
     # collision, so it lands a poll or two after the row first painted
     assert "r.dup_of,r.dup_reason" in _js_fn("sigOf")
@@ -2446,27 +2485,29 @@ console.log(JSON.stringify({
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_a_waiting_row_renders_the_stage_breakdown():
     """W27: est_detail was computed on every poll for every queued file and
-    never rendered. Either render it or stop computing it; it renders."""
+    never rendered. Either render it or stop computing it; it renders. A
+    waiting row is one compact line since 2026-09-28, so the split rides the
+    file name's tooltip, under the whole name, instead of a second line."""
     fixture = "\n".join([
         _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
-        _js_fn("slotActions"), "let S=null;", _js_fn("bodyAndSlot"),
+        _js_region("function fmtEta(", "const STAGE_NICE"),
+        _js_fn("slotActions"), "let S=null;", _js_fn("queueName"), _js_fn("queueBodyAndSlot"),
+        _js_fn("bodyAndSlot"),
         """
 const withDet=bodyAndSlot({state:'waiting',id:'src:a.m4a',title:'a.m4a',
   size_mb:42.1,est_minutes:9,est_detail:'transcribe ~6m \\u00b7 speakers ~3m'});
 const without=bodyAndSlot({state:'waiting',id:'src:b.m4a',title:'b.m4a',
   size_mb:1.0,est_minutes:1});
 console.log(JSON.stringify({
-  shown:withDet.includes('transcribe ~6m'),
-  cls:withDet.includes('class="rmeta estdetail"'),
-  quiet:without.includes('estdetail')}));
+  tip:withDet.includes('title="a.m4a&#10;42.1 MB&#10;transcribe ~6m \\u00b7 speakers ~3m"'),
+  oneLine:!withDet.includes('rmeta'),
+  quiet:without.includes('title="b.m4a&#10;1 MB"')}));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"shown": True, "cls": True, "quiet": False}
+    assert json.loads(r.stdout) == {"tip": True, "oneLine": True, "quiet": True}
     # the field folds into the row signature, or a late estimate never repaints
     assert "r.est_detail," in _js_fn("sigOf")
-    m = re.search(r"(?m)^\.estdetail\{[^}]*\}", NEW_CSS, re.S)
-    assert m and "13px" in m.group(0) and "var(--sub)" in m.group(0)
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -4084,7 +4125,8 @@ def _sections_env():
         re.search(r"(?m)^const NOW_STATES=.*;$", NEW_JS).group(0),
         "function dateKey(r){return r.date||((r.when||'').slice(0,10));}",
         "function shortDate(d){return 'D'+d;}",
-        _js_fn("timelineSections"), _js_fn("finishDotsHTML"), _js_fn("finishRowHTML"),
+        _js_fn("timelineSections"), _js_fn("finishDotsHTML"), _js_fn("peopleMetaBits"),
+        _js_fn("finishRowHTML"),
         _js_fn("secHeadHTML"), _js_fn("finishActsHTML"), _js_fn("headSectionsHTML"),
     ])
 
@@ -4128,9 +4170,11 @@ def test_a_to_finish_row_is_a_compact_link_with_its_step_dots():
 console.log(JSON.stringify({
   named:finishRowHTML({id:'Budget Review 09262026',state:'ready',title:'Budget Review',
     date:'2026-09-26',minutes:47,speakers:['Grace Lindqvist','Speaker 58'],
-    finish:fin(true,2,6)}),
+    named:['Grace Lindqvist'],finish:fin(true,2,6)}),
   waiting:finishRowHTML({id:'Recording 0926',state:'needs_name',title:'Recording 0926',
     suggested_title:'Literacy pilot',finish:fin(false,1,0)}),
+  bare:finishRowHTML({id:'Recording 0927',state:'needs_name',title:'Recording 0927',
+    finish:fin(false,0,0)}),
   dots:[fin(false,2,6),fin(true,0,3),fin(true,0,0)].map(f=>finishDotsHTML({finish:f})),
 }));
 """)
@@ -4139,11 +4183,16 @@ console.log(JSON.stringify({
     assert n.startswith('<a class="lrow" href="#m/Budget%20Review%2009262026"')
     assert 'data-id="Budget Review 09262026"' in n and 'data-state="ready"' in n
     assert '<span class="ltitle">Budget Review</span><span class="ldate">D2026-09-26</span>' in n
-    assert '<span class="lmeta">47 min &middot; Grace Lindqvist, Speaker 58</span>' in n
-    # a meeting waiting for its title shows the suggested one; no date, no meta
+    assert ('<span class="lmeta">47 min &middot; Grace Lindqvist &middot; '
+            '<span class="unn">2 unnamed</span></span>') in n
+    # a meeting waiting for its title shows the suggested one; no date, and
+    # with no duration or named person the meta line is its unnamed count
     w = out["waiting"]
     assert '<span class="ltitle">Literacy pilot</span></span>' in w
-    assert "ldate" not in w and "lmeta" not in w
+    assert "ldate" not in w
+    assert '<span class="lmeta"><span class="unn">1 unnamed</span></span>' in w
+    # nothing to say: no meta line at all
+    assert "lmeta" not in out["bare"]
     # the dots: done green with a check, open teal with a mono count; Title
     # carries no count, and the strip's Done step never becomes a dot
     assert out["dots"][0] == ('<span class="steps"><span class="sdot">Title</span>'
@@ -4229,7 +4278,10 @@ def _timeline_env(sort="date", search="", flagged="false"):
         _js_fn("_trayVerb"), _js_fn("_trayRow"), _js_oneline("dupeDisarm"),
         _js_oneline("nowMsg"), _js_oneline("trayCount"), _js_fn("voiceQueueCount"),
         _js_fn("traySig"),
-        _js_fn("nowTrayHTML"), _js_fn("drawTimeline"),
+        _js_fn("nowTrayHTML"),
+        _js_region("function fmtEta(", "const STAGE_NICE"),
+        re.search(r"(?m)^const QUEUE_SHOW=.*;$", NEW_JS).group(0), _js_fn("nowRowsHTML"),
+        _js_fn("drawTimeline"),
         "const html=()=>els['#timeline'].innerHTML;",
         "const order=h=>(h.match(/id=\"sec-\\w+\"|data-id=\"[^\"]*\"|class=\"ghead [^\"]*\"|"
         "class=\"trayrow\"/g)||[]).map(x=>x.replace(/^(id|data-id|class)=/,''));",
@@ -5807,3 +5859,311 @@ def test_the_key_sheet_lists_the_keys_phases_one_to_three_shipped():
     # the sheet is the one place key caps show; it opens only on ?
     assert "keySheetOpen();" in _kb_body()
     assert NEW_JS.count("keySheetOpen();") == 1
+
+
+# ---------------------------------------------------------------------------
+# UI follow-ups (2026-09-28): the four problems Mark's real library showed and
+# the demo data never did. A board recording's split voice, a queue of long
+# recordings in Now, 22 raw labels on a To finish row, and the pill.
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_strip_counts_a_split_voice_once_as_the_row_does(running_server):
+    """The strip read "Voices 22" while the To finish row read "Voices 21" on
+    the same board meeting: fsVoicesFrom made one voice per CLUSTER, and two
+    clusters carry the one global id U068 ("Speaker 68"). Naming that id
+    names both, so they are one voice. The meeting, its speaker options, and
+    the unknown registry come from the server itself (/api/transcript and
+    /api/state over tests/conftest.py's split_voice_meeting), and the strip's
+    count is FS.fin.voices after the transcript loads."""
+    split_voice_meeting()
+    from urllib.parse import quote
+    _, _, body = _get(running_server, "/api/transcript?base=" + quote(SPLIT_VOICE_BASE))
+    tr = json.loads(body)
+    _, _, body = _get(running_server, "/api/state")
+    st = json.loads(body)
+    row = next(r for r in st["timeline"] if r["id"] == SPLIT_VOICE_BASE)
+    out = _run_node("\n".join([
+        _js_fn("mUnknownUid"), _js_fn("fsVoicesFrom"), _js_fn("fsVoiceOrder"),
+        _js_oneline("_fsOpenVoices"), _js_fn("_fsSubstantial"), _js_fn("fsSegsLoaded"),
+        "function mIsMinor(){return false;}function fsSync(){}function reviewStart(){}",
+        "let S=" + json.dumps({"unknowns": st["unknowns"]}) + ";",
+        "let MR=null,MP=" + json.dumps({"base": SPLIT_VOICE_BASE,
+                                         "spkOpts": tr["speaker_options"],
+                                         "segs": tr["segments"]}) + ";",
+        "let FS={base:MP.base,voices:null,mode:null,past:[],first:true,hand:false,"
+        "fin:" + json.dumps({"title": True, "voices": row["finish"]["voices"],
+                             "flags": 0}) + "};",
+        "const before=FS.fin.voices;fsSegsLoaded();",
+        "const split=FS.voices.find(v=>v.uid===" + json.dumps(SPLIT_VOICE_UID) + ");",
+        "console.log(JSON.stringify({before,strip:FS.fin.voices,voices:FS.voices.length,",
+        "  clusters:FS.voices.reduce((a,v)=>a+(v.ids||[v.id]).length,0),split:split.ids||null,",
+        "  display:split.display,",
+        "  queued:fsVoiceOrder(FS.voices,MP.segs,[],[]).length}));",
+    ]))
+    assert len(tr["speaker_options"]) == 22
+    assert row["finish"]["voices"] == 21
+    # the strip, after the transcript loaded, agrees with the row it came from
+    assert out["before"] == out["strip"] == 21
+    assert out["voices"] == 21 and out["clusters"] == 22
+    assert out["split"] == ["SPEAKER_00", "SPEAKER_01"]
+    assert out["display"] == "Speaker 68"
+    assert out["queued"] == 21
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_split_voice_collapses_by_uid_else_by_display():
+    """fsVoicesFrom keys a voice by its registry uid, or with no uid by its
+    display. A named, a dismissed, and a raw-id cluster never ask."""
+    out = _run_node("\n".join([
+        _js_fn("mUnknownUid"), _js_fn("fsVoicesFrom"),
+        "let MP={base:'M'};",
+        "let S={unknowns:[{uid:'U068',display:'Speaker 68',meetings:['M']},",
+        "  {uid:'U070',display:'Speaker 70',meetings:['OTHER']}]};",
+        "const o=(id,display,x)=>Object.assign({id,display,named:false,dismissed:false},x||{});",
+        "const v=fsVoicesFrom([o('A','Speaker 68'),o('B','Voice 2'),o('C','Speaker 68'),",
+        "  o('D','Speaker 70'),o('E','Speaker 70'),o('F','Grace',{named:true}),",
+        "  o('G','Voice 2',{dismissed:true}),o('SPEAKER_09','SPEAKER_09'),o('H','Voice 3')]);",
+        "console.log(JSON.stringify(v.map(x=>[x.display,x.uid,x.ids,x.id])));",
+    ]))
+    assert out == [
+        ["Speaker 68", "U068", ["A", "C"], "A"],
+        ["Voice 2", None, ["B"], "B"],                 # G dismissed: never asks
+        ["Speaker 70", None, ["D", "E"], "D"],         # U070 not heard here: by display
+        ["Voice 3", None, ["H"], "H"],
+    ]
+
+
+def _split_voice_step_env():
+    return "\n".join([
+        _js_oneline("esc"), _js_fn("mFmtT"), _js_fn("fvToken"), _js_fn("fvLines"),
+        _js_fn("fvBusy"), _js_fn("fvForget"), _js_oneline("_fsOpenVoices"),
+        "let NPBUSY=false;",
+        "const els={'#fvclip':{innerHTML:''},'#fvsaid':{innerHTML:''},'#fverr':{hidden:true}};",
+        "function $(q){return els[q]||null;}",
+        "let MP={base:'M',hasAudio:true},plays=0;function fvPlay(){plays++;}",
+        "function refresh(){}function mReloadSegs(){}function fvNext(){}function fsStripSync(){}",
+        "let FS={base:'M',vi:0,live:true,cur:'voices',fin:{voices:1},",
+        "  voices:[{id:'A',ids:['A','C'],display:'Speaker 68',uid:null,st:''}]};",
+        "const LINES={A:[{start:40,dur:3,text:'short one'}],",
+        "  C:[{start:900,dur:12.5,text:'the long turn'},{start:10,dur:1,text:'yes'}]};",
+        "let posted=[];",
+        "function api(p,b){posted.push(b?[p,b]:[p]);",
+        "  const m=/speaker=([^&]*)/.exec(p);",
+        "  return Promise.resolve(m?{lines:LINES[decodeURIComponent(m[1])]}:{ok:true});}",
+    ])
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_split_voice_plays_and_quotes_from_all_its_clusters():
+    """The Voices step's clip and its "said" lines draw from every cluster
+    of the voice: the longest turn here sits in the second cluster, and the
+    lines of both clusters merge. "Not a real speaker" dismisses every
+    cluster, or the one left over keeps the voice counted."""
+    out = _run_node(_split_voice_step_env() + """
+(async()=>{
+  await fvLines(FS.voices[0],fvToken());
+  const fetched=posted.map(x=>x[0]);
+  const clip=FS.clip,said=els['#fvsaid'].innerHTML;
+  posted=[];
+  await fvForget();
+  const dismissed=posted.filter(x=>x[0]==='/api/dismiss_voice').map(x=>x[1].speaker);
+  FS.voices=[{id:'A',ids:['A','C'],display:'Speaker 68',uid:'U068',st:''}];FS.vi=0;
+  posted=[];
+  await fvForget();
+  const byUid=posted.map(x=>[x[0],x[1].uid||x[1].speaker]);
+  console.log(JSON.stringify({fetched,clip,said,plays,dismissed,byUid}));
+})();
+""")
+    assert out["fetched"] == ["/api/voice_lines?base=M&speaker=A",
+                              "/api/voice_lines?base=M&speaker=C"]
+    # the longest turn of the whole voice, which only the second cluster had
+    assert out["clip"] == {"start": 900, "end": 912.5}
+    assert out["plays"] == 1
+    said = out["said"]
+    assert "the long turn" in said and "short one" in said and "yes" in said
+    # in reading order, as before: 0:10, 0:40, 15:00
+    assert said.index("yes") < said.index("short one") < said.index("the long turn")
+    assert out["dismissed"] == ["A", "C"]
+    assert out["byUid"] == [["/api/forget", "U068"], ["/api/dismiss_voice", "A"],
+                            ["/api/dismiss_voice", "C"]]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_to_finish_row_names_three_people_and_counts_the_unnamed():
+    """A board meeting's To finish row listed 22 labels ("Speaker 77,
+    Speaker 70, Voice 5, ..."). The meta line reads: the duration, up to
+    three named people (the server's `named`, most talk first), "+N" for
+    the rest, then "N unnamed" in the teal attention colour, the same
+    finish.voices the Voices dot counts. A raw label never appears."""
+    raw = [f"Speaker {n}" for n in range(60, 78)] + [f"Voice {n}" for n in range(1, 5)]
+    out = _run_node(_sections_env() + """
+const RAW=""" + json.dumps(raw) + """;
+const row=(named,voices,x)=>finishRowHTML(Object.assign({id:'B',state:'ready',title:'Board',
+  date:'2026-09-23',minutes:214,speakers:RAW.concat(named),named,
+  finish:fin(true,voices,0)},x||{}));
+console.log(JSON.stringify({
+  board:row(['Ana Ortiz','Ben Cole','Cy Diaz','Dee Park','Eli Moss'],21),
+  three:row(['Ana Ortiz','Ben Cole','Cy Diaz'],0),
+  none:row([],21),
+  bare:row([],0),
+  legacy:row(undefined,2),
+  waiting:row(['Ana Ortiz'],1,{state:'needs_name',suggested_title:'Board'}),
+}));
+""")
+    meta = {k: re.search(r'<span class="lmeta">(.*?)</span>(?=<span class="steps">)', v)
+            for k, v in out.items()}
+    got = {k: (m.group(1) if m else None) for k, m in meta.items()}
+    assert got["board"] == ('214 min &middot; Ana Ortiz, Ben Cole, Cy Diaz +2 &middot; '
+                            '<span class="unn">21 unnamed</span>')
+    assert got["three"] == "214 min &middot; Ana Ortiz, Ben Cole, Cy Diaz"
+    assert got["none"] == '214 min &middot; <span class="unn">21 unnamed</span>'
+    assert got["bare"] == "214 min"
+    # a row from before the server sent `named` falls back to no people at
+    # all, never to the raw roster
+    assert got["legacy"] == '214 min &middot; <span class="unn">2 unnamed</span>'
+    assert got["waiting"] == ('214 min &middot; Ana Ortiz &middot; '
+                              '<span class="unn">1 unnamed</span>')
+    for k, html in out.items():
+        assert "Speaker " not in html and "Voice " not in html, k
+    # the count wears the attention teal (measured on the card and on --sel)
+    assert re.search(r"(?m)^\.lrow \.unn\{[^}]*color:var\(--attn\)", NEW_CSS)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_waiting_or_held_file_is_one_compact_line():
+    """Five multi-hour board recordings, each a full-height row, pushed To
+    finish below the fold at 1440x1000. A waiting or held file is one line:
+    the file name, then its size and estimate in mono at the right, and the
+    hover actions it always had. Recording, processing, and failed rows keep
+    their own markup."""
+    out = _run_node("\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
+        _js_region("function fmtEta(", "const STAGE_NICE"),
+        "function clock(){return '0:00';}const STAGE_NICE={diarizing:'Speakers'};",
+        "function catDot(){return '';}function shortDate(d){return d;}",
+        "function meetingByBase(){return null;}function finishRowHTML(){return '';}",
+        "const OPEN=new Set();",
+        _js_fn("slotActions"), _js_fn("gutter"), _js_fn("queueName"), _js_fn("queueBodyAndSlot"),
+        _js_fn("bodyAndSlot"), _js_fn("rowHTML"),
+        """
+const w=rowHTML({state:'waiting',id:'src:Board 0923.mp4',title:'Board 0923.mp4',
+  size_mb:812.4,est_minutes:2515,est_detail:'transcribe ~1540m \\u00b7 speakers ~975m'});
+const h=rowHTML({state:'held',id:'src:Budget.m4a',title:'Budget.m4a',size_mb:40.2,est_minutes:9});
+const bare=rowHTML({state:'waiting',id:'src:x.m4a',title:'x.m4a'});
+const dup=rowHTML({state:'waiting',id:'src:y.m4a',title:'y.m4a',size_mb:3,est_minutes:2,
+  dup_of:'Board 09232026',dup_title:'Board',dup_reason:'identical'});
+const p=rowHTML({state:'processing',id:'P',title:'P',stage:'diarizing',pct:40,eta:600});
+const f=rowHTML({state:'failed',id:'src:f.m4a',title:'f.m4a',error:'boom'});
+const long=queueName('Zoom recording_2026-09-10_board-session.mp4');
+console.log(JSON.stringify({w,h,bare,dup,p,f,long}));
+"""]))
+    w, h = out["w"], out["h"]
+    assert w.startswith('<div class="row qrow" data-state="waiting"')
+    # one line: the name, and the mono size and estimate as the rail's state
+    assert '<div class="rtitle" title="Board 0923.mp4&#10;812.4 MB&#10;transcribe ~1540m' in w
+    # the head takes the ellipsis, the last word (the date) stays whole
+    assert ('<span class="qhead">Board</span><span class="qtail">&nbsp;0923.mp4</span>'
+            '</div>') in w
+    assert '<span class="qhead">Budget.m4a</span></div>' in h
+    # a long last word is no date: the whole name takes the one ellipsis
+    assert out["long"] == '<span class="qhead">Zoom recording_2026-09-10_board-session.mp4</span>'
+    assert ('<span class="rstate qinfo yields"><span class="mono"><span class="qsize">'
+            '812.4 MB &middot; </span>&#8776;41h 55m</span></span>') in w
+    assert "rmeta" not in w and "spill" not in w
+    # the hover actions it always had
+    for a in ("rowListen('src:Board 0923.mp4')", "rowHold('src:Board 0923.mp4')",
+              "rowProcess('src:Board 0923.mp4')", "rowDelete('src:Board 0923.mp4',event)"):
+        assert a in w, a
+    assert h.startswith('<div class="row qrow" data-state="held"')
+    assert ('<span class="rstate qinfo yields"><span class="qheld">&#10073;&#10073; held</span> '
+            '<span class="mono"><span class="qsize">40.2 MB &middot; </span>&#8776;9 min'
+            '</span></span>') in h
+    # the size rides the tooltip too: the narrow list pane shows the estimate alone
+    assert 'title="Budget.m4a&#10;40.2 MB&#10;Held: automatic runs skip' in h
+    assert re.search(r"(?m)^body\.panes\.route-meeting \.row\.qrow \.qsize\{display:none\}",
+                     NEW_CSS)
+    assert "rowRelease('src:Budget.m4a')" in h and "rowHold" not in h
+    # what held means moved from a second line to the name's tooltip
+    assert "Held: automatic runs skip this until you release it" in h
+    assert "rmeta" not in h
+    assert '<span class="rstate qinfo yields">waiting</span>' in out["bare"]
+    # a duplicate still says so, on the same line
+    assert "already processed" in out["dup"] and 'class="rmeta dupnote"' in out["dup"]
+    # the live and failed rows are untouched
+    for k in ("p", "f"):
+        assert "qrow" not in out[k] and "spill" in out[k], k
+    # the line's CSS: compact, the name and a duplicate's note side by side
+    assert re.search(r"(?m)^\.row\.qrow\{min-height:0;", NEW_CSS)
+    assert re.search(r"(?m)^\.row\.qrow \.rbody\{flex-direction:row", NEW_CSS)
+    assert ".estdetail" not in NEW_CSS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_past_three_queued_files_the_rest_fold_under_one_line():
+    """With five long recordings waiting, Now shows the first three and one
+    line, "2 more waiting · ≈Xh", which a click opens. The fold persists as
+    the accordion's do (stt_groups, id q-more, folded by default), a search
+    forces it open, and three files get no fold line at all."""
+    mk = ("const q=(id,state,est)=>({id,title:id,state,est_minutes:est,"
+          "when:'2026-09-'+(29-id.slice(-1))+'T08:00:00'});"
+          "const LIVE=[{id:'R',state:'recording',when:'2026-09-28T09:00:00'},"
+          "{id:'P',state:'processing',when:'2026-09-28T08:00:00'},"
+          "{id:'F',state:'failed',when:'2026-09-01T08:00:00'}];")
+    out = _run_node(_timeline_env() + mk + """
+const five=LIVE.concat([q('H1','held',30),q('W2','waiting',2515),q('W3','waiting',600),
+  q('W4','waiting',61),q('W5','waiting',20)]);
+drawTimeline({timeline:five,tray:[]});
+const folded=order(html()),line=html().match(/<button class="ghead qmore"[\\s\\S]*?<\\/button>/)[0];
+const defaultOpen=grpDefaultOpen('q-more');
+grpToggle('q-more');
+const stored=GRP['q-more'];
+drawTimeline({timeline:five,tray:[]});
+const opened=order(html()),openLine=html().match(/<button class="ghead qmore"[\\s\\S]*?<\\/button>/)[0];
+grpToggle('q-more');drawTimeline({timeline:five,tray:[]});
+const refolded=order(html());
+els['#search'].value='W';els['#timeline'].dataset.sig='';
+drawTimeline({timeline:five,tray:[]});
+const searched=order(html());
+els['#search'].value='';els['#timeline'].dataset.sig='';
+const three=LIVE.concat([q('W2','waiting',30),q('W3','waiting',30),q('W4','waiting',30)]);
+drawTimeline({timeline:three,tray:[]});
+const noFold=html().includes('qmore');
+console.log(JSON.stringify({folded,line,defaultOpen,stored,opened,openLine,refolded,searched,noFold}));
+""")
+    # the live rows stay whole and ahead; three queue rows, then the line
+    assert out["folded"] == ['"sec-now"', '"R"', '"P"', '"F"', '"H1"', '"W2"', '"W3"',
+                             '"ghead qmore"']
+    line = out["line"]
+    assert 'id="qmore"' in line and 'aria-expanded="false"' in line
+    assert "onclick=\"grpToggle('q-more')\"" in line
+    # the count and the two hidden files' summed estimate (61 + 20 min)
+    assert ('<span class="glabel"><span class="mono">2</span> more waiting &middot; '
+            '<span class="mono">&#8776;1h 21m</span></span>') in line
+    assert out["defaultOpen"] is False
+    # a click opens it and stores the choice where the accordion's folds live
+    assert out["stored"] == "open"
+    assert out["opened"] == ['"sec-now"', '"R"', '"P"', '"F"', '"H1"', '"W2"', '"W3"',
+                             '"ghead qmore"', '"W4"', '"W5"']
+    assert 'aria-expanded="true"' in out["openLine"]
+    assert out["refolded"] == out["folded"]
+    # a search never hides a match behind the fold: four W rows match, so
+    # the line stands, forced open, and the fourth file shows under it
+    assert out["searched"] == ['"sec-now"', '"W2"', '"W3"', '"W4"', '"ghead qmore"', '"W5"']
+    assert out["noFold"] is False
+
+
+def test_a_folded_queue_file_leaves_the_selection():
+    """A queue file the fold hides is not in the DOM, so it leaves the
+    selection, as a row inside a folded month does."""
+    out = _run_node("\n".join([
+        "let S={timeline:[{id:'W1',state:'waiting'},{id:'W4',state:'waiting'},"
+        "{id:'W5',state:'held'}]};",
+        "const SELECTABLE=new Set(['ready','waiting','held']);",
+        "let SEL=new Set(['W1','W4','W5']);",
+        "let LAST_GROUPS=[{pinned:true,rows:[],folded:['W4','W5']}];",
+        "const document={querySelectorAll:()=>[],body:{classList:{toggle(){}}}};",
+        "function drawBulkBar(){}",
+        _js_fn("applySel"),
+        "applySel();console.log(JSON.stringify([...SEL].sort()));",
+    ]))
+    assert out == ["W1"]
