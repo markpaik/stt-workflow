@@ -2541,6 +2541,10 @@ function mKey(e){
   // an edit layer over the page (the naming panel, the drawer) owns every key
   // while it is open: n/p, /, the stepper's keys and the finish flow's stay put
   if(kbLayerOpen())return;
+  // an open popover (Process, a ⋯ menu, a bulk confirm) owns the plain keys
+  // the same way, so a list key it held back never lands in the reader
+  // instead (/ from the list is not the reader's find). Its Escape closes it.
+  if(_popClose&&!e.metaKey&&!e.ctrlKey)return;
   if(fsKey(e))return;    // the finish flow's keys: ] [ and the Voices step's
   // two panes: the list took this key (its Enter, e, x, /, j, k) before us
   if(e.defaultPrevented)return;
@@ -5550,7 +5554,10 @@ function kbKey(e){
     }
     if(!PANES)return;
   }
-  if(kbLayerOpen())return;   // the naming panel or the drawer owns the keys
+  // the naming panel, the drawer, or an open popover (Process, a ⋯ menu, a
+  // bulk confirm) owns the keys: j, k, x, Enter, e and / never move the
+  // ring, the bulk selection, or the reader under it. Its Escape closes it.
+  if(kbLayerOpen()||_popClose)return;
   // two panes: / is the list's search from the list, the reader's find elsewhere
   const inList=!!(ae&&ae.closest&&ae.closest('.wrap'));
   if(e.key==='/'){

@@ -186,6 +186,10 @@ Sonnet runs QA and the full suite, then review and commit.
    row, else the newest meeting), x for bulk selection, and denser rows
    (15px title, one 13px summary line, a 22px reader title). Below 900px the
    page is unchanged. See "Two panes" in `gui/DESIGN.md`.
+   Shipped 2026-09-27 (QA fix): an open popover (Process, a ⋯ menu, a bulk
+   confirm) holds the list's keys and the reader's in either layout, so x,
+   j, k, Enter, and `/` never change the bulk selection, the list selection,
+   or the reader under it.
 4. **Search chips and first run.** Filter chips, the "Said in" group, the
    setup check. A panel Record button waits until someone confirms the macOS
    microphone grant lets the server signal the menu-bar recorder; until then

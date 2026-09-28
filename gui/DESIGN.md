@@ -482,7 +482,8 @@ panel and the drawer own every key while either is open: `j`/`k`, `/`, and
 Enter never reach the rows under them, the meeting page's `n`/`p`, `/`, the
 stepper's keys, and the finish flow's keys stay put, and a rebuild never
 puts the ring back under them. The Escape that closes a layer closes only
-that layer; it never also exits the stepper or closes a card underneath.
+that layer; it never also exits the stepper or closes a card underneath. An
+open popover holds the plain keys the same way (see "Two panes").
 
 Phone width (720px and below; checked at 420px and 375px in both themes,
 revised 2026-09-27 after QA). Nothing forces a sideways scroll and no word
@@ -548,7 +549,12 @@ in either layout), Enter and e on a focused row, and `/` from the list (its
 search). A key the list takes never also reaches the reader, so Enter on a
 row never accepts a flag or saves a voice. Every other key is the reader's
 from anywhere: n and p, a and u, Space, s, `1` to `3`, `]` and `[`, and `/`
-from the reader (its find).
+from the reader (its find). An open popover (Process, a ⋯ menu, a bulk
+confirm) owns the plain keys, in either layout, as the naming panel and the
+drawer do: the list's keys and the reader's wait until it closes, and a key
+the list holds back never lands in the reader instead. Its own Escape closes
+it, a button inside it keeps its Enter and Space, and a Cmd or Ctrl chord
+(Cmd-F for the find) still reaches the page (QA fix, 2026-09-27).
 
 Density. List rows carry a 15px semibold title, a 13px meta line, and one
 13px summary line ending in an ellipsis, in either layout; the reader's title

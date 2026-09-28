@@ -2,9 +2,11 @@
 the LLM's structured reply (the LLM itself is faked — parsing is under test)."""
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime as _real_datetime
+from pathlib import Path
 
 import pytest
 
@@ -284,6 +286,9 @@ def _stub_llm_subprocess(monkeypatch, delay=0.0, tracker=None):
 
     monkeypatch.setattr(sp, "run", fake_run)
     monkeypatch.setattr(summarize, "available", lambda: True)
+    # the subprocess is faked, so the interpreter it names only has to exist:
+    # a checkout without .venv-llm (a git worktree) runs these tests too
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
 
 
 def test_generate_never_runs_two_models_at_once(sandbox, monkeypatch):

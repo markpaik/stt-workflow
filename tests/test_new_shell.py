@@ -4853,6 +4853,58 @@ console.log(JSON.stringify({
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_two_panes_is_the_narrow_fallback_decision_at_900px():
+    """twoPanes(width) alone: 900px and wider is two panes, anything
+    narrower keeps the one column."""
+    out = _run_node("\n".join([
+        "const PANES_MIN=900;", _js_oneline("twoPanes"),
+        "console.log(JSON.stringify([0,375,420,720,899,899.5,900,901,1099,1100,1440,2560]"
+        ".map(w=>twoPanes(w))));"]))
+    assert out == [False] * 6 + [True] * 6
+    assert "const PANES_MIN=900;" in NEW_JS
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_list_is_a_pane_only_beside_a_meeting_in_the_reader():
+    """paned() alone: the list is a pane (its own scroll, --sel, the ring
+    scrolling it) only with two panes AND a meeting in the reader. Two panes
+    over an empty library, or one column with a meeting open, are not."""
+    out = _run_node("\n".join([
+        _js_oneline("paned"), "let PANES=false,route={view:'timeline'};",
+        "const o=[];",
+        "for(const two of [false,true])for(const view of ['timeline','meeting']){",
+        "  PANES=two;route={view,base:view==='meeting'?'M1':null};o.push(paned());}",
+        "console.log(JSON.stringify(o));"]))
+    assert out == [False, False, False, True]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_only_a_meeting_row_opens_in_the_reader():
+    """rowOpens(state) alone: a ready meeting or one waiting for its title
+    opens in the reader. A live, queued, held, failed, recording, or upload
+    row never does, and neither does a row without a state."""
+    out = _run_node("\n".join([
+        _js_oneline("rowOpens"),
+        "console.log(JSON.stringify(['ready','needs_name','processing','waiting','held',"
+        "'failed','recording','uploading','done','',null,undefined,'READY'].map(rowOpens)));"]))
+    assert out == [True, True] + [False] * 11
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_reader_is_lost_only_when_the_library_drops_its_meeting():
+    """readerLost(timeline, base) alone: true only when no timeline row
+    carries the reader's id. A missing or empty timeline counts as lost, and
+    null holes in the list are skipped, never read."""
+    out = _run_node("\n".join([
+        _js_oneline("readerLost"),
+        "const tl=[null,{id:'A'},{id:'B',state:'ready'},{}];",
+        "console.log(JSON.stringify([readerLost(tl,'A'),readerLost(tl,'B'),",
+        "  readerLost(tl,'C'),readerLost(tl,undefined),readerLost([],'A'),",
+        "  readerLost(null,'A'),readerLost(undefined,'A')]));"]))
+    assert out == [False, False, True, False, True, True, True]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
 def test_a_click_selects_at_once_and_a_walk_mounts_the_reader_when_it_pauses():
     """Selection: the row wears --sel the moment it is chosen. A click mounts
     the reader at once; j/k mount it once the walk pauses for about 150ms, so
@@ -5054,6 +5106,66 @@ console.log(JSON.stringify(o));
     assert out["escNarrow"]["prevented"] is True and out["escNarrow"]["log"] == []
     assert out["jNarrow"] == {"log": [], "prevented": False}, \
         "one column: the meeting page owns the keys, as before"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_an_open_popover_keeps_the_list_keys_and_the_readers_under_it():
+    """QA, phase 3: with the Process popover (or a ⋯ menu) open, x put the
+    focused row into the bulk selection under it, and j, k, Enter and / sat
+    behind the same guard, which checked only the naming panel and the
+    drawer. An open popover owns the plain keys as those layers do, in either
+    layout: nothing under it moves the ring, the bulk selection, or the
+    reader, and a key the list holds back never lands in the reader instead.
+    Its own Escape (registered by openPop, not here) closes it, a button in
+    it keeps its own Enter and Space, and a chord still reaches the page.
+    Once it closes, every key works again."""
+    out = _run_node(_panes_keys_env() + """
+const o={};
+const KEYS=['x','j','k','Enter','e','/','n','p','a','u',']','[','Escape'];
+const run=t=>Object.fromEntries(KEYS.map(k=>[k,press(k,t)]));
+const popBtn=new Element();popBtn.tagName='BUTTON';popBtn.dataset={};
+popBtn._closest=()=>null;popBtn._matches=()=>false;
+_popClose=()=>{};
+// two panes: the ring on a list row, then focus in the reader
+document.activeElement=row2;o.wideList=run(row2);
+document.activeElement=body;o.wideReader=run(body);
+// a button inside the popover keeps its native Enter and Space
+document.activeElement=popBtn;o.popEnter=press('Enter',popBtn);o.popSpace=press(' ',popBtn);
+// a chord is a deliberate reach past the menu: Cmd-F is still the find
+document.activeElement=body;log.length=0;
+const cmdF={key:'f',metaKey:true,ctrlKey:false,altKey:false,target:body,
+  defaultPrevented:false,preventDefault(){this.defaultPrevented=true;}};
+kbKey(cmdF);mKey(cmdF);o.cmdF={log:log.slice(),prevented:cmdF.defaultPrevented};
+// one column, on the meeting page and on the list
+PANES=false;document.activeElement=body;o.narrowMeeting=run(body);
+route={view:'timeline',base:null};document.activeElement=row2;o.narrowList=run(row2);
+o.sel=[...SEL];
+// the popover closes: the list's keys and the reader's come back
+_popClose=null;
+o.closedNarrow={x:press('x',row2),enter:press('Enter',row2),e:press('e',row2)};
+SEL.clear();PANES=true;route={view:'meeting',base:'M1'};
+o.closedWide={x:press('x',row2),enter:press('Enter',row2)};
+document.activeElement=body;o.closedWide.n=press('n',body);
+console.log(JSON.stringify(o));
+""")
+    quiet = {"log": [], "prevented": False}
+    for where in ("wideList", "wideReader", "narrowMeeting", "narrowList"):
+        for k, v in out[where].items():
+            assert v == quiet, f"{k} fired under the popover ({where}): {v}"
+    assert out["sel"] == [], "x under a popover must not touch the bulk selection"
+    assert out["popEnter"] == quiet and out["popSpace"] == quiet, \
+        "a popover button's own Enter and Space are never swallowed"
+    assert out["cmdF"] == {"log": ["find"], "prevented": True}
+    assert out["closedNarrow"] == {"x": {"log": ["bulk:M2:true"], "prevented": True},
+                                   "enter": {"log": ["open"], "prevented": True},
+                                   "e": {"log": ["peek"], "prevented": True}}
+    assert out["closedWide"] == {"x": {"log": ["bulk:M2:true"], "prevented": True},
+                                 "enter": {"log": ["readerOpen:M2"], "prevented": True},
+                                 "n": {"log": ["reviewGo:1"], "prevented": True}}
+    # the guards themselves: the list's sits with the layers', and the
+    # reader's lets a Cmd or Ctrl chord through
+    assert "if(kbLayerOpen()||_popClose)return;" in _js_fn("kbKey")
+    assert "if(_popClose&&!e.metaKey&&!e.ctrlKey)return;" in _js_fn("mKey")
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
