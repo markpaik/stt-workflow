@@ -1645,6 +1645,76 @@ def test_a_meeting_only_name_applies_to_every_cluster_of_a_split_voice(
     assert "local_names" not in json.loads(j.read_text())
 
 
+def test_a_split_voice_save_writes_every_cluster_or_none(running_server, monkeypatch):
+    """A meeting-only name for a split voice labeled its clusters one request
+    at a time on the server: a bad id second in `speakers` failed the save,
+    but the first cluster's name was already on disk, and the next relabel of
+    the meeting would have stamped a name the user saw fail. The same held for
+    dismissing and restoring a voice's clusters. Every id is checked first,
+    and one write takes them all or none."""
+    import numpy as np
+
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    relabels = []
+    monkeypatch.setattr(srv, "_relabel_now", lambda base: relabels.append(base))
+    rng = np.random.default_rng(12)
+    base = "Split Atomic Mtg"
+    _make_meeting_with_cache(base, {c: [(i * 5.0, i * 5.0 + 3.0)] for i, c in
+                                    enumerate(("SPEAKER_00", "SPEAKER_01", "SPEAKER_02"))},
+                             {c: rng.normal(size=256)
+                              for c in ("SPEAKER_00", "SPEAKER_01", "SPEAKER_02")})
+    j = mfile(base, ".json")
+    mj = json.loads(j.read_text())
+    mj["speakers"] = [{"id": c, "name": None, "global_id": "U070",
+                       "display": "Speaker 70"}
+                      for c in ("SPEAKER_00", "SPEAKER_01", "SPEAKER_02")]
+    j.write_text(json.dumps(mj))
+
+    def name(ids):
+        return _post(running_server, "/api/name",
+                     {"meeting": base, "speaker": ids[0], "speakers": ids,
+                      "name": "Jordan Lee", "local": True})
+
+    def dismiss(ids, restore=False):
+        return _post(running_server, "/api/dismiss_voice",
+                     {"base": base, "speaker": ids[0], "speakers": ids,
+                      "restore": restore})
+
+    # a cluster that is not in this meeting, second in the list
+    st, body = name(["SPEAKER_00", "SPEAKER_99"])
+    assert st == 200 and body == {"ok": False,
+                                  "error": "'SPEAKER_99' is not a voice in this meeting"}
+    assert "local_names" not in json.loads(j.read_text())
+
+    # the voice's clusters dismissed together, or not at all
+    st, body = dismiss(["SPEAKER_01", "SPEAKER_99"])
+    assert st == 200 and body["ok"] is False
+    assert "dismissed_voices" not in json.loads(j.read_text())
+    st, body = dismiss(["SPEAKER_01", "SPEAKER_02"])
+    assert st == 200 and body == {"ok": True, "dismissed": ["SPEAKER_01", "SPEAKER_02"]}
+
+    # a dismissed cluster second in the list: the first is not named either
+    st, body = name(["SPEAKER_00", "SPEAKER_01"])
+    assert st == 200 and body["ok"] is False and "dismissed" in body["error"]
+    assert "local_names" not in json.loads(j.read_text())
+    assert relabels == [], "a refused save never relabels"
+
+    # the undo restores the whole voice, or none of it
+    st, body = dismiss(["SPEAKER_01", "SPEAKER_99"], restore=True)
+    assert st == 200 and body["ok"] is False
+    assert json.loads(j.read_text())["dismissed_voices"] == ["SPEAKER_01", "SPEAKER_02"]
+    st, body = dismiss(["SPEAKER_01", "SPEAKER_02"], restore=True)
+    assert st == 200 and body == {"ok": True, "dismissed": []}
+    assert "dismissed_voices" not in json.loads(j.read_text())
+
+    # and with every id good, one write names them all
+    st, body = name(["SPEAKER_00", "SPEAKER_01", "SPEAKER_02"])
+    assert st == 200 and body["ok"] is True
+    assert json.loads(j.read_text())["local_names"] == {
+        "SPEAKER_00": "Jordan Lee", "SPEAKER_01": "Jordan Lee", "SPEAKER_02": "Jordan Lee"}
+    assert relabels == [base]
+
+
 def test_a_bulk_item_that_raises_never_stops_the_rest(running_server, monkeypatch):
     """W5: the loop had no per-item guard. One item's exception aborted it, so
     the items before it stayed applied on disk, the items after it were never

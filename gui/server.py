@@ -699,6 +699,16 @@ def _dismissed_failures() -> dict:
         return {}
 
 
+def _voice_ids(b: dict):
+    """The clusters a per-meeting voice request acts on: the body's
+    `speakers` list (every cluster of one split voice) when it sends one,
+    else its single `speaker`, as before the list existed."""
+    sids = b.get("speakers")
+    if isinstance(sids, list) and sids:
+        return sids
+    return b.get("speaker", "")
+
+
 _dismiss_lock = threading.Lock()
 
 
@@ -2206,18 +2216,16 @@ class Handler(BaseHTTPRequestHandler):
                         # `speakers`: every cluster of ONE voice. The
                         # diarizer can split a person into two clusters with
                         # no uid between them, and a name saved for the first
-                        # alone left the other counted as unnamed. Each gets
-                        # the same label, and the meeting relabels once below.
-                        # Without the list, `speaker` alone, as before.
+                        # alone left the other counted as unnamed. ONE call
+                        # checks every id and labels them all or none, and the
+                        # meeting relabels once below. Without the list,
+                        # `speaker` alone, as before.
                         from stt import summarize
-                        sids = b.get("speakers")
-                        if not isinstance(sids, list) or not sids:
-                            sids = [b.get("speaker")]
-                        for sid in dict.fromkeys(str(x or "") for x in sids):
-                            res = summarize.set_local_name(b["meeting"], sid, name)
-                            if not res.get("ok"):
-                                self._json(res)
-                                return
+                        res = summarize.set_local_name(
+                            b["meeting"], _voice_ids(b), name)
+                        if not res.get("ok"):
+                            self._json(res)
+                            return
                         # ONE meeting rebuilds, and it rebuilds HERE: the pass
                         # takes well under a poll interval, so a spawned one
                         # started and finished between polls and the open page
@@ -2310,10 +2318,13 @@ class Handler(BaseHTTPRequestHandler):
                 # and leaves every attributed line exactly where it is.
                 if not self._require_base(b.get("base")):
                     return
+                # `speakers`, as /api/name's local branch takes it: every
+                # cluster of one split voice, dismissed or restored in ONE
+                # write, all or none
                 from stt import summarize
                 fn = (summarize.restore_voice if b.get("restore")
                       else summarize.dismiss_voice)
-                self._json(fn(b["base"], b.get("speaker", "")))
+                self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:

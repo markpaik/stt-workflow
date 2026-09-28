@@ -554,8 +554,8 @@ def test_dismiss_posts_the_meeting_scoped_call_not_the_registry_tombstone():
     # runs again, so a post-await `NP.meeting` read is a crash-or-drift bug.
     assert re.search(r"const meeting=NP\.meeting,speaker=NP\.speaker,tok=npToken\(\);",
                      body)
-    assert re.search(r"api\('/api/dismiss_voice',\{base:meeting,speaker:speaker\}\)",
-                     body)
+    assert "const body={base:meeting,speaker:speaker};" in body
+    assert "api('/api/dismiss_voice',body)" in body
     assert "/api/forget" not in body
     # closing is scoped to the voice this call acted on (W14): a late response
     # must not force-close a panel the user has since reopened for someone else
@@ -1030,7 +1030,7 @@ console.log(JSON.stringify({
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out == {"restore": True, "button": True, "nag": False, "undo": True}
-    assert re.search(r"api\('/api/dismiss_voice',\{base:base,speaker:sid,restore:true\}\)", NEW_JS)
+    assert "const body={base:base,speaker:ids[0],restore:true};" in _js_fn("mRestoreVoice")
 
 
 def test_flagged_reviews_sit_last_in_the_tray():
@@ -5993,7 +5993,8 @@ def test_a_split_voice_plays_and_quotes_from_all_its_clusters():
     """The Voices step's clip and its "said" lines draw from every cluster
     of the voice: the longest turn here sits in the second cluster, and the
     lines of both clusters merge. "Not a real speaker" dismisses every
-    cluster, or the one left over keeps the voice counted."""
+    cluster, or the one left over keeps the voice counted, and it does so in
+    ONE request, so the server takes all of them or none."""
     out = _run_node(_split_voice_step_env() + """
 (async()=>{
   await fvLines(FS.voices[0],fvToken());
@@ -6001,11 +6002,11 @@ def test_a_split_voice_plays_and_quotes_from_all_its_clusters():
   const clip=FS.clip,said=els['#fvsaid'].innerHTML;
   posted=[];
   await fvForget();
-  const dismissed=posted.filter(x=>x[0]==='/api/dismiss_voice').map(x=>x[1].speaker);
+  const dismissed=posted.filter(x=>x[0]==='/api/dismiss_voice').map(x=>x[1]);
   FS.voices=[{id:'A',ids:['A','C'],display:'Speaker 68',uid:'U068',st:''}];FS.vi=0;
   posted=[];
   await fvForget();
-  const byUid=posted.map(x=>[x[0],x[1].uid||x[1].speaker]);
+  const byUid=posted.map(x=>[x[0],x[1].uid||x[1].speakers]);
   console.log(JSON.stringify({fetched,clip,said,plays,dismissed,byUid}));
 })();
 """)
@@ -6018,9 +6019,8 @@ def test_a_split_voice_plays_and_quotes_from_all_its_clusters():
     assert "the long turn" in said and "short one" in said and "yes" in said
     # in reading order, as before: 0:10, 0:40, 15:00
     assert said.index("yes") < said.index("short one") < said.index("the long turn")
-    assert out["dismissed"] == ["A", "C"]
-    assert out["byUid"] == [["/api/forget", "U068"], ["/api/dismiss_voice", "A"],
-                            ["/api/dismiss_voice", "C"]]
+    assert out["dismissed"] == [{"base": "M", "speaker": "A", "speakers": ["A", "C"]}]
+    assert out["byUid"] == [["/api/forget", "U068"], ["/api/dismiss_voice", ["A", "C"]]]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -6353,10 +6353,11 @@ const elsewhere=opened.cluster.ids;
     assert out["panel"] == {"meeting": "M", "speaker": "D", "local": False, "ids": ["D", "E"]}
     assert out["local"] == {"meeting": "M", "speaker": "K", "local": True, "ids": ["J", "K"]}
     assert out["elsewhere"] == ["D"], "another meeting's cluster is never grouped by this page"
-    # the undo restores every cluster of the voice, then reloads once
+    # the undo restores every cluster of the voice in ONE request (the server
+    # restores all or none), then reloads once
     assert out["posted"] == [
-        ["/api/dismiss_voice", {"base": "M", "speaker": "G", "restore": True}],
-        ["/api/dismiss_voice", {"base": "M", "speaker": "H", "restore": True}]]
+        ["/api/dismiss_voice", {"base": "M", "speaker": "G", "restore": True,
+                                "speakers": ["G", "H"]}]]
     assert out["refreshes"] == 1 and out["reloads"] == 1
 
 
@@ -6366,8 +6367,8 @@ def test_a_meeting_only_name_reaches_every_cluster_of_a_split_voice():
     Voices step's meeting-only save sent the first cluster alone (fvSave
     posted one speaker), so the other still counted as unnamed. The save now
     sends every cluster in ONE request (`speakers`), from the strip and from
-    the slide-over, and the slide-over's Clear and dismiss reach both. An
-    enrollment still posts one speaker, as before."""
+    the slide-over, and the slide-over's Clear and dismiss reach both, each in
+    one request too. An enrollment still posts one speaker, as before."""
     out = _run_node(_voices_env() + "\n".join([
         _js_fn("npSave"), _js_fn("npToken"), _js_fn("npConfirmBtns"), _js_fn("npBusy"),
         _js_fn("npClearName"), _js_fn("npDismiss"),
@@ -6410,8 +6411,7 @@ def test_a_meeting_only_name_reaches_every_cluster_of_a_split_voice():
                        "confirm": False, "local": True, "speakers": ["D", "E"]}],
         ["/api/name", {"meeting": "M1", "speaker": "D", "name": "", "local": True,
                        "speakers": ["D", "E"]}],
-        ["/api/dismiss_voice", {"base": "M1", "speaker": "D"}],
-        ["/api/dismiss_voice", {"base": "M1", "speaker": "E"}],
+        ["/api/dismiss_voice", {"base": "M1", "speaker": "D", "speakers": ["D", "E"]}],
         ["/api/name", {"meeting": "M1", "speaker": "F", "name": "Ann Lee",
                        "confirm": False, "local": True}]]
 

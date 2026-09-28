@@ -37,6 +37,7 @@ batch.lock
 relabel.lock
 status.lock
 llm.lock
+new_meeting.lock
 manifest.lock
 paused.flag
 stopping.flag

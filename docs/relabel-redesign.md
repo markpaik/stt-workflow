@@ -211,7 +211,12 @@ the cheaper of two honest options:
   and every batch) removes any lock whose stem is not the live key of a live
   meeting — including a base-named lock belonging to a meeting that now has an
   id, since `lock_key` can never ask for that name again. A lock somebody is
-  holding is never unlinked: it is taken non-blocking first.
+  holding is never unlinked: it is taken non-blocking first. A new meeting
+  has no json for `lock_key` to read, so the pipeline mints its id first and
+  passes it as `lock_meeting`'s `key`. The mint runs under
+  `review.lock_new_meeting` (`new_meeting.lock` in the state root, held
+  through the write), so two first runs of one recording queue on one lock
+  instead of each minting an id and writing at once.
 
 Also: `meetings_index.json` maps id to base and is rebuilt by a scan whenever a
 lookup misses, so an index deleted or left behind by an out-of-band move heals

@@ -2709,13 +2709,14 @@ function mLegend(d){
   }).join('');
 }
 // the undo restores every cluster of the voice, or the one left dismissed
-// splits the chip back into two
+// splits the chip back into two. ONE request (`speakers`): the server checks
+// every id and restores all or none, where one call per cluster could stop
+// halfway and leave part of the voice restored
 async function mRestoreVoice(base,id){
-  let r=null;
-  for(const sid of mVoiceIds(base,id)){
-    r=await api('/api/dismiss_voice',{base:base,speaker:sid,restore:true});
-    if(!r||!r.ok)break;
-  }
+  const ids=mVoiceIds(base,id);
+  const body={base:base,speaker:ids[0],restore:true};
+  if(ids.length>1)body.speakers=ids;
+  const r=await api('/api/dismiss_voice',body);
   if(r&&r.ok){refresh();if(MP&&MP.base===base)mReloadSegs();}
 }
 function mUnknownUid(display){
@@ -4121,17 +4122,13 @@ async function npDismiss(){
   // be null or someone else's identity by the time the response lands
   const meeting=NP.meeting,speaker=NP.speaker,tok=npToken();
   const ids=NP.ids||[speaker];
+  // every cluster of the voice, as fvForget does, or the one left over keeps
+  // asking under the same chip. ONE request: the server dismisses all or none
+  const body={base:meeting,speaker:speaker};
+  if(ids.length>1)body.speakers=ids.slice();
   npBusy(true);
   let r=null;
-  try{
-    r=await api('/api/dismiss_voice',{base:meeting,speaker:speaker});
-    // every other cluster of the voice, as fvForget does: the one left over
-    // would keep asking under the same chip
-    for(const sid of ids.filter(x=>x!==speaker)){
-      if(!r||!r.ok)break;
-      r=await api('/api/dismiss_voice',{base:meeting,speaker:sid});
-    }
-  }
+  try{r=await api('/api/dismiss_voice',body);}
   catch(e){r=null;}
   finally{npBusy(false);}
   if(!r||!r.ok){const err=$('#nperr');if(err){err.hidden=false;err.textContent=(r&&r.error)||'Could not dismiss this voice.';}return;}
@@ -4797,13 +4794,14 @@ async function fvForget(){
   fvBusy(true);
   let r=null;
   // every cluster of a split voice is dismissed here, or the one left over
-  // keeps the voice counted
+  // keeps the voice counted. ONE request: the server dismisses all or none
   const ids=v.ids||[v.id];
+  const body={base:base,speaker:ids[0]};
+  if(ids.length>1)body.speakers=ids.slice();
   try{
     r=v.uid?await api('/api/forget',{uid:v.uid})
-           :await api('/api/dismiss_voice',{base:base,speaker:ids[0]});
-    if(r&&r.ok)for(const id of v.uid?ids:ids.slice(1))
-      await api('/api/dismiss_voice',{base:base,speaker:id});
+           :await api('/api/dismiss_voice',body);
+    if(r&&r.ok&&v.uid)await api('/api/dismiss_voice',body);
   }catch(e){r=r&&r.ok?r:null;}
   finally{fvBusy(false);}
   if(!r||!r.ok){

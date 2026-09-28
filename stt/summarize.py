@@ -613,7 +613,15 @@ def set_meeting_category(base: str, category: str) -> dict:
     return {"ok": True, "category": r["category"]}
 
 
-def _set_dismissed(base: str, speaker_id: str, dismissed: bool) -> dict:
+def _cluster_ids(speaker_id) -> list:
+    """One cluster id, or a list of them (every cluster of ONE voice), as a
+    list in order with repeats dropped. An empty entry stays in, so the
+    caller refuses the request instead of silently acting on less."""
+    raw = speaker_id if isinstance(speaker_id, (list, tuple)) else [speaker_id]
+    return list(dict.fromkeys(str(x or "").strip() for x in raw))
+
+
+def _set_dismissed(base: str, speaker_id, dismissed: bool) -> dict:
     """Add or drop a cluster id in the meeting's top-level "dismissed_voices".
 
     What it means: "leave this voice as unknown and stop asking me about it."
@@ -634,13 +642,18 @@ def _set_dismissed(base: str, speaker_id: str, dismissed: bool) -> dict:
 
     The id must already be one of this meeting's speakers: never store junk a
     client made up, or the list slowly fills with ids that match nothing.
+
+    `speaker_id` may be a list: every cluster of one split voice. Every id is
+    checked before any is written, and one write takes them all. Sent one
+    request per cluster, a refused second id left the first already
+    dismissed (or restored) while the panel reported the whole action failed.
     """
     from . import review
 
     if base not in config.meeting_bases():
         return {"ok": False, "error": f"no meeting '{base}'"}
-    sid = str(speaker_id or "").strip()
-    if not sid:
+    sids = _cluster_ids(speaker_id)
+    if not sids or not all(sids):
         return {"ok": False, "error": "no speaker"}
     j = config.meeting_file(base, ".json")
     if not j.exists():
@@ -650,14 +663,16 @@ def _set_dismissed(base: str, speaker_id: str, dismissed: bool) -> dict:
             d = json.loads(j.read_text())
         except (OSError, ValueError):
             return {"ok": False, "error": f"no transcript for '{base}'"}
-        if sid not in {s.get("id") for s in d.get("speakers", [])}:
-            return {"ok": False,
-                    "error": f"'{sid}' is not a voice in this meeting"}
+        roster = {s.get("id") for s in d.get("speakers", [])}
+        for sid in sids:
+            if sid not in roster:
+                return {"ok": False,
+                        "error": f"'{sid}' is not a voice in this meeting"}
         cur = {str(x) for x in d.get("dismissed_voices", []) or []}
         if dismissed:
-            cur.add(sid)
+            cur.update(sids)
         else:
-            cur.discard(sid)
+            cur.difference_update(sids)
         if cur:
             d["dismissed_voices"] = sorted(cur)
         else:
@@ -666,18 +681,19 @@ def _set_dismissed(base: str, speaker_id: str, dismissed: bool) -> dict:
     return {"ok": True, "dismissed": sorted(cur)}
 
 
-def dismiss_voice(base: str, speaker_id: str) -> dict:
+def dismiss_voice(base: str, speaker_id) -> dict:
     """"Not a real speaker", per meeting: stop prompting to name this cluster
-    while leaving its lines attributed exactly as they are."""
+    (or each cluster in a list) while leaving its lines attributed exactly as
+    they are."""
     return _set_dismissed(base, speaker_id, True)
 
 
-def restore_voice(base: str, speaker_id: str) -> dict:
+def restore_voice(base: str, speaker_id) -> dict:
     """Undo a dismissal: the voice becomes nameable again in this meeting."""
     return _set_dismissed(base, speaker_id, False)
 
 
-def set_local_name(base: str, speaker_id: str, name: str) -> dict:
+def set_local_name(base: str, speaker_id, name: str) -> dict:
     """Name a cluster for THIS meeting only: a transcript label, never a
     voiceprint. The quality floor refuses to ENROLL a voice with seconds of
     speech (a thin embedding would mislabel people in every future meeting),
@@ -689,15 +705,20 @@ def set_local_name(base: str, speaker_id: str, name: str) -> dict:
     deliberately resets it because re-clustering reshuffles the ids.
 
     An empty name clears the entry (the undo). The id must be one of this
-    meeting's speakers: never store junk a client made up."""
+    meeting's speakers: never store junk a client made up.
+
+    `speaker_id` may be a list: every cluster of one split voice. Every id is
+    checked before any is written, and one write labels them all. Labeled
+    one id at a time, a refused second id left the first one's name on disk,
+    and the next relabel of the meeting stamped a name the user saw fail."""
     from . import review
 
     if base not in config.meeting_bases():
         return {"ok": False, "error": f"no meeting '{base}'"}
-    sid = str(speaker_id or "").strip()
-    if not sid:
+    sids = _cluster_ids(speaker_id)
+    if not sids or not all(sids):
         return {"ok": False, "error": "no speaker"}
-    if sid.startswith("MANUAL_"):
+    if any(sid.startswith("MANUAL_") for sid in sids):
         # a MANUAL_ speaker is a person a human ADDED to a line; the diarizer
         # never heard them, so there is no cluster and relabel's local_names
         # overlay (which only walks diarized clusters) can never apply the
@@ -722,21 +743,26 @@ def set_local_name(base: str, speaker_id: str, name: str) -> dict:
             d = json.loads(j.read_text())
         except (OSError, ValueError):
             return {"ok": False, "error": f"no transcript for '{base}'"}
-        if sid not in {s.get("id") for s in d.get("speakers", [])}:
-            return {"ok": False,
-                    "error": f"'{sid}' is not a voice in this meeting"}
-        if nm and sid in {str(x) for x in (d.get("dismissed_voices") or [])}:
-            # dismissed means "this is not a person": naming it anyway leaves
-            # the meeting both dismissed and named, a state no surface renders.
-            # Clearing a name (nm == "") stays allowed: that is the undo.
-            return {"ok": False,
-                    "error": "that voice is dismissed as not a real speaker in "
-                             "this meeting -- restore it first, then name it"}
+        roster = {s.get("id") for s in d.get("speakers", [])}
+        gone = {str(x) for x in (d.get("dismissed_voices") or [])}
+        for sid in sids:
+            if sid not in roster:
+                return {"ok": False,
+                        "error": f"'{sid}' is not a voice in this meeting"}
+            if nm and sid in gone:
+                # dismissed means "this is not a person": naming it anyway
+                # leaves the meeting both dismissed and named, a state no
+                # surface renders. Clearing a name (nm == "") stays allowed:
+                # that is the undo.
+                return {"ok": False,
+                        "error": "that voice is dismissed as not a real speaker "
+                                 "in this meeting -- restore it first, then name it"}
         cur = dict(d.get("local_names") or {})
-        if nm:
-            cur[sid] = nm
-        else:
-            cur.pop(sid, None)
+        for sid in sids:
+            if nm:
+                cur[sid] = nm
+            else:
+                cur.pop(sid, None)
         if cur:
             d["local_names"] = cur
         else:
