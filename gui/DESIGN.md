@@ -401,7 +401,7 @@ evidence:
 - **The suggestion lines.** In the drawer's Speakers section, under an unknown
   voice that has one: "Possibly the same voice as Speaker 12 · 0.72" with a
   [Link] button (one `/api/merge_speakers` by uid, toasted with the save's own
-  sentence), and "Looks like Riley Stone · 0.84" with a [Name] button that
+  sentence), and "Looks like Avery Sample · 0.84" with a [Name] button that
   opens this panel with the name already typed. Best candidate only, one line
   each, inset ground, no chips — a wall of guesses is a decision, and this is a
   glance.

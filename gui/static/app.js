@@ -5362,7 +5362,7 @@ function dSpeakersHTML(s){
  * -- a list of five guesses is a decision, and this is meant to be a glance.
  *   - "Possibly the same voice as Speaker 12" : phase 4 wrote this when the
  *     cluster missed the link bar and minted its own number. Link merges them.
- *   - "Looks like Riley Stone"             : an enrolled person this voice
+ *   - "Looks like Avery Sample"             : an enrolled person this voice
  *     resembles above MATCH_MIN but under the automatic margin (the audit's
  *     nineteen). Name opens the panel with the name already typed, so the
  *     human confirms rather than the machine guessing. */

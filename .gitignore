@@ -74,3 +74,15 @@ dismissed_failures.json
 
 # local Claude session config
 .claude/
+
+# Root state files, by class. Every store this pipeline keeps at the repo root
+# holds meeting names or transcript text, so a new one must be ignored before
+# it exists. The rules are anchored at the root because no tracked file of
+# these types lives there. /*.db* also covers the SQLite -wal and -shm files.
+/*.json
+/*.jsonl
+/*.npz
+/*.db*
+/*.flag
+/*.lock
+/ask_threads/

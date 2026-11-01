@@ -47,7 +47,7 @@ def test_spec_resolution_all_shapes():
     assert diar_eval._spec_to_name("SPEAKER_03", None) is None
     assert diar_eval._spec_to_name("MANUAL_2", None) is None
     assert diar_eval._spec_to_name("U007", None) is None
-    assert diar_eval._spec_to_name("Casey Lane", None) == "Casey Lane"
+    assert diar_eval._spec_to_name("Jordan Fixture", None) == "Jordan Fixture"
     assert diar_eval._spec_to_name("", by_id) is None
     assert diar_eval._spec_to_name("name:", by_id) is None
 

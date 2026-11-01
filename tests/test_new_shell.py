@@ -3630,20 +3630,20 @@ def test_a_looks_like_chip_fills_the_name_box_and_saves_nothing():
         _js_fn("npPreviewLine"), _js_fn("npPreviewHTML"), _js_fn("npUseName"),
         """
 const html=npPreviewHTML({here:'A',targets:['A','B'],
-  looks_like:[{name:'Riley Stone',score:0.8412},{name:"O'Hara",score:0.63}]});
-npUseName('Riley Stone');
+  looks_like:[{name:'Avery Sample',score:0.8412},{name:"O'Hara",score:0.63}]});
+npUseName('Avery Sample');
 console.log(JSON.stringify({html,value:box.value,focused:box.focused,
   closed,posted}));
 """]))
     # the chip carries the name and the score, in the existing chip class
     assert 'class="nchip"' in out["html"]
-    assert "Looks like Riley Stone &middot; " in out["html"]
+    assert "Looks like Avery Sample &middot; " in out["html"]
     assert '<span class="mono">0.84</span>' in out["html"]
     assert 'class="nchips nppchips"' in out["html"]
     # an apostrophe in a name must not break out of the onclick attribute
     assert "npUseName('O\\'Hara')" in out["html"]
     # the click fills the box, focuses it, closes the autocomplete, posts NOTHING
-    assert out["value"] == "Riley Stone"
+    assert out["value"] == "Avery Sample"
     assert out["focused"] == 1 and out["closed"] == 1
     assert out["posted"] == [], "a chip is evidence, never a save"
 
