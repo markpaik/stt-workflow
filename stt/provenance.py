@@ -262,6 +262,99 @@ def correction(d: dict, cands: dict):
     return None
 
 
+# ---------- a new arrival ----------
+
+# A Voice Memos sync copy carries a sidecar beside it (stt/voicememos.py),
+# written from the app's own database: the true start, the typed title, and
+# any default place name. The pipeline reads it like the recorder's
+# .opts.json sidecar.
+SIDECAR_SUFFIX = ".vm.json"
+
+
+def sidecar_path(src) -> Path:
+    src = Path(src)
+    return src.with_name(src.stem + SIDECAR_SUFFIX)
+
+
+def read_sidecar(src) -> dict:
+    """The sync sidecar for `src`, or {} when there is none or it is bad."""
+    try:
+        d = json.loads(sidecar_path(src).read_text())
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _probe_worth_it(src: Path) -> bool:
+    # only a Voice Memos export carries the tag the per-file check reads
+    return src.suffix.lower() in (".m4a", ".caf", ".qta")
+
+
+_probe_cache = {}
+
+
+def _probe_once(src: Path) -> dict:
+    """probe_tags() for a new arrival, once per file version: the folder
+    name and the stored keys both ask, and each ask would run ffprobe."""
+    try:
+        st = src.stat()
+        key = (str(src), st.st_size, st.st_mtime)
+    except OSError:
+        return {"tags": {}, "duration": None}
+    if key not in _probe_cache:
+        if len(_probe_cache) > 256:
+            _probe_cache.clear()
+        _probe_cache[key] = probe_tags(src)
+    return _probe_cache[key]
+
+
+def fresh(src, sidecar=None, today=None, probe=True):
+    """(date_source, iso, recorded_at) for a recording arriving for the
+    FIRST time, best source first: a sync sidecar's start (`recorder`), an
+    8-digit typed date that is not in the future (`typed`), the native
+    recorder's own name or a Voice Memos tag that passes the per-file check
+    (`recorder`), a short typed date at the end of the name (`short_typed`),
+    then the source file's day (`mtime`). Falls back to today when the file
+    cannot be read."""
+    src = Path(src)
+    today = today or date.today().isoformat()
+    side = read_sidecar(src) if sidecar is None else (sidecar or {})
+    t = _parse_tag_time(side.get("recorded_at")) if side.get("recorded_at") else None
+    if t is not None:
+        t = t.astimezone()
+        if t.date().isoformat() <= today:
+            return "recorder", t.date().isoformat(), t.isoformat(timespec="seconds")
+    try:
+        mt = src.stat().st_mtime
+    except OSError:
+        mt = None
+    pr = _probe_once(src) if (probe and mt is not None and _probe_worth_it(src)) else None
+    d = {"duration_sec": (pr or {}).get("duration")}
+    # the short date reads the arrival name, which is the title a new
+    # meeting starts with
+    cands = candidates(src.stem, d, src.name, mt, pr, today=today)
+    got = best(cands)
+    if got:
+        return got
+    return "mtime", today, None
+
+
+def arrival_keys(src, sidecar=None, today=None, probe=True) -> dict:
+    """The true-date keys a brand-new meeting starts with (plan section 2):
+    `source_name`, `audio_fp`, `date_source`, `recorded_at`, plus `date`.
+    `audio_fp` is left out when the file cannot be fingerprinted."""
+    from . import dupes
+    src = Path(src)
+    side = read_sidecar(src) if sidecar is None else (sidecar or {})
+    srcname, iso, rec = fresh(src, side, today=today, probe=probe)
+    out = {"source_name": src.name, "date": iso, "date_source": srcname,
+           "recorded_at": rec}
+    fp = dupes.fingerprint(src)
+    if fp:
+        out["audio_fp"] = fp
+    return out
+
+
 def derive(base: str, d: dict, store=None, names=None, probe=True, today=None) -> dict:
     """{key: value} for every key in KEYS that this meeting lacks. Keys it
     already carries are never recomputed: `audio_fp` and `source_name` are
