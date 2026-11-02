@@ -42,7 +42,7 @@ from pathlib import Path
 
 from . import config, dates, output
 
-SCHEMA = "3"
+SCHEMA = "4"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
 _RAW_TOKENIZE = "unicode61 remove_diacritics 2"
 _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
@@ -103,7 +103,7 @@ def _open(create=True, timeout=5.0):
     return conn
 
 
-_TABLES = ("segs", "segs_raw", "docs", "files")
+_TABLES = ("segs", "segs_raw", "docs", "docs_raw", "files")
 
 
 def _schema(conn):
@@ -156,6 +156,11 @@ def _schema(conn):
             text, content='', contentless_delete=1, tokenize='{_RAW_TOKENIZE}');
         CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
             title, summary, tokenize='{_TOKENIZE}');
+        -- the same titles and summaries, unstemmed, for the last-word
+        -- prefix in meetings(), as segs_raw does for lines
+        CREATE VIRTUAL TABLE IF NOT EXISTS docs_raw USING fts5(
+            title, summary, content='', contentless_delete=1,
+            tokenize='{_RAW_TOKENIZE}');
     """)
 
 
@@ -229,6 +234,7 @@ def _drop(conn, fid: int):
     conn.execute("DELETE FROM segs WHERE rowid >= ? AND rowid < ?", (lo, lo + _ROW))
     conn.execute("DELETE FROM segs_raw WHERE rowid >= ? AND rowid < ?", (lo, lo + _ROW))
     conn.execute("DELETE FROM docs WHERE rowid = ?", (fid,))
+    conn.execute("DELETE FROM docs_raw WHERE rowid = ?", (fid,))
 
 
 def _index_one(conn, base: str, mtime: float, size: int) -> bool:
@@ -262,6 +268,8 @@ def _index_one(conn, base: str, mtime: float, size: int) -> bool:
     conn.executemany("INSERT INTO segs_raw(rowid, text) VALUES (?, ?)",
                      [(r[0], r[1]) for r in rows])
     conn.execute("INSERT INTO docs(rowid, title, summary) VALUES (?, ?, ?)",
+                 (fid, title, summary))
+    conn.execute("INSERT INTO docs_raw(rowid, title, summary) VALUES (?, ?, ?)",
                  (fid, title, summary))
     return True
 
@@ -660,21 +668,30 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
     except FilterError:
         return []
     f.pop("from", None)          # a speaker filter has no meaning for a title
-    _, expr, _ = _match_expr(q)
-    if len(q) < 3 or expr is None:
+    stem, prefix, _ = _match_expr(q)
+    if len(q) < 3 or stem is None:
         return []
     conds, cargs = _where(f, bases)
-    where = (" AND " + " AND ".join(conds)) if conds else ""
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
     try:
         with _lock:
             conn = _open()
             try:
                 _sync(conn)
+                # the whole words match stemmed (`docs`), the last word as a
+                # prefix of an unstemmed word (`docs_raw`): porter stems a
+                # part-typed word, so 'attendan*' on `docs` finds nothing
                 rows = conn.execute(
-                    f"""SELECT f.base, d.title FROM docs d
-                       JOIN files f ON f.id = d.rowid
-                       WHERE docs MATCH ?{where} ORDER BY bm25(docs, 5.0, 1.0) LIMIT ?""",
-                    (expr, *cargs, limit)).fetchall()
+                    f"""SELECT f.base, d.title, min(h.r) AS r FROM (
+                           SELECT rowid AS id, bm25(docs, 5.0, 1.0) AS r
+                             FROM docs WHERE docs MATCH ?
+                           UNION ALL
+                           SELECT rowid, bm25(docs_raw, 5.0, 1.0)
+                             FROM docs_raw WHERE docs_raw MATCH ?) h
+                       JOIN docs d ON d.rowid = h.id
+                       JOIN files f ON f.id = h.id{where}
+                       GROUP BY h.id ORDER BY r, f.base LIMIT ?""",
+                    (stem, prefix, *cargs, limit)).fetchall()
             finally:
                 conn.close()
                 _secure(db_path())
@@ -682,7 +699,7 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
         _warn(type(e).__name__, f"index unavailable ({e})")
         _discard_if_corrupt(e)
         return []
-    return [{"base": b, "title": t} for b, t in rows]
+    return [{"base": b, "title": t} for b, t, _r in rows]
 
 
 def ranked_lines(terms, bases=None, limit: int = 60) -> list:

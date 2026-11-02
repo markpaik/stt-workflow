@@ -314,7 +314,7 @@ def _purge_search(base: str) -> None:
             conn.execute("COMMIT")
             # an FTS5 delete only marks the terms gone: 'optimize' merges
             # every index segment, so the deleted terms leave the b-tree
-            for t in ("segs", "segs_raw", "docs"):
+            for t in ("segs", "segs_raw", "docs", "docs_raw"):
                 conn.execute(f"INSERT INTO {t}({t}) VALUES('optimize')")
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             conn.execute("VACUUM")

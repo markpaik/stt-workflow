@@ -272,6 +272,23 @@ def test_meetings_matches_title_and_summary(sandbox):
     assert search.query("substitute pool")["total"] == 0
 
 
+def test_meetings_matches_a_part_typed_title_word(sandbox):
+    """meetings() ran its prefix on the porter-stemmed docs table, so a
+    part-typed word ('attendan', 'communit') found no title. The unstemmed
+    docs_raw table answers the prefix, as segs_raw does for lines."""
+    _mk("Attendance Review 03052026", ["nothing relevant"], title="Attendance Review")
+    _mk("Community Partners 03062026", ["also nothing"], title="Community Partners",
+        ai_summary="Partners shared graduation plans.")
+    assert [m["base"] for m in search.meetings("attendan")] == ["Attendance Review 03052026"]
+    assert [m["base"] for m in search.meetings("communit")] == ["Community Partners 03062026"]
+    assert [m["base"] for m in search.meetings("graduati")] == ["Community Partners 03062026"]
+    # a stemmed whole word still matches, and a deleted meeting leaves both tables
+    assert [m["base"] for m in search.meetings("reviews")] == ["Attendance Review 03052026"]
+    import shutil
+    shutil.rmtree(config.meeting_dir("Attendance Review 03052026"))
+    assert search.meetings("attendan") == []
+
+
 # ---------- type-ahead, malformed jsons, short last words ----------
 
 def test_part_typed_word_finds_the_whole_word(sandbox, monkeypatch):
