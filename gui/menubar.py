@@ -77,9 +77,9 @@ def gather():
     active = st.get("active", {}) if running else {}
     m = manifest.load()
     queued = []
-    # both watched folders — a finished recording waiting in the staging dir
+    # every source folder — a finished recording waiting in a staging dir
     # must show as queued, not vanish until the batch happens to run
-    for folder in (config.source_dir(), config.recordings_dir()):
+    for folder in config.source_dirs():
         try:
             for p in sorted(folder.iterdir()):
                 if (p.is_file() and p.suffix.lower() in config.AUDIO_EXTS

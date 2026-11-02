@@ -361,8 +361,9 @@ def _watched_dirs():
     """The watched folders, in THE resolution order -- the iCloud source first,
     then the recorder's staging dir. The queue shows one row per NAME, so every
     by-name endpoint has to walk them in this same order or it acts on a file
-    the row never showed."""
-    return (config.source_dir(), config.recordings_dir())
+    the row never showed. The Voice Memos staging copies are a source too
+    (config.source_dirs), so they show as queued like any other arrival."""
+    return tuple(config.source_dirs())
 
 
 def _queue_files(name):
@@ -470,7 +471,7 @@ def _upload_target(dest: Path, name: str) -> Path:
 
     def taken(s):
         return ((dest / f"{s}{ext}").exists()
-                or (config.recordings_dir() / f"{s}{ext}").exists()
+                or any((d / f"{s}{ext}").exists() for d in config.source_dirs())
                 or config.meeting_dir(s).exists()
                 or (config.archive_dir() / s).exists())
 

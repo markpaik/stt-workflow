@@ -284,3 +284,31 @@ def test_sync_off_means_no_missing_report(sandbox, monkeypatch):
     voicememos.sync(now=NOW)
     monkeypatch.setenv("STT_VOICEMEMOS_SYNC", "0")
     assert "voicememos_missing" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_every_reader_of_the_source_folders_sees_the_voice_memos_staging(sandbox):
+    """The batch transcribes the Voice Memos staging copies. The panel queue,
+    the menu bar, the doctor's stale-hold check and the archive delete note
+    used to read only the iCloud and recorder folders, so a staged memo was
+    invisible to them. They all read config.source_dirs now."""
+    import json
+
+    import run_batch
+    from conftest import mfile
+    from gui import menubar, server
+    from stt import archive, config, doctor, holds
+
+    stage = voicememos.staging_dir()
+    stage.mkdir(parents=True, exist_ok=True)
+    (stage / "Staged Memo.m4a").write_bytes(b"\x00" * 64)
+    assert stage in config.source_dirs()
+    assert config.source_dirs() == list(server._watched_dirs())
+    assert "Staged Memo.m4a" in [p.name for p in run_batch.iter_sources(config.source_dir())]
+    assert "Staged Memo.m4a" in menubar.gather()["queued"]
+    holds.hold("Staged Memo.m4a")
+    assert "Staged Memo.m4a" not in doctor._stale_holds()
+    mfile("Staged Memo 05012026", ".json").write_text(json.dumps(
+        {"source_name": "Staged Memo.m4a", "source_file": "Staged Memo 05012026.m4a",
+         "segments": [], "speakers": [], "words": []}))
+    r = archive.delete_meeting("Staged Memo 05012026")
+    assert r["ok"] and "re-transcribed" in (r["note"] or "")

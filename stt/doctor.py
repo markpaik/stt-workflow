@@ -244,7 +244,7 @@ def _stale_holds() -> list:
         cur = json.loads(holds.PATH.read_text())
     except (OSError, ValueError):
         return names
-    dirs = [config.source_dir(), config.recordings_dir()]
+    dirs = config.source_dirs()
     for n in cur or []:
         if not any((d / n).exists() for d in dirs):
             names.append(n)

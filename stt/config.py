@@ -304,6 +304,28 @@ def recordings_dir() -> Path:
     return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
 
 
+def source_dirs(source=None) -> list:
+    """Every folder the batch takes source audio from, in THE resolution
+    order: the primary source (iCloud), the recorder's staging folder, and
+    the Voice Memos sync's staging copies. The batch, the panel's queue, the
+    menu bar, the doctor and the archive note all read this one list, so a
+    file the batch will transcribe is never invisible to the others. The
+    Voice Memos library itself is never a source. `source` overrides the
+    primary folder (run_batch --source)."""
+    out = [Path(source) if source is not None else source_dir()]
+    rec = recordings_dir()
+    if rec not in out:
+        out.append(rec)
+    try:
+        from . import voicememos
+        vm = voicememos.staging_dir()
+        if vm not in out:
+            out.append(vm)
+    except Exception:
+        pass
+    return out
+
+
 def mic_speaker() -> str | None:
     """Who "me" is on the meeting recorder's mic channel — read fresh from
     stt.env so the menu-bar recorder (launched by launchd without stt.env in

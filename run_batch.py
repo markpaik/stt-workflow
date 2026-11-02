@@ -357,17 +357,11 @@ def iter_sources(source: Path):
     already skipped by iter_audio; distinct filenames keep the manifest dedupe
     unambiguous across folders."""
     seen = set()
-    folders = [Path(source)]
-    rec = config.recordings_dir()
-    if rec not in folders:
-        folders.append(rec)
-    # the Voice Memos sync's own staging copies (stt/voicememos.py). The
-    # container itself is never a source, so the delete step cannot reach it.
-    from stt import voicememos
-    vm = voicememos.staging_dir()
-    if vm not in folders:
-        folders.append(vm)
-    for folder in folders:
+    # the source, the recorder's staging folder, and the Voice Memos sync's
+    # own staging copies (config.source_dirs, the one shared list). The Voice
+    # Memos container itself is never a source, so the delete step cannot
+    # reach it.
+    for folder in config.source_dirs(source):
         for p in iter_audio(folder):
             if p.name in seen:
                 # two files that merely SHARE a basename across the source and
