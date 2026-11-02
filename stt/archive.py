@@ -37,6 +37,10 @@ def purge_meeting_dir(path: Path):
     mid = config.id_of(path.name, path.parent)
     shutil.rmtree(path)
     config.index_drop(mid)
+    # the transcript is gone, so its lines must not come back as hits.
+    # touch() re-adds a live meeting of the same name (an archived twin).
+    from . import search
+    search.touch(path.name)
     try:
         from . import unknowns
         unknowns.forget_meeting_refs(path.name)
@@ -98,6 +102,9 @@ def archive_meeting(base: str) -> dict:
     # store no longer holds. restore_meeting puts it back.
     config.index_drop(mid)
     manifest.retarget(old_dir, config.archive_dir() / new_base, base, new_base)
+    # search covers the live store only, as it always has
+    from . import search
+    search.touch(base)
     if new_base != base:
         # a collision renamed the folder, so every registry that keys meetings
         # BY NAME has to follow -- exactly as restore_meeting does for the
@@ -132,6 +139,8 @@ def restore_meeting(base: str) -> dict:
     # the archive in the backfill)
     config.index_set(config.id_of(new_base), new_base)
     manifest.retarget(src_dir, config.meeting_dir(new_base), base, new_base)
+    from . import search
+    search.touch(new_base)
     if new_base != base:
         from . import dupes, identify, unknowns
         try:

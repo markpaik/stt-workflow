@@ -36,7 +36,8 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
 
 1. The folder name equals `dates.restamp(title, date)` plus the twin suffix. `stt/doctor.py` reports any folder that breaks this as `name_mismatch`.
 2. A meeting has exactly one live folder. `meetings_index.json` maps `meeting_id` to that folder, and it is a cache that a scan can rebuild.
-3. `generated_at` changes on every write by the pipeline or the panel. A store repair (`tools/backfill_keys.py`, `tools/amnesty.py`) leaves it as it was, so an open panel page does not reload.
+3. `search.db` (`config.SEARCH_DB`, under `PROJECT_DIR`, mode 600) is the full-text index behind `/api/search`. It holds the live meetings only, and it is a cache: every search first re-reads each `<base>.json` whose mtime or size changed and drops the rows of a folder that is gone. `python -m stt.search --rebuild` builds it again from the jsons alone. When the index finds nothing or fails, the search falls back to a substring scan.
+4. `generated_at` changes on every write by the pipeline or the panel. A store repair (`tools/backfill_keys.py`, `tools/amnesty.py`) leaves it as it was, so an open panel page does not reload.
 
 ## Who writes
 
@@ -63,7 +64,7 @@ Run each step as a dry run first. Then run it with `--apply`.
 
 ## Rename rules for readers
 
-A title or date edit renames the folder and every file inside it. The rename then updates the voice registries, the manifest, the duplicate list, and the id index. `renamed_from` holds the previous folder name. A reader that keys on the folder name should fall back to `renamed_from`, and then to `audio_fp` or a live fingerprint of the audio, which a rename never changes.
+A title or date edit renames the folder and every file inside it. The rename then updates the voice registries, the manifest, the duplicate list, the id index, and the search index. `renamed_from` holds the previous folder name. A reader that keys on the folder name should fall back to `renamed_from`, and then to `audio_fp` or a live fingerprint of the audio, which a rename never changes.
 
 ## Size caps
 

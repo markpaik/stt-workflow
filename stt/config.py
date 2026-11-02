@@ -390,6 +390,13 @@ def meeting_audio(base: str, dest_dir=None):
 # a meeting that is being renamed underneath it and still land on the right one.
 MEETINGS_INDEX_PATH = PROJECT_DIR / "meetings_index.json"
 
+# The full-text index behind /api/search (stt/search.py). SQLite FTS5, mode
+# 600, rebuildable from the meeting jsons at any time, so losing it loses
+# nothing. It holds transcript text, so it sits under PROJECT_DIR beside the
+# manifest (STT_HOME redirects it for tests and demos) and the root rule
+# /*.db* keeps it, and any -journal, -wal or -shm file, out of git.
+SEARCH_DB = PROJECT_DIR / "search.db"
+
 # "meeting_id" as it appears in a json's head. A transcript could in principle
 # SAY the words "meeting_id": the negative lookbehind makes the escaped quotes
 # of json string content ( \"meeting_id\" ) fail to match, so only a real key

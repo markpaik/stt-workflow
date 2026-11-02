@@ -26,6 +26,9 @@ def sandbox(tmp_path, monkeypatch):
     # without this every test that renames, archives or backfills a sandbox
     # meeting would write the id map of REAL meeting names into the checkout
     monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", d / "meetings_index.json")
+    # the search index binds its path at import too, and it holds transcript
+    # text: a sandbox search must index the sandbox, never the checkout
+    monkeypatch.setattr(config, "SEARCH_DB", d / "search.db")
     monkeypatch.setattr(config, "CALIBRATION_LOG", d / "calibration.jsonl")
     monkeypatch.setattr(config, "WORK_DIR", d / "work")
     # housekeeping rotates config.LOG_DIR at batch start: a test that runs

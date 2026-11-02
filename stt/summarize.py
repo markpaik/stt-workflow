@@ -459,6 +459,10 @@ def _move_folder(base: str, new_base: str) -> list:
     # registry source, a lock) resolves to the new folder even when a chase
     # above failed. Last, because it must describe the move that happened.
     config.index_set(config.id_of(new_base), new_base)
+    # the search index keys lines by folder name: move them now, so a hit
+    # never opens the old name. A miss here is repaired by the next query.
+    from . import search
+    search.touch(base, new_base)
     return renamed
 
 
