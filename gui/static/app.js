@@ -2593,6 +2593,10 @@ function mFollowUI(){
 /* ------------------------------------------------------- summary section --- */
 function _mSummary(m){return `<section class="msection msummary" id="msummary">${_mSummaryInner(m)}</section>`;}
 function _mSummaryInner(m){
+  // a transcript with 0 segments: say so, and offer no Generate. A model
+  // given nothing writes a plausible summary of a meeting that never happened.
+  if(m.no_speech)return `<div class="mseclabel">Summary</div>
+    <div class="msumbody muted" id="msumbody">No speech found in this recording.</div>`;
   const has=m.summary&&m.summary.trim();
   const steps=(m.next_steps&&m.next_steps.length)
     ?`<div class="mstepshdr">Committed next steps</div><ul class="msteps">${m.next_steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'';

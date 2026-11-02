@@ -175,6 +175,11 @@ def summarize_one(key, base=None) -> bool:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
             return False  # e.g. a re-queued file that was already summarized
+        if not summarize.has_speech(base):
+            # 0 segments: the model would invent a meeting. The pipeline
+            # already set no_speech, and the panel says "No speech found".
+            print(f"   no speech in {base}: no summary written", flush=True)
+            return False
         st.set_stage(key, "summarizing")
         summarize.suggest_title(base)
         return True

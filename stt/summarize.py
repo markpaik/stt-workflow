@@ -279,10 +279,32 @@ def _date_suffix(base: str) -> str:
         return datetime.now().strftime("%m%d%Y")
 
 
+NO_SPEECH_TEXT = "No speech found in this recording."
+
+
+def has_speech(base: str) -> bool:
+    """False when the meeting's transcript holds 0 segments, or says
+    no_speech. A model given an empty transcript writes a plausible summary
+    of nothing, which is worse than no summary. Unreadable json reads as
+    speech: the guard must never hide a real transcript."""
+    try:
+        d = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError):
+        return True
+    if d.get("no_speech"):
+        return False
+    return bool(d.get("segments"))
+
+
 def suggest_title(base: str) -> dict:
     """Suggest a filename + detailed summary for a processed meeting from its
     transcript. The result is persisted into the meeting's .json (ai_title /
-    ai_summary) so it stays visible in the panel afterwards."""
+    ai_summary) so it stays visible in the panel afterwards.
+
+    A transcript with 0 segments gets no call to the model at all: the result
+    is an error that says no speech was found, and nothing is written."""
+    if not has_speech(base):
+        return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
     backend = _backend_for(base)  # strict meetings never reach a cloud LLM
     sample, _ = _transcript_sample(base, max_chars=12000)
     prompt = (

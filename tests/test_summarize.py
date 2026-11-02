@@ -13,12 +13,16 @@ import pytest
 from stt import config, review, summarize
 from conftest import mfile
 
+# one spoken line: the summary guard skips a transcript with 0 segments (unified
+# plan, Phase 1 step 5), so a fixture that expects a summary must hold speech
+SPOKEN = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "we will ship it"}]
+
 
 def _meeting(base="Mtg"):
     mfile(base, ".txt").write_text("[00:00] Alex: We will ship it.\n")
     mfile(base, ".json").write_text(json.dumps(
         {"source_file": f"{base}.m4a", "generated_at": "2026-07-01T10:00:00",
-         "speakers": [], "segments": [], "words": []}))
+         "speakers": [], "segments": SPOKEN, "words": []}))
 
 
 def test_parses_title_summary_and_next_steps(sandbox, monkeypatch):
@@ -362,7 +366,7 @@ def _meeting_strict(base="Confidential"):
     mfile(base, ".txt").write_text("[00:00] A: sensitive words.\n")
     mfile(base, ".json").write_text(json.dumps(
         {"source_file": f"{base}.m4a", "strict": True,
-         "speakers": [], "segments": [], "words": []}))
+         "speakers": [], "segments": SPOKEN, "words": []}))
 
 
 def test_backend_selection_reads_env_fresh(sandbox, monkeypatch):
