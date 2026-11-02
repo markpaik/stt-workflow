@@ -329,3 +329,15 @@ def test_an_old_index_is_rebuilt_with_the_filter_columns(sandbox):
     assert r["total"] == 1
     cols = {row[1] for row in sqlite3.connect(p).execute("PRAGMA table_info(files)")}
     assert {"day", "route", "date_source", "recorded_at", "mid"} <= cols
+
+
+def test_a_grouping_failure_never_breaks_the_state_poll(running_server, monkeypatch):
+    _mk("Grant Writing 10012026", mid="m1")
+
+    def boom():
+        raise RuntimeError("synthetic failure")
+    monkeypatch.setattr(groups, "membership", boom)
+    st, state = _get(running_server, "/api/state")
+    assert st == 200
+    row = next(m for m in state["meetings"] if m["base"] == "Grant Writing 10012026")
+    assert "group" not in row

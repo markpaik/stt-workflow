@@ -29,7 +29,7 @@ from pathlib import Path
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 LIVE_PORT = 8737
-ROUTES = ("home", "recordings", "activity", "speakers", "archive", "settings")
+ROUTES = ("home", "recordings", "groups", "ask", "activity", "speakers", "archive", "settings")
 WIDTHS = (700, 1440)
 THEMES = ("light", "dark")
 

@@ -117,6 +117,12 @@ def _schema(conn):
     if not all(have.get(k) == v for k, v in want.items()):
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # another process may have rebuilt it while this one waited for
+            # the write lock: look again before dropping its fresh tables
+            have = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+            if all(have.get(k) == v for k, v in want.items()):
+                conn.execute("COMMIT")
+                return _schema(conn)
             for t in _TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {t}")
             conn.execute("DELETE FROM meta")
