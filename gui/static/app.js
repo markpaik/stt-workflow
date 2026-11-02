@@ -1230,10 +1230,23 @@ document.addEventListener('visibilitychange',()=>{
   if(document.hidden)return;
   TAB_JOINED.clear();document.title=tabTitle(0);
 });
+// the last look, for the menu bar's "new since last look" count: a POST
+// while the panel is in front of the owner, at most once a minute (or at
+// once when the window comes back). A hidden tab never counts as a look.
+let SEEN_AT=0;
+function markSeen(now){
+  if(document.hidden)return;
+  const t=Date.now();
+  if(!now&&t-SEEN_AT<60000)return;
+  SEEN_AT=t;
+  api('/api/seen',{}).catch(()=>{});
+}
+document.addEventListener('visibilitychange',()=>markSeen(true));
 async function refresh(){try{
   const prev=S;
   S=await api('/api/state');
   tabWatch(S);
+  markSeen(false);
   render();
   // the list view only: the meeting page answers a moved stamp by reloading
   // itself (relabelWatch), which is a louder signal than a tint. Two panes

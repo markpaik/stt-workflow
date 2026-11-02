@@ -100,7 +100,15 @@ def gather():
     # one shared source of truth with the panel (they used to answer this
     # separately, and drifted): only a capture that is genuinely running shows.
     rec = recorder.live_recording()
+    try:
+        # meetings that became readable since the owner last looked at the
+        # panel (stt/ready.py). A count, never a banner.
+        from stt import ready
+        new_count = ready.new_count()
+    except Exception:
+        new_count = 0
     return {"running": running, "active": active, "queued": queued,
+            "new_count": new_count,
             "queued_jobs": queued_jobs,
             "paused": control.is_paused(), "recording": rec,
             "recorder_note": status.recorder_note(),  # expires a success on its own
@@ -176,6 +184,7 @@ class STTMenuBar(rumps.App):
                 tuple(sorted((n, a["stage"]) for n, a in s["active"].items())),
                 tuple(s["queued"]), tuple(j.get("at") for j in s.get("queued_jobs", [])),
                 tuple((r["name"], r.get("ok")) for r in s["recent"]),
+                s.get("new_count", 0),
                 (s["schedule"].get("hour"), s["schedule"].get("minute")))
 
     def refresh(self, _):
@@ -205,7 +214,10 @@ class STTMenuBar(rumps.App):
                 self.title = f" {len(s['queued'])}"
             else:
                 note = s.get("recorder_note")
-                self.title = " ⚠" if (note and not note.get("ok")) else ""
+                if note and not note.get("ok"):
+                    self.title = " ⚠"
+                else:
+                    self.title = _new_title(s.get("new_count", 0))
             # rebuild the dropdown ONLY when its contents change (no flicker while open)
             sig = self._signature(s)
             if sig != self._last_sig:
@@ -253,6 +265,12 @@ class STTMenuBar(rumps.App):
             items.append(_disabled(f"    +{len(s['queued']) - 8} more"))
         if not active and not s["queued"] and not qj:
             items.append(_disabled("○  Nothing waiting"))
+
+        # --- ready since the last look ---
+        n_new = s.get("new_count", 0)
+        if n_new:
+            items.append(rumps.separator)
+            items.append(rumps.MenuItem(_new_line(n_new), callback=self.open_panel))
 
         # --- recent ---
         if s["recent"]:
@@ -391,6 +409,17 @@ class STTMenuBar(rumps.App):
     def open_logs(self, _):
         log = config.LOG_DIR / "stt.err.log"
         subprocess.Popen(["open", str(log if log.exists() else config.LOG_DIR)])
+
+
+def _new_title(n):
+    """The idle menu-bar title: the count of meetings ready since the last
+    look, or nothing. A busy state (recording, running, paused, queued)
+    owns the title instead."""
+    return f" {n} new" if n else ""
+
+
+def _new_line(n):
+    return f"✓  {n} new meeting{'s' if n != 1 else ''} since you last looked"
 
 
 def _disabled(title):

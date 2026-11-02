@@ -2704,6 +2704,13 @@ class Handler(BaseHTTPRequestHandler):
                                 "message": "Permissions reset. Now click Start "
                                            "recording in the menu bar and grant "
                                            "BOTH prompts when macOS asks."})
+            elif u.path == "/api/seen":
+                # the panel is in front of the owner: record the look, so the
+                # menu bar's "new since last look" count starts over. Ids and a
+                # time only, never a title.
+                from stt import ready
+                d = ready.mark_seen()
+                self._json({"ok": True, "seen_at": d["seen_at"]})
             elif u.path == "/api/accept_meeting":
                 # inbox: name/date/tag it, and mark it reviewed so it joins the list
                 if not self._require_base(b.get("base")):
