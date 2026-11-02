@@ -195,10 +195,24 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
+# the .txt header line (output.txt_header): '<source file>  |  N min  |  N
+# speaker(s) ...'. It leads with the SOURCE FILE NAME, which the model copied
+# into titles, and a Voice Memos name can be a street address.
+_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*\n+")
+
+
+def _model_text(base: str) -> str:
+    """The meeting's .txt as the model may read it: the transcript lines,
+    without the header line that names the source file."""
+    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    return _TXT_HEADER.sub("", txt, count=1)
+
+
 def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
     """(text, truncated). Long meetings keep their head, middle, and tail with
-    [...] where spans were dropped — the flag lets callers say so honestly."""
-    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    [...] where spans were dropped — the flag lets callers say so honestly.
+    The header line with the source file name is never part of it."""
+    txt = _model_text(base)
     if len(txt) <= max_chars:
         return txt, False
     third = max_chars // 3
@@ -361,8 +375,10 @@ def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
 def _summary_source(base: str, backend: str) -> tuple:
     """(heading, body, parts) for the final summary prompt: the whole
     transcript when it fits, else the notes on every part. `parts` is 1 for
-    a whole transcript and the number of transcript parts otherwise."""
-    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    a whole transcript and the number of transcript parts otherwise. The
+    header line with the source file name is left out: the model copied
+    its words into the title."""
+    txt = _model_text(base)
     whole = SUMMARY_CLOUD_WHOLE_CHARS if backend != "local" else SUMMARY_WHOLE_CHARS
     if len(txt) <= whole:
         return "Below is a whole meeting transcript.", f"TRANSCRIPT:\n{txt}", 1

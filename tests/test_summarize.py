@@ -61,6 +61,29 @@ def test_summary_prompt_asks_for_brief_varied_prose(sandbox, monkeypatch):
     assert "TITLE: <title>" in p and "NEXT STEPS" in p
 
 
+def test_the_title_prompt_never_carries_the_source_file_name(sandbox, monkeypatch):
+    """The .txt header leads with the source file name. The model copied
+    its words into the title, and a Voice Memos name can be a street
+    address. Neither the summary prompt nor Ask may carry that line."""
+    from stt import output
+    base = "Mtg"
+    header = output.txt_header("123 Elm Street Lot 4.m4a", 600.0,
+                               [{"name": "Alex"}], processed_at="2026-07-01T10:00:00")
+    mfile(base, ".txt").write_text(header + "\n\n[00:00] Alex: We will ship it.\n")
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": "123 Elm Street Lot 4.m4a", "speakers": [],
+         "segments": SPOKEN, "words": []}))
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "TITLE: T\nSUMMARY: S\n")
+    summarize.suggest_title(base)
+    summarize.answer_question(base, "What will ship?")
+    assert len(prompts) == 2
+    for p in prompts:
+        assert "Elm Street" not in p and "123" not in p
+        assert "[00:00] Alex: We will ship it." in p
+
+
 def test_no_commitments_yields_empty_list(sandbox, monkeypatch):
     _meeting()
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
