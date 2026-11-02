@@ -17,6 +17,7 @@ from conftest import mfile
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import backfill_keys  # noqa: E402
 import fix_dates  # noqa: E402
+import restamp_folders  # noqa: E402
 
 SPOKEN = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "we will ship it"}]
 
@@ -61,7 +62,7 @@ def _snapshot():
 @pytest.mark.parametrize("name,ref,want", [
     ("Weekly Sync 9.14", "2026-09-29", "2026-09-14"),
     ("Site Visit 10-5", "2026-10-30", "2026-10-05"),
-    ("Team Check 10:21", "2026-10-30", "2026-10-21"),
+    ("Team Check 10/21 ", "2026-10-30", "2026-10-21"),  # trailing space is fine
     ("Planning 9.14.26", "2026-09-29", "2026-09-14"),
     ("Year End 12.30", "2027-01-08", "2026-12-30"),      # a year boundary resolves to the past
     ("Kickoff 9/2", "2026-09-29", "2026-09-02"),
@@ -77,6 +78,15 @@ def test_short_dates_parse_to_their_most_recent_past_day(name, ref, want):
     ("Room 13.40", "2026-09-29"),               # no month 13
     ("Plain Title", "2026-09-29"),
     ("Weekly Sync 9.14", "not a date"),
+    ("Team Check 10:21", "2026-10-30"),         # a colon is a time, not a date
+    # QA negatives: a date-like run that is not at the end, or is a time,
+    # a range, or a version
+    ("Grades 9-12 Planning", "2026-10-20"),
+    ("1:1 with Lead", "2027-01-20"),
+    ("Standup 9:30", "2026-10-20"),
+    ("Grade 3/4 team", "2026-04-10"),
+    ("v1.2 demo", "2026-01-20"),
+    ("Demo v1.2", "2026-01-20"),
 ])
 def test_what_is_not_a_short_date(name, ref):
     assert dates.short_date(name, ref) is None
@@ -456,3 +466,90 @@ console.log(JSON.stringify(r));
     assert "Date from the file time" in out["mtime"]
     assert "<b>" not in out["<b>"]
     assert out["null"] == ""
+
+
+# ---------- QA fixes ----------
+
+def test_a_null_source_name_fills_once_a_manifest_record_links_the_meeting(store):
+    backfill_keys.apply()
+    base = "Renamed One 09012026"
+    assert _load(base)["source_name"] is None
+    # the doctor relinks a record to this meeting after the backfill
+    config.MANIFEST_PATH.write_text(json.dumps({"processed": {"Old Name.m4a": {
+        "mtime": 1.0, "outputs": [str(config.meeting_file(base, ".json"))]}}}))
+    rows = backfill_keys.plan()
+    assert [r["changes"] for r in rows if r["base"] == base] == [
+        {"source_name": "Old Name.m4a"}]
+    backfill_keys.apply()
+    assert _load(base)["source_name"] == "Old Name.m4a"
+    # a stored name is still never replaced
+    config.MANIFEST_PATH.write_text(json.dumps({"processed": {"Other.m4a": {
+        "mtime": 1.0, "outputs": [str(config.meeting_file(base, ".json"))]}}}))
+    assert backfill_keys.plan() == []
+
+
+def test_source_file_after_a_redo_is_not_a_source_name():
+    j = "/nowhere/x.json"
+    # never redone: arrived_at equals processed_at
+    d = {"source_file": "Raw Label.m4a", "processed_at": "2026-09-29T19:00:00",
+         "arrived_at": "2026-09-29T19:00:00"}
+    assert provenance.source_name("Raw Label 09292026", d, j, {}) == "Raw Label.m4a"
+    # redone: the Redo wrote the stored audio's name
+    d = {"source_file": "Raw Label 09292026.m4a", "processed_at": "2026-10-02T09:00:00",
+         "arrived_at": "2026-09-29T19:00:00"}
+    assert provenance.source_name("Raw Label 09292026", d, j, {}) is None
+    # no arrived_at: a source_file equal to the folder name proves nothing
+    d = {"source_file": "Raw Label 09292026.m4a", "processed_at": "2026-10-02T09:00:00"}
+    assert provenance.source_name("Raw Label 09292026", d, j, {}) is None
+    assert provenance.source_name("Raw Label 09292026 (2)", d, j, {}) is None
+    d = {"source_file": "Raw Label.m4a", "processed_at": "2026-10-02T09:00:00"}
+    assert provenance.source_name("Raw Label 09292026", d, j, {}) == "Raw Label.m4a"
+
+
+def test_an_accept_with_the_stored_date_keeps_the_date_source(sandbox):
+    """/api/accept_meeting's call when the person leaves the date as it was."""
+    _m("Planning Talk 10052026", date="2026-10-05", date_source="recorder",
+       recorded_at="2026-10-05T09:30:00-04:00")
+    r = summarize.apply_meeting_edits("Planning Talk 10052026", title=None,
+                                      date="2026-10-05", category=None,
+                                      reviewed=True, title_state="confirmed")
+    d = _load(r["base"])
+    assert (d["date_source"], d["recorded_at"]) == ("recorder", "2026-10-05T09:30:00-04:00")
+    _m("Guess Day 10052026", date="2026-10-05", date_source="mtime")
+    summarize.apply_meeting_edits("Guess Day 10052026", date="2026-10-05", reviewed=True)
+    assert _load("Guess Day 10052026")["date_source"] == "mtime"
+    # a real change is still a person's choice
+    r = summarize.apply_meeting_edits("Guess Day 10052026", date="2026-10-04")
+    assert _load(r["base"])["date_source"] == "manual"
+
+
+def test_the_finish_flow_sends_the_date_only_when_it_changed():
+    from test_new_shell import _js_fn
+    fn = _js_fn("fsAccept")
+    assert "picked!==stored" in fn and "FS.row.date" in fn
+
+
+def test_a_restore_keeps_the_date_source(sandbox):
+    from stt import archive
+    _m("Legacy Name", date="2026-10-05", date_source="typed", title="Legacy Name")
+    assert archive.archive_meeting("Legacy Name")["ok"]
+    r = archive.restore_meeting("Legacy Name")
+    assert r["ok"] and r["base"] == "Legacy Name 10052026"
+    d = _load(r["base"])
+    assert (d["date_source"], d["title"]) == ("typed", "Legacy Name")
+
+
+def test_restamp_folders_keeps_the_date_source_and_leaves_twins_alone(sandbox, monkeypatch):
+    _m("Legacy Name", date="2026-10-05", date_source="typed", title="Legacy Name")
+    _m("Scan 20260715-160418", date="2026-07-15", date_source="mtime")
+    _m("Team Sync 10052026", date="2026-10-05", date_source="typed")
+    _m("Team Sync 10052026 (2)", date="2026-10-05", date_source="typed")
+    plan = {b: w for b, w, _ in restamp_folders.plan()}
+    assert plan == {"Legacy Name": "Legacy Name 10052026",
+                    "Scan 20260715-160418": "Scan 07152026-160418"}
+    monkeypatch.setattr(sys, "argv", ["restamp_folders.py", "--apply"])
+    assert restamp_folders.main() == 0
+    assert _load("Legacy Name 10052026")["date_source"] == "typed"
+    assert _load("Scan 07152026-160418")["date_source"] == "mtime"
+    from stt import doctor
+    assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]

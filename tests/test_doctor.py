@@ -75,7 +75,11 @@ def lib(sandbox, monkeypatch, tmp_path):
     config.MANIFEST_PATH.write_text(json.dumps(m, indent=2))
     holds.PATH.write_text(json.dumps(["Not Here.m4a"]))
     (config.PROJECT_DIR / "dismissed_failures.json").write_text(
-        json.dumps({"Never Ran.m4a": "2026-09-01T00:00:00"}))
+        json.dumps({"Fixed Later.m4a": "2026-09-01T00:00:00"}))
+    # the dismissed name later succeeded: its latest result is ok
+    monkeypatch.setattr(status, "history", lambda: [
+        {"name": "Fixed Later.m4a", "ok": True, "at": "2026-09-02T00:00:00"},
+        {"name": "Fixed Later.m4a", "ok": False, "at": "2026-09-01T00:00:00"}])
     control.STOP_FLAG.write_text("x")
     return tmp_path
 
@@ -252,3 +256,71 @@ def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
     assert cal.stat().st_size == 0
     cal.write_text("{}\n")
     assert housekeeping.cap_calibration() is False
+
+
+# ---------- QA fixes: dismissals and same-day twins ----------
+
+def test_a_dismissal_clears_only_when_the_latest_result_is_ok(sandbox, monkeypatch):
+    (config.PROJECT_DIR / "dismissed_failures.json").write_text(json.dumps({
+        "Fixed Later.m4a": "x", "Still Failing.m4a": "x", "Never Ran.m4a": "x",
+        "Failed Again.m4a": "x"}))
+    monkeypatch.setattr(status, "history", lambda: [      # newest first
+        {"name": "Failed Again.m4a", "ok": False, "at": "2026-09-03T00:00:00"},
+        {"name": "Fixed Later.m4a", "ok": True, "at": "2026-09-02T00:00:00"},
+        {"name": "Failed Again.m4a", "ok": True, "at": "2026-09-02T00:00:00"},
+        {"name": "Still Failing.m4a", "ok": False, "at": "2026-09-01T00:00:00"},
+        {"name": "Fixed Later.m4a", "ok": False, "at": "2026-09-01T00:00:00"}])
+    assert doctor._stale_dismissals() == ["Fixed Later.m4a"]
+
+
+@pytest.fixture
+def twins(sandbox, monkeypatch, tmp_path):
+    """Two same-day meetings with the same title words, and two stale
+    records that tie on both."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setattr(config, "LOG_DIR", tmp_path / "logs")
+    _m("Team Sync 09232026", date="2026-09-23", arrived_at="2026-09-23T18:00:00")
+    _m("Team Sync 09232026 (2)", date="2026-09-23", arrived_at="2026-09-23T11:00:00")
+    old = config.PROJECT_DIR / "old"
+    m = {"processed": {
+        "Team Sync a.m4a": {"mtime": _ts("2026-09-23T17:00:00"),
+                            "processed_at": "2026-09-23T18:00:05",
+                            "outputs": [str(old / "Team Sync A" / "Team Sync A.json")]},
+        "Team Sync b.m4a": {"mtime": _ts("2026-09-23T10:00:00"),
+                            "processed_at": "2026-09-23T11:00:05",
+                            "outputs": [str(old / "Team Sync B" / "Team Sync B.json")]},
+    }}
+    config.MANIFEST_PATH.write_text(json.dumps(m, indent=2))
+    return tmp_path
+
+
+def test_same_day_twins_pair_one_to_one_by_time(twins):
+    ops = {a["key"]: a for a in doctor.manifest_plan()}
+    assert ops["Team Sync b.m4a"]["op"] == "relink_tie"
+    assert ops["Team Sync b.m4a"]["meeting"] == "Team Sync 09232026 (2)"
+    assert ops["Team Sync a.m4a"]["meeting"] == "Team Sync 09232026"
+    assert ops["Team Sync a.m4a"]["outputs"][0] == str(
+        config.meeting_file("Team Sync 09232026", ".json"))
+
+
+def test_a_tie_pairing_is_journaled_and_undo_still_restores(twins):
+    before = _tree(config.PROJECT_DIR)
+    r = doctor.fix(dry_run=False, registry=False)
+    m = _manifest()
+    assert m["Team Sync a.m4a"]["relinked"] == "relink_tie"
+    lines = [json.loads(x) for x in
+             (twins / "migration" / f"{r['run']}.jsonl").read_text().splitlines()]
+    assert sorted(e["tie"] for e in lines if "tie" in e) == ["Team Sync a.m4a",
+                                                             "Team Sync b.m4a"]
+    doctor.undo(r["run"], dry_run=False)
+    assert _tree(config.PROJECT_DIR) == before
+
+
+def test_a_tie_with_more_records_than_meetings_retires(twins):
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"]["Team Sync c.m4a"] = {
+        "mtime": _ts("2026-09-23T12:00:00"),
+        "outputs": [str(config.PROJECT_DIR / "old" / "Team Sync C" / "Team Sync C.json")]}
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
+    assert set(ops.values()) == {"retire"}

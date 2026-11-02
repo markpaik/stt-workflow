@@ -47,6 +47,18 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
   - `tools/backfill_keys.py` adds `title`, `source_name`, `audio_fp`, `date_source`, and `recorded_at` where they are missing.
   - `tools/fix_dates.py` corrects a file-time date that a recorder tag or a short typed date contradicts.
   - `tools/doctor.py fix` repairs the registries, the manifest, holds, dismissals, and a stale stop flag. `tools/doctor.py check` never writes.
+  - `tools/restamp_folders.py` renames a folder whose name breaks the `<title> MMDDYYYY` rule. It keeps the stored date and its `date_source`. It has a dry run but no journal: undo a rename with a date edit in the panel.
+- A date passed to `apply_meeting_edits` that equals the stored date changes no `date_source`, unless the caller passes one.
+
+## Run order for the store repairs
+
+Run each step as a dry run first. Then run it with `--apply`.
+
+1. `tools/doctor.py fix`. It relinks the manifest records first, so the backfill finds the raw name of each relinked meeting.
+2. `tools/backfill_keys.py`. A `source_name` stored as null fills in later if a manifest record links the meeting, but the `date_source` it chose then stays.
+3. `tools/fix_dates.py`.
+4. `tools/restamp_folders.py`.
+5. `tools/doctor.py fix` again, then `tools/doctor.py check`. The check should report no `name_mismatch` and no `missing_keys`.
 - `chief-of-staff`, `202610_meeting_followup`, and `board-meetings` only read the store.
 
 ## Rename rules for readers

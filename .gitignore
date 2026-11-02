@@ -87,3 +87,6 @@ dismissed_failures.json
 /*.flag
 /*.lock
 /ask_threads/
+
+# a gzip copy in flight (housekeeping._gz_copy); a crash can leave one
+/*.gz.tmp

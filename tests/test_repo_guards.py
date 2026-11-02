@@ -28,6 +28,7 @@ def _git(cwd, *args, check=True):
     "search.db", "search.db-wal", "search.db-shm", "manifest_retired.json",
     "review_metrics.jsonl", "panel_seen.json", "group_overrides.json",
     "ask_threads/x.json", "doctor.json", "calibration.jsonl.1.gz",
+    "calibration.jsonl.1.gz.tmp",
 ])
 def test_root_state_files_are_ignored(path):
     assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 0
