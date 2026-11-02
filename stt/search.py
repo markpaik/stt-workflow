@@ -42,7 +42,7 @@ from pathlib import Path
 
 from . import config, dates, output
 
-SCHEMA = "2"
+SCHEMA = "3"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
 _RAW_TOKENIZE = "unicode61 remove_diacritics 2"
 _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
@@ -103,14 +103,45 @@ def _open(create=True, timeout=5.0):
     return conn
 
 
+_TABLES = ("segs", "segs_raw", "docs", "files")
+
+
 def _schema(conn):
+    # the index describes ONE store in ONE shape: a schema change or a moved
+    # meetings folder (Settings can point it elsewhere) drops every table,
+    # and the next sync fills them again from the folder it now names. The
+    # tables are dropped, not emptied, so a new column always arrives.
+    conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+    want = {"schema": SCHEMA, "meetings_dir": str(config.meetings_dir())}
+    have = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+    if not all(have.get(k) == v for k, v in want.items()):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for t in _TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {t}")
+            conn.execute("DELETE FROM meta")
+            conn.executemany("INSERT INTO meta(key, value) VALUES (?, ?)",
+                             list(want.items()))
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     conn.executescript(f"""
-        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+        -- one row per live meeting. The filter columns (plan Phase 4E) are
+        -- read from the json at index time: `day` is the date part of
+        -- recorded_at when it is set, else the stored date. A meeting from
+        -- before the amnesty keys has null date_source and a route worked
+        -- out from its source name, as the panel does.
         CREATE TABLE IF NOT EXISTS files(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             base TEXT NOT NULL UNIQUE,
             mtime REAL NOT NULL,
-            size INTEGER NOT NULL);
+            size INTEGER NOT NULL,
+            mid TEXT,
+            day TEXT,
+            recorded_at TEXT,
+            date_source TEXT,
+            route TEXT);
         CREATE VIRTUAL TABLE IF NOT EXISTS segs USING fts5(
             text, start UNINDEXED, who UNINDEXED, tokenize='{_TOKENIZE}');
         -- the same lines, unstemmed, for the last-word prefix. Contentless:
@@ -120,25 +151,6 @@ def _schema(conn):
         CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
             title, summary, tokenize='{_TOKENIZE}');
     """)
-    # the index describes ONE store: a schema change or a moved meetings
-    # folder (Settings can point it elsewhere) empties it, and the next sync
-    # fills it from the folder it now names
-    want = {"schema": SCHEMA, "meetings_dir": str(config.meetings_dir())}
-    have = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-    if all(have.get(k) == v for k, v in want.items()):
-        return
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        conn.execute("DELETE FROM segs")
-        conn.execute("DELETE FROM segs_raw")
-        conn.execute("DELETE FROM docs")
-        conn.execute("DELETE FROM files")
-        conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-                         list(want.items()))
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
 
 
 # ---------------------------------------------------------------- indexing ---
@@ -151,9 +163,33 @@ def _summary_text(d) -> str:
     return "\n".join(str(p) for p in parts if p)
 
 
+def facets(d, base: str) -> dict:
+    """The filter keys of one meeting json (plan Phase 4E): meeting_id, the
+    day it was recorded, recorded_at, date_source, and route. Every key may
+    be missing on an old meeting. `route` then comes from the source name, as
+    the panel works it out, and `day` from the folder stamp."""
+    from . import titles
+    d = d if isinstance(d, dict) else {}
+    ra = d.get("recorded_at")
+    ra = ra if isinstance(ra, str) and ra else None
+    day = (ra[:10] if ra else None) or d.get("date") or dates.meeting_date(base)
+    route = d.get("route")
+    if route not in titles.ROUTES:
+        try:
+            route = titles.route_for(d.get("source_file") or "")
+        except Exception:
+            route = "other"
+    ds = d.get("date_source")
+    return {"mid": d.get("meeting_id") or None,
+            "day": day if isinstance(day, str) else None,
+            "recorded_at": ra,
+            "date_source": ds if isinstance(ds, str) else None,
+            "route": route}
+
+
 def _read(base: str, jpath: Path):
-    """(lines, title, summary) for one meeting json, or None if it cannot be
-    read right now. Lines are (index, start, who, text), blank lines skipped,
+    """(lines, title, summary, facets) for one meeting json, or None if it
+    cannot be read right now. Lines are (index, start, who, text), blank lines skipped,
     the label as the transcript shows it (output.line_label).
 
     A json that parses but has a shape this code cannot read (a number where
@@ -176,10 +212,10 @@ def _read(base: str, jpath: Path):
             if text.strip():
                 lines.append((i, s.get("start", 0.0), output.line_label(s, roster), text))
         title = d.get("title") or dates.title_of(base)
-        return lines, title, _summary_text(d)
+        return lines, title, _summary_text(d), facets(d, base)
     except Exception as e:
         _warn(f"bad:{base}", f"{base}: transcript not indexed ({type(e).__name__})")
-        return [], dates.title_of(base), ""
+        return [], dates.title_of(base), "", facets(d if isinstance(d, dict) else {}, base)
 
 
 def _drop(conn, fid: int):
@@ -201,14 +237,18 @@ def _index_one(conn, base: str, mtime: float, size: int) -> bool:
         if row:
             conn.execute("DELETE FROM files WHERE id = ?", (row[0],))
         return False
-    lines, title, summary = got
+    lines, title, summary, fc = got
+    cols = (fc["mid"], fc["day"], fc["recorded_at"], fc["date_source"], fc["route"])
     if row:
         fid = row[0]
-        conn.execute("UPDATE files SET mtime = ?, size = ? WHERE id = ?",
-                     (mtime, size, fid))
+        conn.execute("""UPDATE files SET mtime = ?, size = ?, mid = ?, day = ?,
+                        recorded_at = ?, date_source = ?, route = ? WHERE id = ?""",
+                     (mtime, size, *cols, fid))
     else:
-        fid = conn.execute("INSERT INTO files(base, mtime, size) VALUES (?, ?, ?)",
-                           (base, mtime, size)).lastrowid
+        fid = conn.execute(
+            """INSERT INTO files(base, mtime, size, mid, day, recorded_at,
+                                 date_source, route) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (base, mtime, size, *cols)).lastrowid
     rows = [(fid * _ROW + i, text, start, who)
             for i, start, who, text in lines if i < _ROW]
     conn.executemany("INSERT INTO segs(rowid, text, start, who) VALUES (?, ?, ?, ?)",
@@ -329,7 +369,7 @@ def touch(*bases) -> None:
         _warn("touch", f"index not updated now, the next search will ({e})")
 
 
-# ---------------------------------------------------------------- querying ---
+# ------------------------------------------------------------- query text ---
 
 def _match_expr(q: str):
     """FTS5 phrases for the query: (stemmed, prefix, toks). The stemmed phrase
@@ -367,29 +407,175 @@ def _snippet(text: str, q: str, toks) -> str:
     return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
 
 
+# ----------------------------------------------------------------- filters ---
+# Plan Phase 4E. A filter narrows which MEETINGS a search reads. It comes as
+# a query parameter on /api/search or typed inline in the query ("budget
+# after:2026-10-01 route:voice_memo"). Values:
+#   after:YYYY-MM-DD   recorded on or after that day
+#   before:YYYY-MM-DD  recorded before that day (the day itself is out)
+#   route:a,b          the route that brought it in (titles.ROUTES)
+#   dated:a,b          its date_source (provenance.DATE_SOURCES), or `none`
+#                      for a meeting without the key (from before the amnesty)
+#   from:word          the line's speaker label contains the word
+#   in:<group key>     a computed group (stt/groups.py)
+# The day is the date part of recorded_at when it is set, else the stored
+# date. A meeting with no day at all is outside every date filter.
+
+FILTER_KEYS = ("after", "before", "route", "date_source", "from", "in")
+_INLINE_NAMES = {"after": "after", "before": "before", "route": "route",
+                 "dated": "date_source", "date_source": "date_source",
+                 "from": "from", "in": "in"}
+_INLINE = re.compile(r'(?<!\S)(after|before|route|dated|date_source|from|in):'
+                     r'("[^"]*"|\S+)', re.I)
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+class FilterError(ValueError):
+    """A filter value this module cannot read. The message says which."""
+
+
+def split_query(q: str):
+    """(text, {filter: raw value}) from a query with inline filters. The
+    filter words leave the text, so 'budget after:2026-10-01' searches for
+    'budget'. A later copy of one filter wins."""
+    raw = {}
+
+    def take(m):
+        raw[_INLINE_NAMES[m.group(1).lower()]] = m.group(2).strip('"')
+        return " "
+    text = _INLINE.sub(take, str(q or ""))
+    return re.sub(r"\s+", " ", text).strip(), raw
+
+
+def _listval(v):
+    if isinstance(v, (list, tuple, set)):
+        items = [str(x) for x in v]
+    else:
+        items = str(v or "").split(",")
+    return [x.strip().lower() for x in items if x.strip()]
+
+
+def clean_filters(raw: dict) -> dict:
+    """Check and normalize filter values. Unknown keys are ignored, and an
+    empty value means no filter. Raises FilterError on a bad value."""
+    from . import provenance, titles
+    f = {}
+    for k in ("after", "before"):
+        v = str((raw or {}).get(k) or "").strip()
+        if v:
+            if not _DAY.match(v):
+                raise FilterError(f"{k}: should look like 2026-10-01")
+            try:
+                from datetime import date as _d
+                _d.fromisoformat(v)
+            except ValueError:
+                raise FilterError(f"{k}: {v} is not a real day") from None
+            f[k] = v
+    r = _listval((raw or {}).get("route"))
+    if r:
+        bad = [x for x in r if x not in titles.ROUTES]
+        if bad:
+            raise FilterError(f"route: '{bad[0]}' is not one of "
+                              + ", ".join(titles.ROUTES))
+        f["route"] = sorted(set(r))
+    ds = _listval((raw or {}).get("date_source"))
+    if ds:
+        ok = set(provenance.DATE_SOURCES) | {"none"}
+        bad = [x for x in ds if x not in ok]
+        if bad:
+            raise FilterError(f"dated: '{bad[0]}' is not one of "
+                              + ", ".join(sorted(ok)))
+        f["date_source"] = sorted(set(ds))
+    who = str((raw or {}).get("from") or "").strip().lower()
+    if who:
+        f["from"] = who
+    g = str((raw or {}).get("in") or "").strip()
+    if g:
+        f["in"] = g
+    return f
+
+
+def _group_bases(key: str) -> set:
+    from . import groups
+    return set(groups.members(key))
+
+
+def meeting_passes(fc: dict, f: dict, bases=None) -> bool:
+    """Does one meeting's facets pass the meeting-level filters? `bases` is
+    the resolved `in:` set, or None for no group filter."""
+    if bases is not None and fc.get("base") not in bases:
+        return False
+    day = fc.get("day")
+    if "after" in f and not (day and day >= f["after"]):
+        return False
+    if "before" in f and not (day and day < f["before"]):
+        return False
+    if "route" in f and fc.get("route") not in f["route"]:
+        return False
+    if "date_source" in f and (fc.get("date_source") or "none") not in f["date_source"]:
+        return False
+    return True
+
+
+def _where(f: dict, bases):
+    """SQL conditions on files f (and segs s, for `from`) for the filters."""
+    conds, args = [], []
+    if bases is not None:
+        conds.append("f.base IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(sorted(bases)))
+    if "after" in f:
+        conds.append("f.day >= ?")
+        args.append(f["after"])
+    if "before" in f:
+        conds.append("f.day < ?")
+        args.append(f["before"])
+    if "route" in f:
+        conds.append("f.route IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(f["route"]))
+    if "date_source" in f:
+        conds.append("coalesce(f.date_source, 'none') IN (SELECT value FROM json_each(?))")
+        args.append(json.dumps(f["date_source"]))
+    if "from" in f:
+        conds.append("instr(lower(coalesce(s.who, '')), ?) > 0")
+        args.append(f["from"])
+    return conds, args
+
+
+# ---------------------------------------------------------------- querying ---
+
 _HITS = """WITH hit(id) AS (
                 SELECT rowid FROM segs WHERE segs MATCH ?
                 UNION
                 SELECT rowid FROM segs_raw WHERE segs_raw MATCH ?)"""
 
 
-def _fts(q: str, limit: int):
+def _fts(q: str, limit: int, f=None, bases=None):
     stem, prefix, toks = _match_expr(q)
     if stem is None:
         return None
+    f = f or {}
+    conds, cargs = _where(f, bases)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
     with _lock:
         conn = _open()
         try:
             _sync(conn)
-            total = conn.execute(f"{_HITS} SELECT count(*) FROM hit",
-                                 (stem, prefix)).fetchone()[0]
+            if conds:
+                total = conn.execute(
+                    f"""{_HITS} SELECT count(*) FROM hit h
+                        JOIN segs s ON s.rowid = h.id
+                        JOIN files f ON f.id = h.id / {_ROW}{where}""",
+                    (stem, prefix, *cargs)).fetchone()[0]
+            else:
+                total = conn.execute(f"{_HITS} SELECT count(*) FROM hit",
+                                     (stem, prefix)).fetchone()[0]
             rows = conn.execute(
                 f"""{_HITS}
                     SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
                     FROM hit h JOIN segs s ON s.rowid = h.id
-                    JOIN files f ON f.id = h.id / {_ROW}
+                    JOIN files f ON f.id = h.id / {_ROW}{where}
                     ORDER BY f.mtime DESC, f.base, s.rowid
-                    LIMIT ?""", (stem, prefix, limit)).fetchall() if total else []
+                    LIMIT ?""", (stem, prefix, *cargs, limit)).fetchall() if total else []
         finally:
             conn.close()
             _secure(db_path())
@@ -411,41 +597,71 @@ def _discard_if_corrupt(e):
                     pass
 
 
-def query(q: str, limit: int = 40) -> dict:
+def _prepare(q, filters):
+    """(text, clean filters, group bases or None) for a query plus any
+    explicit filters. Inline filters in the text win over explicit ones."""
+    text, inline = split_query(q)
+    raw = dict(filters or {})
+    raw.update(inline)
+    f = clean_filters(raw)
+    bases = _group_bases(f["in"]) if "in" in f else None
+    return text.strip().lower(), f, bases
+
+
+def query(q: str, limit: int = 40, filters: dict | None = None) -> dict:
     """Search every live transcript line. FTS first, the scan when FTS finds
-    nothing or fails. Returns {query, hits, total}, newest meeting first."""
-    q = (q or "").strip().lower()
+    nothing or fails. Returns {query, hits, total}, newest meeting first.
+    With filters (inline in `q` or in `filters`), the answer also carries
+    `filters`, the values used, and a bad value answers with `error`."""
+    try:
+        q, f, bases = _prepare(q, filters)
+    except FilterError as e:
+        return {"query": (q or "").strip().lower(), "hits": [], "total": 0,
+                "error": str(e)}
+    out = _query(q, limit, f, bases)
+    if f:
+        out["filters"] = f
+    return out
+
+
+def _query(q, limit, f, bases):
     if len(q) < 3:
         return {"query": q, "hits": [], "total": 0}
     try:
-        r = _fts(q, limit)
+        r = _fts(q, limit, f, bases)
     except Exception as e:
         _warn(type(e).__name__, f"index unavailable, scanning instead ({e})")
         _discard_if_corrupt(e)
         r = None
     if r is None or r["total"] == 0:
-        return _scan(q, limit)
+        return _scan(q, limit, f, bases)
     return r
 
 
-def meetings(q: str, limit: int = 20) -> list:
+def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
     """Meetings whose title or AI summary matches, best match first:
     [{base, title}]. Not behind /api/search, whose line-level shape the page
-    depends on. Empty when the index cannot answer."""
-    q = (q or "").strip().lower()
+    depends on. Empty when the index cannot answer or a filter is bad."""
+    try:
+        q, f, bases = _prepare(q, filters)
+    except FilterError:
+        return []
+    f.pop("from", None)          # a speaker filter has no meaning for a title
     _, expr, _ = _match_expr(q)
     if len(q) < 3 or expr is None:
         return []
+    conds, cargs = _where(f, bases)
+    where = (" AND " + " AND ".join(conds)) if conds else ""
     try:
         with _lock:
             conn = _open()
             try:
                 _sync(conn)
                 rows = conn.execute(
-                    """SELECT f.base, d.title FROM docs d
+                    f"""SELECT f.base, d.title FROM docs d
                        JOIN files f ON f.id = d.rowid
-                       WHERE docs MATCH ? ORDER BY bm25(docs, 5.0, 1.0) LIMIT ?""",
-                    (expr, limit)).fetchall()
+                       WHERE docs MATCH ?{where} ORDER BY bm25(docs, 5.0, 1.0) LIMIT ?""",
+                    (expr, *cargs, limit)).fetchall()
             finally:
                 conn.close()
                 _secure(db_path())
@@ -456,11 +672,33 @@ def meetings(q: str, limit: int = 20) -> list:
     return [{"base": b, "title": t} for b, t in rows]
 
 
+def facet_rows() -> list:
+    """[{base, mid, day, recorded_at, date_source, route}] for every live
+    meeting, from the index (synced first). Empty when the index fails."""
+    try:
+        with _lock:
+            conn = _open()
+            try:
+                _sync(conn)
+                rows = conn.execute(
+                    "SELECT base, mid, day, recorded_at, date_source, route FROM files"
+                ).fetchall()
+            finally:
+                conn.close()
+                _secure(db_path())
+    except Exception as e:
+        _warn(type(e).__name__, f"index unavailable ({e})")
+        _discard_if_corrupt(e)
+        return []
+    keys = ("base", "mid", "day", "recorded_at", "date_source", "route")
+    return [dict(zip(keys, r)) for r in rows]
+
+
 # ------------------------------------------------------------ fallback scan ---
 # The pre-index search, kept whole: segment texts cached per file mtime, a
 # case-insensitive substring scan. It is the only path that matches mid-word.
 
-_cache = {}  # path -> (mtime, [(seg_index, start, who, text_lower, text)])
+_cache = {}  # path -> (mtime, [(seg_index, start, who, text_lower, text)], facets)
 
 
 def _mtime(p):
@@ -473,15 +711,18 @@ def _mtime(p):
 
 
 def _segments(jpath):
+    """(rows, facets) for one meeting json, cached on its mtime."""
     try:
         mtime = jpath.stat().st_mtime
     except FileNotFoundError:
-        return []
+        return [], {"base": jpath.stem}
     hit = _cache.get(str(jpath))
     if hit and hit[0] == mtime:
-        return hit[1]
+        return hit[1], hit[2]
+    fc = {}
     try:
         d = json.loads(jpath.read_text())
+        fc = facets(d, jpath.stem)
         # the roster's label, as the transcript shows it: a below-floor
         # voice's lines carry no display, and a hit read "SPEAKER_08"
         roster = output.roster_labels(d.get("speakers", []))
@@ -491,23 +732,32 @@ def _segments(jpath):
                 if s.get("text", "").strip()]
     except Exception:
         rows = []
-    _cache[str(jpath)] = (mtime, rows)
+    fc["base"] = jpath.stem
+    _cache[str(jpath)] = (mtime, rows, fc)
     if len(_cache) > 500:
         _cache.pop(next(iter(_cache)))
-    return rows
+    return rows, fc
 
 
-def _scan(q: str, limit: int = 40) -> dict:
+def _scan(q: str, limit: int = 40, f=None, bases=None) -> dict:
     """Case-insensitive substring search over all transcript segments.
-    `q` arrives stripped and lowercased. Newest meeting first."""
+    `q` arrives stripped and lowercased. Newest meeting first. The filters
+    apply as they do on the index path."""
+    f = f or {}
     hits, total = [], 0
     files = sorted((config.meeting_file(b, ".json") for b in config.meeting_bases()),
                    key=_mtime, reverse=True)
+    who_has = f.get("from")
     for jpath in files:
         base = jpath.stem
-        for idx, start, who, low, text in _segments(jpath):
+        rows, fc = _segments(jpath)
+        if (f or bases is not None) and not meeting_passes(fc, f, bases):
+            continue
+        for idx, start, who, low, text in rows:
             pos = low.find(q)
             if pos < 0:
+                continue
+            if who_has and who_has not in str(who or "").lower():
                 continue
             total += 1
             if len(hits) < limit:

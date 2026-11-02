@@ -24,7 +24,7 @@ DESIGN = Path(srv.__file__).resolve().parent / "DESIGN.md"
 
 
 # the new shell's script: three plain files joined in this fixed order
-NEXT_JS_FILES = ("next.js", "next-meeting.js", "next-voice.js")
+NEXT_JS_FILES = ("next.js", "next-meeting.js", "next-voice.js", "next-library.js")
 
 
 def _next_js():
@@ -194,13 +194,15 @@ def test_each_surface_token_is_present_in_the_frame():
     assert not missing, missing
 
 
-def test_frame_routes_cover_the_4c_pages_and_nothing_from_later_phases():
+def test_frame_routes_cover_the_pages_and_no_nav_entry_is_dead():
     js = _next_js()
-    for r in ("home", "recordings", "activity", "speakers", "archive", "settings"):
+    for r in ("home", "recordings", "groups", "activity", "speakers", "archive", "settings"):
         assert f"#{r}" in js or f"'{r}'" in js
-    # Groups and Ask are Phases 4E and 4F: no dead nav entry for them yet
+    # every sidebar entry has a view to render (Groups since Phase 4E)
     nav = re.search(r"const NAV=\[(.*?)\];", js).group(1) + re.search(r"const NAV2=\[(.*?)\];", js).group(1)
-    assert "groups" not in nav and "'ask'" not in nav
+    views = re.search(r"const views=\{(.*?)\};", js).group(1)
+    for to in re.findall(r"\['(\w+)','", nav):
+        assert re.search(rf"\b{to}:\w+View\b", views), to
 
 
 def test_writes_from_the_frame_are_posts():

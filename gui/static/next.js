@@ -31,7 +31,8 @@ const ICON={
  down:'<path d="m6 10 6 6 6-6"/>',
  theme:'<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
  back:'<path d="m14 6-6 6 6 6"/>',
- edit:'<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>'
+ edit:'<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>',
+ groups:'<path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h6l2 2"/>'
 };
 const ic=n=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]||''}</svg>`;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -82,9 +83,9 @@ const needsYou=()=>(S&&S.needs_you)||[];
 const urgent=()=>((S&&S.tray)||[]).filter(t=>['recorder_stall','failed','dupe_files','dupe_meetings'].includes(t.kind));
 
 /* --------------------------------------------------------------- frame ---- */
-const NAV=[['home','Home','home'],['recordings','Recordings','list'],['speakers','Speakers','voice']];
+const NAV=[['home','Home','home'],['recordings','Recordings','list'],['groups','Groups','groups'],['speakers','Speakers','voice']];
 const NAV2=[['activity','Activity','act'],['archive','Archive','arch'],['settings','Settings','gear']];
-const TITLES={home:'Home',recordings:'Recordings',activity:'Activity',speakers:'Speakers',archive:'Archive',settings:'Settings'};
+const TITLES={home:'Home',recordings:'Recordings',groups:'Groups',activity:'Activity',speakers:'Speakers',archive:'Archive',settings:'Settings'};
 // the page's name in the tab and the top bar: a meeting shows its title
 function pageTitle(){if(UI.route==='meeting'){const m=byBase(UI.mbase);return m?m.title:'Recording';}return TITLES[UI.route]||'Meetings';}
 function pillText(){
@@ -138,7 +139,7 @@ function rowHTML(m,o={}){
  return `<div class="row ${sel?'selected':''}" data-row data-base="${esc(m.base)}" tabindex="0">
   <label class="ck" title="Select"><input type="checkbox" data-sel="${esc(m.base)}" ${sel?'checked':''} aria-label="Select ${esc(m.title)}"></label>
   <a href="${meetingHref(m.base)}" style="min-width:0;color:inherit;text-decoration:none" data-open><div class="row-title"><span>${esc(m.title)}</span>${chipsFor(m)}</div>
-  <div class="meta">${bits.join(' · ')}${u?` · <span class="attn-t nb">${u} unnamed</span>`:''}${m.category?` · ${m.category==='work'?'Work':'Personal'}`:''}</div>
+  <div class="meta">${bits.join(' · ')}${u?` · <span class="attn-t nb">${u} unnamed</span>`:''}${m.category?` · ${m.category==='work'?'Work':'Personal'}`:''}${m.group_name&&!o.group?` · <span class="nb" title="Group">${esc(m.group_name)}</span>`:''}</div>
   ${prev?`<div class="preview">${esc(prev)}</div>`:''}</a>
   <div class="rail"><button class="icon-btn" type="button" data-act="row-menu" data-base="${esc(m.base)}" aria-label="More actions for ${esc(m.title)}">${ic('more')}</button></div></div>`;
 }
@@ -420,16 +421,22 @@ function layersHTML(){
  if(UI.keys)h+=`<div class="veil" data-act="close-layer"></div><div class="palette keysheet" role="dialog" aria-label="Keyboard keys"><div class="keysheet-head"><strong>Keys</strong><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><div class="keys">${KEYS.map(([k,d])=>`<span>${k.split(' ').map(x=>/^(or|then)$/.test(x)?`<span class="sub">${x}</span>`:`<kbd>${esc(x)}</kbd>`).join(' ')}</span><span>${esc(d)}</span>`).join('')}</div></div>`;
  $('#layers').innerHTML=h;
 }
-const KEYS=[['/ or Cmd K','Search titles and words (/ on a Transcript tab finds in it)'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row, keep the title, save the voice'],['x','Select the row'],
+const KEYS=[['/ or Cmd K','Search titles and words (/ on a Transcript tab finds in it)'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then g','Go to Groups'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row, keep the title, save the voice'],['x','Select the row'],
  ['1 2 3','Summary, Transcript, Ask (on a meeting)'],['[ ]','Previous or next recording'],['Space','Play or pause. In the voice sheet, replay the clip'],['v','Name voices'],['n p','Next or previous uncertain line'],['a u','Accept and go on, or use the second reading'],['Cmd F','Find in the transcript'],['Cmd Enter','Save the line card'],
  ['1 2 3 or s','In the voice sheet: fill from a chip, or skip'],['Esc','Back out one layer, then back to the list'],['?','This sheet']];
 // match in the raw text, then escape each slice, so a mark never lands inside an entity
 function hl(text,q){const t=String(text==null?'':text);if(!q)return esc(t);const i=t.toLowerCase().indexOf(String(q).toLowerCase());if(i<0)return esc(t);const j=i+String(q).length;return esc(t.slice(0,i))+'<mark>'+esc(t.slice(i,j))+'</mark>'+esc(t.slice(j));}
+// inline search filters (plan Phase 4E): the server reads them from the
+// query; the palette leaves them out of its own title match and highlight
+const PAL_FILTER=/(?:^|\s)(?:after|before|route|dated|from|in):(?:"[^"]*"|\S+)/gi;
+function palText(){return UI.pq.replace(PAL_FILTER,' ').replace(/\s+/g,' ').trim();}
 function palResults(){
- const q=UI.pq.trim();const lq=q.toLowerCase();
+ const q=palText();const lq=q.toLowerCase();const filtered=q!==UI.pq.trim();
  if(q.length<2)return `<div class="meta pop-note">Type a word someone said, a title, or a name.</div>`+[...meetings()].slice(0,5).map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${esc(m.title)}</div><div class="meta">${esc(whenText(m))}</div></a>`).join('');
- const local=meetings().filter(m=>m.title.toLowerCase().includes(lq)||(m.named||[]).some(n=>n.toLowerCase().includes(lq)));
- const r=UI.pres&&UI.pres.q===lq?UI.pres:null;
+ const r=UI.pres&&UI.pres.q===UI.pq.trim().toLowerCase()?UI.pres:null;
+ if(r&&r.error)return `<div class="err pop-note">${esc(r.error)}</div>`;
+ // with a filter, only the server knows which meetings pass it
+ const local=filtered?[]:meetings().filter(m=>m.title.toLowerCase().includes(lq)||(m.named||[]).some(n=>n.toLowerCase().includes(lq)));
  const fromIdx=r?(r.meetings||[]).map(x=>byBase(x.base)).filter(Boolean):[];
  const titles=[...local,...fromIdx].filter((m,i,a)=>a.indexOf(m)===i).slice(0,6);
  const said=r?(r.hits||[]).slice(0,10):[];
@@ -448,7 +455,7 @@ function palSearch(){
  palTimer=setTimeout(async()=>{const seq=++palSeq;
   const [a,b]=await Promise.all([api('/api/search?q='+encodeURIComponent(q)).catch(()=>({hits:[]})),api('/api/search_meetings?q='+encodeURIComponent(q)).catch(()=>({meetings:[]}))]);
   if(seq!==palSeq||UI.pq.trim().toLowerCase()!==q)return;   // a stale answer
-  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[]};
+  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[],error:a.error||''};
   const box=$('#pal-res');if(box)box.innerHTML=palResults();},180);
 }
 function showPop(anchor,html){const p=$('#pop');p.innerHTML=html;p.hidden=false;const r=anchor.getBoundingClientRect();p.style.left='0';p.style.top='0';
@@ -463,7 +470,7 @@ function rowMenu(base){const m=byBase(base)||{};
   <button class="mi" type="button" data-act="export" data-base="${esc(base)}" data-fmt="docx">Export Word</button><button class="mi" type="button" data-act="export" data-base="${esc(base)}" data-fmt="pdf">Export PDF</button>
   <button class="mi" type="button" data-act="copy" data-base="${esc(base)}">Copy transcript</button><button class="mi" type="button" data-act="export" data-base="${esc(base)}" data-fmt="reveal">Show files</button><hr>
   <button class="mi" type="button" data-act="pop-redo" data-base="${esc(base)}">Redo…<small>Rebuilds from the stored audio</small></button>
-  <button class="mi" type="button" data-act="archive" data-base="${esc(base)}">Archive</button><button class="mi danger" type="button" data-act="pop-del" data-base="${esc(base)}">Delete…</button>`;}
+  <button class="mi" type="button" data-act="archive" data-base="${esc(base)}">Archive</button><button class="mi danger" type="button" data-act="pop-del" data-base="${esc(base)}">Delete…</button>${m.group?groupMenuItem(base,m.group):''}`;}
 function popForm(kind,base,label,value,type){
  return `<div class="pop-form"><label class="meta" for="pf-in">${esc(label)}</label><input type="${type||'text'}" id="pf-in" value="${esc(value)}" data-kind="${kind}" data-base="${esc(base)}"><div class="err" id="pf-err" hidden></div>
   <div class="row-btns"><button class="btn plain" type="button" data-act="cancel-pop">Cancel</button><button class="btn primary" type="button" data-act="pf-save">Save</button></div></div>`;}
@@ -483,7 +490,7 @@ function render(force){
  if(!S)return;
  renderFrame();
  if(UI.route==='meeting'){LAST_SIG='';mRender(force);renderBulk();return;}
- const views={home:homeView,recordings:recordingsView,activity:activityView,speakers:speakersView,archive:archiveView,settings:settingsView};
+ const views={home:homeView,recordings:recordingsView,groups:groupsView,activity:activityView,speakers:speakersView,archive:archiveView,settings:settingsView};
  // a 2s poll must never wipe a field being typed into. The frame repaints
  // anyway, the Recordings list below its filter keeps up, and the rest of
  // the page catches up on the next poll after the field loses focus.
@@ -514,9 +521,12 @@ function route(){
  hidePop();UI.menu=false;UI.palette=false;UI.keys=false;UI.confirm=null;
  // #m/<base> and #m/<base>/t/<secs>: the meeting page (next-meeting.js)
  const mh=parseMeetingHash(h);
- const r=mh?'meeting':TITLES[h]?h:'home';
+ // #groups/<key> (next-library.js)
+ const lh=mh?null:parseLibHash(h);
+ const r=mh?'meeting':lh?lh.r:TITLES[h]?h:'home';
  const sameMeeting=mh&&UI.route==='meeting'&&UI.mbase===mh.base;
- if(r!==UI.route||(mh&&!sameMeeting)){UI.sel.clear();UI.naming=null;if(r==='archive')UI.archived=null;if(r==='activity'){UI.hist=null;UI.dupes=null;}}
+ if(r!==UI.route||(mh&&!sameMeeting)){UI.sel.clear();UI.naming=null;if(r==='archive')UI.archived=null;if(r==='activity'){UI.hist=null;UI.dupes=null;}if(r==='groups'){LIB.groups=null;LIB.gundo=null;LIB.gseen=null;}}
+ if(lh)libEnter(lh);
  if(r!=='meeting'){mTeardown();UI.mbase=null;}
  // the voice sheet stays only for a hand-off into the meeting it walks
  if(VS&&!(mh&&VCARRY&&VCARRY.base===mh.base))vsClose();
@@ -722,7 +732,7 @@ document.addEventListener('keydown',e=>{
  if(UI.keys){if(e.key==='?')closeLayer();return;}
  if(e.key==='?'){UI.keys=true;layersHTML();return;}
  if(e.key==='/'){e.preventDefault();A.palette();return;}
- if(gPending&&Date.now()-gPending<1200){gPending=0;const to={h:'home',r:'recordings',a:'activity',s:'speakers',e:'archive',',':'settings'}[e.key];if(to){go(to);return;}}
+ if(gPending&&Date.now()-gPending<1200){gPending=0;const to={h:'home',r:'recordings',g:'groups',a:'activity',s:'speakers',e:'archive',',':'settings'}[e.key];if(to){go(to);return;}}
  if(e.key==='g'){gPending=Date.now();return;}
  if(e.key==='j'||e.key==='k'){const rows=[...document.querySelectorAll('#view [data-row]')];if(!rows.length)return;e.preventDefault();
   const i=rows.indexOf(t.closest?t.closest('[data-row]'):null);const n=e.key==='j'?Math.min(rows.length-1,i+1):Math.max(0,i-1);rows[n<0?0:n].focus();return;}

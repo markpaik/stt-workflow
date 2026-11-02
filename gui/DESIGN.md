@@ -93,7 +93,7 @@ light, dark under the `stt_theme` key, applied before paint.
 ## Frame
 
 - A 232px sidebar on `--paper`: the wordmark and the theme button, the status
-  pill, New, Search, then Home, Recordings, Speakers, a gap, Activity,
+  pill, New, Search, then Home, Recordings, Groups, Speakers, a gap, Activity,
   Archive, Settings. Home carries the Needs you count and Activity the
   attention count, in teal. The foot holds "Open the classic page" (until
   `/classic` goes) and Keys.
@@ -102,12 +102,13 @@ light, dark under the `stt_theme` key, applied before paint.
   same navigation as a sheet. Rows wrap, one column replaces two, and nothing
   scrolls sideways. Touch targets grow to 40px and 44px. Bottom tabs wait for
   phone access.
-- Routes: `#home`, `#recordings`, `#activity`, `#speakers`, `#archive`,
-  `#settings`, `#m/<base>`, and `#m/<base>/t/<secs>`, which opens the
-  Transcript tab at that second.
+- Routes: `#home`, `#recordings`, `#groups`, `#groups/<key>`, `#activity`,
+  `#speakers`, `#archive`, `#settings`, `#m/<base>`, and
+  `#m/<base>/t/<secs>`, which opens the Transcript tab at that second.
 - The tab title is the page name plus " · Meetings". `(N)` leads it when N
   Needs you items joined while the tab was hidden.
-- Groups and Ask are Phases 4E and 4F. They have no entry until they ship.
+- Groups (Phase 4E) lives in `next-library.js`, joined after the voice
+  sheet.
 
 ## Status pill
 
@@ -145,6 +146,19 @@ Open, Select, Rename, Set date, the tags, Export Word and PDF, Copy
 transcript, Show files, Redo, Archive, Delete. Selecting shows the bulk bar:
 Keep titles, Work, Personal, Clear tag, Rename, Set date, Archive, Delete
 audio, Delete, Select all shown. Delete and Delete audio are two-step.
+
+**Groups.** The group list beside the open group, each with a mono count.
+The open group shows its name, count, hours, and one line on why these
+meetings group, then its rows. Groups form on the server (`stt/groups.py`)
+from title words (average linkage, weak words such as "weekly" never join
+alone), then the same people at the same hour for a meeting with a default
+title. A group needs two meetings. A grouped row shows its group on the meta
+line, and its row menu ends with "Not part of this group", the one write
+this page makes (`POST /api/group_override`, keyed on `meeting_id`), with an
+Undo line. Nothing on disk moves. Opening a group posts one
+`{event: group_open}` line to `/api/usage`, with no title or key, for the
+one-month use count. Empty: "No groups yet" with one sentence on how groups
+form.
 
 **Activity.** Process all new, Import files, Pause or Resume, Stop
 (two-step), the four run options for the next manual run, then Needs
@@ -331,7 +345,7 @@ layer at a time, then back to the list. Key caps show only in the `?` sheet.
 |---|---|---|
 | `/`, Cmd K | Anywhere | Search palette (`/` on a Transcript tab focuses find) |
 | `?` | Anywhere | Key sheet |
-| `g` then `h` `r` `a` `s` `e` `,` | Anywhere | Home, Recordings, Activity, Speakers, Archive, Settings |
+| `g` then `h` `r` `g` `a` `s` `e` `,` | Anywhere | Home, Recordings, Groups, Activity, Speakers, Archive, Settings |
 | `j` `k`, Enter, `x` | A list | Move, open, select |
 | `1` `2` `3` | Meeting | Summary, Transcript, Ask |
 | `[` `]` | Meeting | Previous, next recording in the Recordings order |
@@ -351,6 +365,15 @@ list and `search.meetings`, the FTS5 title and summary index), then "Said
 in" lines from `GET /api/search` (the FTS5 line index, with the scan as
 fallback), each with its mono timestamp. A hit opens `#m/<base>/t/<secs>`.
 Arrow keys move, Enter opens the first or the chosen hit.
+
+Filters (Phase 4E) are typed inline and read by the server:
+`after:2026-10-01` (on or after), `before:2026-10-31` (before that day),
+`route:voice_memo,native`, `dated:typed,recorder` (`dated:none` is a
+meeting from before the `date_source` key), `from:<speaker>`, and
+`in:<group key>`. The day is the date part of `recorded_at` when it is
+set, else the stored date. `/api/search` and `/api/search_meetings` also take
+them as query parameters. A bad value answers with `error` and no hits, and
+the palette shows that line.
 
 ## Rules that hold everywhere
 

@@ -26,7 +26,7 @@ from gui import server as srv
 NODE = shutil.which("node")
 STATIC = Path(srv.__file__).resolve().parent / "static"
 DESIGN = Path(srv.__file__).resolve().parent / "DESIGN.md"
-JS_FILES = ("next.js", "next-meeting.js", "next-voice.js")
+JS_FILES = ("next.js", "next-meeting.js", "next-voice.js", "next-library.js")
 needs_node = pytest.mark.skipif(NODE is None, reason="node not installed")
 
 

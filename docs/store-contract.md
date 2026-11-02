@@ -39,7 +39,8 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
 1. The folder name equals `dates.restamp(title, date)` plus the twin suffix. `stt/doctor.py` reports any folder that breaks this as `name_mismatch`.
 2. A meeting has exactly one live folder. `meetings_index.json` maps `meeting_id` to that folder, and it is a cache that a scan can rebuild.
 3. `search.db` (`config.SEARCH_DB`, under `PROJECT_DIR`, mode 600) is the full-text index behind `/api/search`. It holds the live meetings only, and it is a cache: every search first re-reads each `<base>.json` whose mtime or size changed and drops the rows of a folder that is gone. `python -m stt.search --rebuild` builds it again from the jsons alone. A json that parses but has a shape the index cannot read is recorded with no lines until it changes, so one bad meeting never turns the index off for the rest. When the index finds nothing or fails, the search falls back to a substring scan.
-4. `generated_at` changes on every write by the pipeline or the panel. A store repair (`tools/backfill_keys.py`, `tools/amnesty.py`) leaves it as it was, so an open panel page does not reload.
+4. `group_overrides.json` (`PROJECT_DIR`, mode 600) holds the "Not part of this group" corrections, `{meeting_id: {"not_in": [group key]}}`, keyed on the folder name only for a meeting with no id. Groups themselves are computed on read (`stt/groups.py`) and stored nowhere. `group_usage.jsonl` (mode 600) counts group opens and group questions, `{at, event}`, with no title or key.
+5. `generated_at` changes on every write by the pipeline or the panel. A store repair (`tools/backfill_keys.py`, `tools/amnesty.py`) leaves it as it was, so an open panel page does not reload.
 
 ## Who writes
 

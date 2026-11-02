@@ -17,9 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from gui import jobqueue
-from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
-                 output, queue_order, rates, recorder, review, search, status,
-                 titles, unknowns)
+from stt import (config, control, dates, dupes, export, groups, identify, jobs,
+                 manifest, output, queue_order, rates, recorder, review, search,
+                 status, titles, unknowns)
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -572,6 +572,9 @@ def _meeting_meta(j: Path, dst_dir: Path):
             ask = {disp: cid for disp, cid in unnamed.items()
                    if unnamed_talk.get(disp, 0.0) >= VOICE_ASK_MIN_SECS}
         meta = {"base": j.stem,
+                # the immutable id: group corrections and saved Ask
+                # citations key on it, so they survive a rename
+                "meeting_id": d.get("meeting_id"),
                 "date": iso,
                 # display name: the folder carries the date so recurring
                 # meetings stay unique on disk, but the panel shows the clean
@@ -1306,6 +1309,28 @@ def _queue_and_dupes():
     return queue, meetings, resolvable
 
 
+def _with_groups(meetings: list) -> list:
+    """Each meeting row with its computed group, when it has one (plan Phase
+    4E). The rows are shared cache entries, so a grouped row is a copy."""
+    try:
+        gm = groups.membership()
+    except Exception as e:
+        print(f"   groups: not computed ({e})", file=sys.stderr)
+        return meetings
+    return [dict(m, group=gm[m["base"]][0], group_name=gm[m["base"]][1])
+            if m["base"] in gm else m for m in meetings]
+
+
+def _search_filters(q: dict) -> dict:
+    """The /api/search filters from query parameters. `dated` is the short
+    name for `date_source`, as typed in the palette."""
+    out = {k: q[k] for k in ("after", "before", "route", "date_source", "from", "in")
+           if q.get(k)}
+    if q.get("dated") and "date_source" not in out:
+        out["date_source"] = q["dated"]
+    return out
+
+
 def gather_state():
     from stt import summarize
     st = status.read()
@@ -1448,7 +1473,7 @@ def gather_state():
             # agree and neither has to re-derive the paused-span arithmetic.
             "recording": rec_state,
             "recorder_note": status.recorder_note(),  # expires a success on its own
-            "queue": queue, "meetings": meetings,
+            "queue": queue, "meetings": _with_groups(meetings),
             # the One Timeline: one row per meeting/file, changing state in place
             # (recording -> waiting/held -> processing -> needs_name -> ready |
             # failed), newest first, archived excluded; plus a ranked tray of
@@ -2195,12 +2220,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._serve_audio(f)
             elif u.path == "/api/search":
-                self._json(search.query(q.get("q", "")))
+                # filters (plan Phase 4E) arrive as query parameters or
+                # inline in q ("budget after:2026-10-01"). A bad value
+                # answers with `error` and no hits.
+                self._json(search.query(q.get("q", ""), filters=_search_filters(q)))
             elif u.path == "/api/search_meetings":
                 # meetings whose title or summary matches, best first, for the
                 # /next search palette's Titles group. Read-only, like
                 # /api/search, and empty when the index cannot answer.
-                self._json({"meetings": search.meetings(q.get("q", ""))})
+                self._json({"meetings": search.meetings(
+                    q.get("q", ""), filters=_search_filters(q))})
+            elif u.path == "/api/groups":
+                # computed groups, largest first. Read only: a GET writes
+                # nothing, so the use count is a separate POST /api/usage
+                self._json({"groups": groups.current()})
             elif u.path == "/api/txt":
                 if not self._require_base(q.get("base")):
                     return
@@ -2890,6 +2923,20 @@ class Handler(BaseHTTPRequestHandler):
                                 "message": "Permissions reset. Now click Start "
                                            "recording in the menu bar and grant "
                                            "BOTH prompts when macOS asks."})
+            elif u.path == "/api/group_override":
+                # "Not part of this group", keyed on meeting_id, with undo
+                if not self._require_base(b.get("base")):
+                    return
+                key = str(b.get("group") or "")
+                if not key:
+                    self._json({"ok": False, "error": "no group"}, 400)
+                    return
+                mkey = config.id_of(b["base"]) or b["base"]
+                self._json(groups.set_override(mkey, key, exclude=not b.get("undo")))
+            elif u.path == "/api/usage":
+                # one count line per group open or group question, no title
+                ok = groups.log_use(str(b.get("event") or ""))
+                self._json({"ok": ok}, 200 if ok else 400)
             elif u.path == "/api/seen":
                 # the panel is in front of the owner: record the look, so the
                 # menu bar's "new since last look" count starts over. Ids and a
@@ -3132,8 +3179,10 @@ _page_cache: dict = {"mtimes": None, "html": None}
 # The new shell (plan Phases 4C and 4D), served at /: a second parts tuple,
 # composed the same way, with its own markers. Its script is several small
 # plain files joined in this fixed order, with no import lines and no build
-# step: the frame, then the meeting page, then the voice sheet.
-_NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js")
+# step: the frame, then the meeting page, then the voice sheet, then the
+# library views (Groups and Ask).
+_NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js",
+               "next-library.js")
 _next_cache: dict = {"mtimes": None, "html": None}
 
 

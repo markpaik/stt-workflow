@@ -931,7 +931,8 @@ def test_speaker_select_restores_prior_selection_on_cancel():
 def _new_shell_js():
     static = Path(srv.__file__).resolve().parent / "static"
     return "\n".join((static / f).read_text(encoding="utf-8")
-                     for f in ("next.js", "next-meeting.js", "next-voice.js"))
+                     for f in ("next.js", "next-meeting.js", "next-voice.js",
+                               "next-library.js"))
 
 
 def test_new_shell_flag_reason_is_escaped():
