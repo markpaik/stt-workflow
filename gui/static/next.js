@@ -50,7 +50,7 @@ async function api(path,body){
 let S=null;
 const UI={route:'home',q:'',chip:'all',sort:'new',fold:{},sel:new Set(),menu:false,palette:false,keys:false,
  pq:'',pres:null,actTab:'all',hist:null,histQ:'',histF:'all',dupes:null,archived:null,confirm:null,
- naming:null,openSamples:null,err:{},keysOpen:false,prefsSub:null,updates:null};
+ naming:null,carry:null,openSamples:null,err:{},keysOpen:false,prefsSub:null,updates:null};
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',
  diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 const NEEDS_DAYS=14;
@@ -66,7 +66,9 @@ function arrivedDays(m){const a=m.arrived_at;if(!a)return 9999;const t=new Date(
 const meetings=()=>(S&&S.meetings)||[];
 const byBase=b=>meetings().find(m=>m.base===b);
 const unnamedN=m=>Object.keys(m.ask_clusters||{}).length;
-const isDraft=m=>m.title_state==='needs_title'||(m.title_state==='provisional'&&m.route!=='public_download');
+// a meeting from before the title rule has no title_state. titles.needs_title
+// falls back to needs_review for it, and so does the chip.
+const isDraft=m=>m.title_state?(m.title_state==='needs_title'||(m.title_state==='provisional'&&m.route!=='public_download')):!!m.needs_review;
 const dateUncertain=m=>m.date_source==='mtime'||m.date_source==='short_typed';
 const activeRows=()=>((S&&S.timeline)||[]).filter(r=>r.state==='processing'||r.state==='recording');
 const waitingRows=()=>((S&&S.timeline)||[]).filter(r=>r.state==='waiting'||r.state==='held');
@@ -192,7 +194,7 @@ function homeView(){
  return `<div class="head"><h1>Home</h1></div><div class="home"><div class="stack sections">
   ${att}${run}
   <section><div class="eyebrow">Needs you ${ny.length?`<span class="n">${ny.length}</span>`:''}</div><div class="stack">${ny.map(needsCard).join('')}${none}</div></section>
-  ${drafts.length?`<section><div class="eyebrow">Draft titles <span class="n">${drafts.length}</span>${all}</div><div class="stack">${draftCards}</div><p class="meta note">Optional. These titles came from a label, a typed Voice Memos title, or a public download. They block nothing and leave this list ${NEEDS_DAYS} days after they arrive.</p></section>`:''}
+  ${drafts.length?`<section><div class="eyebrow">Draft titles <span class="n">${drafts.length}</span>${all}</div><div class="stack">${draftCards}</div><p class="meta note">Optional. These titles came from a typed label, or the panel made them from the speakers and topic. They block nothing and leave this list ${NEEDS_DAYS} days after they arrive.</p></section>`:''}
   <section><div class="eyebrow">Recent</div><div class="stack">${recent}</div><a class="btn quiet" style="align-self:flex-start;margin-left:calc(var(--s2) * -1)" href="#recordings">All recordings</a></section></div></div>`;
 }
 const SOURCE_NICE={label:'your label',shortcut:'the Shortcut',public_download:'the public download',calendar:'Calendar',model:'the model',manual:'you',voice_memo:'Voice Memos'};
@@ -422,7 +424,8 @@ function layersHTML(){
  $('#layers').innerHTML=h;
 }
 const KEYS=[['/ or Cmd K','Search titles and words'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row'],['x','Select the row'],['Esc','Back out one layer'],['?','This sheet']];
-function hl(text,q){const t=esc(text);if(!q)return t;const i=t.toLowerCase().indexOf(esc(q).toLowerCase());return i<0?t:t.slice(0,i)+'<mark>'+t.slice(i,i+esc(q).length)+'</mark>'+t.slice(i+esc(q).length);}
+// match in the raw text, then escape each slice, so a mark never lands inside an entity
+function hl(text,q){const t=String(text==null?'':text);if(!q)return esc(t);const i=t.toLowerCase().indexOf(String(q).toLowerCase());if(i<0)return esc(t);const j=i+String(q).length;return esc(t.slice(0,i))+'<mark>'+esc(t.slice(i,j))+'</mark>'+esc(t.slice(j));}
 function palResults(){
  const q=UI.pq.trim();const lq=q.toLowerCase();
  if(q.length<2)return `<div class="meta pop-note">Type a word someone said, a title, or a name.</div>`+[...meetings()].slice(0,5).map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${esc(m.title)}</div><div class="meta">${esc(whenText(m))}</div></a>`).join('');
@@ -511,9 +514,16 @@ function route(){
  hidePop();UI.menu=false;UI.palette=false;UI.keys=false;UI.confirm=null;
  const r=TITLES[h]?h:'home';
  if(r!==UI.route){UI.sel.clear();UI.naming=null;if(r==='archive')UI.archived=null;if(r==='activity'){UI.hist=null;UI.dupes=null;}}
+ // an action on one page that opens another (Select from Home, Name from a
+ // Home voice card) carries its state across the clear above
+ const c=UI.carry;UI.carry=null;const carried=c&&c.to===r;
+ if(carried){(c.sel||[]).forEach(b=>UI.sel.add(b));if(c.naming)UI.naming=c.naming;}
  UI.route=r;document.title=tabTitle();
  layersHTML();render(true);window.scrollTo(0,0);
+ if(carried&&c.after)c.after();
 }
+function goCarry(to,c){UI.carry=Object.assign({to},c);go(to);}
+function focusVoice(uid){const r=document.getElementById('v-'+uid);if(r&&r.scrollIntoView)r.scrollIntoView({block:'center'});const i=$('#vn-in');if(i)i.focus();}
 function go(to){if(location.hash==='#'+to)route();else location.hash=to;}
 
 /* ------------------------------------------------------------- actions ---- */
@@ -564,7 +574,7 @@ const A={
  'spk-menu'(el){const n=el.dataset.name;const others=(S.enrolled||[]).filter(e=>e.name!==n);
   showPop(el,`<button class="mi" type="button" data-act="rn-open" data-name="${esc(n)}">Rename…</button>${others.length?`<div class="pop-form"><label class="meta" for="mg-sel">Merge into</label><select id="mg-sel">${others.map(e=>`<option value="${esc(e.name)}">${esc(e.name)}</option>`).join('')}</select><div class="row-btns"><button class="btn" type="button" data-act="merge" data-name="${esc(n)}">Merge</button></div></div>`:''}<hr><button class="mi danger" type="button" data-act="rm-ask" data-name="${esc(n)}">Remove…<small>Forgets the voice. Meetings keep the name.</small></button>`);},
  open(el){hidePop();location.href=meetingHref(el.dataset.base);},
- select(el){hidePop();UI.sel.add(el.dataset.base);if(UI.route!=='recordings')go('recordings');else render(true);},
+ select(el){hidePop();const b=el.dataset.base;if(UI.route!=='recordings')goCarry('recordings',{sel:[b]});else{UI.sel.add(b);render(true);}},
  'cancel-pop'(){hidePop();},
  'pop-rename'(el){const m=byBase(el.dataset.base)||{};showPop(POP_ANCHOR||el,popForm('rename',el.dataset.base,'New title',m.title||''));},
  'pop-date'(el){const m=byBase(el.dataset.base)||{};showPop(POP_ANCHOR||el,popForm('date',el.dataset.base,'Date (YYYY-MM-DD)',m.date||'','text'));},
@@ -612,8 +622,9 @@ const A={
  async 'dupe-scan'(){await act('/api/dupe_scan',{go:true},'dupes');UI.dupes=null;render(true);},
  async 'dupe-ignore'(el){await act('/api/dupe_ignore',{a:el.dataset.a,b:el.dataset.b},'dupes');UI.dupes=null;render(true);},
  play(el){play(el);},
- 'name-voice'(el){UI.naming={uid:el.dataset.uid,value:'',force:false};if(UI.route!=='speakers')go('speakers');else render(true);
-  setTimeout(()=>{const r=document.getElementById('v-'+el.dataset.uid);if(r)r.scrollIntoView({block:'center'});const i=$('#vn-in');if(i)i.focus();},30);},
+ 'name-voice'(el){const uid=el.dataset.uid;const N={uid,value:'',force:false};
+  if(UI.route!=='speakers'){goCarry('speakers',{naming:N,after:()=>focusVoice(uid)});return;}
+  UI.naming=N;render(true);focusVoice(uid);},
  vfill(el){const i=$('#vn-in');if(i){i.value=el.dataset.n;i.focus();}if(UI.naming){UI.naming.value=el.dataset.n;UI.naming.force=false;UI.naming.warn=null;}},
  vsave(){saveName();},
  vcancel(){UI.naming=null;render(true);},

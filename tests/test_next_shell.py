@@ -242,6 +242,8 @@ console.log(JSON.stringify({
  pub:isDraft(mk({title_state:'provisional',route:'public_download'})),
  conf:isDraft(mk({title_state:'confirmed'})),
  old:isDraft(mk({})),
+ legacy:isDraft(mk({needs_review:true})),
+ legacyChip:chipsFor(mk({needs_review:true})).includes('chip'),
  unc:[dateUncertain(mk({date_source:'mtime'})),dateUncertain(mk({date_source:'short_typed'})),dateUncertain(mk({date_source:'typed'}))],
  attn:chipsFor(mk({title_state:'needs_title'})).includes('chip attn'),
  quiet:chipsFor(mk({title_state:'provisional'})).includes('chip draft')}));
@@ -249,6 +251,8 @@ console.log(JSON.stringify({
     assert out["need"] and out["prov"]
     # a public download wears no chip, and a confirmed or pre-rule meeting none
     assert not out["pub"] and not out["conf"] and not out["old"]
+    # a meeting from before the title rule falls back to needs_review
+    assert out["legacy"] and out["legacyChip"]
     assert out["unc"] == [True, True, False]
     assert out["attn"] and out["quiet"]
 
@@ -350,6 +354,41 @@ const h=rowHTML({base:'b"><img>',title:'<script>x</script>',date:'2026-10-01',mi
 console.log(JSON.stringify({raw:/<script>|<img>|<b>n|<i>s/.test(h)}));
 """)
     assert out["raw"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_highlight_never_lands_inside_an_entity():
+    out = _run_node("""
+console.log(JSON.stringify({a:hl('R&D plan','amp'),b:hl('a<b','lt'),c:hl('R&D plan','&d'),d:hl('<x>','')}));
+""")
+    assert out == {"a": "R&amp;D plan", "b": "a&lt;b", "c": "R<mark>&amp;D</mark> plan",
+                   "d": "&lt;x&gt;"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_select_and_name_from_home_survive_the_route_change():
+    out = _run_node("""
+S={meetings:[{base:'m1',title:'Alpha',date:'2026-10-01',minutes:3,named:[],ask_clusters:{}}],
+ needs_you:[],enrolled:[],unknown:[{uid:'U004',meetings:['m1']}]};
+// a browser hash reads back with its leading '#'
+let _h='';Object.defineProperty(location,'hash',{get:()=>_h?'#'+_h:'',set:v=>{_h=String(v).replace(/^#/,'');}});
+UI.route='home';
+A.select({dataset:{base:'m1'}});
+const hashA=location.hash;route();
+const sel={route:UI.route,size:UI.sel.size,has:UI.sel.has('m1')};
+location.hash='home';route();
+const cleared=UI.sel.size;
+A['name-voice']({dataset:{uid:'U004'}});
+const hashB=location.hash;route();
+const nm={route:UI.route,uid:UI.naming&&UI.naming.uid,carry:UI.carry};
+location.hash='recordings';route();
+console.log(JSON.stringify({hashA,sel,cleared,hashB,nm,after:UI.naming}));
+""")
+    assert out["hashA"] == "#recordings" and out["hashB"] == "#speakers"
+    assert out["sel"] == {"route": "recordings", "size": 1, "has": True}
+    # an ordinary route change still clears the selection and the form
+    assert out["cleared"] == 0 and out["after"] is None
+    assert out["nm"] == {"route": "speakers", "uid": "U004", "carry": None}
 
 
 # ------------------------------------------------- classic seek deep link ---

@@ -930,3 +930,9 @@ carries the surface, and `tests/test_next_shell.py` checks each one.
 | 19 | Setup check | Moves to the Home empty state | moves | `function setupCard` |
 | 20 | Tab title | Moves: `(N)` counts Needs you items that joined while the tab was hidden | moves | `function tabTitle` |
 
+Gate note (QA, 2026-11-02). The 4C gate reads "The 20 surfaces in the panel
+audit each move or retire". Surfaces 1 and 11 stay in 4C, and they move in 4D
+with the meeting page and the `/` swap. So the gate passes only as "4C or 4D".
+Owner decision: pending. The owner either accepts the 4D move for these two
+surfaces or asks for a change to the 4C scope.
+
