@@ -54,6 +54,19 @@ MANIFEST_PATH = PROJECT_DIR / "manifest.json"
 WORK_DIR = PROJECT_DIR / "work"  # scratch space for normalized wavs
 LOG_DIR = PROJECT_DIR / "logs"
 
+
+def migration_dir() -> Path:
+    """Where one-time store changes keep their undo journals (mode 700).
+    Outside the repo on purpose: a journal holds the old values of meeting
+    fields, so it must never sit where `git add` can reach it.
+    STT_MIGRATION_DIR wins, then STT_HOME, then Application Support."""
+    env = os.environ.get("STT_MIGRATION_DIR")
+    if env:
+        return Path(env).expanduser()
+    if _HOME:
+        return _HOME / "migration"
+    return HOME / "Library/Application Support/com.stt-workflow/migration"
+
 # --- Models ---
 # Parakeet TDT 0.6B v2 is English-only and the WER leader with an MLX runtime.
 PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v2")
