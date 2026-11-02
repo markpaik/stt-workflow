@@ -380,7 +380,8 @@ evidence:
   focuses the box FIRST; the line fills in when the response lands. A preview
   that fails paints nothing. A save is never blocked on it.
 - **The looks-like chips.** Under the line, when the voice already resembles
-  somebody enrolled: ordinary `.nchip` buttons reading "Looks like Riley Stone · 0.84", best first, at most three, score in mono. Clicking one fills
+  somebody enrolled: ordinary `.nchip` buttons reading "Looks like Avery
+  Sample · 0.84", best first, at most three, score in mono. Clicking one fills
   the name box and nothing else. These are the clusters the automatic margin
   rule refuses on purpose (at or above MATCH_MIN, under the margin) — a machine
   must not name them, and a human should not have to rediscover them. Evidence,
