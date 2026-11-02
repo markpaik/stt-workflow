@@ -504,6 +504,13 @@ def main():
     dest.mkdir(parents=True, exist_ok=True)
     if not args.dry_run:
         clean_scratch()
+        # size caps: logs/ at 10 MB keeping 3 gzips, calibration.jsonl at
+        # 10 MB keeping 1 (stt/housekeeping.py). Never raises.
+        from stt import housekeeping
+        hk = housekeeping.rotate_all()
+        if hk["logs"] or hk["calibration"]:
+            print(f"rotated {len(hk['logs'])} log(s)"
+                  + (", capped calibration.jsonl" if hk["calibration"] else ""))
         # one-time flat->folder layout migration (idempotent, cheap when done)
         n = config.migrate_flat_meetings(dest)
         if n:
@@ -839,6 +846,12 @@ def main():
     status.end_run()
     if not args.dry_run:
         record_review_metrics()
+        # read-only store and registry check; counts (no titles) go to
+        # doctor.json for the panel. Never fails the run.
+        from stt import doctor
+        dr = doctor.run_check_at_batch_end(dest)
+        if dr.get("error"):
+            print(f"  (doctor check skipped: {dr['error']})", file=sys.stderr, flush=True)
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
     if finish["asked"]:
         control.clear_finish()  # honored: the next run starts normally

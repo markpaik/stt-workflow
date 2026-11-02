@@ -28,6 +28,9 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", d / "meetings_index.json")
     monkeypatch.setattr(config, "CALIBRATION_LOG", d / "calibration.jsonl")
     monkeypatch.setattr(config, "WORK_DIR", d / "work")
+    # housekeeping rotates config.LOG_DIR at batch start: a test that runs
+    # run_batch.main must never truncate the checkout's own logs
+    monkeypatch.setattr(config, "LOG_DIR", d / "logs")
     monkeypatch.setattr(config, "MEETINGS_DIR", d / "meetings")
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(config, "RECORDINGS_DIR", d / "recordings")

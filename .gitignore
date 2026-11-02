@@ -83,6 +83,7 @@ dismissed_failures.json
 /*.jsonl
 /*.npz
 /*.db*
+/*.gz
 /*.flag
 /*.lock
 /ask_threads/
