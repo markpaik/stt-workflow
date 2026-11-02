@@ -220,8 +220,10 @@ def test_meeting_page_defines_the_ported_reader_functions():
 def test_meeting_page_uses_the_read_endpoints_verbatim():
     # transcript is fetched (GET, no body) from /api/transcript, as the old reader
     assert "api('/api/transcript?base='" in NEW_JS
-    # summary generation reuses the old GET /api/suggest call + its persistence
-    assert "api('/api/suggest?base='" in NEW_JS
+    # summary generation POSTs /api/suggest (it writes the .json), and no
+    # caller is left on the old GET form
+    assert "api('/api/suggest',{base})" in NEW_JS
+    assert "/api/suggest?base=" not in NEW_JS
     # the audio src is the byte-range /api/audio?base= endpoint
     assert "'/api/audio?base='" in NEW_JS
 

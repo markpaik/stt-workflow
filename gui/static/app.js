@@ -2676,7 +2676,7 @@ function _mSummaryInner(m){
     <div class="msumbody muted" id="msumbody">${esc(hint)}</div>
     <div class="msumfoot"><button class="btn primary mini" id="mgenbtn" type="button" onclick="mGenSummary()">Generate summary</button></div>`;
 }
-// wired: GET /api/suggest (same call + persistence as the old genSummary), then
+// wired: POST /api/suggest (same call + persistence as the old genSummary), then
 // refresh S and repaint the summary section. Failure (e.g. no local backend)
 // is surfaced inline, never a crash or a banner.
 async function mGenSummary(){
@@ -2686,7 +2686,7 @@ async function mGenSummary(){
   const wait='Reading the transcript… '+(S.llm_backend==='local'?'(~10-20s)':'(a few seconds)');
   if(body)body.innerHTML='<span class="spin"></span> '+esc(wait);
   let r;
-  try{r=await api('/api/suggest?base='+encodeURIComponent(base));}
+  try{r=await api('/api/suggest',{base});}
   catch(e){r={error:'The summary service is unavailable.'};}
   if(route.view!=='meeting'||route.base!==base)return;
   if(r&&r.summary){

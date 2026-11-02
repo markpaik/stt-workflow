@@ -170,12 +170,27 @@ def test_transcript_endpoint_accepts_real_base(running_server):
     assert status == 200 and body["base"] == "Legit Meeting"
 
 
-def test_audio_txt_review_edits_suggest_reject_unknown_base(running_server):
+def test_audio_txt_review_edits_reject_unknown_base(running_server):
     for path in ("/api/audio?base=../x", "/api/txt?base=../x",
-                 "/api/review?base=../x", "/api/edits?base=../x",
-                 "/api/suggest?base=../x"):
+                 "/api/review?base=../x", "/api/edits?base=../x"):
         status, _ = _get(running_server, path)
         assert status == 400, path
+
+
+def test_suggest_is_a_post_and_get_writes_nothing(running_server, monkeypatch):
+    # plan Phase 4C: generating a summary writes the .json, so GET refuses
+    # with 405 and never reaches the model, and POST gates on the base
+    from stt import summarize
+    called = []
+    monkeypatch.setattr(summarize, "suggest_title",
+                        lambda base: called.append(base) or {"title": "x"})
+    _make_meeting("Suggest Meeting")
+    status, body = _get(running_server, "/api/suggest?base=Suggest%20Meeting")
+    assert status == 405 and "error" in body and called == []
+    status, _ = _post(running_server, "/api/suggest", {"base": "../x"})
+    assert status == 400 and called == []
+    status, body = _post(running_server, "/api/suggest", {"base": "Suggest Meeting"})
+    assert status == 200 and called == ["Suggest Meeting"]
 
 
 def test_export_rename_retranscribe_reject_unknown_base(running_server):

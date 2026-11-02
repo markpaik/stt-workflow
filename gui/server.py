@@ -2196,10 +2196,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
-                if not self._require_base(q.get("base")):
-                    return
-                from stt import summarize
-                self._json(summarize.suggest_title(q["base"]))
+                # Generating a title and summary WRITES the meeting .json, so
+                # it is a POST (plan Phase 4C: GET no longer writes). A stale
+                # caller still on GET gets a 405 and changes nothing.
+                self._json({"error": "use POST /api/suggest with {base}"}, 405)
             elif u.path == "/api/check_updates":
                 self._json(check_updates())
             elif u.path.startswith("/static/fonts/"):
@@ -2873,6 +2873,13 @@ class Handler(BaseHTTPRequestHandler):
                 from stt import ready
                 d = ready.mark_seen()
                 self._json({"ok": True, "seen_at": d["seen_at"]})
+            elif u.path == "/api/suggest":
+                # title, summary, and next steps from the local model, saved to
+                # the meeting .json (the call that used to be a GET)
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                self._json(summarize.suggest_title(b["base"]))
             elif u.path == "/api/accept_meeting":
                 # inbox: name/date/tag it, and mark it reviewed so it joins the list
                 if not self._require_base(b.get("base")):
