@@ -69,9 +69,11 @@ def test_new_shell_has_all_seven_state_hooks():
                "ready", "failed"):
         assert f'data-state="{st}"' in page, f"missing state hook: {st}"
     # needs_name lost its tall row and its CSS hook (docs/ui-refresh phase 2):
-    # the state is a compact To finish row in either sort, never a form
+    # the state is a compact row in either sort, never a form. Needs you
+    # holds exactly the rows the server marked (unified plan row 10), so an
+    # old needs_name row outside the window stays in the library
     assert "if(row.state==='needs_name')return finishRowHTML(row);" in page
-    assert "r.state==='needs_name'||toFinish(r,now)" in page
+    assert "else if(toFinish(r,now))out.fin.push(r);" in page
 
 
 def test_new_shell_carries_both_theme_blocks_and_the_prepaint_snippet():
@@ -3796,7 +3798,7 @@ def _js_const(name):
 
 def _finish_env():
     return "\n".join([
-        _js_const("FINISH_DAYS"), _js_const("FS_LABEL"),
+        _js_const("FS_LABEL"),
         _js_oneline("esc"),
         _js_fn("finishSteps"), _js_oneline("fsCur"), _js_fn("toFinish"),
         _js_fn("nextToFinish"), _js_fn("fsStripHTML"), _js_fn("_fsNextBtn"),
@@ -3838,15 +3840,19 @@ console.log(JSON.stringify({
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
-def test_next_to_finish_wraps_skips_the_current_and_honors_fourteen_days():
+def test_next_to_finish_wraps_skips_the_current_and_follows_needs_you():
+    """] walks the rows the server put in Needs you (unified plan row 10).
+    The 14-day window, the 5-row cap and the reasons are the server's
+    (tests/test_needs_you.py): a row is in the walk exactly when it carries
+    needs_you. An old needs_name row the server left out is not."""
     out = _run_node(_finish_env() + """
 const rows=[
   {id:'rec:x',state:'recording'},
-  {id:'A',state:'needs_name',when:'2026-01-01T09:00:00',finish:fin(false,0,0)},
+  {id:'A',state:'needs_name',when:'2026-09-27T09:00:00',finish:fin(false,0,0),needs_you:'needs_title'},
   {id:'B',state:'ready',when:'2026-09-26T09:00:00',finish:fin(true,0,0)},
-  {id:'C',state:'ready',when:'2026-09-25T09:00:00',finish:fin(true,2,0)},
+  {id:'C',state:'ready',when:'2026-09-25T09:00:00',finish:fin(true,2,0),needs_you:'no_speech'},
   {id:'D',state:'ready',when:'2026-08-01T09:00:00',finish:fin(true,0,9)},
-  {id:'E',state:'ready',when:'2026-09-20T09:00:00',finish:fin(true,0,3)},
+  {id:'E',state:'ready',when:'2026-09-20T09:00:00',finish:fin(true,0,3),needs_you:'duration_mismatch'},
 ];
 const id=r=>r?r.id:null;
 console.log(JSON.stringify({
@@ -3859,20 +3865,22 @@ console.log(JSON.stringify({
   unknownBack:id(nextToFinish(rows,'gone',-1,NOW)),
   alone:id(nextToFinish([rows[3]],'C',1,NOW)),
   empty:id(nextToFinish([],'C',1,NOW)),
-  oldTitle:toFinish(rows[1],NOW), oldFlags:toFinish(rows[4],NOW),
-  finished:toFinish(rows[2],NOW), noWhen:toFinish({finish:fin(true,1,0)},NOW),
+  oldTitle:toFinish({id:'O',state:'needs_name',finish:fin(false,0,0)},NOW),
+  flags:toFinish(rows[4],NOW), finished:toFinish(rows[2],NOW),
+  inList:toFinish(rows[1],NOW),
 }));
 """)
-    # B is finished and D is backlog (flags only, processed in August)
+    # B and D are not in Needs you: one is finished, one has flags only
     assert out["fromA"] == "C"
     assert out["fromC"] == "E"
     assert out["fromE"] == "A", "the walk wraps past the end"
     assert out["backFromC"] == "A" and out["backFromA"] == "E"
     assert out["unknown"] == "A" and out["unknownBack"] == "E"
     assert out["alone"] is None and out["empty"] is None
-    # an open title is always to finish; other open steps only within 14 days
-    assert out["oldTitle"] is True and out["oldFlags"] is False
-    assert out["finished"] is False and out["noWhen"] is False
+    # membership is the server's mark, never the row's own age or steps
+    assert out["inList"] is True
+    assert out["oldTitle"] is False and out["flags"] is False
+    assert out["finished"] is False
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -3933,7 +3941,7 @@ ROWS.Done={id:'Done',when:'2026-09-26T09:00:00',finish:fin(true,0,0)};
 fsInit('Done');out.done={fs:FS,hidden:box.hidden,html:box.innerHTML};
 ROWS.New={id:'New',state:'needs_name',when:new Date().toISOString().slice(0,19),
   suggested_title:'Budget Review',suggested_date:'2026-09-26',
-  source_file:'Recording 0926.m4a',finish:fin(false,1,0)};
+  source_file:'Recording 0926.m4a',finish:fin(false,1,0),needs_you:'needs_title'};
 fsInit('New');out.open={cur:FS.cur,live:FS.live,hidden:box.hidden,html:box.innerHTML,focused};
 // two panes: a j/k walk mounts the meeting quietly -- the strip, no focus
 RQUIET='New';fsInit('New');out.quiet={cur:FS.cur,live:FS.live,hidden:box.hidden,focused,
@@ -4086,10 +4094,10 @@ def test_the_hand_off_keys_open_the_next_meeting_to_finish():
     out = _run_node(_voices_env() + """
 const now=new Date(Date.now()-3600e3).toISOString().slice(0,19);
 S.timeline=[
-  {id:'M0',when:now,finish:fin(true,1,0)},
-  {id:'M1',when:now,finish:fin(true,2,0)},
+  {id:'M0',when:now,finish:fin(true,1,0),needs_you:'needs_title'},
+  {id:'M1',when:now,finish:fin(true,2,0),needs_you:'no_speech'},
   {id:'M2',when:now,finish:fin(true,0,0)},
-  {id:'M3',when:now,finish:fin(true,0,4)},
+  {id:'M3',when:now,finish:fin(true,0,4),needs_you:'duration_mismatch'},
 ];
 const o={};
 o.next=key(']');o.hashNext=location.hash;o.carry=FS_CARRY;
@@ -4109,7 +4117,7 @@ o.nothing=key(']');o.hashNothing=location.hash;
 console.log(JSON.stringify(o));
 """)
     assert out["next"] == {"handled": True, "prevented": True}
-    assert out["hashNext"] == "#m/M3", "M2 is finished, so ] skips it"
+    assert out["hashNext"] == "#m/M3", "M2 is not in Needs you, so ] skips it"
     assert out["carry"] == {"base": "M3", "past": [], "live": True, "keep": False}
     assert out["hashPrev"] == "#m/M0"
     assert out["typing"]["handled"] is False and out["hashTyping"] == "#m/M1"
@@ -4163,6 +4171,7 @@ def _sections_env():
         _js_fn("timelineSections"), _js_fn("finishDotsHTML"), _js_fn("peopleMetaBits"),
         _js_fn("finishRowHTML"),
         _js_fn("secHeadHTML"), _js_fn("finishActsHTML"), _js_fn("headSectionsHTML"),
+        _js_fn("needsYouVoiceHTML"),
     ])
 
 
@@ -4176,11 +4185,14 @@ const rows=[
   {id:'P',state:'processing',when:'2026-09-27T09:00:00'},
   {id:'R',state:'recording',when:'2026-09-27T10:00:00'},
   {id:'H',state:'held',when:'2026-09-20T08:00:00'},
-  {id:'N',state:'needs_name',when:'2026-01-02T08:00:00',date:'2026-01-02',finish:fin(false,0,0)},
-  {id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0)},
+  {id:'N',state:'needs_name',when:recent,date:'2026-09-26',finish:fin(false,0,0),
+   needs_you:'needs_title',needs_you_rank:1},
+  {id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0),
+   needs_you:'no_speech',needs_you_rank:0},
   {id:'D',state:'ready',when:recent,date:'2026-09-24',finish:fin(true,0,0)},
   {id:'O',state:'ready',when:'2026-08-01T08:00:00',date:'2026-08-01',finish:fin(true,1,4)},
   {id:'X',state:'ready',when:'2026-09-01T08:00:00',date:'2026-09-01'},
+  {id:'Q',state:'needs_name',when:'2026-01-02T08:00:00',date:'2026-01-02',finish:fin(false,0,0)},
 ];
 const s=timelineSections(rows,NOW),ids=a=>a.map(r=>r.id);
 console.log(JSON.stringify({now:ids(s.now),fin:ids(s.fin),rest:ids(s.rest),
@@ -4189,13 +4201,14 @@ console.log(JSON.stringify({now:ids(s.now),fin:ids(s.fin),rest:ids(s.rest),
     # Now: the pipeline's live rows in the fixed order; a failed April file
     # sits at the top, never buried in April
     assert out["now"] == ["R", "P", "F", "H", "W"]
-    # To finish: a title waiting (however old), and a recent open step, in
-    # the timeline's own order (the order ] walks)
-    assert out["fin"] == ["N", "V"]
-    # the library: the finished meeting, the older backlog (flags and a voice
-    # left, processed in August: a filter, never a to-do), and a row with no
-    # finish record at all, newest meeting date first
-    assert out["rest"] == ["D", "X", "O"]
+    # Needs you: exactly the rows the server marked, in the server's rank
+    # (unified plan row 10)
+    assert out["fin"] == ["V", "N"]
+    # the library: a finished meeting, a meeting with voices or flags left (a
+    # filter, never a to-do), a row with no finish record, and a title
+    # waiting since January (outside the window: it stays on the meeting),
+    # newest meeting date first
+    assert out["rest"] == ["D", "X", "O", "Q"]
     assert out["empty"] == {"now": [], "fin": [], "rest": []}
 
 
@@ -4329,16 +4342,21 @@ def test_the_list_opens_with_now_and_to_finish_above_the_accordion():
 const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
 const st={timeline:[
   {id:'P',state:'processing',when:recent,pct:40},
-  {id:'N',state:'needs_name',when:recent,date:'2026-09-26',finish:fin(false,1,0)},
+  {id:'N',state:'needs_name',when:recent,date:'2026-09-26',finish:fin(false,1,0),
+   needs_you:'needs_title',needs_you_rank:0},
   {id:'V',state:'ready',when:recent,date:'2026-09-25',finish:fin(true,2,0)},
   {id:'D',state:'ready',when:recent,date:'2026-09-24',finish:fin(true,0,0)},
 ],tray:[
   {kind:'recorder_stall',title:'Recording',detail:'no audio',target:'rec:x',count:1},
   {kind:'unknown_voice',title:'Speaker 58',detail:'',target:'U58',count:2},
-  {kind:'review',title:'V',detail:'',target:'V',count:3},
 ]};
 drawTimeline(st);
 const full=order(html());
+els['#timeline'].dataset.sig='';
+drawTimeline({...st,needs_you:[{kind:'needs_title',target:'N'},
+  {kind:'voice',title:'Speaker 20',detail:'319 min of unnamed talk in 12 meetings',target:'N'}]});
+const voice=order(html()),vh=html();
+els['#timeline'].dataset.sig='';
 const noTray={timeline:[st.timeline[3]],tray:[]};
 els['#timeline'].dataset.sig='';drawTimeline(noTray);
 const quiet=order(html());
@@ -4346,16 +4364,23 @@ els['#timeline'].dataset.sig='';
 drawTimeline({timeline:[st.timeline[3]],tray:[{kind:'dupe_meetings',title:'Duplicate transcripts',
   detail:'1 pair',target:'dupes',count:1}]});
 const dupes=order(html());
-console.log(JSON.stringify({full,quiet,dupes,h:html()}));
+console.log(JSON.stringify({full,quiet,dupes,voice,vh,h:html()}));
 """)
-    # Now (the stall row, then the processing row), To finish (its two
-    # rows), then the library; the finished meeting lives only there
-    assert out["full"] == ['"sec-now"', '"trayrow"', '"P"', '"sec-fin"', '"N"', '"V"',
-                           '"ghead mgroup"', '"D"']
+    # Now (the stall row, then the processing row), Needs you (the one row
+    # the server marked), then the library; a meeting with voices left lives
+    # there with the finished one
+    assert out["full"] == ['"sec-now"', '"trayrow"', '"P"', '"sec-fin"', '"N"',
+                           '"ghead mgroup"', '"V"', '"D"']
+    # the one voice row closes Needs you, and its verb walks the voices
+    assert out["voice"] == ['"sec-now"', '"trayrow"', '"P"', '"sec-fin"', '"N"',
+                            '"trayrow"', '"ghead mgroup"', '"V"', '"D"']
+    assert "Speaker 20" in out["vh"] and "fsVoicesStart()" in out["vh"]
+    assert ">Needs you<" in out["vh"] and "To finish" not in out["vh"]
     # a section with nothing in it renders nothing
     assert out["quiet"] == ['"ghead mgroup"', '"D"']
     assert out["dupes"] == ['"sec-now"', '"trayrow"', '"ghead mgroup"', '"D"']
-    # the chronic kinds are the eyebrow's actions, never rows of their own
+    # the tray's unknown voices are never rows of their own: only the server's
+    # one Needs you voice row is
     h = out["h"]
     assert "Speaker 58" not in h
 
@@ -4368,32 +4393,36 @@ def test_now_and_the_to_finish_actions_survive_a_search_and_the_name_sort():
     stall = ("{kind:'recorder_stall',title:'Recording',detail:'no audio',"
              "target:'rec:x',count:1}")
     voice = "{kind:'unknown_voice',title:'Speaker 58',detail:'',target:'U58',count:2}"
+    ny = ("needs_you:[{kind:'voice',title:'Speaker 20',target:'D',"
+          "detail:'5 min of unnamed talk in 2 meetings'}]")
     out = _run_node(_timeline_env(search="zzz") + """
 drawTimeline({timeline:[{id:'D',state:'ready',when:'2026-09-01T00:00:00',
-  title:'Budget',finish:fin(true,0,0)}],tray:[""" + stall + "," + voice + """]});
+  title:'Budget',finish:fin(true,0,0)}],tray:[""" + stall + "," + voice + """],""" + ny + """});
 const nomatch=html();
 els['#search'].value='';els['#timeline'].dataset.sig='';
-drawTimeline({timeline:[],tray:[""" + stall + "," + voice + """]});
+drawTimeline({timeline:[],tray:[""" + stall + "," + voice + """],""" + ny + """});
 const empty=html();
 LF.sort='name';els['#timeline'].dataset.sig='';
 const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
 drawTimeline({timeline:[{id:'B',state:'ready',title:'Budget',when:recent,finish:fin(true,1,0)},
-  {id:'A',state:'needs_name',title:'Alpha',when:recent,finish:fin(false,0,0)}],
-  tray:[""" + stall + "," + voice + """]});
+  {id:'A',state:'needs_name',title:'Alpha',when:recent,finish:fin(false,0,0),
+   needs_you:'needs_title'}],
+  tray:[""" + stall + "," + voice + """],""" + ny + """});
 const byName=order(html());
 console.log(JSON.stringify({nomatch,empty,byName}));
 """)
     for key in ("nomatch", "empty"):
         h = out[key]
         assert 'id="sec-now"' in h and 'class="trayrow"' in h, key
-        assert "Name 1 voice" in h, key
+        assert "Speaker 20" in h and "fsVoicesStart()" in h, key
     assert "No matches." in out["nomatch"]
     assert "Record from the menu bar, or drop an audio file here." in out["empty"]
     assert 'class="setup"' in out["empty"]
-    # by name: Now's urgent row and the To finish actions head the letter
+    # by name: Now's urgent row and the Needs you voice row head the letter
     # groups; the rows themselves stay alphabetical, and a meeting waiting for
     # its title is the compact row there too
-    assert out["byName"] == ['"sec-now"', '"trayrow"', '"sec-fin"', '"A"', '"B"']
+    assert out["byName"] == ['"sec-now"', '"trayrow"', '"sec-fin"', '"trayrow"',
+                             '"A"', '"B"']
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -4746,40 +4775,37 @@ console.log(JSON.stringify({first,then:FS.passed,st:FS.voices.map(v=>v.st)}));
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
-def test_the_eyebrow_counts_the_voices_the_queue_will_ask_about():
-    """drawTimeline labels "Name N voices" with voiceQueueCount, never the
-    tray's count of visible registry voices. With no live meeting holding a
-    voice, the tray's voices open one at a time in the naming panel, and the
-    button's title says so. A row whose voice becomes a registry voice
-    rebuilds the list even though its own voice count did not move."""
+def test_the_needs_you_voice_row_replaces_the_name_n_voices_eyebrow():
+    """Unified plan row 12: Needs you holds ONE voice row, the server's
+    choice (the most unnamed talk in non-public meetings), in place of the
+    eyebrow's "Name N voices". The eyebrow asks for nothing, and the tray's
+    registry voices never become rows. A row whose voice becomes a registry
+    voice still rebuilds the list, because the queue count stays in the
+    signature."""
     out = _run_node(_timeline_env() + """
 const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
-const f=(v,uids)=>({title:true,voices:v,flags:0,done:!v,voice_secs:1,voice_uids:uids});
+const f=(v,uids)=>({title:true,voices:v,flags:0,done:true,voice_secs:1,voice_uids:uids});
 const voice={kind:'unknown_voice',title:'Speaker 7',detail:'',target:'U007',count:2};
 const tl=[{id:'A',state:'ready',when:recent,date:'2026-09-26',finish:f(2,['U007'])},
   {id:'B',state:'ready',when:recent,date:'2026-09-25',finish:f(2,['U007','U012'])},
   {id:'C',state:'ready',when:recent,date:'2026-09-24',finish:f(1,[])}];
 drawTimeline({timeline:tl,tray:[voice]});
-const queue=html(),s0=els['#timeline'].dataset.sig;
+const none=html(),s0=els['#timeline'].dataset.sig;
 drawTimeline({timeline:[tl[0],tl[1],{...tl[2],finish:f(1,['U007'])}],tray:[voice]});
-const s1=els['#timeline'].dataset.sig,merged=html();
+const s1=els['#timeline'].dataset.sig;
 els['#timeline'].dataset.sig='';
-drawTimeline({timeline:[{id:'D',state:'ready',when:recent,date:'2026-09-24',finish:f(0,[])}],
-  tray:[voice,{...voice,title:'Speaker 9',target:'U009'}]});
-const panel=html();
-console.log(JSON.stringify({queue,panel,merged,moved:s1!==s0}));
+drawTimeline({timeline:tl,tray:[voice],needs_you:[{kind:'voice',title:'Speaker 20',
+  target:'A',uid:'U020',detail:'319 min of unnamed talk in 12 meetings, most recently A'}]});
+const row=html();
+console.log(JSON.stringify({none,row,moved:s1!==s0}));
 """)
-    # U007 (heard in A and B), U012, A's local voice, and C's: four. Never
-    # the tray's 1 (U007 alone is a visible registry voice) and never the
-    # meetings' sum of 5
-    assert ">Name 4 voices</button>" in out["queue"]
-    assert "the most talk time first" in out["queue"]
-    # C's voice turns out to be Speaker 7 too: one voice fewer to ask about,
-    # though no meeting's own count moved, so the list must still rebuild
-    assert out["moved"] is True and ">Name 3 voices</button>" in out["merged"]
-    assert ">Name 2 voices</button>" in out["panel"]
-    assert "Heard only in archived meetings: name them one at a time" in out["panel"]
-    assert 'onclick="fsVoicesStart()"' in out["panel"]
+    assert "Name " not in out["none"] and 'id="sec-fin"' not in out["none"]
+    assert "Speaker 7" not in out["none"] and "Speaker 7" not in out["row"]
+    r = out["row"]
+    assert 'id="sec-fin"' in r and ">Needs you<" in r
+    assert "Speaker 20" in r and "319 min of unnamed talk in 12 meetings" in r
+    assert "onclick=\"fsVoicesStart()\"" in r and "Name &#8594;" in r
+    assert out["moved"] is True
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
@@ -4796,24 +4822,25 @@ def test_the_tab_title_counts_meetings_that_joined_to_finish_while_hidden():
 const recent=new Date(Date.now()-864e5).toISOString().slice(0,19);
 const done={id:'D',state:'ready',when:recent,finish:fin(true,0,0)};
 const t=[];
-tabWatch({timeline:[{id:'OLD',state:'needs_name',when:recent,finish:fin(false,0,0)},done]});
+const ny='needs_title';
+tabWatch({timeline:[{id:'OLD',state:'needs_name',when:recent,finish:fin(false,0,0),needs_you:ny},done]});
 t.push(document.title);                        // the first poll is the baseline
-tabWatch({timeline:[{id:'OLD',state:'needs_name',finish:fin(false,0,0)},
-  {id:'N1',state:'needs_name',when:recent,finish:fin(false,1,0)},done]});
+tabWatch({timeline:[{id:'OLD',state:'needs_name',finish:fin(false,0,0),needs_you:ny},
+  {id:'N1',state:'needs_name',when:recent,finish:fin(false,1,0),needs_you:ny},done]});
 t.push(document.title);
 // N1 is named and leaves; N2 joins: two meetings joined since hidden
-tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0)},done]});
+tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0),needs_you:'no_speech'},done]});
 t.push(document.title);
-tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0)},done]});
+tabWatch({timeline:[{id:'N2',state:'ready',when:recent,finish:fin(true,1,0),needs_you:'no_speech'},done]});
 t.push(document.title);                        // an unchanged poll adds nothing
 document.hidden=false;handlers.visibilitychange();
 t.push(document.title);
 // while visible nothing counts, and hiding again starts from zero
-tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0)}]});
+tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0),needs_you:ny}]});
 t.push(document.title);
 document.hidden=true;handlers.visibilitychange();
-tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0)},
-  {id:'N4',state:'needs_name',when:recent,finish:fin(false,0,0)}]});
+tabWatch({timeline:[{id:'N3',state:'needs_name',when:recent,finish:fin(false,0,0),needs_you:ny},
+  {id:'N4',state:'needs_name',when:recent,finish:fin(false,0,0),needs_you:ny}]});
 t.push(document.title);
 console.log(JSON.stringify({t,joins:[tabJoins(null,['a']),tabJoins(['a'],['a','b'])],
   titles:[tabTitle(0),tabTitle(3)]}));
@@ -4891,7 +4918,7 @@ def _panes_env():
     over a stubbed browser. Everything runs inside one function scope, so the
     fake setTimeout never replaces node's own."""
     return "\n".join([
-        _js_const("FINISH_DAYS"), _js_fn("toFinish"),
+        _js_fn("toFinish"),
         _js_const("PIN_ORDER"), _js_const("NOW_STATES"),
         re.search(r"(?m)^function dateKey\(.*$", NEW_JS).group(0),
         _js_fn("timelineSections"), _js_fn("parseHash"), _js_fn("applyRoute"),
@@ -5022,11 +5049,14 @@ def test_the_reader_opens_the_first_to_finish_row_else_the_newest():
 const tl=[
   {id:'P',state:'processing',when:ago(1)},
   {id:'Old',state:'ready',date:'2026-06-01',when:ago(900),finish:fin(true,2,0)},
-  {id:'Name',state:'needs_name',date:'2026-09-20',when:ago(30),finish:fin(false,0,0)},
-  {id:'Voices',state:'ready',date:'2026-09-25',when:ago(10),finish:fin(true,1,0)},
+  {id:'Name',state:'needs_name',date:'2026-09-20',when:ago(30),finish:fin(false,0,0),
+   needs_you:'needs_title'},
+  {id:'Voices',state:'ready',date:'2026-09-25',when:ago(10),finish:fin(true,1,0),
+   needs_you:'no_speech'},
   {id:'New',state:'ready',date:'2026-09-26',when:ago(5),finish:fin(true,0,0)},
   {id:'Mid',state:'ready',date:'2026-09-10',when:ago(400),finish:fin(true,0,0)}];
-const done=tl.map(r=>r.finish?Object.assign({},r,{state:'ready',finish:fin(true,0,0)}):r);
+const done=tl.map(r=>r.finish?Object.assign({},r,{state:'ready',finish:fin(true,0,0),
+  needs_you:undefined}):r);
 console.log(JSON.stringify({
   first:readerDefault(tl),
   skip:readerDefault(tl,undefined,'Name'),

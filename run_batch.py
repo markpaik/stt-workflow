@@ -190,6 +190,22 @@ def summarize_one(key, base=None) -> bool:
         st.clear_stage(key)
 
 
+def record_review_metrics() -> bool:
+    """Append today's review counts (tools/review_metrics.py) once a day, at
+    the end of a run. Counts only, never a title. A failure here never fails
+    the run."""
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "tools" / "review_metrics.py"
+        spec = importlib.util.spec_from_file_location("review_metrics", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(mod.record_today())
+    except Exception as e:
+        print(f"  (review metrics skipped: {e})", file=sys.stderr, flush=True)
+        return False
+
+
 def auto_summarize(keys) -> int:
     """End-of-run sweep: summarize anything from this run still missing a
     description. Normally each file was summarized the moment it finished
@@ -821,6 +837,8 @@ def main():
             print(f"   queued relabel failed: {e}", file=sys.stderr)
 
     status.end_run()
+    if not args.dry_run:
+        record_review_metrics()
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
     if finish["asked"]:
         control.clear_finish()  # honored: the next run starts normally

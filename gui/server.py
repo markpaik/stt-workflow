@@ -1037,6 +1037,119 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
     return timeline, tray
 
 
+# ---------- Needs you: the one short list (plan rows 10, 11, 12) ----------
+#
+# Computed on read from the meeting metas and the unknown registry, so it adds
+# no store and no stored expiry. It holds only what a person must settle, for
+# meetings that ARRIVED in the last NEEDS_YOU_DAYS days (by the stored
+# processed_at, so a memo recorded weeks ago and transferred today appears, and
+# a meeting with no stored processed_at never does). At most NEEDS_YOU_MAX
+# rows and no "N older" line: a count that can reach zero gets used. Older
+# items leave the list and stay recorded on the meeting. Flags never appear.
+# A failed file and a duplicate pair stay in Now, where their verbs live.
+NEEDS_YOU_DAYS = 14
+NEEDS_YOU_MAX = 5
+_NY_RANK = {"no_speech": 0, "duration_mismatch": 1, "needs_title": 2, "voice": 3}
+
+
+def _arrived_within(meta, now, days=NEEDS_YOU_DAYS) -> bool:
+    from datetime import datetime as _dt
+    at = meta.get("arrived_at")
+    if not at:
+        return False
+    try:
+        t = _dt.fromisoformat(str(at))
+    except ValueError:
+        return False
+    if t.tzinfo is not None:
+        t = t.astimezone().replace(tzinfo=None)
+    return (now - t).total_seconds() <= days * 86400
+
+
+def _audio_short_by(meta):
+    """Minutes the audio falls short of the stored duration, when it is over
+    a minute short (audio may be lost), else None."""
+    if not meta.get("audio") or not meta.get("duration_sec"):
+        return None
+    try:
+        secs = queue_order.duration(Path(meta["audio"]))
+    except Exception:
+        return None
+    if secs is None:
+        return None
+    gap = float(meta["duration_sec"]) - float(secs)
+    return round(gap / 60) if gap > 60 else None
+
+
+def _needs_you(meetings, active_bases, unknown_list, now=None) -> list:
+    """The ranked Needs you items: silent recordings, audio shorter than its
+    transcript, titles with only the model's draft, then ONE voice row: the
+    unnamed voice with the most talk in non-public meetings, among the voices
+    heard in a meeting inside the window."""
+    from datetime import datetime as _dt
+    now = now or _dt.now()
+    items = []
+    window = set()
+    for meta in meetings:
+        if meta["base"] in active_bases or not _arrived_within(meta, now):
+            continue
+        window.add(meta["base"])
+        kind, detail = None, ""
+        short_by = None if meta.get("no_speech") else _audio_short_by(meta)
+        if meta.get("no_speech"):
+            kind, detail = "no_speech", "No speech found in this recording"
+        elif short_by:
+            kind = "duration_mismatch"
+            detail = (f"The audio is {short_by} minute{'s' if short_by != 1 else ''} "
+                      f"shorter than the transcript: audio may be lost")
+        elif titles.needs_title(meta):
+            kind = "needs_title"
+            detail = (f"Draft title: {meta['suggested']}" if meta.get("suggested")
+                      else "No title yet")
+        if kind:
+            items.append({"kind": kind, "target": meta["base"], "title": meta["title"],
+                          "detail": detail, "when": meta.get("arrived_at")})
+    items.sort(key=lambda x: x["when"] or "", reverse=True)
+    items.sort(key=lambda x: _NY_RANK[x["kind"]])
+    v = _top_voice(meetings, unknown_list, window)
+    if v:
+        items.append(v)
+    return items[:NEEDS_YOU_MAX]
+
+
+def _top_voice(meetings, unknown_list, window):
+    """The one voice row (plan row 12): ranked by unnamed talk across every
+    non-public meeting, offered only for a voice heard in a meeting inside the
+    window. A registry voice is one voice across meetings. A transcript-local
+    voice is one voice in its own meeting. Public downloads and voices under
+    the one-minute floor never count (their ask_talk is empty)."""
+    uid_of = {(u["display"], m): u["uid"]
+              for u in unknown_list if not u.get("archived")
+              for m in u.get("meetings") or []}
+    talk, heard, best = {}, {}, {}
+    for meta in meetings:
+        for disp, secs in (meta.get("ask_talk") or {}).items():
+            uid = uid_of.get((disp, meta["base"]))
+            key = uid or f"{meta['base']}\x1f{disp}"
+            talk[key] = talk.get(key, 0.0) + float(secs or 0)
+            heard.setdefault(key, set()).add(meta["base"])
+            if meta["base"] in window and secs > best.get(key, ("", -1.0))[1]:
+                best[key] = (meta["base"], float(secs), disp)
+    cands = [k for k in best if talk.get(k, 0) > 0]
+    if not cands:
+        return None
+    k = max(cands, key=lambda c: (talk[c], c))
+    base, _, disp = best[k]
+    n = len(heard[k])
+    mins = max(1, round(talk[k] / 60))
+    title = next((m["title"] for m in meetings if m["base"] == base), base)
+    return {"kind": "voice", "target": base, "title": disp,
+            "uid": k if "\x1f" not in k else None,
+            "detail": (f"{mins} min of unnamed talk in {n} meeting{'s' if n != 1 else ''}"
+                       f", most recently {title}"),
+            "secs": round(talk[k], 1), "when": None}
+
+
 def _failed_at(st, name):
     """When `name`'s most recent (failed) result landed — for the history-only
     failure row's sort timestamp."""
@@ -1274,6 +1387,16 @@ def gather_state():
                        sweep=not running or bool(st.get("sweep")))
     timeline, tray = _timeline_tray(st, queue, meetings, active_out, unknown_list,
                                     rec_state, order)
+    active_bases = {e.get("base") for e in active_out.values() if e.get("base")}
+    needs_you = _needs_you(meetings, active_bases, unknown_list)
+    # the meeting rows the list holds carry their place in it, so the shell's
+    # Needs you section is exactly this list and nothing else
+    ny_rows = {x["target"]: (i, x) for i, x in enumerate(needs_you) if x["kind"] != "voice"}
+    for r in timeline:
+        hit = ny_rows.get(r.get("id"))
+        if hit and r.get("state") in ("ready", "needs_name"):
+            r["needs_you"], r["needs_you_rank"] = hit[1]["kind"], hit[0]
+            r["needs_you_detail"] = hit[1]["detail"]
     relabel_jobs = (RELABEL_QUEUE.snapshot() if RELABEL_QUEUE is not None
                     else jobqueue.empty_snapshot())
     return {"running": running,
@@ -1300,6 +1423,8 @@ def gather_state():
             # what needs the user. Both are strictly additive — every key above
             # keeps its shape so the current panel keeps working unchanged.
             "timeline": timeline, "tray": tray,
+            # Needs you: the one short list, computed on read (_needs_you)
+            "needs_you": needs_you,
             "archived_count": len(config.archived_bases(dst_dir)),
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
