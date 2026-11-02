@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -53,6 +54,10 @@ def _load_env_file():
 _load_env_file()
 
 from stt import config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
+
+# a plain run re-reads the Voice Memos library at most this often while it
+# picks files, so a memo that finishes during a long run joins that run
+VM_RESYNC_SECONDS = 60.0
 
 
 def acquire_lock():
@@ -175,7 +180,11 @@ def summarize_one(key, base=None) -> bool:
     try:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
-            return False  # e.g. a re-queued file that was already summarized
+            # e.g. a re-queued file that was already summarized. Its automatic
+            # title may still be owed (an earlier attempt failed), so the
+            # title chain's last step runs here too. It is a no-op once titled.
+            _auto_title(base)
+            return False
         if not summarize.has_speech(base):
             # 0 segments: the model would invent a meeting. The pipeline
             # already set no_speech, and the panel says "No speech found".
@@ -192,13 +201,20 @@ def summarize_one(key, base=None) -> bool:
     # the title chain's last steps, once the stage has cleared (a meeting in
     # a live stage refuses a folder move): a meeting with no typed title
     # takes the speakers plus topic, else the model's draft
+    _auto_title(base)
+    return done
+
+
+def _auto_title(base) -> None:
+    """summarize.apply_auto_title for one meeting. A failure is printed and
+    never breaks the run."""
+    from stt import summarize
     try:
         r = summarize.apply_auto_title(base)
         if r.get("ok") and r.get("base") and r["base"] != base:
             print(f"   titled: {r['base']}", flush=True)
     except Exception as e:
         print(f"   automatic title skipped for {base}: {e}", file=sys.stderr, flush=True)
-    return done
 
 
 def record_review_metrics() -> bool:
@@ -296,6 +312,12 @@ def sync_voice_memos(dry_run=False) -> dict:
     except Exception as e:
         print(f"  (Voice Memos sync skipped: {e.__class__.__name__})",
               file=sys.stderr, flush=True)
+        # a sync that raised still leaves a record, so the doctor reports it
+        try:
+            if not dry_run:
+                voicememos.record_failure(e)
+        except Exception:
+            pass
         return {"status": "error"}
     st = r.get("status")
     if st == "ok":
@@ -769,13 +791,19 @@ def main():
     in_flight = set()        # names started and not yet finished (--parallel)
     finish = {"asked": False}
 
+    vm_synced = {"at": time.monotonic()}
+
     def arrivals():
         """Files in the watched folders that this run has not queued, started,
         finished, or failed: recordings that landed WHILE it ran. Their
         WatchPaths trigger hit our lock and exited, so the run takes them in
-        itself (plain runs only)."""
+        itself (plain runs only). A Voice Memos memo that finished during the
+        run is copied in first (at most once per VM_RESYNC_SECONDS)."""
         if not sweep:
             return []
+        if time.monotonic() - vm_synced["at"] >= VM_RESYNC_SECONDS:
+            vm_synced["at"] = time.monotonic()
+            sync_voice_memos()
         have = {s.name for s in queue} | in_flight
         held = holds.items()    # re-read: a hold placed mid-run counts
         out = []

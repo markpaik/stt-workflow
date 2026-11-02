@@ -1235,8 +1235,16 @@ def test_watch_and_nightly_toggle_independently(fake_agent):
     # staging folder (the meeting recorder's output), healing stale paths
     r = srv.write_automation(watch=True)
     d = plistlib.loads(p.read_bytes())
-    assert d["WatchPaths"] == [str(config.source_dir()), str(config.recordings_dir())]
-    assert len(reloads) == 4               # every change reloaded the agent
+    from stt import voicememos
+    assert d["WatchPaths"] == [str(config.source_dir()), str(config.recordings_dir()),
+                               str(voicememos.container_dir())]
+    # the 10-minute run that picks up a finished Voice Memos memo follows
+    # the Watch switch
+    assert d["StartInterval"] == srv.WATCH_INTERVAL
+    srv.write_automation(watch=False)
+    assert "StartInterval" not in plistlib.loads(p.read_bytes())
+    srv.write_automation(watch=True)
+    assert len(reloads) == 6               # every change reloaded the agent
 
 
 def test_setting_a_time_implies_nightly_on(fake_agent):

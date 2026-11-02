@@ -54,9 +54,14 @@ write_batch_plist() {
   </dict>
   <!-- Layered triggers (the in-code flock makes them all safe):
        nightly 02:00 (runs at next wake if asleep) + WatchPaths (new recordings
-       while awake) + RunAtLoad (login catch-up; manifest makes it a no-op). -->
+       while awake) + RunAtLoad (login catch-up; manifest makes it a no-op)
+       + StartInterval 600. A Voice Memos memo becomes eligible 5 minutes
+       after it ends, and no folder event fires then, so a run every
+       10 minutes picks it up. A run with nothing to do exits quickly. The
+       panel's Watch switch adds and removes this key with WatchPaths. -->
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StartInterval</key><integer>600</integer>
   <key>WatchPaths</key>
   <array>
     <string>$(source_dir)</string>
@@ -113,9 +118,12 @@ case "${1:-}" in
     launchctl bootout "gui/$U/$BATCH_LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$U" "$BATCH_PLIST"
     echo "Installed + loaded $BATCH_LABEL (nightly 02:00 + folder watch + login catch-up)."
-    echo "Grant Full Disk Access to this binary (resolve the symlink):"
+    echo "Grant Full Disk Access to BOTH of these (launchd starts caffeinate,"
+    echo "which starts python, and macOS may check either one):"
+    echo "  /usr/bin/caffeinate"
     echo "  $(readlink -f "$BASE/.venv/bin/python")"
     echo "Voice Memos sync reads the Voice Memos library, which needs that grant."
+    echo "After the first run, the doctor must show no voicememos_denied."
     echo "Force a test run:  ./setup.sh kick"
     ;;
   uninstall-agent)

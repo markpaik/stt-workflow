@@ -300,14 +300,17 @@ drawer's Settings or via `STT_ICLOUD_DIR` / `STT_MEETINGS_DIR` in `stt.env`.
 
 ```bash
 ./setup.sh gui-install       # menu-bar app + control panel
-./setup.sh install-agent     # nightly run + folder watch + login catch-up
+./setup.sh install-agent     # nightly run + folder watch + 10-minute run + login catch-up
 ./setup.sh build-recorder    # the call recorder (mic + system audio)
 ```
 
 launchd plists are generated with your paths; nothing machine-specific is
-stored in the repo. The installer prints the Python binary that needs
-**Full Disk Access** (System Settings > Privacy & Security) so the
-background job can read iCloud Drive. The recorder needs Microphone and
+stored in the repo. The installer prints the two binaries that need
+**Full Disk Access** (System Settings > Privacy & Security), `/usr/bin/caffeinate`
+and the resolved Python, so the background job can read iCloud Drive and the
+Voice Memos library. After the first run, `voicememos_denied` must not show in
+the doctor. The 10-minute run picks up a Voice Memos memo once it has been
+finished for 5 minutes, and follows the panel's Watch switch. The recorder needs Microphone and
 "System Audio Recording Only" permissions; the panel walks you through both
 and warns in the tray, during and after a capture, if macOS stops delivering
 audio. Overnight runs need AC power; for a true night wake:

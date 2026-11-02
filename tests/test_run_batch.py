@@ -1062,3 +1062,40 @@ def test_under_parallel_the_stop_flag_lets_the_files_in_flight_finish(
     m = manifest.load()
     assert set(m["processed"]) == {"a.m4a", "b.m4a"}
     assert not control.finish_requested()
+
+
+def test_a_plain_run_syncs_voice_memos_again_mid_run(sandbox, monkeypatch):
+    """A memo that finishes during a long run joins that run: the re-sweep
+    before each pick calls the Voice Memos sync again (throttled)."""
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from stt import config, summarize, voicememos
+
+    src = sandbox / "source"
+    (src / "A Mtg.m4a").write_bytes(b"\x00" * 64)
+    syncs, processed = [], []
+
+    def fake_sync(dry_run=False, **k):
+        syncs.append(dry_run)
+        if len(syncs) == 2:     # the memo finished while A Mtg ran
+            d = voicememos.staging_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "Synced Memo 11032026.m4a").write_bytes(b"\x00" * 64)
+        return {"status": "ok", "staged": [], "counts": {}}
+
+    def fake_process_one(src_str, dest_str, opts):
+        p = _P(src_str)
+        processed.append(p.name)
+        return {"ok": False, "key": p.name}
+
+    monkeypatch.setattr(run_batch, "VM_RESYNC_SECONDS", 0.0)
+    monkeypatch.setattr(voicememos, "sync", fake_sync)
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "synthetic")
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(_sys, "argv", ["run_batch.py", "--source", str(src),
+                                       "--ignore-battery", "--ignore-pause"])
+    run_batch.main()
+    assert len(syncs) >= 2
+    assert processed == ["A Mtg.m4a", "Synced Memo 11032026.m4a"]

@@ -178,7 +178,23 @@ def _watch_paths():
     recordings staging folder (the meeting recorder's output). Every place that
     rewrites WatchPaths uses this, so changing the source folder or toggling the
     watch never silently drops the recorder's trigger."""
-    return [str(config.source_dir()), str(config.recordings_dir())]
+    out = [str(config.source_dir()), str(config.recordings_dir())]
+    # the Voice Memos library (read, never written): setup.sh watches it, so
+    # a rewrite here keeps it, or the panel's Watch switch would drop it
+    try:
+        from stt import voicememos
+        if voicememos.enabled():
+            vm = str(voicememos.container_dir())
+            if vm not in out:
+                out.append(vm)
+    except Exception:
+        pass
+    return out
+
+
+# a run every 10 minutes while Watch is on: a Voice Memos memo becomes
+# eligible 5 minutes after it ends, and no folder event fires then
+WATCH_INTERVAL = 600
 
 
 def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
@@ -194,8 +210,10 @@ def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
     if watch is not None:
         if watch:
             d["WatchPaths"] = _watch_paths()
+            d["StartInterval"] = WATCH_INTERVAL
         else:
             d.pop("WatchPaths", None)
+            d.pop("StartInterval", None)   # 'manual' means manual
     if hour is not None:  # setting a time implies the nightly run is wanted
         nightly = True
     if nightly is not None:

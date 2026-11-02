@@ -52,7 +52,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from . import config, titles
+from . import config, dates, titles
 
 GO_LIVE = "2026-11-02"
 MIN_SECONDS = 180.0
@@ -225,27 +225,25 @@ def classify_title(title: str, all_titles=()) -> tuple:
     """(typed, location_note).
 
     A default title is not a typed title: 'New Recording' names, timestamps
-    and other generic names, a street address, a place name on the owner's
-    list, and a name that Voice Memos numbered as a repeat of another memo's
-    name. A street address or a place name is kept as the location note."""
+    and other generic names, a street address, and a place name on the
+    owner's list, each with or without the count Voice Memos adds to a
+    repeat. A street address or a place name is kept as the location note.
+
+    A numbered name whose base is none of those stays typed, even when
+    another memo carries the base name: people number their own series
+    ('Cohort 3'). `all_titles` is kept for callers and no longer decides."""
     t = re.sub(r"\s+", " ", str(title or "")).strip()
     if not t:
         return False, None
     bare = t
     m = _COUNT.match(t)
-    others = {re.sub(r"\s+", " ", str(x or "")).strip().lower() for x in all_titles}
-    numbered_repeat = bool(m) and m.group(1).lower() in others
-    if m and (numbered_repeat or titles.is_address(m.group(1))
+    if m and (titles.is_address(m.group(1))
               or m.group(1).lower() in place_names()):
         bare = m.group(1)
     if titles.is_address(t) or titles.is_address(bare):
         return False, bare
     if bare.lower() in place_names():
         return False, bare
-    if numbered_repeat:
-        # 'Some Place 2' beside 'Some Place': Voice Memos numbered a default.
-        # Nothing says the name is a place, so no location note is kept.
-        return False, None
     if not titles.is_label(t):
         return False, None
     return True, None
@@ -258,10 +256,35 @@ def _safe(s: str) -> str:
 
 # ---------- the sync ----------
 
-def _write_state_last(d, status, detail=None, counts=None):
+def _write_state_last(d, status, detail=None, counts=None, app=None):
     d["last"] = {"at": datetime.now().isoformat(timespec="seconds"),
                  "status": status, "detail": detail, "counts": counts or {}}
+    if app is not None:
+        d["last"]["app_present"] = bool(app)
     _save_state(d)
+
+
+def _app_present(container: Path) -> bool:
+    """True when the Voice Memos group container (the parent of Recordings)
+    exists on this Mac. A missing library there means the app moved or
+    renamed its database. A denied stat counts as present."""
+    try:
+        return Path(container).parent.exists()
+    except PermissionError:
+        return True
+
+
+def record_failure(exc: BaseException) -> None:
+    """Record a sync that raised, so the doctor reports it. The batch calls
+    this when sync() itself fails. A denial is recorded as `denied`."""
+    try:
+        d = load_state()
+        if isinstance(exc, PermissionError):
+            _write_state_last(d, "denied", exc.__class__.__name__)
+        else:
+            _write_state_last(d, "error", exc.__class__.__name__)
+    except Exception:
+        pass
 
 
 def eligible(row: dict, now: float, since: str, container: Path):
@@ -296,7 +319,18 @@ def eligible(row: dict, now: float, since: str, container: Path):
 def _staged_name(row, start, typed, stage: Path) -> str:
     stem = _safe(row.get("title")) if typed else ""
     stem = stem or "Voice Memo"
-    name = f"{stem} {start.strftime('%m%d%Y')}"
+    # a typed title often carries its own 8-digit date. The name holds ONE
+    # date, the true start: a trailing typed date is dropped, a date inside
+    # the title is replaced in place, else the start is appended. So the
+    # folder name and the stored date always agree.
+    stem = dates.strip_stamp(stem)
+    new = start.strftime("%m%d%Y")
+    name = None
+    for m in dates._DIGITS8.finditer(stem):
+        if dates._run_date(m.group(1)) is not None:
+            name = stem[:m.start()] + new + stem[m.end():]
+            break
+    name = name or f"{stem} {new}"
     cand, i = name, 2
     while ((stage / f"{cand}.m4a").exists()
            or (stage / f"{cand}{SIDECAR_SUFFIX}").exists()):
@@ -318,17 +352,26 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         if not dry_run:
             _write_state_last(state, "disabled")
         return {"status": "disabled", "staged": [], "counts": {}, "detail": None}
-    if not (container / DB_NAME).exists():
-        status = "missing"
-        try:
-            container.stat()
-            next(container.iterdir(), None)
-        except PermissionError:
-            status = "denied"
-        except OSError:
-            pass
+    # Path.exists() re-raises PermissionError (Python 3.12), and macOS can
+    # refuse the stat itself inside the guarded container. Every probe here
+    # is caught, so a denial is recorded for the doctor and never escapes.
+    try:
+        has_db = (container / DB_NAME).exists()
+    except PermissionError:
+        has_db = None
+    if not has_db:
+        status = "missing" if has_db is False else "denied"
+        if status == "missing":
+            try:
+                container.stat()
+                next(container.iterdir(), None)
+            except PermissionError:
+                status = "denied"
+            except OSError:
+                pass
         if not dry_run:
-            _write_state_last(state, status)
+            _write_state_last(state, status, None, None,
+                              app=_app_present(container))
         return {"status": status, "staged": [], "counts": {}, "detail": None}
     try:
         rows = read_rows(container)
@@ -359,7 +402,13 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         if row.get("uuid") in state["staged"]:
             counts["already"] = counts.get("already", 0) + 1
             continue
-        ok, why, start, from_path = eligible(row, now, since, container)
+        try:
+            ok, why, start, from_path = eligible(row, now, since, container)
+        except PermissionError:
+            if not dry_run:
+                _write_state_last(state, "denied", "file stat", counts)
+            return {"status": "denied", "staged": staged, "counts": counts,
+                    "detail": None}
         if not ok:
             counts[why] = counts.get(why, 0) + 1
             continue
@@ -426,6 +475,12 @@ def doctor_findings() -> list:
     elif st == "error":
         out.append(("voicememos_error",
                     "the last Voice Memos read failed: " + str(last.get("detail") or "")))
+    elif st == "missing" and enabled() and last.get("app_present"):
+        # the app's group container is here but its database is not: an
+        # update most likely moved or renamed it, and nothing is copied
+        out.append(("voicememos_missing",
+                    "the Voice Memos library database was not found; "
+                    "sync copies nothing until the reader is updated"))
     counts = last.get("counts") or {}
     skipped = {k: v for k, v in counts.items()
                if k in ("short", "in_progress", "not_local", "no_start", "no_file",

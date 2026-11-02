@@ -109,7 +109,7 @@ def test_a_listed_place_name_is_a_default(sandbox, monkeypatch):
     assert voicememos.classify_title("Sample Cafe") == (False, "Sample Cafe")
     assert voicememos.classify_title("Sample Cafe 3") == (False, "Sample Cafe")
     assert voicememos.classify_title("Budget Review") == (True, None)
-    assert voicememos.classify_title("Budget Review 2", ["Budget Review"]) == (False, None)
+    assert voicememos.classify_title("New Recording 2", ["New Recording"]) == (False, None)
     assert voicememos.classify_title("2026-11-03 09:00") == (False, None)
 
 
@@ -200,3 +200,87 @@ def test_staged_files_are_private(sandbox):
     for p in d.iterdir():
         assert oct(p.stat().st_mode & 0o777) == "0o600"
     assert oct(voicememos.state_path().stat().st_mode & 0o777) == "0o600"
+
+
+def test_a_numbered_typed_title_stays_typed(sandbox):
+    # people number their own series: a repeat is a default only when its
+    # base is an address, a listed place, or a 'New Recording' name
+    assert voicememos.classify_title("Team Sync 2", ["Team Sync"]) == (True, None)
+    assert voicememos.classify_title("Cohort 3", ["Cohort"]) == (True, None)
+    assert voicememos.classify_title("1200 Example Ave 2", ["1200 Example Ave"]) == \
+        (False, "1200 Example Ave")
+
+
+def test_a_typed_date_in_the_title_is_not_doubled(sandbox):
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Study Session 11032026"},
+          {"start": "2026-11-03 10:00:00", "title": "Board 10152026"},
+          {"start": "2026-11-03 11:00:00", "title": "Board 10152026 Notes"}])
+    voicememos.sync(now=NOW)
+    assert _staged() == ["Board 11032026 Notes.m4a", "Board 11032026.m4a",
+                         "Study Session 11032026.m4a"]
+    from stt import dates
+    for n in _staged():
+        assert dates.meeting_date(n) == "2026-11-03"
+
+
+def test_a_denied_stat_on_the_database_is_recorded(sandbox, monkeypatch):
+    """Path.exists() re-raises PermissionError: the sync must record it for
+    the doctor, never raise."""
+    import pathlib
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"}])
+    real = pathlib.Path.exists
+
+    def exists(self, *a, **k):
+        if self.name == voicememos.DB_NAME:
+            raise PermissionError("denied")
+        return real(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "exists", exists)
+    r = voicememos.sync(now=NOW)
+    assert r["status"] == "denied" and _staged() == []
+    monkeypatch.setattr(pathlib.Path, "exists", real)
+    assert "voicememos_denied" in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_denied_file_stat_is_recorded(sandbox, monkeypatch):
+    import pathlib
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"}])
+    real = pathlib.Path.stat
+
+    def stat(self, *a, **k):
+        if self.suffix == ".m4a" and self.parent == voicememos.container_dir():
+            raise PermissionError("denied")
+        return real(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "stat", stat)
+    r = voicememos.sync(now=NOW)
+    monkeypatch.setattr(pathlib.Path, "stat", real)
+    assert r["status"] == "denied" and _staged() == []
+    assert voicememos.load_state()["last"]["status"] == "denied"
+
+
+def test_a_sync_that_raises_is_recorded_by_the_batch(sandbox, monkeypatch):
+    def boom(**k):
+        raise RuntimeError("synthetic")
+    monkeypatch.setattr(voicememos, "sync", boom)
+    assert run_batch.sync_voice_memos()["status"] == "error"
+    assert "voicememos_error" in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_missing_database_is_reported_when_the_app_is_here(sandbox):
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"}])
+    (c / voicememos.DB_NAME).unlink()
+    assert voicememos.sync(now=NOW)["status"] == "missing"
+    assert "voicememos_missing" in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_no_voice_memos_app_means_no_missing_report(sandbox, monkeypatch, tmp_path):
+    monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(tmp_path / "no-app" / "Recordings"))
+    assert voicememos.sync(now=NOW)["status"] == "missing"
+    assert "voicememos_missing" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_sync_off_means_no_missing_report(sandbox, monkeypatch):
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"}])
+    (c / voicememos.DB_NAME).unlink()
+    voicememos.sync(now=NOW)
+    monkeypatch.setenv("STT_VOICEMEMOS_SYNC", "0")
+    assert "voicememos_missing" not in {f.kind for f in doctor.check(registry=False)}

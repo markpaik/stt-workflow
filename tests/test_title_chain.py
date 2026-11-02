@@ -147,3 +147,16 @@ def test_the_batch_titles_after_the_summary(sandbox, monkeypatch):
     assert run_batch.summarize_one("Voice Memo 10292026.m4a", "Voice Memo 10292026")
     assert "Spring Budget Planning with Blake Example and Avery Sample 10292026" in \
         config.meeting_bases()
+
+
+def test_an_already_summarized_meeting_still_gets_its_automatic_title(sandbox, monkeypatch):
+    """A meeting whose summary landed earlier (a failed title attempt, a
+    re-queued file) still takes the title chain's last step."""
+    _model_meeting("Voice Memo 10292026", SPK, SEGS)   # ai_summary already set
+    calls = []
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
+    assert run_batch.summarize_one("Voice Memo 10292026.m4a", "Voice Memo 10292026") is False
+    assert calls == []                                   # no second summary
+    assert "Spring Budget Planning with Blake Example and Avery Sample 10292026" in \
+        config.meeting_bases()
