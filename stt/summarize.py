@@ -462,11 +462,28 @@ def _move_folder(base: str, new_base: str) -> list:
     return renamed
 
 
+_UNSET = object()
+# pass as recorded_at= to remove the key (an undo back to a meeting that
+# never had one)
+DROP = "$drop"
+
+
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
-                        reviewed=None, title_state=None) -> dict:
+                        reviewed=None, title_state=None, date_source=None,
+                        recorded_at=_UNSET) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
     Work/Personal category, whether it still needs review, and the title's
     state.
+
+    Every title or date edit also keeps the `title` key equal to the folder
+    name it lands on, without the date stamp or twin suffix.
+
+    A date edit records where the date came from. `date_source` defaults to
+    `manual`, because the panel is a person. A repair passes the real
+    source (`recorder`, `short_typed`, ...). `recorded_at` sets the true
+    start time with that date, None stores null, and DROP removes the key.
+    Left out, a stored `recorded_at` on another day is cleared to null,
+    because `date` must equal its date part whenever it is set.
 
     A title edit is a person's choice, so it also sets title_state=confirmed
     and title_source=manual. `title_state` sets the state alone (a Keep on one
@@ -508,6 +525,17 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     if title_state is not None and title_state not in titles.TITLE_STATES:
         return {"ok": False, "error": f"unknown title state '{title_state}'"}
 
+    from . import provenance
+    if date_source is not None and date_source not in provenance.DATE_SOURCES:
+        return {"ok": False, "error": f"unknown date source '{date_source}'"}
+    if recorded_at is not _UNSET and recorded_at not in (None, DROP):
+        try:
+            _ra = datetime.fromisoformat(str(recorded_at))
+        except ValueError:
+            return {"ok": False, "error": "recorded_at should be an ISO time"}
+        if iso is not None and _ra.date().isoformat() != iso:
+            return {"ok": False, "error": "recorded_at must fall on the meeting date"}
+
     new_title = None
     if title is not None:
         new_title = _sanitize_name(title)
@@ -520,6 +548,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         """Fold the requested edits into `d` and return the folder name they
         imply. Writes nothing, so it can be re-run under a wider set of locks
         without repeating a side effect."""
+        date_before = d.get("date")
         if iso is not None:
             d["date"] = iso
         if category is not None:
@@ -559,6 +588,19 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # suffix first) rather than appending a second date
                 want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
+            d["title"] = dates.title_of(want)
+        if date is not None or d.get("date") != date_before:
+            # a date was set (the picker, a repair, or a typed stamp in a
+            # title): record where it came from
+            d["date_source"] = date_source or "manual"
+            if recorded_at is _UNSET:
+                ra = d.get("recorded_at")
+                if ra and str(ra)[:10] != d.get("date"):
+                    d["recorded_at"] = None
+        if recorded_at is not _UNSET and recorded_at == DROP:
+            d.pop("recorded_at", None)
+        elif recorded_at is not _UNSET:
+            d["recorded_at"] = recorded_at
         return want
 
     def _dest_taken(want: str) -> bool:

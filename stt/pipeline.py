@@ -501,6 +501,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             meta["category"] = category
         meta["reviewed"] = bool(reviewed)
         _title_fields(meta, prev, src, segments)
+        # the `title` key always equals the folder name without its stamp
+        # and twin suffix (store contract). The folder is decided above, so
+        # this follows it on a new meeting and on a Redo alike.
+        from . import dates as _dates
+        meta["title"] = _dates.title_of(base)
         if channel_layout:  # a recording that declared a me/them layout
             meta["channel_layout"] = channel_layout
             meta["mic_speaker"] = mic_speaker

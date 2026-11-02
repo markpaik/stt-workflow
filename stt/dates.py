@@ -68,6 +68,67 @@ def stamp(name: str, iso: str) -> str:
 _UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
 
 
+def title_of(base: str) -> str:
+    """The meeting's `title` key: its folder name with the twin suffix and
+    the trailing date stamp removed. A date inside the name (the recorder's
+    'Recording 07112026 1814') stays, because restamp() replaces it in
+    place, so restamp(title_of(b), date) gives the folder name back."""
+    return strip_stamp(_UNIQ_SUFFIX.sub("", str(base or "").strip()))
+
+
+def twin_suffix(base: str) -> str:
+    """' (2)' for a same-name twin folder, else ''."""
+    m = _UNIQ_SUFFIX.search(str(base or ""))
+    return m.group(0) if m else ""
+
+
+# --- Short typed dates: '9.14', '10-5', '10:21', '9.14.26' ---
+# A person typing a label on the phone writes the day short. The audit found
+# 7 such labels, and each disagreed with the stored transfer date by 9 to 25
+# days. A short date has no year, so it resolves to its most recent day on or
+# before a reference day (the transfer day), and only within SHORT_MAX_DAYS:
+# further back than that, the digits are more likely a time or a count than
+# the day of the meeting.
+_SHORT = re.compile(
+    r"(?<![\d.:/\-])(\d{1,2})([.\-:/])(\d{1,2})(?:\2(\d{2}|\d{4}))?(?![\d.:/\-])")
+SHORT_MAX_DAYS = 60
+
+
+def short_date(name: str, ref_iso: str):
+    """ISO date for the first short typed date in `name`, resolved against
+    the reference day `ref_iso`, else None.
+
+    '9.14' read on 2026-09-29 is 2026-09-14. '12.30' read on 2027-01-08 is
+    2026-12-30: a year boundary resolves to the past. An explicit year
+    ('9.14.26') is taken as written. A result after the reference day, or
+    more than SHORT_MAX_DAYS before it, is rejected. 8-digit stamps never
+    match, because the pattern needs a separator."""
+    try:
+        ref = date.fromisoformat(str(ref_iso)[:10])
+    except (TypeError, ValueError):
+        return None
+    for m in _SHORT.finditer(str(name or "")):
+        mo, dy, yr = int(m.group(1)), int(m.group(3)), m.group(4)
+        if not (1 <= mo <= 12 and 1 <= dy <= 31):
+            continue
+        cands = []
+        if yr:
+            y = int(yr) + (2000 if len(yr) == 2 else 0)
+            cands.append(y)
+        else:
+            cands += [ref.year, ref.year - 1]
+        for y in cands:
+            try:
+                d = date(y, mo, dy)
+            except ValueError:
+                continue
+            if d <= ref and (ref - d).days <= SHORT_MAX_DAYS:
+                return d.isoformat()
+            if yr:
+                break
+    return None
+
+
 def restamp(base: str, iso: str) -> str:
     """The folder name this meeting SHOULD have: its title carrying `iso` as its
     one and only date.
