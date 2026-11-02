@@ -75,10 +75,18 @@ mentioned decide decided get got go going ever please give list show find
 # ---------------------------------------------------------------- retrieve ---
 
 def terms(question: str) -> list:
-    """The content words of a question, in order, without repeats."""
+    """The content words of a question, in order, without repeats. A
+    two-letter word typed in capitals ('PD', 'HR', 'AP') is an acronym and
+    counts, though shorter words are otherwise dropped. A question typed all
+    in capitals marks nothing, so none of its words count as acronyms."""
     out = []
-    for w in re.findall(r"\w+", (question or "").lower()):
-        if w in _STOP or (len(w) < 3 and not w.isdigit()):
+    question = question or ""
+    mixed = any(c.islower() for c in question)
+    for raw in re.findall(r"\w+", question):
+        w = raw.lower()
+        acronym = mixed and len(raw) == 2 and raw.isupper() and raw.isalpha()
+        if (w in _STOP and not acronym) or (len(w) < 3 and not w.isdigit()
+                                            and not acronym):
             continue
         if w not in out:
             out.append(w)

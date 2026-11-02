@@ -68,6 +68,17 @@ def test_terms_drop_question_words():
     assert ask.terms("Who said 412?") == ["412"]
 
 
+def test_two_letter_acronyms_count_as_terms():
+    """'PD', 'HR' and 'AP' questions came back NOT FOUND: every word under
+    three letters was dropped. A two-letter word in capitals is kept."""
+    assert ask.terms("What did we decide about PD days?") == ["pd", "days"]
+    assert ask.terms("Who from HR joined the AP planning?") == ["hr", "joined", "ap", "planning"]
+    assert ask.terms("Did IT fix the projector?") == ["it", "fix", "projector"]
+    # lower case stays a dropped short word, and an all-caps question marks nothing
+    assert ask.terms("is it about pd?") == []
+    assert ask.terms("WHAT DID WE SAY ABOUT PD") == []
+
+
 def test_passages_hold_the_hit_with_its_neighbors(sandbox):
     _world()
     ps = ask.passages("How big is the roof reserve?")
