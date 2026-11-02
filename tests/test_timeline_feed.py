@@ -546,9 +546,11 @@ def test_additive_keys(sandbox):
     # relabel_running joined them later (the honest "a relabel is happening
     # right now" signal next to the queued-behind-another relabel_pending),
     # and `jobs` after it (the relabel queue's own running/queued/last report),
-    # and `needs_you` (the one short list, unified plan Phase 1 step 8)
+    # and `needs_you` (the one short list, unified plan Phase 1 step 8),
+    # and `voicememos` (sync on or off and its go-live day, for /next Settings)
     assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running",
-                                       "jobs", "needs_you"}
+                                       "jobs", "needs_you", "voicememos"}
+    assert set(st["voicememos"]) == {"enabled", "since"}
     assert isinstance(st["relabel_running"], bool)
     assert st["jobs"] == {"running": None, "queued": [], "last": None}, \
         "no queue in this process: the empty shape, never a missing key"

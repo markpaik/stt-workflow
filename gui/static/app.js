@@ -2155,12 +2155,17 @@ let pendingOpen=null;                     // {base, seek?:secs, ask?:true} -- on
 
 function parseHash(){
   const h=location.hash||'';
+  // #m/<base>/t/<secs>: the /next search palette's "Said in" deep link, which
+  // opens the meeting and seeks to the line (the same pendingOpen seek)
+  const t=h.match(/^#m\/([^/]+)\/t\/(\d+(?:\.\d+)?)$/);
+  if(t)return {view:'meeting',base:decodeURIComponent(t[1]),seek:+t[2]};
   const m=h.match(/^#m\/(.+)$/);
   return m?{view:'meeting',base:decodeURIComponent(m[1])}:{view:'timeline',base:null};
 }
 function applyRoute(){
   if(NP)closeNamePanel();          // a route change closes the naming slide-over
   dupeDisarm();                    // and disarms the no-undo duplicate sweep
+  if(route.view==='meeting'&&route.seek!=null)pendingOpen={base:route.base,seek:route.seek};
   if(route.view==='meeting')enterMeeting(route.base);
   else if(!readerSync())exitMeeting();   // two panes: no hash opens the default meeting
   selFollow();                     // two panes: the list's selection follows the hash

@@ -17,9 +17,12 @@ All machinery lives behind one popover (runs) and one drawer (settings).
 
 ## Shell mechanics
 
-- The shell is the ONLY frontend: `GET /` serves it. The retired `ui` query
-  flag is ignored entirely, so a stale bookmark carrying it still gets the
-  shell, never a 404. No flags, no bridges, no second page.
+- The shell is the frontend at `GET /`. The retired `ui` query flag is
+  ignored entirely, so a stale bookmark carrying it still gets the shell,
+  never a 404. One exception, approved by the owner on 2026-11-02 (plan
+  decision 8): the Phase 4C frame lives at `GET /next` beside it until the
+  4D swap, when `/` serves the new frame and `/classic` keeps this page for
+  30 days. See "The /next frame" at the end of this file.
 - The frontend lives in `gui/static/{page.html,app.css,app.js}` (vendored
   fonts in `gui/static/fonts/`), composed via marker comments and cached by
   mtime in `gui/server.py`, so edits to the parts reload live without a
@@ -865,3 +868,65 @@ Grouping, the year-to-month accordion (replaces flat month headers):
 - Collapsed sections render only their header line: the rows are not in
   the DOM, so a 400-meeting library costs the browser only its open
   months.
+
+## The /next frame (Phase 4C, built 2026-11-02)
+
+A second page at `GET /next`, built from the approved mockup
+(`mockup-plaud-style-v2.html`) under plan Phase 4C. It is temporary: the 4D
+swap makes it `/`. It lives in `gui/static/{next.html,next.css,next.js}`,
+composed by `gui/server.py` from a second parts tuple with its own markers
+(`/*@NEXT_CSS@*/`, `//@NEXT_JS@`), and it calls only existing endpoints plus
+the read-only `GET /api/search_meetings`.
+
+- **Frame.** A 232px sidebar on `--paper`: the wordmark and theme button,
+  the status pill (a click opens Activity), New, Search, then Home,
+  Recordings, Speakers, and after a gap Activity, Archive, Settings. Home
+  carries the Needs you count, and Activity carries the attention count, in
+  teal. Groups and Ask wait for Phases 4E and 4F, so they have no entry yet.
+- **Routes.** `#home`, `#recordings`, `#activity`, `#speakers`, `#archive`,
+  `#settings`. A meeting opens in the classic reader at `/#m/<base>` until
+  Phase 4D builds the new meeting page. A search hit opens
+  `/#m/<base>/t/<secs>`, which the classic reader seeks to.
+- **Narrow-window fallback.** Below 900px the sidebar hides, and a top bar
+  carries the menu button, the page name, the pill, and Search. The menu
+  opens the same navigation as a sheet. Bottom tabs wait for phone access.
+- **Search palette.** `/` or Cmd K. Titles come from the loaded list and from
+  `search.meetings` (title and summary, FTS5). "Said in" lines come from
+  `GET /api/search`, the FTS5 index with the scan as fallback.
+- **Writes.** Every write is a POST. `GET /api/suggest` answers 405, and the
+  classic page posts too.
+- **Tokens.** Indigo Blueprint, with the mockup's two changes: light `--attn`
+  is `#0A6C7E`, and `--personal` is retired. `tools/token_contrast.py --css
+  next` measures every text pair at or above 4.5:1 in all four token blocks.
+- **Screens.** `tools/next_screens.py` shoots every route at 700px and 1440px
+  in light and dark against a demo home, and fails on a sideways scroll.
+
+### Where the 20 classic surfaces went
+
+The surface numbers are those of the 2026-11-01 panel audit. Each row moves
+or retires. The last column names a token in `gui/static/next.js` that
+carries the surface, and `tests/test_next_shell.py` checks each one.
+
+| # | Classic surface | In /next | Status | Token |
+|---:|---|---|---|---|
+| 1 | Menu-bar app | Stays as it is. Its Open Control Panel item keeps opening `/` until the 4D swap | stays | `/api/seen` |
+| 2 | Header | Retires. The sidebar takes the wordmark, the theme button, and the pill | retires | `class="side-top"` |
+| 3 | Status pill | Moves to the sidebar top and the narrow top bar. A click opens Activity | moves | `function pillText` |
+| 4 | Process popover | Moves to the Activity page: Process all new, Import files, Pause or Resume, Stop with two steps, queued runs with Cancel, and the four run options | moves | `'run-all'` |
+| 5 | List search and chips | Moves to Recordings: a filter field, a sort menu with A to Z, and the chips All, Work, Personal, Draft title, Has voices | moves | `function filtered` |
+| 6 | Said in | Moves to the search palette's "Said in" group | moves | `function palResults` |
+| 7 | Now | Moves to Home "Running now" and to Activity, which also holds waiting, held, failed, and urgent rows | moves | `function activeRowHTML` |
+| 8 | To finish | Retires. Home "Needs you" replaces it with the computed list from `/api/state` | retires | `function needsCard` |
+| 9 | Library accordion | Moves to Recordings: Today, Yesterday, This week, then months. The newest older month stays open | moves | `function recListHTML` |
+| 10 | Jump rail | Retires. Folded months and the search palette replace it | retires | `data-act="fold"` |
+| 11 | Reader | Stays in the classic page for 4C. A row opens `/#m/<base>`. Phase 4D rebuilds it | stays | `const meetingHref` |
+| 12 | Two-pane layout | Retires. One content column, and the meeting opens full width | retires | `class="page"` |
+| 13 | Row menu | Moves to the Recordings row menu: Open, Select, Rename, Set date, tags, Export Word and PDF, Copy transcript, Show files, Redo, Archive, Delete. Ask moves with the meeting page in 4D | moves | `function rowMenu` |
+| 14 | Bulk bar | Moves to the Recordings selection bar: Keep titles, Work, Personal, Clear tag, Rename, Set date, Archive, Delete audio, Delete, Select all shown | moves | `function renderBulk` |
+| 15 | Drawer | Retires. Its tabs become pages: Settings, Speakers, Activity (History and Duplicates), Archive | retires | `function settingsView` |
+| 16 | Naming panel | Moves to Speakers: a name form with looks-like chips, a clip, the two-step quality warning, and Link for a near-match voice. The full voice sheet is Phase 4D | moves | `function nameForm` |
+| 17 | Key sheet | Moves to `?` with the new keys | moves | `const KEYS` |
+| 18 | Drop overlay | Moves as is: drop audio anywhere to upload | moves | `class="drop"` |
+| 19 | Setup check | Moves to the Home empty state | moves | `function setupCard` |
+| 20 | Tab title | Moves: `(N)` counts Needs you items that joined while the tab was hidden | moves | `function tabTitle` |
+

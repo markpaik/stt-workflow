@@ -1477,10 +1477,21 @@ def gather_state():
             # OR our own worker, which is in-process and therefore does not have
             # to be discovered through the marker at all.
             "relabel_running": control.relabel_running() or bool(relabel_jobs["running"]),
+            # Voice Memos sync, for the /next Settings page: whether it is on
+            # and the go-live day. Read only; nothing here touches the library.
+            "voicememos": _voicememos_state(),
             "llm_available": summarize.available(),
             "llm_backend": summarize.llm_backend(),
             "llm_backends": {b: summarize.backend_available(b)
                              for b in summarize.LLM_BACKENDS}}
+
+
+def _voicememos_state() -> dict:
+    try:
+        from stt import voicememos
+        return {"enabled": voicememos.enabled(), "since": voicememos.go_live()}
+    except Exception:
+        return {"enabled": None, "since": None}
 
 
 def _osascript(script: str, timeout=120, args=None):
@@ -1975,11 +1986,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
-            if u.path == "/":
-                # The shell is the only page. The retired `ui` query param is
+            if u.path in ("/", "/next"):
+                # `/` is the classic shell. The retired `ui` query param is
                 # ignored entirely, so a stale bookmark that still carries it
-                # gets the shell rather than a 404.
-                body = _page_html().encode()
+                # gets the shell rather than a 404. `/next` is the Phase 4C
+                # frame, a temporary second page the owner approved; both read
+                # the same API and neither GET writes anything.
+                body = (_next_html() if u.path == "/next" else _page_html()).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -2177,6 +2190,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_audio(f)
             elif u.path == "/api/search":
                 self._json(search.query(q.get("q", "")))
+            elif u.path == "/api/search_meetings":
+                # meetings whose title or summary matches, best first, for the
+                # /next search palette's Titles group. Read-only, like
+                # /api/search, and empty when the index cannot answer.
+                self._json({"meetings": search.meetings(q.get("q", ""))})
             elif u.path == "/api/txt":
                 if not self._require_base(q.get("base")):
                     return
@@ -3104,27 +3122,45 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _FONT_DIR = _STATIC_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
 _PAGE_PARTS = ("page.html", "app.css", "app.js")
 _page_cache: dict = {"mtimes": None, "html": None}
+# The /next frame (plan Phase 4C): a second parts tuple, composed the same
+# way, with its own markers. It lives beside the classic page until the 4D
+# swap, when `/` serves it and `/classic` keeps the old page for 30 days.
+_NEXT_PARTS = ("next.html", "next.css", "next.js")
+_next_cache: dict = {"mtimes": None, "html": None}
+
+
+def _compose(parts, css_marker, js_marker):
+    """Assemble one served page from its (skeleton, css, js) parts. The CSS
+    and JS are full of braces, so the skeleton carries marker comments and we
+    substitute with str.replace -- never .format()/f-strings."""
+    page, css, js = ((_STATIC_DIR / f).read_text(encoding="utf-8") for f in parts)
+    return page.replace(css_marker, css).replace(js_marker, js)
 
 
 def _compose_page():
-    """Assemble the served panel page from its static parts. The CSS and JS
-    are full of braces, so the skeleton carries marker comments and we
-    substitute with str.replace -- never .format()/f-strings."""
-    page = (_STATIC_DIR / "page.html").read_text(encoding="utf-8")
-    css = (_STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (_STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    return page.replace("/*@APP_CSS@*/", css).replace("//@APP_JS@", js)
+    return _compose(_PAGE_PARTS, "/*@APP_CSS@*/", "//@APP_JS@")
+
+
+def _compose_next():
+    return _compose(_NEXT_PARTS, "/*@NEXT_CSS@*/", "//@NEXT_JS@")
+
+
+def _cached(parts, cache, compose):
+    """The composed page, recomposed only when one of its static parts
+    changes on disk -- editing a part reloads live, with no server restart."""
+    mtimes = tuple((_STATIC_DIR / f).stat().st_mtime_ns for f in parts)
+    if cache["html"] is None or cache["mtimes"] != mtimes:
+        cache["html"] = compose()
+        cache["mtimes"] = mtimes
+    return cache["html"]
 
 
 def _page_html():
-    """The composed page, recomposed only when one of its static parts
-    changes on disk -- editing page.html/app.css/app.js reloads live, with
-    no server restart."""
-    mtimes = tuple((_STATIC_DIR / f).stat().st_mtime_ns for f in _PAGE_PARTS)
-    if _page_cache["html"] is None or _page_cache["mtimes"] != mtimes:
-        _page_cache["html"] = _compose_page()
-        _page_cache["mtimes"] = mtimes
-    return _page_cache["html"]
+    return _cached(_PAGE_PARTS, _page_cache, _compose_page)
+
+
+def _next_html():
+    return _cached(_NEXT_PARTS, _next_cache, _compose_next)
 
 
 if __name__ == "__main__":
