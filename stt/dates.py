@@ -82,20 +82,26 @@ def twin_suffix(base: str) -> str:
     return m.group(0) if m else ""
 
 
-# --- Short typed dates: '9.14', '10-5', '10:21', '9.14.26' ---
+# --- Short typed dates: '9.14', '10-5', '9/14', '9.14.26' ---
 # A person typing a label on the phone writes the day short. The audit found
 # 7 such labels, and each disagreed with the stored transfer date by 9 to 25
 # days. A short date has no year, so it resolves to its most recent day on or
 # before a reference day (the transfer day), and only within SHORT_MAX_DAYS:
 # further back than that, the digits are more likely a time or a count than
 # the day of the meeting.
+#
+# Only a short date at the END of the title counts: every real label puts it
+# there, and a date-like run mid-title is usually something else ('Grades
+# 9-12 Planning', '1:1 with Lead', 'v1.2 demo'). A colon is not a date
+# separator ('Standup 9:30' is a time), and a letter right before the digits
+# ('v1.2') rules the run out.
 _SHORT = re.compile(
-    r"(?<![\d.:/\-])(\d{1,2})([.\-:/])(\d{1,2})(?:\2(\d{2}|\d{4}))?(?![\d.:/\-])")
+    r"(?<![\w.:/\-])(\d{1,2})([.\-/])(\d{1,2})(?:\2(\d{2}|\d{4}))?\s*$")
 SHORT_MAX_DAYS = 60
 
 
 def short_date(name: str, ref_iso: str):
-    """ISO date for the first short typed date in `name`, resolved against
+    """ISO date for the short typed date that ends `name`, resolved against
     the reference day `ref_iso`, else None.
 
     '9.14' read on 2026-09-29 is 2026-09-14. '12.30' read on 2027-01-08 is
@@ -107,7 +113,7 @@ def short_date(name: str, ref_iso: str):
         ref = date.fromisoformat(str(ref_iso)[:10])
     except (TypeError, ValueError):
         return None
-    for m in _SHORT.finditer(str(name or "")):
+    for m in _SHORT.finditer(str(name or "").rstrip()):
         mo, dy, yr = int(m.group(1)), int(m.group(3)), m.group(4)
         if not (1 <= mo <= 12 and 1 <= dy <= 31):
             continue

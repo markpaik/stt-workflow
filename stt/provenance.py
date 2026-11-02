@@ -109,17 +109,28 @@ def source_name(base: str, d: dict, json_path, names: dict):
     """The raw arrival name, or None when no record keeps it.
 
     The stored key wins. Then the manifest's record of this meeting. Then
-    `source_file`, but only on a meeting that was never renamed: a rename
-    overwrites `source_file` with the new folder name."""
+    `source_file`, but only on a meeting that was never renamed (a rename
+    overwrites `source_file` with the new folder name) and never redone (a
+    Redo writes the stored audio's name, which carries the folder name).
+
+    A Redo shows as `arrived_at` different from `processed_at`. A meeting
+    from before `arrived_at` existed gives no such proof, so its
+    `source_file` counts only when it is not the folder name itself."""
     if d.get("source_name"):
         return d["source_name"]
     hit = names.get(str(json_path))
     if hit:
         return hit
     sf = d.get("source_file")
-    if sf and not d.get("renamed_from"):
-        return sf
-    return None
+    if not sf or d.get("renamed_from"):
+        return None
+    arrived, processed = d.get("arrived_at"), d.get("processed_at")
+    if arrived:
+        return sf if arrived == processed else None
+    stem = os.path.splitext(str(sf))[0]
+    if stem == dates._UNIQ_SUFFIX.sub("", str(base or "")) or stem == base:
+        return None
+    return sf
 
 
 def _local_day(ts):
@@ -254,7 +265,9 @@ def correction(d: dict, cands: dict):
 def derive(base: str, d: dict, store=None, names=None, probe=True, today=None) -> dict:
     """{key: value} for every key in KEYS that this meeting lacks. Keys it
     already carries are never recomputed: `audio_fp` and `source_name` are
-    frozen at first write."""
+    frozen at first write. The one exception is a `source_name` stored as
+    null: once a manifest record links the meeting (a doctor relink after
+    the backfill), the raw name it gives fills the null."""
     store = Path(store) if store else config.meetings_dir()
     j = config.meeting_file(base, ".json", store)
     audio = config.meeting_audio(base, store)
@@ -263,6 +276,8 @@ def derive(base: str, d: dict, store=None, names=None, probe=True, today=None) -
         out["title"] = dates.title_of(base)
     raw = source_name(base, d, j, names or {})
     if "source_name" not in d:
+        out["source_name"] = raw
+    elif d.get("source_name") is None and raw is not None:
         out["source_name"] = raw
     if "audio_fp" not in d and audio is not None:
         from . import dupes
