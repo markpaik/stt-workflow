@@ -68,7 +68,7 @@ def _known_base(base) -> bool:
             and base in set(config.meeting_bases()))
 
 ASR_CHOICES = [
-    {"id": "parakeet", "label": "Parakeet TDT 0.6B v2", "note": "fastest · lowest benchmark WER · English"},
+    {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
     {"id": "mlxwhisper:large-v3", "label": "Whisper large-v3 (MLX)", "note": "best punctuation robustness · ~4x realtime"},
     {"id": "mlxwhisper:turbo", "label": "Whisper large-v3-turbo (MLX)", "note": "Whisper punctuation · ~9x realtime"},
     # cloud engines: shown only once their key is set; words are transcribed
@@ -82,7 +82,7 @@ ASR_CHOICES = [
      "note": "audio uploads to Mistral · strict mode stays local"},
 ]
 MODEL_REPOS = {
-    "Parakeet TDT 0.6B v2": "mlx-community/parakeet-tdt-0.6b-v2",
+    "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
     "Whisper large-v3 (MLX)": "mlx-community/whisper-large-v3-mlx",
     "Whisper large-v3-turbo (MLX)": "mlx-community/whisper-large-v3-turbo",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",

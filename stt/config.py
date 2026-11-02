@@ -68,8 +68,8 @@ def migration_dir() -> Path:
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
 # --- Models ---
-# Parakeet TDT 0.6B v2 is English-only and the WER leader with an MLX runtime.
-PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v2")
+# Parakeet TDT 0.6B v3 (Nov 2026 swap from v2): closer to Scribe v2 in a shadow test, keeps fillers, ~15% slower.
+PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 DIARIZATION_MODEL = os.environ.get(
     "STT_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"
 )
