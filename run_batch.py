@@ -274,6 +274,33 @@ def preflight_source(source: Path) -> bool:
         return False
 
 
+def sync_voice_memos(dry_run=False) -> dict:
+    """Copy finished meeting memos from the Voice Memos library into the
+    staging folder (stt/voicememos.py). Reads the library and never writes
+    to it. A schema change or a denied read copies nothing and is recorded
+    for the doctor. Never fails the run."""
+    try:
+        from stt import voicememos
+        r = voicememos.sync(dry_run=dry_run)
+    except Exception as e:
+        print(f"  (Voice Memos sync skipped: {e.__class__.__name__})",
+              file=sys.stderr, flush=True)
+        return {"status": "error"}
+    st = r.get("status")
+    if st == "ok":
+        c = r.get("counts") or {}
+        if c.get("copied") or c.get("would_copy"):
+            print(f"Voice Memos: {'would copy' if dry_run else 'copied'} "
+                  f"{c.get('copied') or c.get('would_copy')} memo(s)", flush=True)
+    elif st == "schema":
+        print("Voice Memos: the database schema changed, so sync stopped "
+              f"({r.get('detail')}). Run the doctor.", file=sys.stderr, flush=True)
+    elif st == "denied":
+        print("Voice Memos: macOS denied the read. Grant Full Disk Access to "
+              f"{os.path.realpath(sys.executable)}.", file=sys.stderr, flush=True)
+    return r
+
+
 def iter_audio(folder: Path):
     if not Path(folder).is_dir():
         return
@@ -292,6 +319,12 @@ def iter_sources(source: Path):
     rec = config.recordings_dir()
     if rec not in folders:
         folders.append(rec)
+    # the Voice Memos sync's own staging copies (stt/voicememos.py). The
+    # container itself is never a source, so the delete step cannot reach it.
+    from stt import voicememos
+    vm = voicememos.staging_dir()
+    if vm not in folders:
+        folders.append(vm)
     for folder in folders:
         for p in iter_audio(folder):
             if p.name in seen:
@@ -578,6 +611,8 @@ def main():
     if not args.dry_run and not args.no_diarize and not config.resolve_hf_token():
         print("Diarization needs a HuggingFace token (see README).", file=sys.stderr)
         return 2
+
+    sync_voice_memos(dry_run=args.dry_run)
 
     wanted = None
     if args.files:

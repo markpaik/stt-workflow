@@ -38,6 +38,13 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(config, "RECORDINGS_DIR", d / "recordings")
     monkeypatch.setattr(config, "MIC_SPEAKER", None)  # don't inherit the real user's setting
+    # the Voice Memos sync runs at every batch start: a sandbox run must read
+    # a synthetic library, never the real one, even with STT_HOME unset
+    monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(d / "vm_container"))
+    monkeypatch.delenv("STT_VOICEMEMOS_STAGING", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_SYNC", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_SINCE", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_PLACES", raising=False)
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
     monkeypatch.setattr(status, "HISTORY_LOG", d / "results.jsonl")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")

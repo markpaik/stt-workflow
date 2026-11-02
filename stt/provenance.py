@@ -324,6 +324,14 @@ def fresh(src, sidecar=None, today=None, probe=True):
         t = t.astimezone()
         if t.date().isoformat() <= today:
             return "recorder", t.date().isoformat(), t.isoformat(timespec="seconds")
+    # a sidecar that names its own date and source (a duplicated memo whose
+    # file name no longer holds the start) is taken at its word
+    sd, ss = side.get("date"), side.get("date_source")
+    if sd and ss in DATE_SOURCES and str(sd) <= today:
+        try:
+            return ss, date.fromisoformat(str(sd)).isoformat(), None
+        except ValueError:
+            pass
     try:
         mt = src.stat().st_mtime
     except OSError:

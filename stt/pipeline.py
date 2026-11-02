@@ -79,7 +79,14 @@ def _arrival_fields(meta: dict, prev, src: Path) -> None:
     if prev is not None:
         return
     from . import provenance
-    keys = provenance.arrival_keys(src)
+    side = provenance.read_sidecar(src)
+    keys = provenance.arrival_keys(src, side)
+    # a Voice Memos sync copy: the memo's id (so a purge can block it from
+    # coming back) and the default place name it carried, kept as a note
+    if side.get("vm_uuid"):
+        meta["vm_uuid"] = str(side["vm_uuid"])
+    if side.get("location_note"):
+        meta["location_note"] = str(side["location_note"])[:200]
     for k in ("source_name", "audio_fp", "date_source", "recorded_at"):
         if k in keys:
             meta[k] = keys[k]

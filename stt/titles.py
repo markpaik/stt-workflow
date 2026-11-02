@@ -31,7 +31,8 @@ ROUTES = ("voice_memo", "native", "conference", "public_download", "other")
 # metadata from scratch, so a key missing here is silently erased by it.
 # Later phases write the last five; carrying them now costs nothing.
 CARRY_KEYS = ("title_state", "title_source", "route",
-              "recorded_at", "date_source", "source_name", "audio_fp", "title")
+              "recorded_at", "date_source", "source_name", "audio_fp", "title",
+              "location_note", "vm_uuid")
 
 # --- what counts as "no label" -------------------------------------------
 # A recording name that says nothing about the meeting: the recorder's and

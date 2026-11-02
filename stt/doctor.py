@@ -318,6 +318,9 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         n = sum(1 for p in config.WORK_DIR.glob("*.wav"))
         if n:
             out.append(Finding("work_scratch", "work", f"{n} scratch audio file(s)", False))
+    from . import voicememos
+    for kind, detail in voicememos.doctor_findings():
+        out.append(Finding(kind, "voicememos", detail, False))
     for name in housekeeping.rotate_logs(dry_run=True):
         out.append(Finding("log_oversize", name, "over the log cap", True))
     if housekeeping.cap_calibration(dry_run=True):

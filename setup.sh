@@ -22,6 +22,13 @@ recordings_dir() {
   echo "${d:-$HOME/Library/Application Support/com.stt-workflow/recordings}"
 }
 
+voicememos_dir() {
+  # the Voice Memos library on this Mac (read only; stt/voicememos.py)
+  local d=""
+  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_VOICEMEMOS_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  echo "${d:-$HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings}"
+}
+
 write_batch_plist() {
   mkdir -p "$AGENTS" "$BASE/logs"
   mkdir -p "$(recordings_dir)"   # launchd can only watch a path that exists
@@ -54,6 +61,9 @@ write_batch_plist() {
   <array>
     <string>$(source_dir)</string>
     <string>$(recordings_dir)</string>
+    <!-- Voice Memos sync: a new memo wakes the batch, which copies it under
+         the allow-list. The library is read, never written. -->
+    <string>$(voicememos_dir)</string>
   </array>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
@@ -105,6 +115,7 @@ case "${1:-}" in
     echo "Installed + loaded $BATCH_LABEL (nightly 02:00 + folder watch + login catch-up)."
     echo "Grant Full Disk Access to this binary (resolve the symlink):"
     echo "  $(readlink -f "$BASE/.venv/bin/python")"
+    echo "Voice Memos sync reads the Voice Memos library, which needs that grant."
     echo "Force a test run:  ./setup.sh kick"
     ;;
   uninstall-agent)
