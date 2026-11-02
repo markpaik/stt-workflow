@@ -80,8 +80,9 @@ async function openPage(base,tr,row){
 """
 
 
-def _run(body, timeout=30):
-    js = _STUB + _js() + "\n;(async()=>{" + _PRE + body + "\n})().catch(e=>{console.log(JSON.stringify({threw:String(e&&e.stack||e)}));});"
+def _run(body, timeout=30, pre=""):
+    # `pre` runs after the stub and before the page's scripts
+    js = _STUB + pre + _js() + "\n;(async()=>{" + _PRE + body + "\n})().catch(e=>{console.log(JSON.stringify({threw:String(e&&e.stack||e)}));});"
     r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=timeout)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
@@ -1165,3 +1166,111 @@ def test_the_joined_script_is_three_plain_files_with_no_modules():
         assert not re.search(r"^\s*(import|export)\b", src, re.M), f
         assert "—" not in src, f
     assert srv._NEXT_PARTS == ("next.html", "next.css") + JS_FILES
+
+
+# ======================================================= Phase 4D QA fixes ===
+
+# the page's document listeners, kept so a test can fire a key at them
+_LISTEN = r"""
+const __L={};document.addEventListener=(t,f)=>{(__L[t]=__L[t]||[]).push(f);};
+const fire=(t,e)=>(__L[t]||[]).forEach(f=>f(e));
+"""
+
+
+@needs_node
+def test_enter_on_a_palette_hit_in_the_open_meeting_closes_the_palette():
+    out = _run("""
+await openPage('P1',{segments:[seg(0,0,5,'S1','Speaker 1','hello'),seg(1,60,70,'S1','Speaker 1','pear trees')]});
+__els['pop']=_mk({hidden:true});__els['layers']=_mk();
+let routed=0;const realRoute=route;route=()=>{routed++;realRoute();};
+const enter=href=>{__els['pal-res .hit.sel']=_mk({getAttribute:()=>href});
+ UI.palette=true;layersHTML();
+ fire('keydown',{key:'Enter',target:_mk({id:'pal-in',matches:()=>true}),preventDefault(){}});
+ return {palette:UI.palette,layer:__els['layers'].innerHTML.includes('palette'),routed};};
+// the title hit of the open meeting: the hash does not change
+const title=enter('#m/P1');
+// a Said in hit: the hash changes, and hashchange takes the early return
+const said=enter('#m/P1/t/60');location.hash='m/P1/t/60';UI.palette=true;layersHTML();route();
+console.log(JSON.stringify({title,said,afterRoute:{palette:UI.palette,layer:__els['layers'].innerHTML.includes('palette'),now:MP.nowIdx}}));
+""", pre=_LISTEN)
+    assert out["title"] == {"palette": False, "layer": False, "routed": 1}
+    assert out["said"]["palette"] is False and out["said"]["layer"] is False
+    assert out["afterRoute"] == {"palette": False, "layer": False, "now": 1}
+
+
+@needs_node
+def test_a_refresh_during_a_poll_waits_for_a_fresh_poll():
+    # a save that awaits refresh() while the 2-second poll is in flight must
+    # read state from a request that started after the save
+    js = _STUB + _js() + r"""
+;(async()=>{
+for(let k=0;k<8;k++)await new Promise(r=>setTimeout(r,0));
+let n=0;const held=[];
+fetch=()=>{n++;const k=n;return new Promise(r=>held.push(()=>r({ok:true,json:async()=>({meetings:[],gen:k})})));};
+const tick=()=>new Promise(r=>setTimeout(r,0));
+const p1=refresh();await tick();
+const p2=refresh(),p3=refresh();await tick();
+const during=n;
+held[0]();await p1;const afterFirst=S.gen;await tick();
+const started=n;held[1]();await p2;await p3;
+console.log(JSON.stringify({during,afterFirst,started,final:S.gen,same:p2===p3}));
+})().catch(e=>console.log(JSON.stringify({threw:String(e&&e.stack||e)})));
+"""
+    r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    # one request at a time, the two late callers share ONE follow-up poll,
+    # and they resolve only on its answer
+    assert out == {"during": 1, "afterFirst": 1, "started": 2, "final": 2, "same": True}
+
+
+@needs_node
+def test_a_said_in_link_keeps_a_tenth_of_a_second():
+    out = _run("""
+console.log(JSON.stringify({a:meetingHref('L1',11.64),b:meetingHref('L1',0),c:parseMeetingHash(meetingHref('L1',11.64).slice(1))}));
+""")
+    assert out == {"a": "#m/L1/t/11.6", "b": "#m/L1/t/0", "c": {"base": "L1", "seek": 11.6}}
+
+
+@needs_node
+def test_the_dock_shows_the_length_before_the_first_play():
+    out = _run("""
+__els['dock']=_mk();__els['a-dur']=_mk({textContent:'0:00'});__els['a-seek']=_mk({max:0});
+await openPage('D1',{segments:[seg(0,0,5,'S1','Speaker 1','words')]},{audio:'/x/d1.m4a',duration_sec:754});
+mDock();
+console.log(JSON.stringify({dur:__els['a-dur'].textContent,max:__els['a-seek'].max,player:MP.audio}));
+""")
+    assert out == {"dur": "12:34", "max": 754, "player": None}
+
+
+@needs_node
+def test_the_speakers_name_button_opens_the_voice_in_a_meeting_and_the_clip_says_its_title():
+    out = _run("""
+S={unknowns:[{uid:'U7',display:'Speaker 7',meetings:['f1 01152026','f2 01162026']}],enrolled:[],
+ meetings:[{base:'f1 01152026',title:'Synthetic Demo',date:'2026-01-15',minutes:9,named:[],ask_clusters:{}},
+  {base:'f2 01162026',title:'Synthetic Other',date:'2026-01-16',minutes:9,named:[],ask_clusters:{}}],needs_you:[]};
+UI.route='speakers';
+const html=speakersView();
+const m=html.match(/data-act="name-voice" data-uid="([^"]*)" data-base="([^"]*)"/);
+answer=p=>p.startsWith('/api/voice_lines')?{lines:[{start:8,dur:4,text:'synthetic words'}],talk_secs:12}
+ :p.startsWith('/api/voice_clips')?{clips:[{meeting:'f2 01162026',start:3,dur:5}]}:{targets:[]};
+A['name-voice']({dataset:{uid:m[1],base:m[2]}});await flush();
+const where=vsClipWhere(),lines=(VS.lines||[]).length;
+VS.clip.meeting='f1 01152026';const self=vsClipWhere();
+VS.clip.meeting='gone 01012026';const gone=vsClipWhere();
+console.log(JSON.stringify({base:VS.base,lines,where,self,gone}));
+""")
+    assert out == {"base": "f1 01152026", "lines": 1, "where": "Synthetic Other", "self": "", "gone": ""}
+
+
+@needs_node
+def test_a_hidden_unknown_keeps_its_uid_on_the_page():
+    # ports test_row_unknown_uid_matches_archived_voices_not_just_live_ones:
+    # hiding an unknown stops the nagging, never the naming
+    out = _run("""
+S={unknowns:[{uid:'U1',display:'Voice 9',meetings:['base1'],archived:true},
+ {uid:'U2',display:'Voice 10',meetings:['base1'],archived:false}]};
+console.log(JSON.stringify([mUnknownUid('Voice 9','base1'),mUnknownUid('Voice 10','base1'),
+ mUnknownUid('Voice 99','base1'),mUnknownUid('Voice 9','otherbase')]));
+""")
+    assert out == ["U1", "U2", None, None]

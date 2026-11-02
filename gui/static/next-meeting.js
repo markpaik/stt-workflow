@@ -419,6 +419,9 @@ function mDock(){
   <button class="btn plain" id="a-rate" type="button" data-act="a-rate" title="Playback speed">1x</button>
   <button class="btn plain h-desk" id="a-follow" type="button" data-act="a-follow" aria-pressed="true" title="Scroll the transcript with the playing line">Follow</button>
   <button class="btn plain h-desk" type="button" data-act="m-add" title="Add a line the pipeline missed, at the playhead">Add line</button></div>`;
+ // the length is known before the player exists: show it, not 0:00
+ const dur=+m.duration_sec||0;
+ if(dur>0){const u=document.getElementById('a-dur');if(u)u.textContent=fmtT(dur);const s=document.getElementById('a-seek');if(s)s.max=dur;}
 }
 function mAudio(){
  if(!MP||!MP.hasAudio)return null;

@@ -40,7 +40,8 @@ const fmtT=t=>{t=Math.max(0,Math.round(+t||0));const h=Math.floor(t/3600),m=Math
  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s).padStart(2,'0');};
 const fmtMin=secs=>{const m=Math.max(1,Math.round((+secs||0)/60));return m>=60?`${Math.floor(m/60)}h ${m%60}m`:`${m}m`;};
 const plural=(n,one,many)=>`${n} ${n===1?one:(many||one+'s')}`;
-const meetingHref=(base,t)=>'#m/'+encodeURIComponent(base)+(t!=null?'/t/'+Math.floor(+t):'');
+// one decimal: a whole-second floor can land before the hit's own line
+const meetingHref=(base,t)=>'#m/'+encodeURIComponent(base)+(t!=null?'/t/'+Math.floor(+t*10)/10:'');
 
 /* ---------------------------------------------------------------- data ---- */
 async function api(path,body){
@@ -331,7 +332,7 @@ function speakersView(){
  const unkRow=u=>{const n=(u.meetings||[]).length;const look=(u.looks_like||[])[0];const same=(u.suggested||[]).filter(x=>x&&x.uid).slice(0,2);
   return `<div class="row static" data-row tabindex="0" id="v-${esc(u.uid)}"><div style="min-width:0"><div class="row-title">${esc(u.display)}</div><div class="meta">In ${plural(n,'meeting')}${look?` · Looks like <span class="nb">${esc(look.name)} · <span class="mono">${(+look.score).toFixed(2)}</span></span>`:''}</div>
    ${same.length?`<div class="tools">${same.map(x=>`<button class="btn plain" type="button" data-act="link-voice" data-src="${esc(u.uid)}" data-dst="${esc(x.uid)}">Same voice as ${esc(x.display)} · <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('')}</div>`:''}</div>
-   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
+   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}" data-base="${esc((u.meetings||[])[0]||'')}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
  const others=enr.map(e=>e.name);
  const enrRow=e=>{const conf=UI.confirm==='rm:'+e.name;const open=UI.openSamples===e.name;const mine=S.mic_speaker===e.name;
   return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(e.name)}${mine?'<span class="chip draft">Your voice</span>':''}</div><div class="meta">${plural(e.samples||0,'voice sample')}${(e.sources||[]).length?' · from '+plural(e.sources.length,'meeting'):''}</div>
@@ -519,7 +520,7 @@ function route(){
  if(r!=='meeting'){mTeardown();UI.mbase=null;}
  // the voice sheet stays only for a hand-off into the meeting it walks
  if(VS&&!(mh&&VCARRY&&VCARRY.base===mh.base))vsClose();
- if(mh){UI.mbase=mh.base;UI.mseek=mh.seek;if(sameMeeting&&mh.seek!=null&&MP&&MP.loaded){UI.route=r;mSeekLine(mh.seek);return;}}
+ if(mh){UI.mbase=mh.base;UI.mseek=mh.seek;if(sameMeeting&&mh.seek!=null&&MP&&MP.loaded){UI.route=r;layersHTML();mSeekLine(mh.seek);return;}}
  // Select from a Home row menu carries its selection across the clear above
  const c=UI.carry;UI.carry=null;const carried=c&&c.to===r;
  if(carried){(c.sel||[]).forEach(b=>UI.sel.add(b));}
@@ -709,7 +710,10 @@ document.addEventListener('keydown',e=>{
  if(!UI.palette&&!UI.menu&&!UI.keys&&UI.route==='meeting'&&mKey(e))return;
  if(t.id==='pal-in'&&(e.key==='ArrowDown'||e.key==='ArrowUp')){const hs=[...document.querySelectorAll('#pal-res .hit')];if(!hs.length)return;e.preventDefault();
   let i=hs.findIndex(h=>h.classList.contains('sel'));hs.forEach(h=>h.classList.remove('sel'));i=e.key==='ArrowDown'?Math.min(hs.length-1,i+1):Math.max(0,i-1);hs[i].classList.add('sel');hs[i].scrollIntoView({block:'nearest'});return;}
- if(t.id==='pal-in'&&e.key==='Enter'){const h=document.querySelector('#pal-res .hit.sel')||document.querySelector('#pal-res .hit');if(h)location.href=h.getAttribute('href');return;}
+ // close the palette first: a hit in the open meeting may not change the
+ // hash (no hashchange), or may take route()'s same-meeting early return
+ if(t.id==='pal-in'&&e.key==='Enter'){const h=document.querySelector('#pal-res .hit.sel')||document.querySelector('#pal-res .hit');if(!h)return;
+  const href=h.getAttribute('href');UI.palette=false;layersHTML();if(href===location.hash)route();else location.href=href;return;}
  if(t.id==='rn-in'&&e.key==='Enter'){e.preventDefault();A['rn-save']();return;}
  if(t.id==='pf-in'&&e.key==='Enter'){e.preventDefault();A['pf-save']();return;}
  if(t.id&&t.id.startsWith('nt-')&&e.key==='Enter'){e.preventDefault();A.keep({dataset:{base:t.dataset.base}});return;}
@@ -750,12 +754,15 @@ document.addEventListener('visibilitychange',()=>{
  if(document.hidden){HIDDEN_BASE=needsYou().length;}
  else{HIDDEN_BASE=null;document.title=tabTitle();api('/api/seen',{}).catch(()=>{});refresh().then(()=>render());}
 });
-let POLL_BUSY=false;
-async function refresh(){
- if(POLL_BUSY)return;POLL_BUSY=true;
- try{const r=await fetch('/api/state');if(r.ok)S=await r.json();}catch(e){}
- finally{POLL_BUSY=false;}
- document.title=tabTitle();
+// One poll at a time. A caller that arrives while a poll is in flight gets a
+// fresh poll that starts after it: a save that awaits refresh() must read
+// state from after the save, never the stale answer of an older request.
+let POLL=null,POLL_NEXT=null;
+function refresh(){
+ if(POLL){if(!POLL_NEXT)POLL_NEXT=POLL.then(()=>{POLL_NEXT=null;return refresh();});return POLL_NEXT;}
+ POLL=(async()=>{try{const r=await fetch('/api/state');if(r.ok)S=await r.json();}catch(e){}
+  finally{POLL=null;}document.title=tabTitle();})();
+ return POLL;
 }
 async function tick(){if(document.hidden&&S){await refresh();return;}await refresh();render();}
 addEventListener('hashchange',route);

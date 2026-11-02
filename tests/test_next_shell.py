@@ -336,7 +336,7 @@ UI.pres={q:'pear',total:1,meetings:[{base:'Budget 2',title:'Budget'}],
  hits:[{base:'Orchard 1',start:61.4,who:'Speaker 1',snippet:'the pear trees'}]};
 const h=palResults();
 UI.pq='orch';UI.pres=null;const h2=palResults();
-console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('href="#m/Orchard%201/t/61"'),
+console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('href="#m/Orchard%201/t/61.4"'),
  fromIdx:h.includes('href="#m/Budget%202"'),mark:h.includes('<mark>pear</mark>'),
  local:h2.includes('<mark>Orch</mark>ard Survey'),pending:h2.includes('Searching')}));
 """)
@@ -361,7 +361,7 @@ def test_meeting_links_escape_the_base():
 console.log(JSON.stringify({a:meetingHref('A/B #1'),b:meetingHref('x',12.9)}));
 """)
     # the meeting page lives in this page now: an in-page hash, no reload
-    assert out == {"a": "#m/A%2FB%20%231", "b": "#m/x/t/12"}
+    assert out == {"a": "#m/A%2FB%20%231", "b": "#m/x/t/12.9"}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
