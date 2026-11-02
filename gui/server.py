@@ -2230,6 +2230,18 @@ class Handler(BaseHTTPRequestHandler):
                 # /api/search, and empty when the index cannot answer.
                 self._json({"meetings": search.meetings(
                     q.get("q", ""), filters=_search_filters(q))})
+            elif u.path == "/api/threads":
+                # saved library Ask threads, newest first: id, first question,
+                # scope, and count. No answer text in the list.
+                from stt import ask
+                self._json({"threads": ask.list_threads()})
+            elif u.path == "/api/thread":
+                from stt import ask
+                t = ask.get_thread(q.get("id", ""))
+                if t is None:
+                    self._json({"error": "no such thread"}, 404)
+                    return
+                self._json(t)
             elif u.path == "/api/groups":
                 # computed groups, largest first. Read only: a GET writes
                 # nothing, so the use count is a separate POST /api/usage
@@ -2686,6 +2698,58 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "The local model is busy with another "
                                          "summary or question. Try again in a "
                                          "minute."}, 503)
+            elif u.path == "/api/ask_library":
+                # library Ask (plan Phase 4F): FTS5 retrieval into the local
+                # model, citations stored with meeting_id, the exchange saved
+                # to its thread. Busy is a 503 with busy:true, and the page
+                # keeps the typed question.
+                from stt import ask, summarize
+                q_ = (b.get("question") or "").strip()
+                if not q_:
+                    self._json({"error": "empty question"}, 400)
+                    return
+                if len(q_) > 2000:
+                    self._json({"error": "question too long (2000 chars max)"}, 400)
+                    return
+                tid = b.get("thread") or None
+                if tid is not None and not ask.valid_id(tid):
+                    self._json({"error": "no such thread"}, 400)
+                    return
+                prev = ask.get_thread(tid) if tid else None
+                if tid and prev is None:
+                    self._json({"error": "no such thread"}, 404)
+                    return
+                # a follow-up keeps its thread's scope
+                scope = (prev or {}).get("scope") or b.get("scope") or {"kind": "all"}
+                if not isinstance(scope, dict):
+                    self._json({"error": "bad scope"}, 400)
+                    return
+                if not summarize.available():
+                    self._json({"error": "The assistant is not installed, so Ask "
+                                         "cannot answer. Search still works."}, 503)
+                    return
+                try:
+                    r = ask.ask(q_, scope=scope,
+                                history=ask.history_of(tid) if tid else None)
+                except summarize.LLMBusy:
+                    self._json({"busy": True,
+                                "error": "The assistant is busy with a summary or "
+                                         "another question. Try again when it "
+                                         "finishes. Your question stays here."}, 503)
+                    return
+                if not r.get("ok"):
+                    self._json(r, 400)
+                    return
+                if scope.get("kind") == "group":
+                    groups.log_use("group_ask")
+                t = ask.save_message(tid, {k: v for k, v in scope.items() if k != "label"},
+                                     r.get("scope_label", ""), q_, r)
+                self._json({"ok": True, "thread": t["id"],
+                            "message": t["messages"][-1],
+                            "scope_label": r.get("scope_label", "")})
+            elif u.path == "/api/thread_delete":
+                from stt import ask
+                self._json({"ok": ask.delete_thread(b.get("id"))})
             elif u.path == "/api/hide_unknown":
                 ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
                       else unknowns.restore(b["uid"]))

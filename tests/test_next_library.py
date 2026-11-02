@@ -76,3 +76,108 @@ location.hash='groups';route();await flush();
 console.log(JSON.stringify({v:document.querySelector('#view').innerHTML}));
 """)
     assert "No groups yet" in out["v"]
+
+
+# ===================================================================== Ask ===
+
+_ASK = _VIEW + """
+S=Object.assign({meetings:[],needs_you:[],unknowns:[],enrolled:[],llm_available:true,llm_backend:'local'},S||{});
+S.meetings=[{base:'R1',title:'Roof Budget',date:'2026-10-01',minutes:30,named:[],ask_clusters:{},summary:'',next_steps:[]}];
+const T1={id:'aaaaaaaaaaaa',scope:{kind:'all',label:'All recordings'},messages:[
+ {q:'How big is the reserve?',a:'It is 412 <b>thousand</b> [1].',nothing_found:false,
+  citations:[{n:1,meeting_id:'m1',base:'R1',title:'Roof <i>Budget</i>',date:'2026-10-01',start:100.5,index:5,gone:false},
+             {n:2,meeting_id:'m9',base:null,title:'Gone Meeting',date:'2026-09-01',start:3,index:0,gone:true}],hits:[]},
+ {q:'Is the heater fixed?',a:'I did not find this in your meetings.',nothing_found:true,citations:[],
+  hits:[{base:'R1',title:'Roof Budget',date:'2026-10-01',start:40,snippet:'The roof heater <x> was discussed.'}]}]};
+answer=(p,b)=>{
+ if(p==='/api/threads')return {threads:[{id:'aaaaaaaaaaaa',q:'How big is the reserve?',scope:'All recordings',updated_at:'2026-10-02T10:00:00',n:2}]};
+ if(p.startsWith('/api/thread?id='))return T1;
+ if(p==='/api/groups')return {groups:[{key:'gA',name:'Grant Writing',count:2,hours:1,why:'',bases:[]}]};
+ return {};
+};
+"""
+
+
+@needs_node
+def test_ask_thread_renders_citations_links_and_nothing_found():
+    out = _run(_ASK + """
+location.hash='ask/aaaaaaaaaaaa';route();await flush();
+console.log(JSON.stringify({route:UI.route,v:document.querySelector('#view').innerHTML,
+ loaded:calls.map(c=>c[0])}));
+""")
+    v = out["v"]
+    assert out["route"] == "ask"
+    # escaped answer text and titles
+    assert "412 &lt;b&gt;thousand&lt;/b&gt; [1]." in v and "<b>thousand" not in v
+    assert "Roof &lt;i&gt;Budget&lt;/i&gt;" in v
+    # a citation opens the meeting at its second, a gone one is not a link
+    assert 'href="#m/R1/t/100.5"' in v
+    assert 'class="cite gone"' in v and "Gone Meeting" in v
+    # nothing found shows the closest hits, escaped, and no invented text
+    assert "I did not find this in your meetings." in v
+    assert "Closest search hits" in v and "&lt;x&gt;" in v and 'href="#m/R1/t/40"' in v
+    assert "Runs on this Mac. Threads save here." in v
+    # a follow-up keeps the thread's scope: no picker on an open thread
+    assert 'id="ask-scope"' not in v and "All recordings" in v
+
+
+@needs_node
+def test_ask_sends_with_scope_and_keeps_the_question_when_busy():
+    out = _run(_ASK + """
+LIB.groups=null;location.hash='ask';route();await flush();
+const v0=document.querySelector('#view').innerHTML;
+LIB.ascope='group:gA';LIB.adraft='What is the match rate?';
+const prev=answer;
+answer=(p,b)=>p==='/api/ask_library'?{busy:true,error:'The assistant is busy with a summary or another question. Try again when it finishes. Your question stays here.'}:prev(p,b);
+await askSend();await flush();
+const busyView=document.querySelector('#view').innerHTML;
+const sent=calls.filter(c=>c[0]==='/api/ask_library').map(c=>c[1]);
+console.log(JSON.stringify({v0,busyView,sent,draft:LIB.adraft,busy:LIB.abusy,g:LIB.groups}));
+""")
+    assert 'id="ask-scope"' in out["v0"] and "Grant Writing (2)" in out["v0"]
+    assert "Last 30 days" in out["v0"]
+    assert out["sent"] == [{"question": "What is the match rate?",
+                            "scope": {"kind": "group", "key": "gA"}}]
+    # busy: the typed question stays, and the reason shows
+    assert out["draft"] == "What is the match rate?" and out["busy"] is False
+    assert 'value="What is the match rate?"' in out["busyView"]
+    assert "Your question stays here." in out["busyView"]
+
+
+@needs_node
+def test_ask_follow_up_goes_to_the_thread_and_clears_the_field():
+    out = _run(_ASK + """
+location.hash='ask/aaaaaaaaaaaa';route();await flush();
+LIB.adraft='And the roof?';
+const prev=answer;
+answer=(p,b)=>p==='/api/ask_library'?{ok:true,thread:'aaaaaaaaaaaa',message:{}}:prev(p,b);
+await askSend();await flush();
+console.log(JSON.stringify({sent:calls.filter(c=>c[0]==='/api/ask_library').map(c=>c[1]),draft:LIB.adraft,tid:LIB.tid}));
+""")
+    assert out["sent"] == [{"question": "And the roof?", "thread": "aaaaaaaaaaaa"}]
+    assert out["draft"] == "" and out["tid"] == "aaaaaaaaaaaa"
+
+
+@needs_node
+def test_ask_states_for_an_empty_library_and_a_missing_model():
+    out = _run(_VIEW + """
+answer=()=>({threads:[],groups:[]});
+S=Object.assign({meetings:[],needs_you:[],llm_available:false},S||{});
+location.hash='ask';route();await flush();
+const empty=document.querySelector('#view').innerHTML;
+S.meetings=[{base:'R1',title:'Roof',date:'2026-10-01',minutes:1,named:[],ask_clusters:{}}];
+render(true);
+console.log(JSON.stringify({empty,off:document.querySelector('#view').innerHTML}));
+""")
+    assert "Nothing to ask about yet" in out["empty"]
+    assert "Ask needs the assistant installed" in out["off"]
+    assert 'data-act="ask-send" disabled' in out["off"]
+
+
+@needs_node
+def test_ask_this_group_opens_ask_with_the_group_scope():
+    out = _run(_ASK + """
+A['ask-group']({dataset:{k:'gA'}});route();await flush();
+console.log(JSON.stringify({route:UI.route,scope:LIB.ascope,hash:location.hash}));
+""")
+    assert out == {"route": "ask", "scope": "group:gA", "hash": "#ask"}

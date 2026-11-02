@@ -316,6 +316,15 @@ textarea.mc-text{width:100%;min-height:72px;resize:vertical;line-height:1.5}
 .ask-form{display:flex;gap:var(--s2)}
 .ask-form input{flex:1;min-width:0}
 .ask-note{font-size:var(--fs-meta);color:var(--sub)}
+/* Ask (plan Phase 4F): saved threads beside the open thread */
+.ask-grid{display:grid;grid-template-columns:240px minmax(0,1fr);gap:var(--s6);align-items:start}
+.thread-list{gap:2px}
+.thread-list .hit{margin-inline:calc(var(--s2) * -1);width:calc(100% + var(--s2) * 2)}
+.thread-list .eyebrow{margin-bottom:var(--s2)}
+.cites{display:flex;flex-direction:column;gap:2px;margin-top:var(--s2)}
+.cite{font-size:var(--fs-meta);line-height:20px;color:var(--accent-text);text-decoration:none;white-space:normal}
+a.cite:hover{text-decoration:underline}
+.cite.gone{color:var(--sub)}
 /* Groups (plan Phase 4E): the group list beside the open group */
 .f-grid{display:grid;grid-template-columns:220px minmax(0,1fr);gap:var(--s6);align-items:start}
 .tree{display:flex;flex-direction:column;gap:2px;margin-inline:calc(var(--s2) * -1)}
@@ -381,6 +390,7 @@ input.name-input[type=text]{width:100%;font-size:var(--fs-title);min-height:40px
   .sheet-body{padding:var(--s2) var(--s4) var(--s4)}
   .sheet-foot{padding:var(--s2) var(--s4)}
   .f-grid{grid-template-columns:minmax(0,1fr);gap:var(--s4)}
+  .ask-grid{grid-template-columns:minmax(0,1fr);gap:var(--s4)}
   .tree-item{min-height:44px}
   .tabbar{top:50px}
   .revbar{top:91px}

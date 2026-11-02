@@ -32,7 +32,8 @@ const ICON={
  theme:'<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
  back:'<path d="m14 6-6 6 6 6"/>',
  edit:'<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>',
- groups:'<path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h6l2 2"/>'
+ groups:'<path d="M3 7h6l2 2h10v10H3z"/><path d="M3 7V5h6l2 2"/>',
+ ask:'<path d="M4 5h16v11H9l-5 4z"/><path d="M9 10h6"/>'
 };
 const ic=n=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]||''}</svg>`;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -83,9 +84,9 @@ const needsYou=()=>(S&&S.needs_you)||[];
 const urgent=()=>((S&&S.tray)||[]).filter(t=>['recorder_stall','failed','dupe_files','dupe_meetings'].includes(t.kind));
 
 /* --------------------------------------------------------------- frame ---- */
-const NAV=[['home','Home','home'],['recordings','Recordings','list'],['groups','Groups','groups'],['speakers','Speakers','voice']];
+const NAV=[['home','Home','home'],['recordings','Recordings','list'],['groups','Groups','groups'],['ask','Ask','ask'],['speakers','Speakers','voice']];
 const NAV2=[['activity','Activity','act'],['archive','Archive','arch'],['settings','Settings','gear']];
-const TITLES={home:'Home',recordings:'Recordings',groups:'Groups',activity:'Activity',speakers:'Speakers',archive:'Archive',settings:'Settings'};
+const TITLES={home:'Home',recordings:'Recordings',groups:'Groups',ask:'Ask',activity:'Activity',speakers:'Speakers',archive:'Archive',settings:'Settings'};
 // the page's name in the tab and the top bar: a meeting shows its title
 function pageTitle(){if(UI.route==='meeting'){const m=byBase(UI.mbase);return m?m.title:'Recording';}return TITLES[UI.route]||'Meetings';}
 function pillText(){
@@ -421,7 +422,7 @@ function layersHTML(){
  if(UI.keys)h+=`<div class="veil" data-act="close-layer"></div><div class="palette keysheet" role="dialog" aria-label="Keyboard keys"><div class="keysheet-head"><strong>Keys</strong><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><div class="keys">${KEYS.map(([k,d])=>`<span>${k.split(' ').map(x=>/^(or|then)$/.test(x)?`<span class="sub">${x}</span>`:`<kbd>${esc(x)}</kbd>`).join(' ')}</span><span>${esc(d)}</span>`).join('')}</div></div>`;
  $('#layers').innerHTML=h;
 }
-const KEYS=[['/ or Cmd K','Search titles and words (/ on a Transcript tab finds in it)'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then g','Go to Groups'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row, keep the title, save the voice'],['x','Select the row'],
+const KEYS=[['/ or Cmd K','Search titles and words (/ on a Transcript tab finds in it)'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then g','Go to Groups'],['g then q','Go to Ask'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row, keep the title, save the voice'],['x','Select the row'],
  ['1 2 3','Summary, Transcript, Ask (on a meeting)'],['[ ]','Previous or next recording'],['Space','Play or pause. In the voice sheet, replay the clip'],['v','Name voices'],['n p','Next or previous uncertain line'],['a u','Accept and go on, or use the second reading'],['Cmd F','Find in the transcript'],['Cmd Enter','Save the line card'],
  ['1 2 3 or s','In the voice sheet: fill from a chip, or skip'],['Esc','Back out one layer, then back to the list'],['?','This sheet']];
 // match in the raw text, then escape each slice, so a mark never lands inside an entity
@@ -490,7 +491,7 @@ function render(force){
  if(!S)return;
  renderFrame();
  if(UI.route==='meeting'){LAST_SIG='';mRender(force);renderBulk();return;}
- const views={home:homeView,recordings:recordingsView,groups:groupsView,activity:activityView,speakers:speakersView,archive:archiveView,settings:settingsView};
+ const views={home:homeView,recordings:recordingsView,groups:groupsView,ask:askView,activity:activityView,speakers:speakersView,archive:archiveView,settings:settingsView};
  // a 2s poll must never wipe a field being typed into. The frame repaints
  // anyway, the Recordings list below its filter keeps up, and the rest of
  // the page catches up on the next poll after the field loses focus.
@@ -732,7 +733,7 @@ document.addEventListener('keydown',e=>{
  if(UI.keys){if(e.key==='?')closeLayer();return;}
  if(e.key==='?'){UI.keys=true;layersHTML();return;}
  if(e.key==='/'){e.preventDefault();A.palette();return;}
- if(gPending&&Date.now()-gPending<1200){gPending=0;const to={h:'home',r:'recordings',g:'groups',a:'activity',s:'speakers',e:'archive',',':'settings'}[e.key];if(to){go(to);return;}}
+ if(gPending&&Date.now()-gPending<1200){gPending=0;const to={h:'home',r:'recordings',g:'groups',q:'ask',a:'activity',s:'speakers',e:'archive',',':'settings'}[e.key];if(to){go(to);return;}}
  if(e.key==='g'){gPending=Date.now();return;}
  if(e.key==='j'||e.key==='k'){const rows=[...document.querySelectorAll('#view [data-row]')];if(!rows.length)return;e.preventDefault();
   const i=rows.indexOf(t.closest?t.closest('[data-row]'):null);const n=e.key==='j'?Math.min(rows.length-1,i+1):Math.max(0,i-1);rows[n<0?0:n].focus();return;}

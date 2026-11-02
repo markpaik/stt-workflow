@@ -672,6 +672,72 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
     return [{"base": b, "title": t} for b, t in rows]
 
 
+def ranked_lines(terms, bases=None, limit: int = 60) -> list:
+    """Lines that match ANY of `terms`, best first by bm25 (plan Phase 4F,
+    the retrieval step of library Ask). Each term is a \\w-only word, matched
+    stemmed. `bases` limits the meetings (None for all). Returns
+    [{base, mid, day, title, index, start, who, text, rank}], or [] when the
+    index cannot answer."""
+    toks = [t for t in dict.fromkeys(str(x).lower() for x in terms or [])
+            if re.fullmatch(r"\w+", t)]
+    if not toks:
+        return []
+    expr = " OR ".join(f'"{t}"' for t in toks)
+    conds, cargs = _where({}, bases)
+    where = (" AND " + " AND ".join(conds)) if conds else ""
+    try:
+        with _lock:
+            conn = _open()
+            try:
+                _sync(conn)
+                rows = conn.execute(
+                    f"""SELECT f.base, f.mid, f.day, d.title, s.rowid % {_ROW},
+                               s.start, s.who, s.text, bm25(segs) AS r
+                        FROM segs s JOIN files f ON f.id = s.rowid / {_ROW}
+                        LEFT JOIN docs d ON d.rowid = f.id
+                        WHERE segs MATCH ?{where}
+                        ORDER BY r LIMIT ?""", (expr, *cargs, limit)).fetchall()
+            finally:
+                conn.close()
+                _secure(db_path())
+    except Exception as e:
+        _warn(type(e).__name__, f"index unavailable ({e})")
+        _discard_if_corrupt(e)
+        return []
+    keys = ("base", "mid", "day", "title", "index", "start", "who", "text", "rank")
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def neighbors(base: str, index: int, before: int = 2, after: int = 2) -> list:
+    """The indexed lines of one meeting from `before` lines ahead of `index`
+    to `after` lines past it, in order: [{index, start, who, text}]. Blank
+    lines are not indexed, so the window counts indexed lines only."""
+    try:
+        with _lock:
+            conn = _open(create=False)
+            if conn is None:
+                return []
+            try:
+                row = conn.execute("SELECT id FROM files WHERE base = ?", (base,)).fetchone()
+                if not row:
+                    return []
+                lo, mid = row[0] * _ROW, row[0] * _ROW + int(index)
+                head = conn.execute(
+                    "SELECT rowid, start, who, text FROM segs WHERE rowid >= ? AND rowid < ? "
+                    "ORDER BY rowid DESC LIMIT ?", (lo, mid, before)).fetchall()
+                tail = conn.execute(
+                    "SELECT rowid, start, who, text FROM segs WHERE rowid >= ? AND rowid < ? "
+                    "ORDER BY rowid LIMIT ?", (mid, lo + _ROW, after + 1)).fetchall()
+            finally:
+                conn.close()
+                _secure(db_path())
+    except Exception as e:
+        _warn(type(e).__name__, f"index unavailable ({e})")
+        return []
+    return [{"index": r[0] % _ROW, "start": r[1], "who": r[2], "text": r[3]}
+            for r in list(reversed(head)) + tail]
+
+
 def facet_rows() -> list:
     """[{base, mid, day, recorded_at, date_source, route}] for every live
     meeting, from the index (synced first). Empty when the index fails."""

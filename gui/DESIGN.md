@@ -93,7 +93,7 @@ light, dark under the `stt_theme` key, applied before paint.
 ## Frame
 
 - A 232px sidebar on `--paper`: the wordmark and the theme button, the status
-  pill, New, Search, then Home, Recordings, Groups, Speakers, a gap, Activity,
+  pill, New, Search, then Home, Recordings, Groups, Ask, Speakers, a gap, Activity,
   Archive, Settings. Home carries the Needs you count and Activity the
   attention count, in teal. The foot holds "Open the classic page" (until
   `/classic` goes) and Keys.
@@ -102,13 +102,14 @@ light, dark under the `stt_theme` key, applied before paint.
   same navigation as a sheet. Rows wrap, one column replaces two, and nothing
   scrolls sideways. Touch targets grow to 40px and 44px. Bottom tabs wait for
   phone access.
-- Routes: `#home`, `#recordings`, `#groups`, `#groups/<key>`, `#activity`,
+- Routes: `#home`, `#recordings`, `#groups`, `#groups/<key>`, `#ask`,
+  `#ask/<thread>`, `#activity`,
   `#speakers`, `#archive`, `#settings`, `#m/<base>`, and
   `#m/<base>/t/<secs>`, which opens the Transcript tab at that second.
 - The tab title is the page name plus " · Meetings". `(N)` leads it when N
   Needs you items joined while the tab was hidden.
-- Groups (Phase 4E) lives in `next-library.js`, joined after the voice
-  sheet.
+- Groups (Phase 4E) and Ask (Phase 4F) live in `next-library.js`, joined
+  after the voice sheet.
 
 ## Status pill
 
@@ -159,6 +160,23 @@ Undo line. Nothing on disk moves. Opening a group posts one
 `{event: group_open}` line to `/api/usage`, with no title or key, for the
 one-month use count. Empty: "No groups yet" with one sentence on how groups
 form.
+
+**Ask.** Saved threads on the left, newest first, and the open thread on
+the right. "Answer from" picks All recordings, a group, or Last 30 days for
+a new question, and a follow-up keeps its thread's scope. The scope line
+says "Runs on this Mac. Threads save here." Each answer lists its
+citations (number, meeting, day, mono time), and a citation opens
+`#m/<base>/t/<secs>`. A citation whose meeting is gone is plain text.
+`POST /api/ask_library` retrieves lines from the FTS5 index, sends them to
+the local model under excerpt ids, and keeps only answers that cite one.
+States: an empty library says Ask starts after the first meeting; nothing
+found reads "I did not find this in your meetings." with the closest search
+hits and no invented answer; a busy assistant (a 503 with `busy`) disables
+nothing permanently, shows its reason, and keeps the typed question; a
+missing assistant disables Ask and says search still works. With a cloud
+assistant set, strict meetings are left out and the answer says how many.
+"Ask this group" on a group opens Ask with that scope. Delete thread is
+two-step.
 
 **Activity.** Process all new, Import files, Pause or Resume, Stop
 (two-step), the four run options for the next manual run, then Needs
@@ -345,7 +363,7 @@ layer at a time, then back to the list. Key caps show only in the `?` sheet.
 |---|---|---|
 | `/`, Cmd K | Anywhere | Search palette (`/` on a Transcript tab focuses find) |
 | `?` | Anywhere | Key sheet |
-| `g` then `h` `r` `g` `a` `s` `e` `,` | Anywhere | Home, Recordings, Groups, Activity, Speakers, Archive, Settings |
+| `g` then `h` `r` `g` `q` `a` `s` `e` `,` | Anywhere | Home, Recordings, Groups, Ask, Activity, Speakers, Archive, Settings |
 | `j` `k`, Enter, `x` | A list | Move, open, select |
 | `1` `2` `3` | Meeting | Summary, Transcript, Ask |
 | `[` `]` | Meeting | Previous, next recording in the Recordings order |
