@@ -156,3 +156,19 @@ def test_an_active_meeting_is_refused(sandbox, monkeypatch, tmp_path):
     monkeypatch.setattr(status, "meeting_active", lambda b: b == LEAK)
     r = purge.apply(LEAK)
     assert r["ok"] is False and config.meeting_dir(LEAK).exists()
+
+
+def test_a_legacy_meeting_without_source_name_finds_its_original(sandbox, monkeypatch, tmp_path):
+    """A meeting from before source_name existed, renamed since: its JSON
+    names neither the arrival name nor the file in the watched folder. The
+    manifest key still does, so the purge finds and removes the original,
+    and the next batch has nothing to transcribe again."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _meeting(LEAK, "mid-leak", "zebracakes groceries pharmacy")
+    config.MANIFEST_PATH.write_text(json.dumps({"processed": {
+        "Old Arrival.m4a": {"mtime": 1.0, "outputs": [
+            str(config.meeting_file(LEAK, ".json"))]}}}))
+    src = config.source_dir() / "Old Arrival.m4a"
+    src.write_bytes(b"legacy source")
+    p = purge.plan(LEAK)
+    assert p["sources"] == [str(src)]

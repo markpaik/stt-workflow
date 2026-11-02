@@ -120,9 +120,14 @@ def _unknown_plan(base: str, mid) -> dict:
     return {"only": sorted(only), "shared": sorted(shared)}
 
 
-def _watched_sources(meta: dict) -> list:
+def _watched_sources(meta: dict, keys=()) -> list:
+    """The meeting's original audio still in a watched folder. A meeting from
+    before source_name existed carries only source_file, and the manifest
+    key is the arrival name, so all three are checked: a missed original
+    would be transcribed again by the next batch."""
     from stt import voicememos
-    names = {n for n in (meta.get("source_name"),) if n}
+    names = {Path(n).name for n in (meta.get("source_name"), meta.get("source_file"),
+                                    *keys) if n}
     out = []
     for d in (config.source_dir(), config.recordings_dir(), voicememos.staging_dir()):
         for n in names:
@@ -212,15 +217,16 @@ def plan(base: str) -> dict:
     mid = meta.get("meeting_id") or config.id_of(base, folder.parent)
     from stt import centroids
     cmeta = _read_json(centroids.meta_path()) or {}
+    keys = _manifest_keys(folder, base, meta)
     return {
         "ok": True, "base": base, "meeting_id": mid, "archived": archived,
         "folder": str(folder),
-        "manifest_keys": _manifest_keys(folder, base, meta),
+        "manifest_keys": keys,
         "enrolled": _enrolled_plan(base, mid),
         "unknowns": _unknown_plan(base, mid),
         "centroid_row": base in cmeta,
         "search_rows": _search_rows(base),
-        "sources": [str(p) for p in _watched_sources(meta)],
+        "sources": [str(p) for p in _watched_sources(meta, keys)],
         "vm_uuid": meta.get("vm_uuid"),
         "threads": [str(p) for p in _threads(base, mid)],
         "overrides": _overrides(base, mid),
