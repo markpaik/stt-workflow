@@ -346,9 +346,14 @@ def touch(*bases) -> None:
     again if it is live. The rename, archive, restore and delete paths call
     this after they move or remove a folder. Best-effort and quick: it never
     creates the index, never raises, and waits at most a second for a lock,
-    because the next query's sync repairs anything it misses."""
+    because the next query's sync repairs anything it misses. The one-second
+    bound covers the in-process lock too: a full rebuild holds `_lock` for
+    minutes, and a panel rename must not wait behind it."""
     try:
-        with _lock:
+        if not _lock.acquire(timeout=1.0):
+            _warn("touch", "index busy, not updated now, the next search will")
+            return
+        try:
             conn = _open(create=False, timeout=1.0)
             if conn is None:
                 return
@@ -371,6 +376,8 @@ def touch(*bases) -> None:
             finally:
                 conn.close()
                 _secure(db_path())
+        finally:
+            _lock.release()
     except Exception as e:
         _warn("touch", f"index not updated now, the next search will ({e})")
 

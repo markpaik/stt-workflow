@@ -337,3 +337,30 @@ def test_malformed_json_does_not_disable_the_index(sandbox, bad):
     finally:
         search._read = real
     assert calls == []
+
+
+def test_touch_waits_at_most_a_second_behind_a_rebuild(corpus):
+    """touch() promises a one-second bound. A full rebuild holds the
+    in-process lock for minutes, and touch used to queue behind it with no
+    timeout, so a panel rename stalled until the rebuild ended."""
+    import threading
+    import time
+
+    search.sync()
+    held, done = threading.Event(), threading.Event()
+
+    def rebuild_in_progress():
+        with search._lock:
+            held.set()
+            done.wait(10)
+
+    t = threading.Thread(target=rebuild_in_progress)
+    t.start()
+    try:
+        held.wait(5)
+        t0 = time.monotonic()
+        search.touch("anything")
+        assert time.monotonic() - t0 < 2.0
+    finally:
+        done.set()
+        t.join()
