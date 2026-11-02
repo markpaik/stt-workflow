@@ -27,6 +27,8 @@ A reader may rely on these keys in `<base>.json`.
 | `arrived_at` | When the meeting first arrived | Never |
 | `reviewed` | A person looked at the meeting | A person's action only |
 | `title_state`, `title_source`, `route` | See `stt/titles.py` | A person's Keep or edit, or the amnesty |
+| `location_note` | The default place name Voice Memos gave a synced memo (a street address or a listed place), kept as a note because it is not a title | Never, once written |
+| `vm_uuid` | The Voice Memos id of a synced memo. A purge blocks it so the sync never copies it again | Never, once written |
 
 Old code can ignore any key it does not know. A meeting from before a key simply lacks it, and every reader must accept that.
 
@@ -41,7 +43,10 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
 
 ## Who writes
 
-- `stt/pipeline.py` writes a new meeting and a Redo. A Redo carries every key in `titles.CARRY_KEYS`.
+- `stt/pipeline.py` writes a new meeting and a Redo. A new meeting gets `source_name`, `audio_fp`, `date_source`, and `recorded_at` at its first write, from the same rule that stamps the folder (`provenance.fresh`). A Redo carries every key in `titles.CARRY_KEYS` and writes none of these keys on a meeting that lacks them.
+- `run_batch.summarize_one` gives a meeting with no typed title its automatic title once, after the summary (`summarize.apply_auto_title`): the named speakers plus the topic, else the model's draft. The title stays `provisional` with `title_source` `model`.
+- `stt/voicememos.py` copies synced memos into `PROJECT_DIR/voicememos/` (mode 700) with a `.vm.json` sidecar, and keeps its ledger in `voicememos_state.json` (mode 600). It only reads the Voice Memos library.
+- `tools/purge.py` removes one meeting from every store, `search.db` included. It has a dry run and no undo.
 - `summarize.apply_meeting_edits` is the one place a title, date, category, review state, or title state changes. A date edit also writes `date_source`, which is `manual` from the panel and the real source from a repair.
 - Store repairs run as tools. Each one has a dry run that writes nothing, a journal in `config.migration_dir()` (mode 700, files mode 600), and an undo that restores a value only where it still holds what the tool wrote:
   - `tools/amnesty.py` relabels titles that wait for a name.

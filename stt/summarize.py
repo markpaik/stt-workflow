@@ -477,7 +477,7 @@ DROP = "$drop"
 
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                         reviewed=None, title_state=None, date_source=None,
-                        recorded_at=_UNSET) -> dict:
+                        recorded_at=_UNSET, auto_title=False) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
     Work/Personal category, whether it still needs review, and the title's
     state.
@@ -494,7 +494,8 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     because `date` must equal its date part whenever it is set.
 
     A title edit is a person's choice, so it also sets title_state=confirmed
-    and title_source=manual. `title_state` sets the state alone (a Keep on one
+    and title_source=manual. `auto_title=True` marks the title as the
+    pipeline's own (titles.AUTO_TITLE_STATE and AUTO_TITLE_SOURCE) instead. `title_state` sets the state alone (a Keep on one
     meeting or a bulk Keep). Neither touches `reviewed`: only the caller's
     own `reviewed` argument does, so a bulk Keep never claims a person looked.
 
@@ -566,7 +567,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 d.pop("category", None)
         if reviewed is not None:
             d["reviewed"] = bool(reviewed)
-        if title is not None:
+        if title is not None and auto_title:
+            d["title_state"] = titles.AUTO_TITLE_STATE
+            d["title_source"] = titles.AUTO_TITLE_SOURCE
+        elif title is not None:
             d["title_state"], d["title_source"] = "confirmed", "manual"
         elif title_state is not None:
             d["title_state"] = title_state
@@ -861,3 +865,26 @@ def set_local_name(base: str, speaker_id, name: str) -> dict:
             d.pop("local_names", None)   # empty means no key at all
         _write_json(j, d)
     return {"ok": True, "local_names": cur}
+
+
+def apply_auto_title(base: str) -> dict:
+    """Give a meeting with no typed title its automatic title, once, after
+    the summary (the owner's title chain, plan row 20): the named speakers
+    plus the topic, else the model's draft. The folder moves through
+    apply_meeting_edits, so the registries, the manifest, the id index and
+    search follow it. `source_name` keeps the raw arrival name.
+
+    Returns {ok, base, renamed?, skipped?}. A meeting that a person already
+    titled, or that carries a typed label, is skipped."""
+    from . import titles
+    j = config.meeting_file(base, ".json")
+    try:
+        d = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    if not titles.wants_auto_title(d):
+        return {"ok": True, "base": base, "skipped": "not a model-titled meeting"}
+    t = titles.auto_title(d, me=config.mic_speaker())
+    if not t:
+        return {"ok": True, "base": base, "skipped": "no draft title"}
+    return apply_meeting_edits(base, title=t, auto_title=True)

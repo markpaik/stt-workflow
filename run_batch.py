@@ -171,6 +171,7 @@ def summarize_one(key, base=None) -> bool:
     if not summarize.available():
         return False
     base = base or Path(key).stem
+    done = False
     try:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
@@ -182,12 +183,22 @@ def summarize_one(key, base=None) -> bool:
             return False
         st.set_stage(key, "summarizing")
         summarize.suggest_title(base)
-        return True
+        done = True
     except Exception as e:
         print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
         return False
     finally:
         st.clear_stage(key)
+    # the title chain's last steps, once the stage has cleared (a meeting in
+    # a live stage refuses a folder move): a meeting with no typed title
+    # takes the speakers plus topic, else the model's draft
+    try:
+        r = summarize.apply_auto_title(base)
+        if r.get("ok") and r.get("base") and r["base"] != base:
+            print(f"   titled: {r['base']}", flush=True)
+    except Exception as e:
+        print(f"   automatic title skipped for {base}: {e}", file=sys.stderr, flush=True)
+    return done
 
 
 def record_review_metrics() -> bool:

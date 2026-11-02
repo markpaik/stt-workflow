@@ -199,3 +199,60 @@ def is_done(d: dict) -> bool:
     """Plan row 8: done unless the title is still needed. Voices and flags
     leave the rule."""
     return not needs_title(d)
+
+
+# --- the automatic title (the owner's title chain) ---------------------------
+# A typed title wins, and it arrives as the recording's name (a label). A
+# default name is not a typed title. For a meeting with no typed title, the
+# folder takes an automatic title once, after the summary: the named
+# speakers plus the topic, else the local model's draft alone. The owner's
+# decision: every automatic title stays provisional. It is never confirmed
+# and never counts as a human check.
+AUTO_TITLE_STATE = "provisional"
+AUTO_TITLE_SOURCE = "model"
+_NO_TOPIC = {"", "untitled meeting", "untitled"}
+
+
+def _talk_by_name(d: dict, exclude=()) -> list:
+    """Named speakers, most talk first. A speaker's talk is the sum of its
+    segment lengths."""
+    names = {}
+    for sp in d.get("speakers") or []:
+        if isinstance(sp, dict) and sp.get("name") and sp["name"] not in exclude:
+            names[sp.get("id")] = sp["name"]
+    talk = {}
+    for seg in d.get("segments") or []:
+        n = names.get(seg.get("speaker"))
+        if n:
+            try:
+                talk[n] = talk.get(n, 0.0) + max(0.0, float(seg["end"]) - float(seg["start"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+    for n in names.values():
+        talk.setdefault(n, 0.0)
+    return [n for n, _ in sorted(talk.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def auto_title(d: dict, me=None):
+    """The automatic title for meeting json `d`, or None when there is no
+    topic to build it from. The owner's own name (`me`, the mic speaker) is
+    left out: it is in nearly every meeting and says nothing about this one."""
+    topic = re.sub(r"\s+", " ", str(d.get("ai_title") or "")).strip()
+    if topic.lower() in _NO_TOPIC:
+        return None
+    who = _talk_by_name(d, exclude={me} if me else ())
+    if not who:
+        return topic
+    if len(who) == 1:
+        return f"{topic} with {who[0]}"
+    if len(who) == 2:
+        return f"{topic} with {who[0]} and {who[1]}"
+    return f"{topic} with {who[0]}, {who[1]} and others"
+
+
+def wants_auto_title(d: dict) -> bool:
+    """True only for a new meeting that arrived with no typed title and still
+    holds the model's placeholder state. A meeting from before the rule (no
+    title_state), a typed label, a public download, and anything a person
+    kept or edited are never renamed."""
+    return d.get("title_state") == "needs_title" and d.get("title_source") == "model"
