@@ -269,7 +269,7 @@ def test_midband_low_score_not_rescued_without_neighbour_anchor(sandbox):
 def test_midband_named_cluster_never_rescued(sandbox):
     """A NAMED mid-band turn keeps its owner even when a rival is ahead on
     the turn's own embedding — 0.437 vs 0.329 is the real-library case
-    (Quinn vs Casey) where flipping contradicted the human correction.
+    (two similar enrolled voices) where flipping contradicted the human correction.
     Verification (id_mismatch flagging) governs named turns, not rescue."""
     merged, stats = _stranded_case(0.437, 0.329, named_owner="Bob")
     assert merged[0]["speaker"] == "Bob"
