@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meetings</title>
+<style>
+/*@NEXT_CSS@*/</style>
+<script>
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint, with
+// the same stt_theme key as the classic page. Storage can throw, so wrapped.
+(function(){try{var q=new URLSearchParams(location.search).get("theme");
+var t=q||localStorage.getItem("stt_theme");
+if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();
+</script></head><body>
+<div class="app">
+  <aside class="side" id="side" aria-label="Main navigation"></aside>
+  <div class="main">
+    <header class="topbar" id="topbar"></header>
+    <main class="page" id="view" tabindex="-1"></main>
+    <div id="dock"></div>
+  </div>
+</div>
+<div id="layers"></div>
+<div id="sheet"></div>
+<div id="pop" class="pop" hidden></div>
+<div id="bulk" class="bulk" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="drop" class="drop" hidden>Drop audio to add it to the queue</div>
+<script>
+//@NEXT_JS@
+</script>
+</body></html>

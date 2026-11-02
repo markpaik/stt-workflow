@@ -61,6 +61,29 @@ def test_summary_prompt_asks_for_brief_varied_prose(sandbox, monkeypatch):
     assert "TITLE: <title>" in p and "NEXT STEPS" in p
 
 
+def test_the_title_prompt_never_carries_the_source_file_name(sandbox, monkeypatch):
+    """The .txt header leads with the source file name. The model copied
+    its words into the title, and a Voice Memos name can be a street
+    address. Neither the summary prompt nor Ask may carry that line."""
+    from stt import output
+    base = "Mtg"
+    header = output.txt_header("123 Elm Street Lot 4.m4a", 600.0,
+                               [{"name": "Alex"}], processed_at="2026-07-01T10:00:00")
+    mfile(base, ".txt").write_text(header + "\n\n[00:00] Alex: We will ship it.\n")
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": "123 Elm Street Lot 4.m4a", "speakers": [],
+         "segments": SPOKEN, "words": []}))
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "TITLE: T\nSUMMARY: S\n")
+    summarize.suggest_title(base)
+    summarize.answer_question(base, "What will ship?")
+    assert len(prompts) == 2
+    for p in prompts:
+        assert "Elm Street" not in p and "123" not in p
+        assert "[00:00] Alex: We will ship it." in p
+
+
 def test_no_commitments_yields_empty_list(sandbox, monkeypatch):
     _meeting()
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
@@ -242,6 +265,29 @@ def test_answer_question_flags_a_sampled_long_transcript(sandbox, monkeypatch):
     (p,) = prompts
     assert "HEADMARK" in p and "TAILMARK" in p and "[...]" in p
     assert "omitted" in p                                  # the model is told
+
+
+def test_answer_question_keeps_a_multi_hour_transcript_inside_the_cap(sandbox, monkeypatch):
+    """A ~234k-char transcript (the longest kind on disk, ~58k tokens) must
+    reach the model as a sample no bigger than QA_MAX_CHARS plus the fixed
+    rules and question, so the prompt stays inside Qwen3-8B's 32k context."""
+    line = "[1:02:03] Speaker: synthetic filler line for a long session.\n"
+    half = line * (117_000 // len(line))
+    body = "HEADMARK\n" + half + "MIDMARK\n" + half + "TAILMARK\n"
+    assert 230_000 < len(body) < 240_000
+    mfile("Long", ".txt").write_text(body)
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "ok")
+    r = summarize.answer_question("Long", "anything?",
+                                  history=[{"q": "q" * 5000, "a": "a" * 9000}] * 9)
+    assert r["ok"] and r["truncated"] is True
+    (p,) = prompts
+    assert "HEADMARK" in p and "MIDMARK" in p and "TAILMARK" in p
+    # transcript sample + rules + clipped history (3 x (2000 + 4000)) + question
+    assert len(p) <= summarize.QA_MAX_CHARS + 3 * 6000 + 2000
+    # at the module's ~4 chars/token, prompt + a 2000-token answer fit in 32k
+    assert len(p) // 4 + 2000 <= 32_768
 
 
 def test_answer_question_rejects_empty_and_missing(sandbox, monkeypatch):
@@ -558,3 +604,135 @@ def test_a_destination_taken_after_the_plan_is_re_planned(sandbox):
 
     assert r["ok"] and r["base"] == "Team Sync 06152026 (2)"
     assert config.meeting_file("Team Sync 06152026 (2)", ".json").exists()
+
+
+# ---------- whole-transcript summaries (unified plan Phase 4G) ----------
+
+# the next-steps line grammar chief-of-staff reads (cos/commitments.py
+# NEXT_STEP_RE, copied as the contract): owner in optional brackets, "will",
+# the rest. A summary change that broke this would stop the commitments feed.
+COS_NEXT_STEP_RE = __import__("re").compile(
+    r"^\[?(?P<owner>[^\]]+?)\]?\s+will\s+(?P<rest>.+?)\.?$")
+
+_FILL = "[{t}] Speaker 1: synthetic filler line about the agenda and nothing else.\n"
+
+
+def _long_meeting(base, n_chars, fact, at=0.97):
+    """A synthetic transcript of about n_chars with `fact` placed `at` of the
+    way through (near its end by default)."""
+    lines, size, i = [], 0, 0
+    while size < n_chars:
+        ln = _FILL.format(t=f"{i // 60}:{i % 60:02d}")
+        lines.append(ln)
+        size += len(ln)
+        i += 1
+    lines.insert(int(len(lines) * at), f"[9:59:00] Avery Stone: {fact}\n")
+    mfile(base, ".txt").write_text("".join(lines))
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": f"{base}.m4a", "speakers": [], "segments": SPOKEN, "words": []}))
+    return "".join(lines)
+
+
+def _fake_model(prompts):
+    """Part prompts: echo the transcript lines that name the planted fact or
+    a commitment, as notes. The final prompt: a summary that repeats any
+    planted fact it can see, and the commitment line."""
+    def gen(p, **k):
+        prompts.append((p, k))
+        if p.startswith("Below is part"):
+            body = p.split("\n\n", 1)[1]
+            keep = [ln.split(": ", 1)[-1] for ln in body.splitlines()
+                    if "Avery Stone:" in ln]
+            return "\n".join(keep) or "- nothing notable"
+        seen = [w for w in ("PLUM-417",) if w in p]
+        return ("TITLE: Long Synthetic Session\n"
+                f"SUMMARY: Facts: {' '.join(seen) or 'none'}.\n"
+                "NEXT STEPS:\n- [Avery Stone] will send the PLUM-417 report by Friday\n")
+    return gen
+
+
+def test_a_fact_near_the_end_of_a_long_meeting_reaches_the_summary(sandbox, monkeypatch):
+    """The plan's 4G gate: a synthetic long meeting (the ~234k-character
+    kind) keeps a known fact from near its end. The old 12,000-character
+    sample dropped everything between the middle and the last 4,000."""
+    body = _long_meeting("Long", 234_000, "The vendor code is PLUM-417.", at=0.95)
+    assert body.index("PLUM-417") < len(body) - 4000      # outside the old tail
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
+    r = summarize.suggest_title("Long")
+    assert "PLUM-417" in r["summary"]
+    parts = [p for p, _ in prompts if p.startswith("Below is part")]
+    assert len(parts) == r["parts"] >= 3
+    # every part prompt and the final prompt fit Qwen3-8B's 32k context
+    for p, k in prompts:
+        assert len(p) // 4 + k.get("max_tokens", 0) <= 32_768
+    # together the parts carry every line of the transcript
+    joined = "".join(p.split("\n\n", 1)[1].split(":\n", 1)[1] for p in parts)
+    assert joined.count("synthetic filler line") == body.count("synthetic filler line")
+    d = json.loads(config.meeting_file("Long", ".json").read_text())
+    assert d["ai_summary_parts"] == r["parts"]
+
+
+def test_a_mid_length_meeting_goes_in_whole(sandbox, monkeypatch):
+    # 50k characters: the old sample kept 12k of it; now one whole prompt
+    body = _long_meeting("Mid", 50_000, "The vendor code is PLUM-417.", at=0.8)
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
+    r = summarize.suggest_title("Mid")
+    ((p, k),) = prompts
+    assert body in p and "[...]" not in p and "(partial)" not in p
+    assert "whole meeting transcript" in p
+    assert "PLUM-417" in r["summary"] and r["parts"] == 1
+    assert k.get("think") is False
+
+
+def test_a_cloud_assistant_takes_a_long_meeting_in_one_prompt(sandbox, monkeypatch):
+    body = _long_meeting("Cloud", 234_000, "The vendor code is PLUM-417.")
+    monkeypatch.setattr(summarize, "_backend_for", lambda b: "anthropic")
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
+    summarize.suggest_title("Cloud")
+    ((p, k),) = prompts
+    assert body in p and k["backend"] == "anthropic"
+
+
+def test_next_steps_from_a_long_meeting_still_feed_chief_of_staff(sandbox, monkeypatch):
+    _long_meeting("Feed", 234_000, "Avery will send the PLUM-417 report by Friday.")
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
+    r = summarize.suggest_title("Feed")
+    d = json.loads(config.meeting_file("Feed", ".json").read_text())
+    assert d["ai_next_steps"] == r["next_steps"] == [
+        "[Avery Stone] will send the PLUM-417 report by Friday"]
+    for line in d["ai_next_steps"]:
+        m = COS_NEXT_STEP_RE.match(line)
+        assert m and m.group("owner") == "Avery Stone"
+    # each part is asked for commitments in that same line format
+    part = next(p for p, _ in prompts if p.startswith("Below is part"))
+    assert "will <specific action> by <stated deadline" in part
+
+
+def test_old_next_steps_stay_until_a_new_summary_runs(sandbox, monkeypatch):
+    """A meeting summarized before 4G keeps its ai_next_steps and has no
+    ai_summary_parts: a new summary of ANOTHER meeting rewrites nothing
+    else, so chief-of-staff reads the old lines as before."""
+    _meeting("Old")
+    j = config.meeting_file("Old", ".json")
+    d = json.loads(j.read_text())
+    d.update(ai_summary="Old summary.", ai_next_steps=["[Alex] will ship it by Friday"])
+    j.write_text(json.dumps(d))
+    before = j.read_bytes()
+    _long_meeting("New", 234_000, "The vendor code is PLUM-417.")
+    monkeypatch.setattr(summarize, "_generate", _fake_model([]))
+    summarize.suggest_title("New")
+    assert j.read_bytes() == before
+    assert "ai_summary_parts" not in json.loads(j.read_text())
+
+
+def test_parts_cut_at_line_breaks_and_cover_everything():
+    text = "".join(f"line {i:05d} " + "x" * 50 + "\n" for i in range(5000))
+    ps = summarize._parts(text, 60_000)
+    assert "".join(ps) == text
+    assert all(len(p) <= 60_000 and p.endswith("\n") for p in ps)
+    big = "y" * 130_000
+    assert "".join(summarize._parts(big, 60_000)) == big

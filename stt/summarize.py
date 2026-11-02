@@ -195,10 +195,24 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
+# the .txt header line (output.txt_header): '<source file>  |  N min  |  N
+# speaker(s) ...'. It leads with the SOURCE FILE NAME, which the model copied
+# into titles, and a Voice Memos name can be a street address.
+_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*\n+")
+
+
+def _model_text(base: str) -> str:
+    """The meeting's .txt as the model may read it: the transcript lines,
+    without the header line that names the source file."""
+    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    return _TXT_HEADER.sub("", txt, count=1)
+
+
 def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
     """(text, truncated). Long meetings keep their head, middle, and tail with
-    [...] where spans were dropped — the flag lets callers say so honestly."""
-    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    [...] where spans were dropped — the flag lets callers say so honestly.
+    The header line with the source file name is never part of it."""
+    txt = _model_text(base)
     if len(txt) <= max_chars:
         return txt, False
     third = max_chars // 3
@@ -206,9 +220,12 @@ def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
             + "\n[...]\n" + txt[-third:]), True
 
 
-QA_MAX_CHARS = 80_000   # ~20k tokens: every meeting on disk so far fits whole,
-                        # and Qwen3's 32k context still has room for history +
-                        # a 2000-token answer
+QA_MAX_CHARS = 80_000   # ~20k tokens, so Qwen3-8B's 32k context still has room
+                        # for history + a 2000-token answer. Most meetings fit
+                        # whole, but multi-hour sessions do not (transcripts on
+                        # disk reach ~234k chars, ~58k tokens): those go through
+                        # _transcript_sample's head/middle/tail cut, and Ask
+                        # tells the model and the user that parts were omitted
 QA_MAX_HISTORY = 3      # last N exchanges sent back so follow-ups make sense
 
 
@@ -296,19 +313,110 @@ def has_speech(base: str) -> bool:
     return bool(d.get("segments"))
 
 
+# Whole-transcript summaries (unified plan Phase 4G). The summary used to
+# read a 12,000-character head/middle/tail sample, so a decision near the end
+# of a long meeting never reached it. Now the model reads every line:
+#   - a transcript up to SUMMARY_WHOLE_CHARS goes in one prompt, whole;
+#   - a longer one is cut at line breaks into parts of SUMMARY_PART_CHARS,
+#     the model writes notes on each part (topics, decisions, numbers, and
+#     every commitment in the next-steps line format), and the final prompt
+#     reads all the notes in order. Notes longer than the one-prompt limit
+#     are cut and noted again, at most SUMMARY_MAX_LEVELS times.
+# The limits keep each local prompt plus its answer inside Qwen3-8B's 32k
+# context at the module's ~4 characters a token. A cloud assistant takes up
+# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt. The output format, and so the
+# ai_next_steps lines chief-of-staff reads, is unchanged.
+SUMMARY_WHOLE_CHARS = 80_000          # ~20k tokens + a 3000-token answer
+SUMMARY_PART_CHARS = 60_000           # ~15k tokens + a 1500-token note
+SUMMARY_NOTE_TOKENS = 1500
+SUMMARY_CLOUD_WHOLE_CHARS = 400_000   # ~100k tokens, inside every cloud model
+SUMMARY_MAX_LEVELS = 3
+
+
+def _parts(text: str, size: int) -> list:
+    """`text` cut into pieces of at most `size` characters, at line breaks
+    where a line allows it."""
+    out, cur, n = [], [], 0
+    for line in text.splitlines(keepends=True):
+        while len(line) > size:               # one enormous line: hard cut
+            if cur:
+                out.append("".join(cur))
+                cur, n = [], 0
+            out.append(line[:size])
+            line = line[size:]
+        if n + len(line) > size and cur:
+            out.append("".join(cur))
+            cur, n = [], 0
+        cur.append(line)
+        n += len(line)
+    if cur:
+        out.append("".join(cur))
+    return [p for p in out if p.strip()]
+
+
+def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
+    what = "notes on one long meeting" if notes else "one meeting transcript"
+    return (
+        f"Below is part {i} of {n} of {what}, in order. Write notes on THIS "
+        "part only, for someone who will summarize the whole meeting later. "
+        "Start with a line 'DECISIONS:' and list every decision made in this "
+        "part (or 'none'), then:\n"
+        "- the topics discussed and what was said about each;\n"
+        "- every open question;\n"
+        "- names, numbers, dates, and places exactly as they appear;\n"
+        "- every concrete commitment, one per line, formatted exactly as:  "
+        "- [<speaker name as labeled>] will <specific action> by <stated "
+        "deadline, or 'no date given'>\n"
+        "Plain lines, no preamble. Do not invent anything.\n\n"
+        f"PART {i} OF {n}:\n{text}"
+    )
+
+
+def _summary_source(base: str, backend: str) -> tuple:
+    """(heading, body, parts) for the final summary prompt: the whole
+    transcript when it fits, else the notes on every part. `parts` is 1 for
+    a whole transcript and the number of transcript parts otherwise. The
+    header line with the source file name is left out: the model copied
+    its words into the title."""
+    txt = _model_text(base)
+    whole = SUMMARY_CLOUD_WHOLE_CHARS if backend != "local" else SUMMARY_WHOLE_CHARS
+    if len(txt) <= whole:
+        return "Below is a whole meeting transcript.", f"TRANSCRIPT:\n{txt}", 1
+    body, notes, parts = txt, False, 0
+    for _ in range(SUMMARY_MAX_LEVELS):
+        chunks = _parts(body, SUMMARY_PART_CHARS)
+        parts = parts or len(chunks)
+        got = []
+        for i, c in enumerate(chunks, 1):
+            got.append(f"PART {i} OF {len(chunks)}:\n" + _generate(
+                _part_prompt(i, len(chunks), c, notes),
+                max_tokens=SUMMARY_NOTE_TOKENS, backend=backend, think=False).strip())
+        body, notes = "\n\n".join(got), True
+        if len(body) <= whole:
+            break
+    body = body[:whole]
+    return ("Below are notes on every part of one long meeting, in order, taken "
+            "from its whole transcript. Treat them as the meeting. The summary "
+            "must state the main decisions the notes list, wherever in the "
+            "meeting they came.",
+            f"NOTES:\n{body}", parts)
+
+
 def suggest_title(base: str) -> dict:
     """Suggest a filename + detailed summary for a processed meeting from its
-    transcript. The result is persisted into the meeting's .json (ai_title /
-    ai_summary) so it stays visible in the panel afterwards.
+    WHOLE transcript (see SUMMARY_WHOLE_CHARS). The result is persisted into
+    the meeting's .json (ai_title / ai_summary / ai_next_steps, and
+    ai_summary_parts: 1 for a one-pass summary, else how many parts were
+    noted) so it stays visible in the panel afterwards.
 
     A transcript with 0 segments gets no call to the model at all: the result
     is an error that says no speech was found, and nothing is written."""
     if not has_speech(base):
         return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
     backend = _backend_for(base)  # strict meetings never reach a cloud LLM
-    sample, _ = _transcript_sample(base, max_chars=12000)
+    heading, source, parts = _summary_source(base, backend)
     prompt = (
-        "Below is a (partial) meeting transcript. Produce:\n"
+        f"{heading} Produce:\n"
         "1. A SHORT descriptive title for the recording file: 3-6 words, Title Case, "
         "no punctuation except spaces, naming the meeting type and main topic (key "
         "participant names only if clearly central).\n"
@@ -324,7 +432,7 @@ def suggest_title(base: str) -> dict:
         "exactly:  - none\n"
         "Answer in exactly this format:\n"
         "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
-        f"TRANSCRIPT:\n{sample}"
+        f"{source}"
     )
     out = _generate(prompt, max_tokens=3000, backend=backend, think=False)
     title, summary, steps = "", [], []
@@ -348,7 +456,7 @@ def suggest_title(base: str) -> dict:
     summary = " ".join(s for s in summary if s)
     title = re.sub(r'[<>:"/\\|?*]', "", title).strip() or "Untitled Meeting"
     result = {"title": title, "summary": summary, "next_steps": steps,
-              "suggested_name": f"{title} {_date_suffix(base)}"}
+              "suggested_name": f"{title} {_date_suffix(base)}", "parts": parts}
     # persist so the panel can show it without regenerating. Take the per-meeting
     # lock and re-read INSIDE it (the LLM call above can run for minutes, so a
     # read taken earlier would be stale) and write atomically, so this can't
@@ -360,6 +468,7 @@ def suggest_title(base: str) -> dict:
             d = json.loads(j.read_text())
             d["ai_title"], d["ai_summary"] = title, summary
             d["ai_next_steps"] = steps
+            d["ai_summary_parts"] = parts
             d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
             tmp = j.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
@@ -459,17 +568,40 @@ def _move_folder(base: str, new_base: str) -> list:
     # registry source, a lock) resolves to the new folder even when a chase
     # above failed. Last, because it must describe the move that happened.
     config.index_set(config.id_of(new_base), new_base)
+    # the search index keys lines by folder name: move them now, so a hit
+    # never opens the old name. A miss here is repaired by the next query.
+    from . import search
+    search.touch(base, new_base)
     return renamed
 
 
+_UNSET = object()
+# pass as recorded_at= to remove the key (an undo back to a meeting that
+# never had one)
+DROP = "$drop"
+
+
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
-                        reviewed=None, title_state=None) -> dict:
+                        reviewed=None, title_state=None, date_source=None,
+                        recorded_at=_UNSET, auto_title=False) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
     Work/Personal category, whether it still needs review, and the title's
     state.
 
+    Every title or date edit also keeps the `title` key equal to the folder
+    name it lands on, without the date stamp or twin suffix.
+
+    A date edit records where the date came from. `date_source` defaults to
+    `manual`, because the panel is a person. A repair passes the real
+    source (`recorder`, `short_typed`, ...). A date equal to the stored one
+    leaves `date_source` alone unless the caller passes it explicitly. `recorded_at` sets the true
+    start time with that date, None stores null, and DROP removes the key.
+    Left out, a stored `recorded_at` on another day is cleared to null,
+    because `date` must equal its date part whenever it is set.
+
     A title edit is a person's choice, so it also sets title_state=confirmed
-    and title_source=manual. `title_state` sets the state alone (a Keep on one
+    and title_source=manual. `auto_title=True` marks the title as the
+    pipeline's own (titles.AUTO_TITLE_STATE and AUTO_TITLE_SOURCE) instead. `title_state` sets the state alone (a Keep on one
     meeting or a bulk Keep). Neither touches `reviewed`: only the caller's
     own `reviewed` argument does, so a bulk Keep never claims a person looked.
 
@@ -508,6 +640,17 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     if title_state is not None and title_state not in titles.TITLE_STATES:
         return {"ok": False, "error": f"unknown title state '{title_state}'"}
 
+    from . import provenance
+    if date_source is not None and date_source not in provenance.DATE_SOURCES:
+        return {"ok": False, "error": f"unknown date source '{date_source}'"}
+    if recorded_at is not _UNSET and recorded_at not in (None, DROP):
+        try:
+            _ra = datetime.fromisoformat(str(recorded_at))
+        except ValueError:
+            return {"ok": False, "error": "recorded_at should be an ISO time"}
+        if iso is not None and _ra.date().isoformat() != iso:
+            return {"ok": False, "error": "recorded_at must fall on the meeting date"}
+
     new_title = None
     if title is not None:
         new_title = _sanitize_name(title)
@@ -520,6 +663,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         """Fold the requested edits into `d` and return the folder name they
         imply. Writes nothing, so it can be re-run under a wider set of locks
         without repeating a side effect."""
+        date_before = d.get("date")
         if iso is not None:
             d["date"] = iso
         if category is not None:
@@ -529,7 +673,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 d.pop("category", None)
         if reviewed is not None:
             d["reviewed"] = bool(reviewed)
-        if title is not None:
+        if title is not None and auto_title:
+            d["title_state"] = titles.AUTO_TITLE_STATE
+            d["title_source"] = titles.AUTO_TITLE_SOURCE
+        elif title is not None:
             d["title_state"], d["title_source"] = "confirmed", "manual"
         elif title_state is not None:
             d["title_state"] = title_state
@@ -559,6 +706,24 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # suffix first) rather than appending a second date
                 want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
+            d["title"] = dates.title_of(want)
+        moved = d.get("date") != date_before
+        if moved or (date is not None and date_source is not None):
+            # the date changed (the picker, a repair, or a typed stamp in a
+            # title), or a repair names its source: record where it came
+            # from. Passing the date a meeting ALREADY has (an Accept with
+            # the prefilled date, a restore, a restamp) is no evidence of
+            # anything, so the stored source stays as it was.
+            d["date_source"] = date_source or "manual"
+        if moved:
+            if recorded_at is _UNSET:
+                ra = d.get("recorded_at")
+                if ra and str(ra)[:10] != d.get("date"):
+                    d["recorded_at"] = None
+        if recorded_at is not _UNSET and recorded_at == DROP:
+            d.pop("recorded_at", None)
+        elif recorded_at is not _UNSET:
+            d["recorded_at"] = recorded_at
         return want
 
     def _dest_taken(want: str) -> bool:
@@ -806,3 +971,26 @@ def set_local_name(base: str, speaker_id, name: str) -> dict:
             d.pop("local_names", None)   # empty means no key at all
         _write_json(j, d)
     return {"ok": True, "local_names": cur}
+
+
+def apply_auto_title(base: str) -> dict:
+    """Give a meeting with no typed title its automatic title, once, after
+    the summary (the owner's title chain, plan row 20): the named speakers
+    plus the topic, else the model's draft. The folder moves through
+    apply_meeting_edits, so the registries, the manifest, the id index and
+    search follow it. `source_name` keeps the raw arrival name.
+
+    Returns {ok, base, renamed?, skipped?}. A meeting that a person already
+    titled, or that carries a typed label, is skipped."""
+    from . import titles
+    j = config.meeting_file(base, ".json")
+    try:
+        d = json.loads(j.read_text())
+    except (OSError, ValueError):
+        return {"ok": False, "error": f"no transcript for '{base}'"}
+    if not titles.wants_auto_title(d):
+        return {"ok": True, "base": base, "skipped": "not a model-titled meeting"}
+    t = titles.auto_title(d, me=config.mic_speaker())
+    if not t:
+        return {"ok": True, "base": base, "skipped": "no draft title"}
+    return apply_meeting_edits(base, title=t, auto_title=True)

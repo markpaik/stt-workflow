@@ -26,12 +26,25 @@ def sandbox(tmp_path, monkeypatch):
     # without this every test that renames, archives or backfills a sandbox
     # meeting would write the id map of REAL meeting names into the checkout
     monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", d / "meetings_index.json")
+    # the search index binds its path at import too, and it holds transcript
+    # text: a sandbox search must index the sandbox, never the checkout
+    monkeypatch.setattr(config, "SEARCH_DB", d / "search.db")
     monkeypatch.setattr(config, "CALIBRATION_LOG", d / "calibration.jsonl")
     monkeypatch.setattr(config, "WORK_DIR", d / "work")
+    # housekeeping rotates config.LOG_DIR at batch start: a test that runs
+    # run_batch.main must never truncate the checkout's own logs
+    monkeypatch.setattr(config, "LOG_DIR", d / "logs")
     monkeypatch.setattr(config, "MEETINGS_DIR", d / "meetings")
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(config, "RECORDINGS_DIR", d / "recordings")
     monkeypatch.setattr(config, "MIC_SPEAKER", None)  # don't inherit the real user's setting
+    # the Voice Memos sync runs at every batch start: a sandbox run must read
+    # a synthetic library, never the real one, even with STT_HOME unset
+    monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(d / "vm_container"))
+    monkeypatch.delenv("STT_VOICEMEMOS_STAGING", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_SYNC", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_SINCE", raising=False)
+    monkeypatch.delenv("STT_VOICEMEMOS_PLACES", raising=False)
     monkeypatch.setattr(status, "STATUS_PATH", d / "status.json")
     monkeypatch.setattr(status, "HISTORY_LOG", d / "results.jsonl")
     monkeypatch.setattr(control, "PAUSE_FLAG", d / "paused.flag")

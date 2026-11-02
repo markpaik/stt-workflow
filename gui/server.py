@@ -10,6 +10,7 @@ import os
 import plistlib
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -17,9 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from gui import jobqueue
-from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
-                 output, queue_order, rates, recorder, review, search, status,
-                 titles, unknowns)
+from stt import (config, control, dates, dupes, export, groups, identify, jobs,
+                 manifest, output, queue_order, rates, recorder, review, search,
+                 status, titles, unknowns)
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -178,7 +179,23 @@ def _watch_paths():
     recordings staging folder (the meeting recorder's output). Every place that
     rewrites WatchPaths uses this, so changing the source folder or toggling the
     watch never silently drops the recorder's trigger."""
-    return [str(config.source_dir()), str(config.recordings_dir())]
+    out = [str(config.source_dir()), str(config.recordings_dir())]
+    # the Voice Memos library (read, never written): setup.sh watches it, so
+    # a rewrite here keeps it, or the panel's Watch switch would drop it
+    try:
+        from stt import voicememos
+        if voicememos.enabled():
+            vm = str(voicememos.container_dir())
+            if vm not in out:
+                out.append(vm)
+    except Exception:
+        pass
+    return out
+
+
+# a run every 10 minutes while Watch is on: a Voice Memos memo becomes
+# eligible 5 minutes after it ends, and no folder event fires then
+WATCH_INTERVAL = 600
 
 
 def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
@@ -194,8 +211,10 @@ def write_automation(watch=None, nightly=None, hour=None, minute=None) -> dict:
     if watch is not None:
         if watch:
             d["WatchPaths"] = _watch_paths()
+            d["StartInterval"] = WATCH_INTERVAL
         else:
             d.pop("WatchPaths", None)
+            d.pop("StartInterval", None)   # 'manual' means manual
     if hour is not None:  # setting a time implies the nightly run is wanted
         nightly = True
     if nightly is not None:
@@ -342,8 +361,9 @@ def _watched_dirs():
     """The watched folders, in THE resolution order -- the iCloud source first,
     then the recorder's staging dir. The queue shows one row per NAME, so every
     by-name endpoint has to walk them in this same order or it acts on a file
-    the row never showed."""
-    return (config.source_dir(), config.recordings_dir())
+    the row never showed. The Voice Memos staging copies are a source too
+    (config.source_dirs), so they show as queued like any other arrival."""
+    return tuple(config.source_dirs())
 
 
 def _queue_files(name):
@@ -451,7 +471,7 @@ def _upload_target(dest: Path, name: str) -> Path:
 
     def taken(s):
         return ((dest / f"{s}{ext}").exists()
-                or (config.recordings_dir() / f"{s}{ext}").exists()
+                or any((d / f"{s}{ext}").exists() for d in config.source_dirs())
                 or config.meeting_dir(s).exists()
                 or (config.archive_dir() / s).exists())
 
@@ -554,6 +574,9 @@ def _meeting_meta(j: Path, dst_dir: Path):
             ask = {disp: cid for disp, cid in unnamed.items()
                    if unnamed_talk.get(disp, 0.0) >= VOICE_ASK_MIN_SECS}
         meta = {"base": j.stem,
+                # the immutable id: group corrections and saved Ask
+                # citations key on it, so they survive a rename
+                "meeting_id": d.get("meeting_id"),
                 "date": iso,
                 # display name: the folder carries the date so recurring
                 # meetings stay unique on disk, but the panel shows the clean
@@ -600,6 +623,15 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "title_source": d.get("title_source"),
                 "route": route,
                 "no_speech": bool(d.get("no_speech")),
+                # where the date came from (stt/provenance.py). The page
+                # shows it, and a file-time or short typed date wears the
+                # Date uncertain chip. None on a meeting before the key.
+                "date_source": d.get("date_source"),
+                "recorded_at": d.get("recorded_at"),
+                # the place Voice Memos named, kept when the title chain
+                # passed over a default address title. The meeting page
+                # shows it on the meta line. Absent on most meetings.
+                "location_note": d.get("location_note"),
                 "duration_sec": d.get("duration_sec"),
                 # the Needs you window's key: the STORED arrival stamp only.
                 # A meeting without one falls outside the window, so a
@@ -1279,6 +1311,28 @@ def _queue_and_dupes():
     return queue, meetings, resolvable
 
 
+def _with_groups(meetings: list) -> list:
+    """Each meeting row with its computed group, when it has one (plan Phase
+    4E). The rows are shared cache entries, so a grouped row is a copy."""
+    try:
+        gm = groups.membership()
+    except Exception as e:
+        print(f"   groups: not computed ({e})", file=sys.stderr)
+        return meetings
+    return [dict(m, group=gm[m["base"]][0], group_name=gm[m["base"]][1])
+            if m["base"] in gm else m for m in meetings]
+
+
+def _search_filters(q: dict) -> dict:
+    """The /api/search filters from query parameters. `dated` is the short
+    name for `date_source`, as typed in the palette."""
+    out = {k: q[k] for k in ("after", "before", "route", "date_source", "from", "in")
+           if q.get(k)}
+    if q.get("dated") and "date_source" not in out:
+        out["date_source"] = q["dated"]
+    return out
+
+
 def gather_state():
     from stt import summarize
     st = status.read()
@@ -1421,7 +1475,7 @@ def gather_state():
             # agree and neither has to re-derive the paused-span arithmetic.
             "recording": rec_state,
             "recorder_note": status.recorder_note(),  # expires a success on its own
-            "queue": queue, "meetings": meetings,
+            "queue": queue, "meetings": _with_groups(meetings),
             # the One Timeline: one row per meeting/file, changing state in place
             # (recording -> waiting/held -> processing -> needs_name -> ready |
             # failed), newest first, archived excluded; plus a ranked tray of
@@ -1454,10 +1508,21 @@ def gather_state():
             # OR our own worker, which is in-process and therefore does not have
             # to be discovered through the marker at all.
             "relabel_running": control.relabel_running() or bool(relabel_jobs["running"]),
+            # Voice Memos sync, for the /next Settings page: whether it is on
+            # and the go-live day. Read only; nothing here touches the library.
+            "voicememos": _voicememos_state(),
             "llm_available": summarize.available(),
             "llm_backend": summarize.llm_backend(),
             "llm_backends": {b: summarize.backend_available(b)
                              for b in summarize.LLM_BACKENDS}}
+
+
+def _voicememos_state() -> dict:
+    try:
+        from stt import voicememos
+        return {"enabled": voicememos.enabled(), "since": voicememos.go_live()}
+    except Exception:
+        return {"enabled": None, "since": None}
 
 
 def _osascript(script: str, timeout=120, args=None):
@@ -1952,11 +2017,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
-            if u.path == "/":
-                # The shell is the only page. The retired `ui` query param is
-                # ignored entirely, so a stale bookmark that still carries it
-                # gets the shell rather than a 404.
-                body = _page_html().encode()
+            if u.path in ("/", "/next", "/classic"):
+                # The 4D swap: `/` serves the new shell, and `/classic` keeps
+                # the old page for 30 days (a temporary route the owner
+                # approved; a later commit deletes it with app.js). `/next`,
+                # the 4C preview address, still answers with the new shell so
+                # a bookmark to it keeps working until that same commit. The
+                # retired `ui` query param is ignored. Every page reads the
+                # same API, and no GET here writes anything.
+                body = (_page_html() if u.path == "/classic" else _next_html()).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -2153,7 +2222,32 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._serve_audio(f)
             elif u.path == "/api/search":
-                self._json(search.query(q.get("q", "")))
+                # filters (plan Phase 4E) arrive as query parameters or
+                # inline in q ("budget after:2026-10-01"). A bad value
+                # answers with `error` and no hits.
+                self._json(search.query(q.get("q", ""), filters=_search_filters(q)))
+            elif u.path == "/api/search_meetings":
+                # meetings whose title or summary matches, best first, for the
+                # /next search palette's Titles group. Read-only, like
+                # /api/search, and empty when the index cannot answer.
+                self._json({"meetings": search.meetings(
+                    q.get("q", ""), filters=_search_filters(q))})
+            elif u.path == "/api/threads":
+                # saved library Ask threads, newest first: id, first question,
+                # scope, and count. No answer text in the list.
+                from stt import ask
+                self._json({"threads": ask.list_threads()})
+            elif u.path == "/api/thread":
+                from stt import ask
+                t = ask.get_thread(q.get("id", ""))
+                if t is None:
+                    self._json({"error": "no such thread"}, 404)
+                    return
+                self._json(t)
+            elif u.path == "/api/groups":
+                # computed groups, largest first. Read only: a GET writes
+                # nothing, so the use count is a separate POST /api/usage
+                self._json({"groups": groups.current()})
             elif u.path == "/api/txt":
                 if not self._require_base(q.get("base")):
                     return
@@ -2173,10 +2267,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
-                if not self._require_base(q.get("base")):
-                    return
-                from stt import summarize
-                self._json(summarize.suggest_title(q["base"]))
+                # Generating a title and summary WRITES the meeting .json, so
+                # it is a POST (plan Phase 4C: GET no longer writes). A stale
+                # caller still on GET gets a 405 and changes nothing.
+                self._json({"error": "use POST /api/suggest with {base}"}, 405)
             elif u.path == "/api/check_updates":
                 self._json(check_updates())
             elif u.path.startswith("/static/fonts/"):
@@ -2606,6 +2700,58 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "The local model is busy with another "
                                          "summary or question. Try again in a "
                                          "minute."}, 503)
+            elif u.path == "/api/ask_library":
+                # library Ask (plan Phase 4F): FTS5 retrieval into the local
+                # model, citations stored with meeting_id, the exchange saved
+                # to its thread. Busy is a 503 with busy:true, and the page
+                # keeps the typed question.
+                from stt import ask, summarize
+                q_ = (b.get("question") or "").strip()
+                if not q_:
+                    self._json({"error": "empty question"}, 400)
+                    return
+                if len(q_) > 2000:
+                    self._json({"error": "question too long (2000 chars max)"}, 400)
+                    return
+                tid = b.get("thread") or None
+                if tid is not None and not ask.valid_id(tid):
+                    self._json({"error": "no such thread"}, 400)
+                    return
+                prev = ask.get_thread(tid) if tid else None
+                if tid and prev is None:
+                    self._json({"error": "no such thread"}, 404)
+                    return
+                # a follow-up keeps its thread's scope
+                scope = (prev or {}).get("scope") or b.get("scope") or {"kind": "all"}
+                if not isinstance(scope, dict):
+                    self._json({"error": "bad scope"}, 400)
+                    return
+                if not summarize.available():
+                    self._json({"error": "The assistant is not installed, so Ask "
+                                         "cannot answer. Search still works."}, 503)
+                    return
+                try:
+                    r = ask.ask(q_, scope=scope,
+                                history=ask.history_of(tid) if tid else None)
+                except summarize.LLMBusy:
+                    self._json({"busy": True,
+                                "error": "The assistant is busy with a summary or "
+                                         "another question. Try again when it "
+                                         "finishes. Your question stays here."}, 503)
+                    return
+                if not r.get("ok"):
+                    self._json(r, 400)
+                    return
+                if scope.get("kind") == "group":
+                    groups.log_use("group_ask")
+                t = ask.save_message(tid, {k: v for k, v in scope.items() if k != "label"},
+                                     r.get("scope_label", ""), q_, r)
+                self._json({"ok": True, "thread": t["id"],
+                            "message": t["messages"][-1],
+                            "scope_label": r.get("scope_label", "")})
+            elif u.path == "/api/thread_delete":
+                from stt import ask
+                self._json({"ok": ask.delete_thread(b.get("id"))})
             elif u.path == "/api/hide_unknown":
                 ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
                       else unknowns.restore(b["uid"]))
@@ -2843,6 +2989,20 @@ class Handler(BaseHTTPRequestHandler):
                                 "message": "Permissions reset. Now click Start "
                                            "recording in the menu bar and grant "
                                            "BOTH prompts when macOS asks."})
+            elif u.path == "/api/group_override":
+                # "Not part of this group", keyed on meeting_id, with undo
+                if not self._require_base(b.get("base")):
+                    return
+                key = str(b.get("group") or "")
+                if not key:
+                    self._json({"ok": False, "error": "no group"}, 400)
+                    return
+                mkey = config.id_of(b["base"]) or b["base"]
+                self._json(groups.set_override(mkey, key, exclude=not b.get("undo")))
+            elif u.path == "/api/usage":
+                # one count line per group open or group question, no title
+                ok = groups.log_use(str(b.get("event") or ""))
+                self._json({"ok": ok}, 200 if ok else 400)
             elif u.path == "/api/seen":
                 # the panel is in front of the owner: record the look, so the
                 # menu bar's "new since last look" count starts over. Ids and a
@@ -2850,6 +3010,13 @@ class Handler(BaseHTTPRequestHandler):
                 from stt import ready
                 d = ready.mark_seen()
                 self._json({"ok": True, "seen_at": d["seen_at"]})
+            elif u.path == "/api/suggest":
+                # title, summary, and next steps from the local model, saved to
+                # the meeting .json (the call that used to be a GET)
+                if not self._require_base(b.get("base")):
+                    return
+                from stt import summarize
+                self._json(summarize.suggest_title(b["base"]))
             elif u.path == "/api/accept_meeting":
                 # inbox: name/date/tag it, and mark it reviewed so it joins the list
                 if not self._require_base(b.get("base")):
@@ -3072,29 +3239,52 @@ def start_server():
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _FONT_DIR = _STATIC_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
+# The classic page, served at /classic for 30 days after the 4D swap.
 _PAGE_PARTS = ("page.html", "app.css", "app.js")
 _page_cache: dict = {"mtimes": None, "html": None}
+# The new shell (plan Phases 4C and 4D), served at /: a second parts tuple,
+# composed the same way, with its own markers. Its script is several small
+# plain files joined in this fixed order, with no import lines and no build
+# step: the frame, then the meeting page, then the voice sheet, then the
+# library views (Groups and Ask).
+_NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js",
+               "next-library.js")
+_next_cache: dict = {"mtimes": None, "html": None}
+
+
+def _compose(parts, css_marker, js_marker):
+    """Assemble one served page from its (skeleton, css, js, ...) parts. Every
+    part after the CSS is a script, joined in order. The CSS and JS are full
+    of braces, so the skeleton carries marker comments and we substitute with
+    str.replace -- never .format()/f-strings."""
+    page, css, *js = ((_STATIC_DIR / f).read_text(encoding="utf-8") for f in parts)
+    return page.replace(css_marker, css).replace(js_marker, "\n".join(js))
 
 
 def _compose_page():
-    """Assemble the served panel page from its static parts. The CSS and JS
-    are full of braces, so the skeleton carries marker comments and we
-    substitute with str.replace -- never .format()/f-strings."""
-    page = (_STATIC_DIR / "page.html").read_text(encoding="utf-8")
-    css = (_STATIC_DIR / "app.css").read_text(encoding="utf-8")
-    js = (_STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    return page.replace("/*@APP_CSS@*/", css).replace("//@APP_JS@", js)
+    return _compose(_PAGE_PARTS, "/*@APP_CSS@*/", "//@APP_JS@")
+
+
+def _compose_next():
+    return _compose(_NEXT_PARTS, "/*@NEXT_CSS@*/", "//@NEXT_JS@")
+
+
+def _cached(parts, cache, compose):
+    """The composed page, recomposed only when one of its static parts
+    changes on disk -- editing a part reloads live, with no server restart."""
+    mtimes = tuple((_STATIC_DIR / f).stat().st_mtime_ns for f in parts)
+    if cache["html"] is None or cache["mtimes"] != mtimes:
+        cache["html"] = compose()
+        cache["mtimes"] = mtimes
+    return cache["html"]
 
 
 def _page_html():
-    """The composed page, recomposed only when one of its static parts
-    changes on disk -- editing page.html/app.css/app.js reloads live, with
-    no server restart."""
-    mtimes = tuple((_STATIC_DIR / f).stat().st_mtime_ns for f in _PAGE_PARTS)
-    if _page_cache["html"] is None or _page_cache["mtimes"] != mtimes:
-        _page_cache["html"] = _compose_page()
-        _page_cache["mtimes"] = mtimes
-    return _page_cache["html"]
+    return _cached(_PAGE_PARTS, _page_cache, _compose_page)
+
+
+def _next_html():
+    return _cached(_NEXT_PARTS, _next_cache, _compose_next)
 
 
 if __name__ == "__main__":

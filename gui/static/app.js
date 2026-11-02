@@ -2155,12 +2155,17 @@ let pendingOpen=null;                     // {base, seek?:secs, ask?:true} -- on
 
 function parseHash(){
   const h=location.hash||'';
+  // #m/<base>/t/<secs>: the /next search palette's "Said in" deep link, which
+  // opens the meeting and seeks to the line (the same pendingOpen seek)
+  const t=h.match(/^#m\/([^/]+)\/t\/(\d+(?:\.\d+)?)$/);
+  if(t)return {view:'meeting',base:decodeURIComponent(t[1]),seek:+t[2]};
   const m=h.match(/^#m\/(.+)$/);
   return m?{view:'meeting',base:decodeURIComponent(m[1])}:{view:'timeline',base:null};
 }
 function applyRoute(){
   if(NP)closeNamePanel();          // a route change closes the naming slide-over
   dupeDisarm();                    // and disarms the no-undo duplicate sweep
+  if(route.view==='meeting'&&route.seek!=null)pendingOpen={base:route.base,seek:route.seek};
   if(route.view==='meeting')enterMeeting(route.base);
   else if(!readerSync())exitMeeting();   // two panes: no hash opens the default meeting
   selFollow();                     // two panes: the list's selection follows the hash
@@ -2474,6 +2479,18 @@ function draftChipHTML(m){
   return (m&&m.title_state==='provisional'&&m.route!=='public_download')
     ?'<span class="mchip draft" title="A draft title: edit it, or leave it">Draft title</span>':'';
 }
+// the date's source, shown for every date. A file-time date or a short
+// typed one is a guess, so it also wears the Date uncertain chip. A meeting
+// from before the key (no date_source) shows neither. No count anywhere.
+function dateSourceHTML(m){
+  const src=m&&m.date_source;
+  if(!src)return '';
+  const said={typed:'typed in the name',recorder:'the recorder',
+    short_typed:'a short date in the name',mtime:'the file time',manual:'set by hand'};
+  const unsure=src==='mtime'||src==='short_typed';
+  return (unsure?'<span class="mchip dateunsure" title="This date may be the transfer day: change it if it is wrong">Date uncertain</span>':'')
+    +`<span class="mdatesrc">Date from ${esc(said[src]||src)}</span>`;
+}
 function _mHeader(m,base){
   const bits=mMetaBits(m);
   const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
@@ -2492,7 +2509,7 @@ function _mHeader(m,base){
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta"><span id="mmbits">${bits.join(' &middot; ')}</span>
       <button class="mcat ${dot}" id="mcatdot" type="button"
-        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${strict}${flagged}<span class="mflagnote" id="maudionote" hidden></span></div>
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${dateSourceHTML(m)}${strict}${flagged}<span class="mflagnote" id="maudionote" hidden></span></div>
   </div>`;
 }
 // the audio-may-be-lost note: the Needs you row's words, kept on the
@@ -2664,7 +2681,7 @@ function _mSummaryInner(m){
     <div class="msumbody muted" id="msumbody">${esc(hint)}</div>
     <div class="msumfoot"><button class="btn primary mini" id="mgenbtn" type="button" onclick="mGenSummary()">Generate summary</button></div>`;
 }
-// wired: GET /api/suggest (same call + persistence as the old genSummary), then
+// wired: POST /api/suggest (same call + persistence as the old genSummary), then
 // refresh S and repaint the summary section. Failure (e.g. no local backend)
 // is surfaced inline, never a crash or a banner.
 async function mGenSummary(){
@@ -2674,7 +2691,7 @@ async function mGenSummary(){
   const wait='Reading the transcript… '+(S.llm_backend==='local'?'(~10-20s)':'(a few seconds)');
   if(body)body.innerHTML='<span class="spin"></span> '+esc(wait);
   let r;
-  try{r=await api('/api/suggest?base='+encodeURIComponent(base));}
+  try{r=await api('/api/suggest',{base});}
   catch(e){r={error:'The summary service is unavailable.'};}
   if(route.view!=='meeting'||route.base!==base)return;
   if(r&&r.summary){
@@ -4718,7 +4735,10 @@ function fsUseFile(){
 async function fsAccept(){
   if(!FS||FS.busy||FS.cur!=='title')return;
   const base=FS.base,ti=$('#fstitle'),di=$('#fsdate'),btn=$('#fsaccept'),err=$('#fserr');
-  const name=(ti&&ti.value.trim())||'',date=(di&&di.value)||'';
+  // the date goes only when it differs from the stored one: sending the
+  // prefilled date back would claim a person chose it (date_source=manual)
+  const stored=(FS.row&&FS.row.date)||'',picked=(di&&di.value)||'';
+  const name=(ti&&ti.value.trim())||'',date=(picked&&picked!==stored)?picked:'';
   FS.busy=true;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
   let r;
   try{r=await api('/api/accept_meeting',{base,name,date});}

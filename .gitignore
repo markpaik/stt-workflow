@@ -83,6 +83,15 @@ dismissed_failures.json
 /*.jsonl
 /*.npz
 /*.db*
+/*.gz
 /*.flag
 /*.lock
 /ask_threads/
+
+# a gzip copy in flight (housekeeping._gz_copy); a crash can leave one
+/*.gz.tmp
+
+# Voice Memos sync staging: copies of memos (audio and their .vm.json
+# sidecars, which hold titles and places) waiting for the batch
+/voicememos/
+*.vm.json

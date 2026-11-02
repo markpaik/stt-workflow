@@ -50,12 +50,13 @@ def _transcribe_with_fallback(asr, wav, progress=None) -> dict:
 def _meeting_date(src: Path, existing_json: Path = None) -> str:
     """Reprocessing preserves an already-stored date: it was either stamped
     from this same filename originally or corrected by a human in the panel —
-    a Redo must never silently undo that correction. Fresh files derive from
-    the filename convention, else the source mtime."""
+    a Redo must never silently undo that correction. A fresh file takes the
+    best date source it has evidence for (provenance.fresh): a sync
+    sidecar's start, a typed date, the recorder's start, a short typed date,
+    else the source mtime. A typed date in the future never counts."""
     import json as _json
-    from datetime import date
 
-    from . import dates
+    from . import provenance
     if existing_json is not None and existing_json.exists():
         try:
             kept = _json.loads(existing_json.read_text()).get("date")
@@ -63,17 +64,38 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
                 return kept
         except (OSError, ValueError):
             pass
-    try:
-        fallback = date.fromtimestamp(src.stat().st_mtime).isoformat()
-    except OSError:
-        fallback = date.today().isoformat()
-    # a recording can't be from the future: a filename like "...10242026"
-    # parses to Oct 24 2026, which would sort above today's real meetings.
-    # Reject a future parse and fall back to the processing/mtime date.
-    parsed = dates.meeting_date(src.stem)
-    if parsed and parsed <= date.today().isoformat():
-        return parsed
-    return fallback
+    return provenance.fresh(src)[1]
+
+
+def _arrival_fields(meta: dict, prev, src: Path) -> None:
+    """Write the true-date keys on a brand-new meeting (plan Phase 2 step
+    2): `source_name` (the raw arrival name, immutable), `audio_fp` (frozen
+    at first write), `date_source`, and `recorded_at`. `date` is already
+    set, from the same rule, so the two always agree.
+
+    A Redo writes none of them: _title_fields carries whatever the stored
+    json holds, and a meeting from before these keys stays without them
+    (tools/backfill_keys.py adds them under its own journal)."""
+    if prev is not None:
+        return
+    from . import provenance
+    side = provenance.read_sidecar(src)
+    keys = provenance.arrival_keys(src, side)
+    # a Voice Memos sync copy: the memo's id (so a purge can block it from
+    # coming back) and the default place name it carried, kept as a note
+    if side.get("vm_uuid"):
+        meta["vm_uuid"] = str(side["vm_uuid"])
+    if side.get("location_note"):
+        meta["location_note"] = str(side["location_note"])[:200]
+    for k in ("source_name", "audio_fp", "date_source", "recorded_at"):
+        if k in keys:
+            meta[k] = keys[k]
+    if keys.get("date") != meta.get("date"):
+        # the folder stamp came from _meeting_date: keep the stored date and
+        # say honestly that only the file day backs it
+        meta["date_source"], meta["recorded_at"] = "mtime", None
+    elif meta.get("recorded_at") and str(meta["recorded_at"])[:10] != meta["date"]:
+        meta["recorded_at"] = None
 
 
 def _title_fields(meta: dict, prev, src: Path, segments) -> None:
@@ -501,6 +523,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             meta["category"] = category
         meta["reviewed"] = bool(reviewed)
         _title_fields(meta, prev, src, segments)
+        _arrival_fields(meta, prev, src)
+        # the `title` key always equals the folder name without its stamp
+        # and twin suffix (store contract). The folder is decided above, so
+        # this follows it on a new meeting and on a Redo alike.
+        from . import dates as _dates
+        meta["title"] = _dates.title_of(base)
         if channel_layout:  # a recording that declared a me/them layout
             meta["channel_layout"] = channel_layout
             meta["mic_speaker"] = mic_speaker

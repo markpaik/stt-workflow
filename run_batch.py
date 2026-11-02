@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -53,6 +54,10 @@ def _load_env_file():
 _load_env_file()
 
 from stt import config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
+
+# a plain run re-reads the Voice Memos library at most this often while it
+# picks files, so a memo that finishes during a long run joins that run
+VM_RESYNC_SECONDS = 60.0
 
 
 def acquire_lock():
@@ -156,7 +161,7 @@ def spawn_chained_job(job: dict):
         subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
-def summarize_one(key, base=None) -> bool:
+def summarize_one(key, base=None, track=None) -> bool:
     """Draft the AI title/summary for ONE just-finished meeting (local Qwen
     via .venv-llm). Runs right after the file completes, not at end-of-run:
     with a long backlog the end is hours away, and a Stop before it would
@@ -164,17 +169,26 @@ def summarize_one(key, base=None) -> bool:
     the LLM venv isn't installed or the meeting already has a summary; a
     failure never breaks the run (the end-of-run sweep retries it).
     `base` is the RESOLVED meeting folder — date-stamped for plain-named
-    sources, so it can differ from the source stem."""
+    sources, so it can differ from the source stem. The automatic title can
+    rename that folder; a `track` dict gets the folder's final name under
+    "base", so a later retry never reads the old, now-missing folder."""
     import json as _json
 
     from stt import status as st, summarize
     if not summarize.available():
         return False
     base = base or Path(key).stem
+    done = False
     try:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
-            return False  # e.g. a re-queued file that was already summarized
+            # e.g. a re-queued file that was already summarized. Its automatic
+            # title may still be owed (an earlier attempt failed), so the
+            # title chain's last step runs here too. It is a no-op once titled.
+            base = _auto_title(base)
+            if track is not None:
+                track["base"] = base
+            return False
         if not summarize.has_speech(base):
             # 0 segments: the model would invent a meeting. The pipeline
             # already set no_speech, and the panel says "No speech found".
@@ -182,12 +196,52 @@ def summarize_one(key, base=None) -> bool:
             return False
         st.set_stage(key, "summarizing")
         summarize.suggest_title(base)
-        return True
+        done = True
     except Exception as e:
         print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
         return False
     finally:
         st.clear_stage(key)
+    # the title chain's last steps, once the stage has cleared (a meeting in
+    # a live stage refuses a folder move): a meeting with no typed title
+    # takes the speakers plus topic, else the model's draft
+    base = _auto_title(base)
+    if track is not None:
+        track["base"] = base
+    return done
+
+
+def _auto_title(base) -> str:
+    """summarize.apply_auto_title for one meeting. Returns the meeting's
+    folder name afterwards (the new one when the title renamed it). A failure
+    is printed and never breaks the run."""
+    from stt import summarize
+    try:
+        r = summarize.apply_auto_title(base)
+        if r.get("ok") and r.get("base") and r["base"] != base:
+            print(f"   titled: {r['base']}", flush=True)
+            return r["base"]
+    except Exception as e:
+        print(f"   automatic title skipped for {base}: {e}", file=sys.stderr, flush=True)
+    return base
+
+
+DOCTOR_EVERY_SECONDS = 24 * 3600
+
+
+def doctor_due(processed: int, failed: int) -> bool:
+    """True when the end-of-run doctor check should run: a file finished or
+    failed this run, or the last report is a day old or missing. The watch
+    trigger starts an empty run every few minutes, and a full store check on
+    each of them is wasted work."""
+    if processed or failed:
+        return True
+    from stt import doctor
+    try:
+        age = time.time() - (config.PROJECT_DIR / doctor.REPORT_PATH_NAME).stat().st_mtime
+    except OSError:
+        return True
+    return age >= DOCTOR_EVERY_SECONDS
 
 
 def record_review_metrics() -> bool:
@@ -274,6 +328,39 @@ def preflight_source(source: Path) -> bool:
         return False
 
 
+def sync_voice_memos(dry_run=False) -> dict:
+    """Copy finished meeting memos from the Voice Memos library into the
+    staging folder (stt/voicememos.py). Reads the library and never writes
+    to it. A schema change or a denied read copies nothing and is recorded
+    for the doctor. Never fails the run."""
+    try:
+        from stt import voicememos
+        r = voicememos.sync(dry_run=dry_run)
+    except Exception as e:
+        print(f"  (Voice Memos sync skipped: {e.__class__.__name__})",
+              file=sys.stderr, flush=True)
+        # a sync that raised still leaves a record, so the doctor reports it
+        try:
+            if not dry_run:
+                voicememos.record_failure(e)
+        except Exception:
+            pass
+        return {"status": "error"}
+    st = r.get("status")
+    if st == "ok":
+        c = r.get("counts") or {}
+        if c.get("copied") or c.get("would_copy"):
+            print(f"Voice Memos: {'would copy' if dry_run else 'copied'} "
+                  f"{c.get('copied') or c.get('would_copy')} memo(s)", flush=True)
+    elif st == "schema":
+        print("Voice Memos: the database schema changed, so sync stopped "
+              f"({r.get('detail')}). Run the doctor.", file=sys.stderr, flush=True)
+    elif st == "denied":
+        print("Voice Memos: macOS denied the read. Grant Full Disk Access to "
+              f"{os.path.realpath(sys.executable)}.", file=sys.stderr, flush=True)
+    return r
+
+
 def iter_audio(folder: Path):
     if not Path(folder).is_dir():
         return
@@ -288,11 +375,11 @@ def iter_sources(source: Path):
     already skipped by iter_audio; distinct filenames keep the manifest dedupe
     unambiguous across folders."""
     seen = set()
-    folders = [Path(source)]
-    rec = config.recordings_dir()
-    if rec not in folders:
-        folders.append(rec)
-    for folder in folders:
+    # the source, the recorder's staging folder, and the Voice Memos sync's
+    # own staging copies (config.source_dirs, the one shared list). The Voice
+    # Memos container itself is never a source, so the delete step cannot
+    # reach it.
+    for folder in config.source_dirs(source):
         for p in iter_audio(folder):
             if p.name in seen:
                 # two files that merely SHARE a basename across the source and
@@ -307,6 +394,48 @@ def iter_sources(source: Path):
                 continue
             seen.add(p.name)
             yield p
+
+
+def _sha256(path: Path):
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def safe_to_delete(src: Path, dest_audio: Path, src_fp, src_size):
+    """(ok, reason): may the batch delete the source now that the meeting
+    holds its copy (unified plan Phase 2 step 2)?
+
+    The source must still be the file the run started on (same size and
+    fingerprint as before processing), and the stored copy must hold the
+    same bytes: equal size and equal SHA-256. A video's stored audio is an
+    extracted track that shares no bytes with it, so for a video the check
+    is the source being unchanged plus a non-empty extracted track. Any
+    doubt keeps the source, which the manifest then skips."""
+    from stt import dupes
+    try:
+        size_now = src.stat().st_size
+        dsize = dest_audio.stat().st_size
+    except OSError as e:
+        return False, f"cannot read size ({e.__class__.__name__})"
+    if src_size is not None and size_now != src_size:
+        return False, "the source changed size during processing"
+    if src_fp and dupes.fingerprint(src) != src_fp:
+        return False, "the source changed during processing"
+    if src.suffix.lower() in config.VIDEO_EXTS:
+        return (dsize > 0, "ok" if dsize > 0 else "the extracted audio is empty")
+    if dsize != size_now:
+        return False, "the stored copy differs in size"
+    a, b = _sha256(src), _sha256(dest_audio)
+    if a is None or b is None or a != b:
+        return False, "the stored copy differs in content"
+    return True, "ok"
 
 
 def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
@@ -343,6 +472,10 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     report("downloading")
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
+    # resolved again now the bytes are here: a Voice Memos date tag cannot
+    # be read from a dataless placeholder, so the first answer may have
+    # fallen back to the file day. process_file resolves the same way.
+    resolved_base = pipeline.resolve_base(src, dest)
 
     # the meeting recorder drops a <base>.opts.json next to a stereo capture,
     # declaring its me/them channel layout; its contents are copied into the
@@ -398,8 +531,14 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
 
     success = res["txt"].exists() and res["json"].exists() and dest_audio.exists()
     if success and opts["do_move"] and src.resolve() != dest_audio.resolve():
-        src.unlink()
-        side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
+        ok, why = safe_to_delete(src, dest_audio, src_fp, src_size)
+        if ok:
+            src.unlink()
+            side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
+            from stt import provenance
+            provenance.sidecar_path(src).unlink(missing_ok=True)
+        else:
+            print(f"   kept the source {src.name}: {why}", file=sys.stderr, flush=True)
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
@@ -504,6 +643,13 @@ def main():
     dest.mkdir(parents=True, exist_ok=True)
     if not args.dry_run:
         clean_scratch()
+        # size caps: logs/ at 10 MB keeping 3 gzips, calibration.jsonl at
+        # 10 MB keeping 1 (stt/housekeeping.py). Never raises.
+        from stt import housekeeping
+        hk = housekeeping.rotate_all()
+        if hk["logs"] or hk["calibration"]:
+            print(f"rotated {len(hk['logs'])} log(s)"
+                  + (", capped calibration.jsonl" if hk["calibration"] else ""))
         # one-time flat->folder layout migration (idempotent, cheap when done)
         n = config.migrate_flat_meetings(dest)
         if n:
@@ -523,6 +669,8 @@ def main():
     if not args.dry_run and not args.no_diarize and not config.resolve_hf_token():
         print("Diarization needs a HuggingFace token (see README).", file=sys.stderr)
         return 2
+
+    sync_voice_memos(dry_run=args.dry_run)
 
     wanted = None
     if args.files:
@@ -652,12 +800,16 @@ def main():
                          rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
-            succeeded.append((res["key"], res.get("base")))
             processed += 1
             # the description lands NOW, while the next file transcribes —
             # not hours later when the whole backlog ends (and never lost to
-            # a Stop pressed before then)
-            summarize_one(res["key"], res.get("base"))
+            # a Stop pressed before then). The automatic title may rename the
+            # folder, so the end-of-run sweep gets the folder's final name.
+            track = {"base": res.get("base")}
+            try:
+                summarize_one(res["key"], res.get("base"), track=track)
+            finally:
+                succeeded.append((res["key"], track.get("base")))
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
@@ -668,15 +820,31 @@ def main():
     in_flight = set()        # names started and not yet finished (--parallel)
     finish = {"asked": False}
 
+    vm_synced = {"at": time.monotonic()}
+
     def arrivals():
         """Files in the watched folders that this run has not queued, started,
         finished, or failed: recordings that landed WHILE it ran. Their
         WatchPaths trigger hit our lock and exited, so the run takes them in
-        itself (plain runs only)."""
+        itself (plain runs only). A Voice Memos memo that finished during the
+        run is copied in first (at most once per VM_RESYNC_SECONDS)."""
         if not sweep:
             return []
+        if time.monotonic() - vm_synced["at"] >= VM_RESYNC_SECONDS:
+            vm_synced["at"] = time.monotonic()
+            sync_voice_memos()
         have = {s.name for s in queue} | in_flight
         held = holds.items()    # re-read: a hold placed mid-run counts
+        # re-read the manifest from disk, never the snapshot `m`: a meeting
+        # this run finished and then renamed (the automatic title) moved its
+        # folder, and manifest.retarget fixed only the file on disk. The stale
+        # snapshot would call the source unprocessed, and with the original
+        # kept (STT_MOVE_AFTER_SUCCESS=0, a refused delete) the run would
+        # transcribe it again into a " (2)" folder, then again, in a loop.
+        try:
+            cur = manifest.load()
+        except Exception:
+            cur = m
         out = []
         for src in iter_sources(source):
             # never a file that already failed this run: nothing marks it
@@ -685,7 +853,7 @@ def main():
             if src.name in have or src.name in failed_names or src.name in held:
                 continue
             try:
-                if manifest.is_processed(m, src.name, src.stat().st_mtime):
+                if manifest.is_processed(cur, src.name, src.stat().st_mtime):
                     continue
             except OSError:
                 continue
@@ -839,6 +1007,15 @@ def main():
     status.end_run()
     if not args.dry_run:
         record_review_metrics()
+        # read-only store and registry check; counts (no titles) go to
+        # doctor.json for the panel. Only after a run that did work, or once
+        # a day (doctor_due). Never fails the run.
+        if doctor_due(processed, failed):
+            from stt import doctor
+            dr = doctor.run_check_at_batch_end(dest)
+            if dr.get("error"):
+                print(f"  (doctor check skipped: {dr['error']})",
+                      file=sys.stderr, flush=True)
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
     if finish["asked"]:
         control.clear_finish()  # honored: the next run starts normally

@@ -22,6 +22,13 @@ recordings_dir() {
   echo "${d:-$HOME/Library/Application Support/com.stt-workflow/recordings}"
 }
 
+voicememos_dir() {
+  # the Voice Memos library on this Mac (read only; stt/voicememos.py)
+  local d=""
+  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_VOICEMEMOS_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  echo "${d:-$HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings}"
+}
+
 write_batch_plist() {
   mkdir -p "$AGENTS" "$BASE/logs"
   mkdir -p "$(recordings_dir)"   # launchd can only watch a path that exists
@@ -47,20 +54,29 @@ write_batch_plist() {
   </dict>
   <!-- Layered triggers (the in-code flock makes them all safe):
        nightly 02:00 (runs at next wake if asleep) + WatchPaths (new recordings
-       while awake) + RunAtLoad (login catch-up; manifest makes it a no-op). -->
+       while awake) + RunAtLoad (login catch-up; manifest makes it a no-op)
+       + StartInterval 600. A Voice Memos memo becomes eligible 5 minutes
+       after it ends, and no folder event fires then, so a run every
+       10 minutes picks it up. A run with nothing to do exits quickly. The
+       panel's Watch switch adds and removes this key with WatchPaths. -->
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StartInterval</key><integer>600</integer>
   <key>WatchPaths</key>
   <array>
     <string>$(source_dir)</string>
     <string>$(recordings_dir)</string>
+    <!-- Voice Memos sync: a new memo wakes the batch, which copies it under
+         the allow-list. The library is read, never written. -->
+    <string>$(voicememos_dir)</string>
   </array>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$BASE/logs/stt.out.log</string>
   <key>StandardErrorPath</key><string>$BASE/logs/stt.err.log</string>
-  <key>ProcessType</key><string>Background</string>
-  <key>LowPriorityIO</key><true/>
+  <!-- No ProcessType or LowPriorityIO: a Nov 2026 A/B on one ~19-minute file
+       under launchd measured speaker separation about 2.3x slower with them
+       (1423 s and 1447 s) than without (627 s). Nice=5 stays. -->
   <key>Nice</key><integer>5</integer>
 </dict>
 </plist>
@@ -102,8 +118,12 @@ case "${1:-}" in
     launchctl bootout "gui/$U/$BATCH_LABEL" 2>/dev/null || true
     launchctl bootstrap "gui/$U" "$BATCH_PLIST"
     echo "Installed + loaded $BATCH_LABEL (nightly 02:00 + folder watch + login catch-up)."
-    echo "Grant Full Disk Access to this binary (resolve the symlink):"
+    echo "Grant Full Disk Access to BOTH of these (launchd starts caffeinate,"
+    echo "which starts python, and macOS may check either one):"
+    echo "  /usr/bin/caffeinate"
     echo "  $(readlink -f "$BASE/.venv/bin/python")"
+    echo "Voice Memos sync reads the Voice Memos library, which needs that grant."
+    echo "After the first run, the doctor must show no voicememos_denied."
     echo "Force a test run:  ./setup.sh kick"
     ;;
   uninstall-agent)

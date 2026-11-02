@@ -1,5 +1,7 @@
-"""The panel shell: the ONE composed page (gui/static/), assembled by the
-marker/mtime composer and served at /.
+"""The classic panel shell: the One Timeline page (gui/static/page.html,
+app.css, app.js), assembled by the marker/mtime composer. Since the Phase 4D
+swap it serves at /classic for 30 days, and / serves the new shell. Its
+naming, review, and hostile-name tests are ported in tests/test_next_meeting.py.
 
 Structure and regex over the composed page, plus live byte-compares proving
 the routing serves exactly what the composer builds.
@@ -52,11 +54,12 @@ def _get(port, path):
     return status, ctype, body
 
 
-def test_root_serves_the_shell_and_ignores_the_ui_param(running_server):
-    # the shell is the only page. The retired ui query flag is ignored no
-    # matter its value, so a stale bookmark still gets the shell, never a 404.
+def test_classic_serves_the_old_shell_and_ignores_the_ui_param(running_server):
+    # since the 4D swap this page serves at /classic for 30 days, and / is the
+    # new shell (tests/test_next_shell.py). The retired ui query flag is
+    # ignored no matter its value, so a stale bookmark still gets the page.
     expected = _compose(STATIC).encode()
-    for path in ("/", "/?ui=stale-bookmark", "/?anything=else"):
+    for path in ("/classic", "/classic?ui=stale-bookmark", "/classic?anything=else"):
         status, ctype, body = _get(running_server, path)
         assert status == 200
         assert "text/html" in ctype
@@ -220,8 +223,10 @@ def test_meeting_page_defines_the_ported_reader_functions():
 def test_meeting_page_uses_the_read_endpoints_verbatim():
     # transcript is fetched (GET, no body) from /api/transcript, as the old reader
     assert "api('/api/transcript?base='" in NEW_JS
-    # summary generation reuses the old GET /api/suggest call + its persistence
-    assert "api('/api/suggest?base='" in NEW_JS
+    # summary generation POSTs /api/suggest (it writes the .json), and no
+    # caller is left on the old GET form
+    assert "api('/api/suggest',{base})" in NEW_JS
+    assert "/api/suggest?base=" not in NEW_JS
     # the audio src is the byte-range /api/audio?base= endpoint
     assert "'/api/audio?base='" in NEW_JS
 
@@ -6321,7 +6326,7 @@ def _header_env():
     return "\n".join([
         _js_oneline("esc"), _js_oneline("escJs"), _js_fn("shortDate"),
         _js_fn("peopleMetaBits"), _js_fn("mMetaBits"), _js_fn("mHeadSync"),
-        _js_fn("draftChipHTML"), _js_fn("_mHeader"),
+        _js_fn("draftChipHTML"), _js_fn("dateSourceHTML"), _js_fn("_mHeader"),
         "const bits=h=>{const m=/<span id=\"mmbits\">([\\s\\S]*?)<\\/span>\\s*<button class=\"mcat/.exec(h);"
         "return m?m[1]:null;};",
     ])
@@ -6659,3 +6664,13 @@ def test_the_meeting_header_holds_the_audio_note_and_both_loads_fill_it():
     assert 'id="maudionote" hidden' in head
     assert NEW_JS.count("mAudioNote(d.audio_short_by);") == 2
     assert NEW_JS.count("MP.noSpeech=!!d.no_speech;") == 2
+
+
+def test_screen_names_for_routes_with_a_slash():
+    """QA 4F #8: groups/<key> and ask/<id> shoot to a file in OUT."""
+    from tools import next_screens
+    assert next_screens._name("groups/gabc123") == "groups-gabc123"
+    assert next_screens._name("ask/0123456789ab") == "ask-0123456789ab"
+    assert next_screens._name("m/Some Base 10012026") == "meeting"
+    assert next_screens._name("m/Some Base 10012026/t/12") == "meeting-transcript"
+    assert next_screens._name("home") == "home"

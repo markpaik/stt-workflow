@@ -68,6 +68,102 @@ def stamp(name: str, iso: str) -> str:
 _UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
 
 
+def title_of(base: str) -> str:
+    """The meeting's `title` key: its folder name with the twin suffix and
+    the trailing date stamp removed. A date inside the name (the recorder's
+    'Recording 07112026 1814') stays, because restamp() replaces it in
+    place, so restamp(title_of(b), date) gives the folder name back."""
+    return strip_stamp(_UNIQ_SUFFIX.sub("", str(base or "").strip()))
+
+
+def twin_suffix(base: str) -> str:
+    """' (2)' for a same-name twin folder, else ''."""
+    m = _UNIQ_SUFFIX.search(str(base or ""))
+    return m.group(0) if m else ""
+
+
+# --- Short typed dates: '9.14', '10-5', '9/14', '9.14.26' ---
+# A person typing a label on the phone writes the day short. The audit found
+# 7 such labels, and each disagreed with the stored transfer date by 9 to 25
+# days. A short date has no year, so it resolves to its most recent day on or
+# before a reference day (the transfer day), and only within SHORT_MAX_DAYS:
+# further back than that, the digits are more likely a time or a count than
+# the day of the meeting.
+#
+# Only a short date at the END of the title counts: every real label puts it
+# there, and a date-like run mid-title is usually something else ('Grades
+# 9-12 Planning', '1:1 with Lead', 'v1.2 demo'). A colon is not a date
+# separator ('Standup 9:30' is a time), and a letter right before the digits
+# ('v1.2') rules the run out.
+_SHORT = re.compile(
+    r"(?<![\w.:/\-])(\d{1,2})([.\-/])(\d{1,2})(?:\2(\d{2}|\d{4}))?\s*$")
+SHORT_MAX_DAYS = 60
+
+# A trailing run right after one of these words is a range or a count, not a
+# day: 'Math PLC Grades 6-8' is grades six to eight, never June 8. The word
+# is matched whole, case-blind, with an optional trailing period ('Gr.').
+_RANGE_WORDS = frozenset("""
+    grade grades gr grs k pk tk ages age yrs years
+    ch chapter chapters unit units lesson lessons module modules
+    week weeks wk wks page pages pg pgs pp level levels tier tiers
+    period periods session sessions part parts section sections
+    step steps days room rooms v ver version rev no
+    """.split())
+_WORD_BEFORE = re.compile(r"(\w+)\.?\s*$")
+# another range earlier in the title ('Grades K-2 and 3-5', '6-8, 9-12')
+# means the trailing one is a range too
+_RANGE_TOKEN = re.compile(r"(?<![\w.:/\-])(?:[A-Za-z]|\d{1,2})\s*[\-\u2013/]\s*\d{1,2}(?![\w.:/\-])")
+
+
+def _is_range(head: str) -> bool:
+    """True when the text before a trailing short run marks it as a range or
+    a count: a range word right before it, or another range earlier on."""
+    w = _WORD_BEFORE.search(head)
+    if w and w.group(1).lower() in _RANGE_WORDS:
+        return True
+    return bool(_RANGE_TOKEN.search(head))
+
+
+def short_date(name: str, ref_iso: str):
+    """ISO date for the short typed date that ends `name`, resolved against
+    the reference day `ref_iso`, else None.
+
+    '9.14' read on 2026-09-29 is 2026-09-14. '12.30' read on 2027-01-08 is
+    2026-12-30: a year boundary resolves to the past. An explicit year
+    ('9.14.26') is taken as written. A result after the reference day, or
+    more than SHORT_MAX_DAYS before it, is rejected. 8-digit stamps never
+    match, because the pattern needs a separator. A run that reads as a
+    range or a count ('Grades 6-8', 'Units 3/4', 'K-2 and 3-5') is
+    rejected (_is_range)."""
+    try:
+        ref = date.fromisoformat(str(ref_iso)[:10])
+    except (TypeError, ValueError):
+        return None
+    text = str(name or "").rstrip()
+    for m in _SHORT.finditer(text):
+        mo, dy, yr = int(m.group(1)), int(m.group(3)), m.group(4)
+        if not (1 <= mo <= 12 and 1 <= dy <= 31):
+            continue
+        if _is_range(text[:m.start()]):
+            continue
+        cands = []
+        if yr:
+            y = int(yr) + (2000 if len(yr) == 2 else 0)
+            cands.append(y)
+        else:
+            cands += [ref.year, ref.year - 1]
+        for y in cands:
+            try:
+                d = date(y, mo, dy)
+            except ValueError:
+                continue
+            if d <= ref and (ref - d).days <= SHORT_MAX_DAYS:
+                return d.isoformat()
+            if yr:
+                break
+    return None
+
+
 def restamp(base: str, iso: str) -> str:
     """The folder name this meeting SHOULD have: its title carrying `iso` as its
     one and only date.

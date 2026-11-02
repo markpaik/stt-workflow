@@ -8,7 +8,8 @@ module is the arithmetic behind that promise: it reads the four token blocks
 straight out of the stylesheet, resolves the var() aliases, and measures each
 pair the design actually paints.
 
-Run it:      python3 tools/token_contrast.py
+Run it:      python3 tools/token_contrast.py            (gui/static/app.css)
+             python3 tools/token_contrast.py --css next (gui/static/next.css)
 Import it:   from tools.token_contrast import audit  ->  list of Result rows
 
 tests/test_new_shell.py runs it over the shipped sheet, so a future token edit
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 CSS_PATH = Path(__file__).resolve().parent.parent / "gui" / "static" / "app.css"
+# the /next frame's sheet (plan Phase 4C), audited with its own base pairs
+NEXT_CSS_PATH = CSS_PATH.with_name("next.css")
 
 AA = 4.5   # WCAG AA for normal-size text; the house floor for every pair
 
@@ -58,6 +61,25 @@ PAIRS = (
     # teal review count sit on --sel, a ground set by class, not by the rule
     # that sets the text colour, so the scan below cannot find these
     ("ink", "sel"), ("sub", "sel"), ("attn", "sel"),
+)
+
+
+# The /next frame's promised pairs. It retires --busy, --amber, --work, and
+# --personal, and it adds the grounds the frame paints text on: the sidebar's
+# --hair (current nav item, its Needs you count), the toast (paper on ink),
+# and accent text on accent-soft (a chip that is on, a search match).
+NEXT_PAIRS = (
+    ("ink", "paper"), ("ink", "card"), ("ink", "inset"), ("ink", "hair"),
+    ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
+    ("accent-text", "paper"), ("accent-text", "card"), ("accent-text", "inset"),
+    ("accent-text", "accent-soft"),
+    ("acc-ink", "accent"),
+    ("ok", "ok-soft"), ("ok", "card"),
+    ("attn", "attn-soft"), ("attn", "card"), ("attn", "paper"), ("attn", "inset"),
+    ("attn", "hair"),
+    ("rec-text", "rec-soft"), ("rec-text", "card"), ("rec-text", "paper"),
+    ("ink", "sel"), ("sub", "sel"), ("attn", "sel"),
+    ("paper", "ink"),
 )
 
 
@@ -172,7 +194,7 @@ def contrast(fg: str, bg: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def audit(css_path: Path = CSS_PATH) -> list[Result]:
+def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
     """Measure the union of PAIRS and the pairs the sheet actually paints, in
     every token block. A PAIRS token that a block no longer defines is an
     error: a block that has stopped defining a token the sheet paints is a
@@ -180,12 +202,14 @@ def audit(css_path: Path = CSS_PATH) -> list[Result]:
     colour in that block -- the rule is painting something the contrast
     arithmetic has no opinion about."""
     css = Path(css_path).read_text(encoding="utf-8")
+    if pairs is None:
+        pairs = NEXT_PAIRS if Path(css_path).name == "next.css" else PAIRS
     scanned = sorted(painted_pairs(css))          # stable order, base pairs first
     rows: list[Result] = []
     for label, pattern in BLOCKS:
         tokens = read_tokens(css, pattern)
         seen: set[tuple[str, str]] = set()
-        for fg, bg in PAIRS:
+        for fg, bg in pairs:
             missing = [n for n in (fg, bg) if n not in tokens]
             if missing:
                 raise AssertionError(f"{label}: token(s) not defined: {missing}")
@@ -207,8 +231,12 @@ def audit(css_path: Path = CSS_PATH) -> list[Result]:
     return rows
 
 
-def main() -> int:
-    rows = audit()
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    # --css next audits the /next frame's sheet; the default stays app.css
+    path = NEXT_CSS_PATH if argv[:2] == ["--css", "next"] else CSS_PATH
+    print(f"{path.name}")
+    rows = audit(path)
     for r in rows:
         print(r.line())
     bad = [r for r in rows if not r.ok]

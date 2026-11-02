@@ -1062,3 +1062,171 @@ def test_under_parallel_the_stop_flag_lets_the_files_in_flight_finish(
     m = manifest.load()
     assert set(m["processed"]) == {"a.m4a", "b.m4a"}
     assert not control.finish_requested()
+
+
+def test_a_plain_run_syncs_voice_memos_again_mid_run(sandbox, monkeypatch):
+    """A memo that finishes during a long run joins that run: the re-sweep
+    before each pick calls the Voice Memos sync again (throttled)."""
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from stt import config, summarize, voicememos
+
+    src = sandbox / "source"
+    (src / "A Mtg.m4a").write_bytes(b"\x00" * 64)
+    syncs, processed = [], []
+
+    def fake_sync(dry_run=False, **k):
+        syncs.append(dry_run)
+        if len(syncs) == 2:     # the memo finished while A Mtg ran
+            d = voicememos.staging_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "Synced Memo 11032026.m4a").write_bytes(b"\x00" * 64)
+        return {"status": "ok", "staged": [], "counts": {}}
+
+    def fake_process_one(src_str, dest_str, opts):
+        p = _P(src_str)
+        processed.append(p.name)
+        return {"ok": False, "key": p.name}
+
+    monkeypatch.setattr(run_batch, "VM_RESYNC_SECONDS", 0.0)
+    monkeypatch.setattr(voicememos, "sync", fake_sync)
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "synthetic")
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(_sys, "argv", ["run_batch.py", "--source", str(src),
+                                       "--ignore-battery", "--ignore-pause"])
+    run_batch.main()
+    assert len(syncs) >= 2
+    assert processed == ["A Mtg.m4a", "Synced Memo 11032026.m4a"]
+
+
+def test_a_renamed_meeting_whose_original_stays_is_not_transcribed_again(
+        sandbox, monkeypatch):
+    """The automatic title renames a meeting folder right after the file
+    finishes. manifest.retarget fixes the manifest on disk. The run's own
+    snapshot still named the old folder, so with the original kept in the
+    watched folder the mid-run rescan saw an unprocessed file and
+    transcribed it again into a new folder, then again, in a loop."""
+    import json
+    import shutil
+    import signal
+    import sys
+    from pathlib import Path
+
+    from conftest import mfile
+    from stt import config, manifest, summarize
+
+    _drop("Kept Mtg.m4a")
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        src = Path(src_str)
+        seen.append(src.name)
+        if len(seen) > 3:
+            raise RuntimeError("re-transcribed in a loop")
+        j = mfile(src.stem, ".json")
+        j.write_text(json.dumps({"source_file": src.name, "segments": [],
+                                 "speakers": [], "words": []}))
+        mfile(src.stem, ".txt").write_text("[00:00] A: hi")
+        return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime,
+                "outputs": [str(j), str(j.with_suffix(".txt"))],
+                "summary": "1 speaker(s)", "who": "", "base": src.stem,
+                "duration_sec": 1.0, "stage_secs": {}}
+
+    def fake_summarize_one(key, base=None, track=None):
+        # the inline automatic title: move the folder and its files, then
+        # retarget the manifest on disk, as summarize.apply_auto_title does
+        old = config.meeting_file(base, ".json").parent
+        new = old.parent / "Titled Mtg"
+        shutil.move(str(old), str(new))
+        for f in list(new.iterdir()):
+            f.rename(new / ("Titled Mtg" + f.name[len(base):]))
+        manifest.retarget(old, new, base, "Titled Mtg")
+        return True
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", fake_summarize_one)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize", "--keep-original",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert seen == ["Kept Mtg.m4a"], seen
+    assert rc == 0
+    assert (config.ICLOUD_DIR / "Kept Mtg.m4a").exists()
+
+
+def test_the_end_of_run_sweep_follows_a_meeting_the_title_renamed(sandbox, monkeypatch):
+    """The inline pass titles and renames the folder. The end-of-run sweep
+    used to get the folder name from before that rename and log a false
+    FileNotFoundError. It now gets the folder's final name."""
+    import json
+
+    from conftest import mfile
+    from stt import summarize
+
+    mfile("Raw Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Raw Mtg.m4a", "segments": SPOKEN, "speakers": [], "words": []}))
+
+    def fake_suggest(base):
+        j = mfile(base, ".json")
+        d = json.loads(j.read_text())
+        d["ai_summary"] = "drafted"
+        j.write_text(json.dumps(d))
+        return {}
+
+    def fake_apply(base):
+        if base != "Raw Mtg":
+            return {"ok": True, "base": base, "skipped": "no draft title"}
+        old = mfile(base, ".json")
+        new = mfile("Titled Mtg", ".json")
+        new.write_text(old.read_text())
+        old.unlink()
+        old.parent.rmdir()
+        return {"ok": True, "base": "Titled Mtg"}
+
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", fake_suggest)
+    monkeypatch.setattr(summarize, "apply_auto_title", fake_apply)
+    track = {"base": "Raw Mtg"}
+    assert run_batch.summarize_one("Raw Mtg.m4a", "Raw Mtg", track=track) is True
+    assert track == {"base": "Titled Mtg"}
+    seen = []
+    real = run_batch.summarize_one
+    monkeypatch.setattr(run_batch, "summarize_one",
+                        lambda k, b=None, **kw: seen.append(b) or real(k, b, **kw))
+    assert run_batch.auto_summarize([("Raw Mtg.m4a", track["base"])]) == 0
+    assert seen == ["Titled Mtg"]
+
+
+def test_an_empty_run_skips_the_doctor_unless_its_report_is_a_day_old(sandbox, monkeypatch):
+    """The watch trigger starts an empty run every few minutes. Each one ran
+    the full doctor check. The check now runs after a run that processed or
+    failed a file, or when the last report is a day old or missing."""
+    import os
+    import time
+
+    from stt import config, doctor
+    calls = []
+    monkeypatch.setattr(doctor, "run_check_at_batch_end",
+                        lambda store=None: calls.append(store) or {"findings": 0})
+    rep = config.PROJECT_DIR / doctor.REPORT_PATH_NAME
+    _drive(monkeypatch, [])
+    assert len(calls) == 1            # no report yet: the check runs
+    rep.write_text("{}")
+    _drive(monkeypatch, [])
+    assert len(calls) == 1            # an empty run with a fresh report: skipped
+    _drop("New Mtg.m4a")
+    _drive(monkeypatch, [])
+    assert len(calls) == 2            # a file was processed: the check runs
+    old = time.time() - 25 * 3600
+    os.utime(rep, (old, old))
+    _drive(monkeypatch, [])
+    assert len(calls) == 3            # a day-old report: the check runs

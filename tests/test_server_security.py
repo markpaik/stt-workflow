@@ -170,12 +170,27 @@ def test_transcript_endpoint_accepts_real_base(running_server):
     assert status == 200 and body["base"] == "Legit Meeting"
 
 
-def test_audio_txt_review_edits_suggest_reject_unknown_base(running_server):
+def test_audio_txt_review_edits_reject_unknown_base(running_server):
     for path in ("/api/audio?base=../x", "/api/txt?base=../x",
-                 "/api/review?base=../x", "/api/edits?base=../x",
-                 "/api/suggest?base=../x"):
+                 "/api/review?base=../x", "/api/edits?base=../x"):
         status, _ = _get(running_server, path)
         assert status == 400, path
+
+
+def test_suggest_is_a_post_and_get_writes_nothing(running_server, monkeypatch):
+    # plan Phase 4C: generating a summary writes the .json, so GET refuses
+    # with 405 and never reaches the model, and POST gates on the base
+    from stt import summarize
+    called = []
+    monkeypatch.setattr(summarize, "suggest_title",
+                        lambda base: called.append(base) or {"title": "x"})
+    _make_meeting("Suggest Meeting")
+    status, body = _get(running_server, "/api/suggest?base=Suggest%20Meeting")
+    assert status == 405 and "error" in body and called == []
+    status, _ = _post(running_server, "/api/suggest", {"base": "../x"})
+    assert status == 400 and called == []
+    status, body = _post(running_server, "/api/suggest", {"base": "Suggest Meeting"})
+    assert status == 200 and called == ["Suggest Meeting"]
 
 
 def test_export_rename_retranscribe_reject_unknown_base(running_server):
@@ -913,6 +928,41 @@ def test_speaker_select_restores_prior_selection_on_cancel():
     assert "if(!nm){sel.selectedIndex=0;return}" not in js
 
 
+def _new_shell_js():
+    static = Path(srv.__file__).resolve().parent / "static"
+    return "\n".join((static / f).read_text(encoding="utf-8")
+                     for f in ("next.js", "next-meeting.js", "next-voice.js",
+                               "next-library.js"))
+
+
+def test_new_shell_flag_reason_is_escaped():
+    """The new shell's port of the flag-title test above: a flag code (a
+    speaker name flows into `possible:<name>`) reaches the line and the card
+    only through esc()."""
+    js = _new_shell_js()
+    assert "${esc(mFlagWhy(g))}" in js and "${esc(mFlagWhy(it))}" in js
+    assert "${mFlagWhy(" not in js
+
+
+def test_new_shell_new_person_never_falls_back_to_the_first_speaker():
+    """The new shell's port of the select-restore test above: "New person"
+    with an empty name box refuses the save (mSpkValue answers __new__ and
+    every caller refuses it), so a line is never silently given to option 0."""
+    js = _new_shell_js()
+    assert "return v?'name:'+v:'__new__';" in js
+    for fn in ("mEditSave", "mRevApply", "mRevSave", "mSplitSave", "mInsertSave"):
+        body = js[js.index("function " + fn):]
+        body = body[:body.index("\n}\n")]
+        assert "__new__" in body, fn
+    assert "selectedIndex=0" not in js
+
+
+@pytest.mark.parametrize("path", ["/", "/next", "/classic"])
+def test_every_page_route_is_origin_gated(running_server, path):
+    status, _ = _get(running_server, path, headers={"Origin": "https://evil.example.com"})
+    assert status == 403
+
+
 # ---------- /api/snippet: stale meeting reference falls back, never 400s ----------
 
 def test_snippet_with_stale_meeting_falls_back_to_search(running_server, monkeypatch):
@@ -1235,8 +1285,16 @@ def test_watch_and_nightly_toggle_independently(fake_agent):
     # staging folder (the meeting recorder's output), healing stale paths
     r = srv.write_automation(watch=True)
     d = plistlib.loads(p.read_bytes())
-    assert d["WatchPaths"] == [str(config.source_dir()), str(config.recordings_dir())]
-    assert len(reloads) == 4               # every change reloaded the agent
+    from stt import voicememos
+    assert d["WatchPaths"] == [str(config.source_dir()), str(config.recordings_dir()),
+                               str(voicememos.container_dir())]
+    # the 10-minute run that picks up a finished Voice Memos memo follows
+    # the Watch switch
+    assert d["StartInterval"] == srv.WATCH_INTERVAL
+    srv.write_automation(watch=False)
+    assert "StartInterval" not in plistlib.loads(p.read_bytes())
+    srv.write_automation(watch=True)
+    assert len(reloads) == 6               # every change reloaded the agent
 
 
 def test_setting_a_time_implies_nightly_on(fake_agent):

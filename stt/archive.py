@@ -37,6 +37,10 @@ def purge_meeting_dir(path: Path):
     mid = config.id_of(path.name, path.parent)
     shutil.rmtree(path)
     config.index_drop(mid)
+    # the transcript is gone, so its lines must not come back as hits.
+    # touch() re-adds a live meeting of the same name (an archived twin).
+    from . import search
+    search.touch(path.name)
     try:
         from . import unknowns
         unknowns.forget_meeting_refs(path.name)
@@ -98,6 +102,9 @@ def archive_meeting(base: str) -> dict:
     # store no longer holds. restore_meeting puts it back.
     config.index_drop(mid)
     manifest.retarget(old_dir, config.archive_dir() / new_base, base, new_base)
+    # search covers the live store only, as it always has
+    from . import search
+    search.touch(base)
     if new_base != base:
         # a collision renamed the folder, so every registry that keys meetings
         # BY NAME has to follow -- exactly as restore_meeting does for the
@@ -132,6 +139,8 @@ def restore_meeting(base: str) -> dict:
     # the archive in the backfill)
     config.index_set(config.id_of(new_base), new_base)
     manifest.retarget(src_dir, config.meeting_dir(new_base), base, new_base)
+    from . import search
+    search.touch(new_base)
     if new_base != base:
         from . import dupes, identify, unknowns
         try:
@@ -202,9 +211,13 @@ def delete_meeting(base: str) -> dict:
     # read source_file BEFORE the folder is gone: if the original audio still
     # sits in a watched folder, the next run will re-transcribe it — say so
     # honestly instead of letting the meeting silently reappear.
-    src_name = None
+    # source_name is the arrival name. source_file follows a rename, so it
+    # only finds a legacy meeting's original. The manifest keys below are
+    # arrival names too.
+    src_names = []
     try:
-        src_name = json.loads((target / f"{base}.json").read_text()).get("source_file")
+        d = json.loads((target / f"{base}.json").read_text())
+        src_names = [n for n in (d.get("source_name"), d.get("source_file")) if n]
     except (OSError, ValueError):
         pass
 
@@ -244,6 +257,7 @@ def delete_meeting(base: str) -> dict:
                      if any(str(o).endswith(".json") and Path(o).stem == base
                             and Path(o).parent == target
                             for o in rec.get("outputs") or [])]
+            src_names += [k for k in stale if k not in src_names]
             for k in stale:
                 m["processed"].pop(k, None)
             if stale:
@@ -252,14 +266,16 @@ def delete_meeting(base: str) -> dict:
         pass
 
     note = None
-    if src_name:
-        for folder in (config.source_dir(), config.recordings_dir()):
+    for src_name in src_names:
+        for folder in config.source_dirs():
             try:
-                if (folder / src_name).exists():
+                if (folder / Path(src_name).name).exists():
                     note = (f"the original audio '{src_name}' is still in a watched "
                             "folder — it will be re-transcribed on the next run "
                             "unless you remove it")
                     break
             except OSError:
                 pass
+        if note:
+            break
     return {"ok": True, "freed_mb": round(freed, 1), "note": note}

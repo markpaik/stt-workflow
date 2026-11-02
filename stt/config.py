@@ -304,6 +304,28 @@ def recordings_dir() -> Path:
     return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
 
 
+def source_dirs(source=None) -> list:
+    """Every folder the batch takes source audio from, in THE resolution
+    order: the primary source (iCloud), the recorder's staging folder, and
+    the Voice Memos sync's staging copies. The batch, the panel's queue, the
+    menu bar, the doctor and the archive note all read this one list, so a
+    file the batch will transcribe is never invisible to the others. The
+    Voice Memos library itself is never a source. `source` overrides the
+    primary folder (run_batch --source)."""
+    out = [Path(source) if source is not None else source_dir()]
+    rec = recordings_dir()
+    if rec not in out:
+        out.append(rec)
+    try:
+        from . import voicememos
+        vm = voicememos.staging_dir()
+        if vm not in out:
+            out.append(vm)
+    except Exception:
+        pass
+    return out
+
+
 def mic_speaker() -> str | None:
     """Who "me" is on the meeting recorder's mic channel — read fresh from
     stt.env so the menu-bar recorder (launched by launchd without stt.env in
@@ -389,6 +411,13 @@ def meeting_audio(base: str, dest_dir=None):
 # one index update; a lock file, a registry reference or a queued job can name
 # a meeting that is being renamed underneath it and still land on the right one.
 MEETINGS_INDEX_PATH = PROJECT_DIR / "meetings_index.json"
+
+# The full-text index behind /api/search (stt/search.py). SQLite FTS5, mode
+# 600, rebuildable from the meeting jsons at any time, so losing it loses
+# nothing. It holds transcript text, so it sits under PROJECT_DIR beside the
+# manifest (STT_HOME redirects it for tests and demos) and the root rule
+# /*.db* keeps it, and any -journal, -wal or -shm file, out of git.
+SEARCH_DB = PROJECT_DIR / "search.db"
 
 # "meeting_id" as it appears in a json's head. A transcript could in principle
 # SAY the words "meeting_id": the negative lookbehind makes the escaped quotes
