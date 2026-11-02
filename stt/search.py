@@ -3,11 +3,16 @@
 Two paths, one result shape ({query, hits, total}, each hit {base, index,
 start, who, snippet}, newest meeting first):
 
-1. An SQLite FTS5 index at config.SEARCH_DB (mode 600). Tokens go through
-   `porter unicode61`, so "meeting" finds "meetings" and "cafe" finds "café",
-   and the last word of the query matches as a prefix ("pano" finds
-   "panorama"). The words of a query must sit together as a phrase in one
-   transcript line, as the substring scan required.
+1. An SQLite FTS5 index at config.SEARCH_DB (mode 600). Each line is
+   indexed twice. `segs` stems with porter, so "meeting" finds "meetings"
+   and "cafe" finds "café". `segs_raw` keeps whole words (no stemming), and
+   it answers the last word of the query as a prefix ("pano" finds
+   "panorama", "attendan" finds "attendance"). Porter would stem a part-typed
+   word, so a prefix on `segs` hides lines while the user types. A query
+   matches a line when either table matches. A last word under 3 characters
+   is not a prefix ("ai?" does not find "air"). The words of a query must
+   sit together as a phrase in one transcript line, as the substring scan
+   required.
 2. The original in-memory substring scan, as the fallback. It runs when FTS
    finds nothing (token search cannot match mid-word, so "orama" only ever
    finds "panorama" this way), when the query has no word characters, and
@@ -37,8 +42,10 @@ from pathlib import Path
 
 from . import config, dates, output
 
-SCHEMA = "1"
+SCHEMA = "2"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
+_RAW_TOKENIZE = "unicode61 remove_diacritics 2"
+_PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
 # a line's FTS rowid is file_id * _ROW + its segment index, so one meeting's
 # rows are a rowid RANGE: dropping a meeting is a range delete, which FTS5
 # serves from its rowid b-tree instead of scanning every row
@@ -106,6 +113,10 @@ def _schema(conn):
             size INTEGER NOT NULL);
         CREATE VIRTUAL TABLE IF NOT EXISTS segs USING fts5(
             text, start UNINDEXED, who UNINDEXED, tokenize='{_TOKENIZE}');
+        -- the same lines, unstemmed, for the last-word prefix. Contentless:
+        -- the text is read from segs by rowid, so it is not stored twice
+        CREATE VIRTUAL TABLE IF NOT EXISTS segs_raw USING fts5(
+            text, content='', contentless_delete=1, tokenize='{_RAW_TOKENIZE}');
         CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
             title, summary, tokenize='{_TOKENIZE}');
     """)
@@ -119,6 +130,7 @@ def _schema(conn):
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute("DELETE FROM segs")
+        conn.execute("DELETE FROM segs_raw")
         conn.execute("DELETE FROM docs")
         conn.execute("DELETE FROM files")
         conn.executemany("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
@@ -142,28 +154,38 @@ def _summary_text(d) -> str:
 def _read(base: str, jpath: Path):
     """(lines, title, summary) for one meeting json, or None if it cannot be
     read right now. Lines are (index, start, who, text), blank lines skipped,
-    the label as the transcript shows it (output.line_label)."""
+    the label as the transcript shows it (output.line_label).
+
+    A json that parses but has a shape this code cannot read (a number where
+    text belongs, a bad speakers list) gives no lines, as the scan does, so
+    one bad meeting never fails the sync for the whole store. It is still
+    recorded, with its mtime and size, so it is not re-read on every query."""
     try:
         d = json.loads(jpath.read_text())
     except (OSError, ValueError):
-        return None
-    if not isinstance(d, dict):
-        return None
-    roster = output.roster_labels(d.get("speakers", []))
-    lines = []
-    for i, s in enumerate(d.get("segments") or []):
-        if not isinstance(s, dict):
-            continue
-        text = s.get("text") or ""
-        if text.strip():
-            lines.append((i, s.get("start", 0.0), output.line_label(s, roster), text))
-    title = d.get("title") or dates.title_of(base)
-    return lines, title, _summary_text(d)
+        return None             # missing or half written: try again next sync
+    try:
+        if not isinstance(d, dict):
+            raise TypeError("not a json object")
+        roster = output.roster_labels(d.get("speakers", []))
+        lines = []
+        for i, s in enumerate(d.get("segments") or []):
+            if not isinstance(s, dict):
+                continue
+            text = s.get("text") or ""
+            if text.strip():
+                lines.append((i, s.get("start", 0.0), output.line_label(s, roster), text))
+        title = d.get("title") or dates.title_of(base)
+        return lines, title, _summary_text(d)
+    except Exception as e:
+        _warn(f"bad:{base}", f"{base}: transcript not indexed ({type(e).__name__})")
+        return [], dates.title_of(base), ""
 
 
 def _drop(conn, fid: int):
     lo = fid * _ROW
     conn.execute("DELETE FROM segs WHERE rowid >= ? AND rowid < ?", (lo, lo + _ROW))
+    conn.execute("DELETE FROM segs_raw WHERE rowid >= ? AND rowid < ?", (lo, lo + _ROW))
     conn.execute("DELETE FROM docs WHERE rowid = ?", (fid,))
 
 
@@ -187,9 +209,12 @@ def _index_one(conn, base: str, mtime: float, size: int) -> bool:
     else:
         fid = conn.execute("INSERT INTO files(base, mtime, size) VALUES (?, ?, ?)",
                            (base, mtime, size)).lastrowid
+    rows = [(fid * _ROW + i, text, start, who)
+            for i, start, who, text in lines if i < _ROW]
     conn.executemany("INSERT INTO segs(rowid, text, start, who) VALUES (?, ?, ?, ?)",
-                     [(fid * _ROW + i, text, start, who)
-                      for i, start, who, text in lines if i < _ROW])
+                     rows)
+    conn.executemany("INSERT INTO segs_raw(rowid, text) VALUES (?, ?)",
+                     [(r[0], r[1]) for r in rows])
     conn.execute("INSERT INTO docs(rowid, title, summary) VALUES (?, ?, ?)",
                  (fid, title, summary))
     return True
@@ -307,13 +332,18 @@ def touch(*bases) -> None:
 # ---------------------------------------------------------------- querying ---
 
 def _match_expr(q: str):
-    """An FTS5 phrase for the query: its words in order, the last one a
-    prefix. None when the query has no word characters. Every token is \\w
-    only, so nothing in it can break out of the quotes."""
+    """FTS5 phrases for the query: (stemmed, prefix, toks). The stemmed phrase
+    is the words in order, for `segs`. The prefix phrase is the same words
+    with the last one a prefix, for the unstemmed `segs_raw`. A last word
+    under _PREFIX_MIN characters is matched whole. (None, None, []) when the
+    query has no word characters. Every token is \\w only, so nothing in it
+    can break out of the quotes."""
     toks = re.findall(r"\w+", q)
     if not toks:
-        return None, []
-    return '"' + " ".join(toks) + '"*', toks
+        return None, None, []
+    phrase = '"' + " ".join(toks) + '"'
+    star = "*" if len(toks[-1]) >= _PREFIX_MIN else ""
+    return phrase, phrase + star, toks
 
 
 def _snippet(text: str, q: str, toks) -> str:
@@ -337,22 +367,29 @@ def _snippet(text: str, q: str, toks) -> str:
     return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
 
 
+_HITS = """WITH hit(id) AS (
+                SELECT rowid FROM segs WHERE segs MATCH ?
+                UNION
+                SELECT rowid FROM segs_raw WHERE segs_raw MATCH ?)"""
+
+
 def _fts(q: str, limit: int):
-    expr, toks = _match_expr(q)
-    if expr is None:
+    stem, prefix, toks = _match_expr(q)
+    if stem is None:
         return None
     with _lock:
         conn = _open()
         try:
             _sync(conn)
-            total = conn.execute("SELECT count(*) FROM segs WHERE segs MATCH ?",
-                                 (expr,)).fetchone()[0]
+            total = conn.execute(f"{_HITS} SELECT count(*) FROM hit",
+                                 (stem, prefix)).fetchone()[0]
             rows = conn.execute(
-                f"""SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
-                    FROM segs s JOIN files f ON f.id = s.rowid / {_ROW}
-                    WHERE segs MATCH ?
+                f"""{_HITS}
+                    SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
+                    FROM hit h JOIN segs s ON s.rowid = h.id
+                    JOIN files f ON f.id = h.id / {_ROW}
                     ORDER BY f.mtime DESC, f.base, s.rowid
-                    LIMIT ?""", (expr, limit)).fetchall() if total else []
+                    LIMIT ?""", (stem, prefix, limit)).fetchall() if total else []
         finally:
             conn.close()
             _secure(db_path())
@@ -396,7 +433,7 @@ def meetings(q: str, limit: int = 20) -> list:
     [{base, title}]. Not behind /api/search, whose line-level shape the page
     depends on. Empty when the index cannot answer."""
     q = (q or "").strip().lower()
-    expr, _ = _match_expr(q)
+    _, expr, _ = _match_expr(q)
     if len(q) < 3 or expr is None:
         return []
     try:

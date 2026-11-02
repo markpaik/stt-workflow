@@ -270,3 +270,70 @@ def test_meetings_matches_title_and_summary(sandbox):
     assert search.meetings("ops sync")[0]["base"] == "Ops Sync 03032026"
     # a summary match is not a transcript line, so /api/search does not list it
     assert search.query("substitute pool")["total"] == 0
+
+
+# ---------- type-ahead, malformed jsons, short last words ----------
+
+def test_part_typed_word_finds_the_whole_word(sandbox, monkeypatch):
+    """Porter stems a part-typed word, so "attendan" alone would only find
+    words that keep those letters after stemming. The unstemmed table answers
+    the prefix, so both lines come back while the user is still typing."""
+    _mk("Mtg A 03052026", ["Daily attendance is up this month."], mtime=1_800_000_000)
+    _mk("Mtg B 03062026", ["The attendant opens the lot at seven."], mtime=1_800_000_100)
+    _mk("Mtg C 03092026", ["Meeting notes go out on Friday."], mtime=1_800_000_200)
+    _mk("Mtg D 03102026", ["The old meetinghouse is for sale."], mtime=1_800_000_300)
+
+    def no_scan(*a, **k):
+        raise AssertionError("the index must answer this query, not the scan")
+    monkeypatch.setattr(search, "_scan", no_scan)
+    r = search.query("attendan")
+    assert r["total"] == 2
+    assert [h["base"] for h in r["hits"]] == ["Mtg B 03062026", "Mtg A 03052026"]
+    r = search.query("meetin")
+    assert {h["base"] for h in r["hits"]} == {"Mtg C 03092026", "Mtg D 03102026"}
+    # a whole word still finds its other forms through the stemmed table
+    assert "Mtg C 03092026" in {h["base"] for h in search.query("meetings")["hits"]}
+
+
+def test_short_last_word_is_not_a_prefix(sandbox):
+    _mk("Mtg A 03052026", ["The air handler failed again."], mtime=1_800_000_000)
+    _mk("Mtg B 03062026", ["We tried the AI tutor pilot."], mtime=1_800_000_100)
+    _mk("Mtg C 03092026", ["Most code here is c++ and some is cobol."],
+        mtime=1_800_000_200)
+    r = search.query("ai?")
+    assert [h["base"] for h in r["hits"]] == ["Mtg B 03062026"]
+    r = search.query("c++")
+    assert [h["base"] for h in r["hits"]] == ["Mtg C 03092026"]
+    assert r["total"] == 1
+    # three letters or more still match as a prefix
+    assert search.query("han")["total"] == 1
+
+
+@pytest.mark.parametrize("bad", [
+    {"segments": [{"start": 0.0, "speaker": "SPEAKER_00", "text": 12345}]},
+    {"speakers": "not a list"},
+    {"segments": [{"start": 0.0, "speaker": ["SPEAKER_00"], "text": "hello there"}]},
+    ["not", "an", "object"],
+], ids=["int-text", "str-speakers", "list-speaker", "list-root"])
+def test_malformed_json_does_not_disable_the_index(sandbox, bad):
+    _mk("Good 03052026", ["The capital reserve forecast drops."], mtime=1_800_000_000)
+    j = mfile("Bad 03062026", ".json")
+    if isinstance(bad, dict):
+        d = {"speakers": [], "segments": []}
+        d.update(bad)
+        bad = d
+    j.write_text(json.dumps(bad))
+    r = search.rebuild()
+    assert r["meetings"] == 2                       # both recorded, the bad one empty
+    assert _indexed() == {"Good 03052026", "Bad 03062026"}
+    q = search.query("capital reserve")
+    assert q["total"] == 1 and q["hits"][0]["base"] == "Good 03052026"
+    # the bad file is not read again until it changes
+    calls = []
+    real = search._read
+    search._read = lambda *a: calls.append(a) or real(*a)
+    try:
+        search.query("capital reserve")
+    finally:
+        search._read = real
+    assert calls == []
