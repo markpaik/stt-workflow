@@ -59,8 +59,10 @@ write_batch_plist() {
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$BASE/logs/stt.out.log</string>
   <key>StandardErrorPath</key><string>$BASE/logs/stt.err.log</string>
-  <key>ProcessType</key><string>Background</string>
-  <key>LowPriorityIO</key><true/>
+  <!-- No ProcessType or LowPriorityIO: a Nov 2026 A/B on one ~19-minute file
+       under launchd measured speaker separation about 2.3x slower with them
+       (1423 s and 1447 s) than without (627 s). Nice=5 alone keeps the
+       foreground responsive. -->
   <key>Nice</key><integer>5</integer>
 </dict>
 </plist>
