@@ -1204,3 +1204,29 @@ def test_the_end_of_run_sweep_follows_a_meeting_the_title_renamed(sandbox, monke
                         lambda k, b=None, **kw: seen.append(b) or real(k, b, **kw))
     assert run_batch.auto_summarize([("Raw Mtg.m4a", track["base"])]) == 0
     assert seen == ["Titled Mtg"]
+
+
+def test_an_empty_run_skips_the_doctor_unless_its_report_is_a_day_old(sandbox, monkeypatch):
+    """The watch trigger starts an empty run every few minutes. Each one ran
+    the full doctor check. The check now runs after a run that processed or
+    failed a file, or when the last report is a day old or missing."""
+    import os
+    import time
+
+    from stt import config, doctor
+    calls = []
+    monkeypatch.setattr(doctor, "run_check_at_batch_end",
+                        lambda store=None: calls.append(store) or {"findings": 0})
+    rep = config.PROJECT_DIR / doctor.REPORT_PATH_NAME
+    _drive(monkeypatch, [])
+    assert len(calls) == 1            # no report yet: the check runs
+    rep.write_text("{}")
+    _drive(monkeypatch, [])
+    assert len(calls) == 1            # an empty run with a fresh report: skipped
+    _drop("New Mtg.m4a")
+    _drive(monkeypatch, [])
+    assert len(calls) == 2            # a file was processed: the check runs
+    old = time.time() - 25 * 3600
+    os.utime(rep, (old, old))
+    _drive(monkeypatch, [])
+    assert len(calls) == 3            # a day-old report: the check runs

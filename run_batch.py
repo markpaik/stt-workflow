@@ -226,6 +226,24 @@ def _auto_title(base) -> str:
     return base
 
 
+DOCTOR_EVERY_SECONDS = 24 * 3600
+
+
+def doctor_due(processed: int, failed: int) -> bool:
+    """True when the end-of-run doctor check should run: a file finished or
+    failed this run, or the last report is a day old or missing. The watch
+    trigger starts an empty run every few minutes, and a full store check on
+    each of them is wasted work."""
+    if processed or failed:
+        return True
+    from stt import doctor
+    try:
+        age = time.time() - (config.PROJECT_DIR / doctor.REPORT_PATH_NAME).stat().st_mtime
+    except OSError:
+        return True
+    return age >= DOCTOR_EVERY_SECONDS
+
+
 def record_review_metrics() -> bool:
     """Append today's review counts (tools/review_metrics.py) once a day, at
     the end of a run. Counts only, never a title. A failure here never fails
@@ -990,11 +1008,14 @@ def main():
     if not args.dry_run:
         record_review_metrics()
         # read-only store and registry check; counts (no titles) go to
-        # doctor.json for the panel. Never fails the run.
-        from stt import doctor
-        dr = doctor.run_check_at_batch_end(dest)
-        if dr.get("error"):
-            print(f"  (doctor check skipped: {dr['error']})", file=sys.stderr, flush=True)
+        # doctor.json for the panel. Only after a run that did work, or once
+        # a day (doctor_due). Never fails the run.
+        if doctor_due(processed, failed):
+            from stt import doctor
+            dr = doctor.run_check_at_batch_end(dest)
+            if dr.get("error"):
+                print(f"  (doctor check skipped: {dr['error']})",
+                      file=sys.stderr, flush=True)
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
     if finish["asked"]:
         control.clear_finish()  # honored: the next run starts normally
