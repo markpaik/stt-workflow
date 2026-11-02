@@ -7,12 +7,18 @@ fails, keep search and per-meeting Ask, and stop.
 
 This tool builds a synthetic store (12 meetings, filler talk, 25 planted
 facts at known seconds, some near the end of a long meeting), asks 25
-known-answer questions and 6 questions the store cannot answer, and scores:
+known-answer questions and 12 questions the store cannot answer, and scores:
 
 - answered: the expected value appears in the answer;
 - working citation: a citation names the fact's meeting, that meeting is
   live, and the cited second is within CITE_SLACK seconds of the fact line;
 - declined: a nothing-found question gets the nothing-found answer.
+
+Six nothing-found questions share no topic with the store, so retrieval
+finds little or nothing and the model is rarely called. The other six are
+NEAR MISSES: each shares topic words with a planted fact (the same reserve,
+another campus) but the store cannot answer it. Retrieval returns the
+planted fact, so these measure whether the model itself declines.
 
 It also records the p90 answer time. It writes only inside STT_HOME, and it
 refuses to run without STT_HOME or with a home that holds real data.
@@ -142,6 +148,15 @@ NOT_FOUND = [
     "Which vendor supplies the vending machines?",
     "How many tickets were sold for the gala?",
 ]
+# near misses: retrieval finds a planted fact, but it answers another question
+NEAR_MISS = [
+    "How much is the capital reserve for the south campus gym?",
+    "When is the boiler replacement at the main building?",
+    "Which stop does route twenty add?",
+    "How many substitute teachers do we need before winter break?",
+    "Who will lead the parent training?",
+    "What time does the enrollment dashboard refresh?",
+]
 
 
 # ------------------------------------------------------------------- build ---
@@ -199,7 +214,7 @@ def build(home: Path) -> dict:
     from stt import search
     search.rebuild()
     return {"meetings": n, "facts": sum(len(m[5]) for m in MEETINGS),
-            "not_found": len(NOT_FOUND)}
+            "not_found": len(NOT_FOUND) + len(NEAR_MISS)}
 
 
 def questions() -> list:
@@ -208,6 +223,7 @@ def questions() -> list:
         for li, _, _, q, want in facts:
             out.append({"q": q, "base": base, "start": li * STEP, "want": want})
     out += [{"q": q, "base": None} for q in NOT_FOUND]
+    out += [{"q": q, "base": None, "near_miss": True} for q in NEAR_MISS]
     return out
 
 
@@ -215,7 +231,9 @@ def questions() -> list:
 
 def oracle(prompt: str) -> str:
     """A stand-in for the model: the excerpt line sharing the most content
-    words with the question, cited, or NOT FOUND under two shared words."""
+    words with the question, cited. NOT FOUND when that line shares under two
+    words, misses more than one of the question's words, or holds under 75%
+    of them (a near miss names a campus or a route the line does not)."""
     from stt import ask
     q = prompt.rsplit("QUESTION:", 1)[-1].strip()
     want = set(ask.terms(q))
@@ -230,7 +248,7 @@ def oracle(prompt: str) -> str:
         s = len(want & words)
         if sid and s > score:
             best, score = (sid, line.split(": ", 1)[-1]), s
-    if not best or score < 2:
+    if not best or score < 2 or len(want) - score > 1 or score < 0.75 * len(want):
         return "NOT FOUND"
     return f"{best[1]} [{best[0]}]"
 
@@ -249,6 +267,7 @@ def evaluate(generate=None) -> dict:
         row = {"q": item["q"], "seconds": round(dt, 1)}
         if item["base"] is None:
             row["kind"] = "nothing_found"
+            row["near_miss"] = bool(item.get("near_miss"))
             row["declined"] = bool(r.get("nothing_found"))
             row["pass"] = row["declined"]
         else:
@@ -268,6 +287,8 @@ def evaluate(generate=None) -> dict:
     return {"known": len(known), "known_pass": sum(r["pass"] for r in known),
             "known_rate": round(rate, 3),
             "nothing_found": len(nf), "declined": sum(r["pass"] for r in nf),
+            "near_miss": sum(r["near_miss"] for r in nf),
+            "near_miss_declined": sum(r["pass"] for r in nf if r["near_miss"]),
             "p90_seconds": round(p90, 1),
             "gate": rate >= GATE and all(r["pass"] for r in nf),
             "rows": rows}

@@ -23,6 +23,12 @@ Saved threads live in PROJECT_DIR/ask_threads/<id>.json (folder 700, files
 Scope: all recordings, one computed group, or the last N days. A strict
 meeting never reaches a cloud assistant: with a cloud backend selected, its
 passages are dropped and the answer says how many meetings were left out.
+The thread history follows the same rule: an earlier exchange that cites a
+strict meeting, or a meeting that no longer resolves, stays out of a cloud
+prompt.
+
+A reply that stops inside the model's reasoning (no closing </think>) is an
+error, not an answer, and the exchange is not saved.
 
 Busy: the local model takes one request at a time (summarize.LLMBusy after
 a short wait). The caller reports it and keeps the typed question.
@@ -46,6 +52,8 @@ CANDIDATES = 60         # ranked lines read to build the passages
 MAX_TERMS = 12
 HISTORY = 3             # earlier exchanges in a thread sent as context
 NOT_FOUND_TEXT = "I did not find this in your meetings."
+OUT_OF_ROOM_TEXT = ("The assistant ran out of room reasoning about this one. "
+                    "Try a more specific question.")
 EMPTY_TEXT = "Ask starts after the first meeting finishes."
 _THREAD_ID = re.compile(r"^[0-9a-f]{12}$")
 
@@ -164,15 +172,26 @@ def prompt(question: str, ps: list, history=None) -> str:
 _CITE = re.compile(r"\[\s*(S\d+(?:\s*[,;]\s*S\d+)*)\s*\]", re.I)
 
 
+_ENDS_NOT_FOUND = re.compile(r"(?:^|[.!?:;\n])\s*\**\s*NOT\s+FOUND\s*\**[.!]?\s*$", re.I)
+
+
 def parse_answer(text: str, ps: list) -> dict:
-    """{nothing_found, answer, citations}. Each [S#] becomes a numbered
-    citation [1], [2] in order of first use. Ids the passages do not hold
-    are dropped. An answer with no valid citation counts as nothing found."""
+    """{nothing_found, answer, citations}, or {error} when the reply stopped
+    inside the model's reasoning. Each [S#] becomes a numbered citation [1],
+    [2] in order of first use. Ids the passages do not hold are dropped. An
+    answer with no valid citation, or one whose last sentence is NOT FOUND,
+    counts as nothing found."""
     text = (text or "").strip()
-    if "<think>" in text:
+    if "<think>" in text or "</think>" in text:
+        # generation can stop mid-reasoning: the closing tag never arrives,
+        # _generate's strip does not match, and the chain of thought (with
+        # any [S#] it names) must never pass for an answer
         text = text.split("</think>")[-1].strip()
+        if not text or "<think>" in text:
+            return {"error": OUT_OF_ROOM_TEXT}
     flat = re.sub(r"[^a-z ]", "", text.lower()).strip()
-    if not text or flat.startswith("not found") or flat == "notfound":
+    if (not text or flat.startswith("not found") or flat == "notfound"
+            or _ENDS_NOT_FOUND.search(text)):
         return {"nothing_found": True, "answer": NOT_FOUND_TEXT, "citations": []}
     by_sid = {p["sid"].upper(): p for p in ps}
     order = []
@@ -211,6 +230,26 @@ def closest(ps: list, n: int = 5) -> list:
 
 # ------------------------------------------------------------------- answer ---
 
+def _cloud_safe_history(history) -> tuple:
+    """(history, dropped) for a cloud prompt: an exchange stays only when
+    every citation it stored resolves to a live meeting that is not strict.
+    An exchange with no stored citations cannot be checked, so it stays out."""
+    keep, dropped = [], 0
+    for h in history or []:
+        cites = h.get("citations") if isinstance(h, dict) else None
+        ok = bool(cites)
+        for c in cites or []:
+            base = _resolve(c).get("base") if isinstance(c, dict) else None
+            if not base or summarize._strict_meeting(base):
+                ok = False
+                break
+        if ok:
+            keep.append(h)
+        else:
+            dropped += 1
+    return keep, dropped
+
+
 def ask(question: str, scope=None, history=None, generate=None) -> dict:
     """Answer one question across the meetings in `scope`.
 
@@ -231,13 +270,15 @@ def ask(question: str, scope=None, history=None, generate=None) -> dict:
     ps = passages(question, bases)
     left_out = 0
     if backend != "local" and generate is None:
-        # a strict meeting never leaves this Mac: drop its excerpts
+        # a strict meeting never leaves this Mac: drop its excerpts, and any
+        # earlier answer in the thread that came from one
         strict = {p["base"] for p in ps if summarize._strict_meeting(p["base"])}
         if strict:
             left_out = len(strict)
             ps = [p for p in ps if p["base"] not in strict]
             for i, p in enumerate(ps, 1):
                 p["sid"] = f"S{i}"
+        history, _ = _cloud_safe_history(history)
     base_out = {"ok": True, "scope_label": label, "left_out": left_out}
     if not ps:
         return {**base_out, "nothing_found": True, "answer": NOT_FOUND_TEXT,
@@ -250,6 +291,8 @@ def ask(question: str, scope=None, history=None, generate=None) -> dict:
         raw = summarize._generate(p, max_tokens=2500, lock_timeout=15.0,
                                   backend=backend, think=True)
     r = parse_answer(raw, ps)
+    if r.get("error"):
+        return {"ok": False, "error": r["error"]}
     return {**base_out, **r, "hits": closest(ps) if r["nothing_found"] else [],
             "elapsed_sec": round(time.monotonic() - t0, 1)}
 
@@ -336,8 +379,10 @@ def history_of(tid) -> list:
     d = _read(tid) if valid_id(tid) else None
     if not d:
         return []
-    return [{"q": m.get("q", ""), "a": m.get("a", "")} for m in d.get("messages", [])
-            if not m.get("nothing_found")]
+    return [{"q": m.get("q", ""), "a": m.get("a", ""),
+             "citations": [{"meeting_id": c.get("meeting_id"), "base": c.get("base")}
+                           for c in m.get("citations") or [] if isinstance(c, dict)]}
+            for m in d.get("messages", []) if not m.get("nothing_found")]
 
 
 def _resolve(c: dict) -> dict:

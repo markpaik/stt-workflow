@@ -150,6 +150,70 @@ def test_a_cloud_backend_never_receives_a_strict_meeting(sandbox, monkeypatch):
     assert "secret" not in p and "public" in p
 
 
+def test_a_reply_cut_off_inside_its_reasoning_is_an_error_not_an_answer(sandbox):
+    """QA 4F #1: max_tokens can end the reply before </think>. The reasoning
+    names [S1], and it must never pass for a cited answer."""
+    _world()
+    ps = ask.passages("roof reserve")
+    cut = "<think>\nThe user asks about the reserve. Excerpt [S1] mentions it. Let me check whether"
+    r = ask.parse_answer(cut, ps)
+    assert r == {"error": ask.OUT_OF_ROOM_TEXT}
+    assert ask.parse_answer("<think>all of it</think>", ps) == {"error": ask.OUT_OF_ROOM_TEXT}
+    r = ask.ask("How big is the roof reserve?", generate=lambda p: cut)
+    assert r["ok"] is False and "ran out of room" in r["error"]
+    assert "citations" not in r
+
+
+def test_a_closing_not_found_makes_the_answer_nothing_found(sandbox):
+    """QA 4F #5: a reply that cites, then ends in NOT FOUND, is not an answer."""
+    _world()
+    ps = ask.passages("roof reserve")
+    for txt in ("The excerpts mention [S1] a reserve, but not the vote. NOT FOUND",
+                "The reserve is named [S1].\nNOT FOUND.",
+                "The reserve is named [S1]. **NOT FOUND**"):
+        r = ask.parse_answer(txt, ps)
+        assert r["nothing_found"] and r["citations"] == [], txt
+    # "not found" inside a sentence is still an answer
+    r = ask.parse_answer("The reserve was not found in the audit [S1].", ps)
+    assert not r["nothing_found"]
+
+
+def test_a_cloud_backend_never_receives_a_strict_answer_from_the_thread(sandbox, monkeypatch):
+    """QA 4F #2: an earlier local answer drawn from a strict meeting stays
+    out of a cloud follow-up. A citation that no longer resolves counts as
+    strict."""
+    _mk("Strict Review 10032026", FILL + ["The settlement figure is ninety thousand."] + FILL,
+        mid="m-strict", strict=True)
+    _mk("Open Plan 10042026", FILL + ["The settlement plan is public."] + FILL,
+        mid="m-open", day="2026-10-04")
+    r = ask.ask("settlement figure",
+                generate=lambda p: "Ninety thousand [S1]" if "ninety" in p else "NOT FOUND")
+    assert r["citations"][0]["meeting_id"] == "m-strict"
+    t = ask.save_message(None, {"kind": "all"}, r["scope_label"], "settlement figure", r)
+    r = ask.ask("settlement plan", generate=lambda p: "It is public [S1]")
+    t = ask.save_message(t["id"], {"kind": "all"}, r["scope_label"], "settlement plan", r)
+    hist = [{"q": "an exchange from a purged meeting", "a": "Gone answer",
+             "citations": [{"meeting_id": "m-purged", "base": "Purged 10012026"}]},
+            {"q": "no citations stored", "a": "Bare answer"}] + ask.history_of(t["id"])
+    monkeypatch.setattr(summarize, "llm_backend", lambda: "anthropic")
+    sent = []
+
+    def fake(prompt, **k):
+        sent.append(prompt)
+        return "NOT FOUND"
+    monkeypatch.setattr(summarize, "_generate", fake)
+    ask.ask("settlement plan again", history=hist)
+    (p,) = sent
+    assert "Ninety thousand" not in p and "ninety" not in p.lower()
+    assert "Gone answer" not in p and "Bare answer" not in p
+    assert "It is public" in p                   # an open meeting's answer stays
+    # the local model still sees the whole thread
+    monkeypatch.setattr(summarize, "llm_backend", lambda: "local")
+    sent.clear()
+    ask.ask("settlement plan again", history=hist)
+    assert "Ninety thousand" in sent[0]
+
+
 # --------------------------------------------------------------- threads ---
 
 def test_threads_save_private_and_survive_a_rename(sandbox):
@@ -227,6 +291,11 @@ def test_api_ask_library_busy_and_missing_model(running_server, monkeypatch):
     st, r = _post(running_server, "/api/ask_library", {"question": "roof reserve?"})
     assert st == 503 and r["busy"] is True and "stays here" in r["error"]
     assert ask.list_threads() == []          # nothing saved for a busy model
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: "<think>Excerpt [S1] has the reserve, but")
+    st, r = _post(running_server, "/api/ask_library", {"question": "roof reserve?"})
+    assert st == 400 and "ran out of room" in r["error"]
+    assert ask.list_threads() == []          # nor for a reply cut off mid-reasoning
     st, r = _post(running_server, "/api/ask_library", {"question": "  "})
     assert st == 400
 
@@ -255,8 +324,10 @@ def test_the_stop_rule_passes_on_the_synthetic_store_with_the_stand_in(sandbox, 
     same evaluation with the local model."""
     ask_eval.build(tmp_path / "home")
     r = ask_eval.evaluate(ask_eval.oracle)
-    assert r["known"] == 25 and r["nothing_found"] == 6
-    assert r["declined"] == 6
+    assert r["known"] == 25 and r["nothing_found"] == 12
+    assert r["declined"] == 12
+    # the near misses reach the model: retrieval finds a planted fact
+    assert r["near_miss"] == 6 and r["near_miss_declined"] == 6
     assert r["known_rate"] >= ask_eval.GATE, [x for x in r["rows"] if not x["pass"]]
     assert r["gate"] is True
 
