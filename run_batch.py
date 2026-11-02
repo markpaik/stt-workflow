@@ -161,7 +161,7 @@ def spawn_chained_job(job: dict):
         subprocess.Popen(args, start_new_session=True, stdout=log, stderr=log)
 
 
-def summarize_one(key, base=None) -> bool:
+def summarize_one(key, base=None, track=None) -> bool:
     """Draft the AI title/summary for ONE just-finished meeting (local Qwen
     via .venv-llm). Runs right after the file completes, not at end-of-run:
     with a long backlog the end is hours away, and a Stop before it would
@@ -169,7 +169,9 @@ def summarize_one(key, base=None) -> bool:
     the LLM venv isn't installed or the meeting already has a summary; a
     failure never breaks the run (the end-of-run sweep retries it).
     `base` is the RESOLVED meeting folder — date-stamped for plain-named
-    sources, so it can differ from the source stem."""
+    sources, so it can differ from the source stem. The automatic title can
+    rename that folder; a `track` dict gets the folder's final name under
+    "base", so a later retry never reads the old, now-missing folder."""
     import json as _json
 
     from stt import status as st, summarize
@@ -183,7 +185,9 @@ def summarize_one(key, base=None) -> bool:
             # e.g. a re-queued file that was already summarized. Its automatic
             # title may still be owed (an earlier attempt failed), so the
             # title chain's last step runs here too. It is a no-op once titled.
-            _auto_title(base)
+            base = _auto_title(base)
+            if track is not None:
+                track["base"] = base
             return False
         if not summarize.has_speech(base):
             # 0 segments: the model would invent a meeting. The pipeline
@@ -201,20 +205,25 @@ def summarize_one(key, base=None) -> bool:
     # the title chain's last steps, once the stage has cleared (a meeting in
     # a live stage refuses a folder move): a meeting with no typed title
     # takes the speakers plus topic, else the model's draft
-    _auto_title(base)
+    base = _auto_title(base)
+    if track is not None:
+        track["base"] = base
     return done
 
 
-def _auto_title(base) -> None:
-    """summarize.apply_auto_title for one meeting. A failure is printed and
-    never breaks the run."""
+def _auto_title(base) -> str:
+    """summarize.apply_auto_title for one meeting. Returns the meeting's
+    folder name afterwards (the new one when the title renamed it). A failure
+    is printed and never breaks the run."""
     from stt import summarize
     try:
         r = summarize.apply_auto_title(base)
         if r.get("ok") and r.get("base") and r["base"] != base:
             print(f"   titled: {r['base']}", flush=True)
+            return r["base"]
     except Exception as e:
         print(f"   automatic title skipped for {base}: {e}", file=sys.stderr, flush=True)
+    return base
 
 
 def record_review_metrics() -> bool:
@@ -775,12 +784,16 @@ def main():
                          rates.current_asr_key(), n_active=n_active)
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
-            succeeded.append((res["key"], res.get("base")))
             processed += 1
             # the description lands NOW, while the next file transcribes —
             # not hours later when the whole backlog ends (and never lost to
-            # a Stop pressed before then)
-            summarize_one(res["key"], res.get("base"))
+            # a Stop pressed before then). The automatic title may rename the
+            # folder, so the end-of-run sweep gets the folder's final name.
+            track = {"base": res.get("base")}
+            try:
+                summarize_one(res["key"], res.get("base"), track=track)
+            finally:
+                succeeded.append((res["key"], track.get("base")))
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
@@ -806,6 +819,16 @@ def main():
             sync_voice_memos()
         have = {s.name for s in queue} | in_flight
         held = holds.items()    # re-read: a hold placed mid-run counts
+        # re-read the manifest from disk, never the snapshot `m`: a meeting
+        # this run finished and then renamed (the automatic title) moved its
+        # folder, and manifest.retarget fixed only the file on disk. The stale
+        # snapshot would call the source unprocessed, and with the original
+        # kept (STT_MOVE_AFTER_SUCCESS=0, a refused delete) the run would
+        # transcribe it again into a " (2)" folder, then again, in a loop.
+        try:
+            cur = manifest.load()
+        except Exception:
+            cur = m
         out = []
         for src in iter_sources(source):
             # never a file that already failed this run: nothing marks it
@@ -814,7 +837,7 @@ def main():
             if src.name in have or src.name in failed_names or src.name in held:
                 continue
             try:
-                if manifest.is_processed(m, src.name, src.stat().st_mtime):
+                if manifest.is_processed(cur, src.name, src.stat().st_mtime):
                     continue
             except OSError:
                 continue

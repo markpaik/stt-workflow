@@ -1099,3 +1099,108 @@ def test_a_plain_run_syncs_voice_memos_again_mid_run(sandbox, monkeypatch):
     run_batch.main()
     assert len(syncs) >= 2
     assert processed == ["A Mtg.m4a", "Synced Memo 11032026.m4a"]
+
+
+def test_a_renamed_meeting_whose_original_stays_is_not_transcribed_again(
+        sandbox, monkeypatch):
+    """The automatic title renames a meeting folder right after the file
+    finishes. manifest.retarget fixes the manifest on disk. The run's own
+    snapshot still named the old folder, so with the original kept in the
+    watched folder the mid-run rescan saw an unprocessed file and
+    transcribed it again into a new folder, then again, in a loop."""
+    import json
+    import shutil
+    import signal
+    import sys
+    from pathlib import Path
+
+    from conftest import mfile
+    from stt import config, manifest, summarize
+
+    _drop("Kept Mtg.m4a")
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        src = Path(src_str)
+        seen.append(src.name)
+        if len(seen) > 3:
+            raise RuntimeError("re-transcribed in a loop")
+        j = mfile(src.stem, ".json")
+        j.write_text(json.dumps({"source_file": src.name, "segments": [],
+                                 "speakers": [], "words": []}))
+        mfile(src.stem, ".txt").write_text("[00:00] A: hi")
+        return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime,
+                "outputs": [str(j), str(j.with_suffix(".txt"))],
+                "summary": "1 speaker(s)", "who": "", "base": src.stem,
+                "duration_sec": 1.0, "stage_secs": {}}
+
+    def fake_summarize_one(key, base=None, track=None):
+        # the inline automatic title: move the folder and its files, then
+        # retarget the manifest on disk, as summarize.apply_auto_title does
+        old = config.meeting_file(base, ".json").parent
+        new = old.parent / "Titled Mtg"
+        shutil.move(str(old), str(new))
+        for f in list(new.iterdir()):
+            f.rename(new / ("Titled Mtg" + f.name[len(base):]))
+        manifest.retarget(old, new, base, "Titled Mtg")
+        return True
+
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", fake_summarize_one)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize", "--keep-original",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        rc = run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert seen == ["Kept Mtg.m4a"], seen
+    assert rc == 0
+    assert (config.ICLOUD_DIR / "Kept Mtg.m4a").exists()
+
+
+def test_the_end_of_run_sweep_follows_a_meeting_the_title_renamed(sandbox, monkeypatch):
+    """The inline pass titles and renames the folder. The end-of-run sweep
+    used to get the folder name from before that rename and log a false
+    FileNotFoundError. It now gets the folder's final name."""
+    import json
+
+    from conftest import mfile
+    from stt import summarize
+
+    mfile("Raw Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Raw Mtg.m4a", "segments": SPOKEN, "speakers": [], "words": []}))
+
+    def fake_suggest(base):
+        j = mfile(base, ".json")
+        d = json.loads(j.read_text())
+        d["ai_summary"] = "drafted"
+        j.write_text(json.dumps(d))
+        return {}
+
+    def fake_apply(base):
+        if base != "Raw Mtg":
+            return {"ok": True, "base": base, "skipped": "no draft title"}
+        old = mfile(base, ".json")
+        new = mfile("Titled Mtg", ".json")
+        new.write_text(old.read_text())
+        old.unlink()
+        old.parent.rmdir()
+        return {"ok": True, "base": "Titled Mtg"}
+
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "suggest_title", fake_suggest)
+    monkeypatch.setattr(summarize, "apply_auto_title", fake_apply)
+    track = {"base": "Raw Mtg"}
+    assert run_batch.summarize_one("Raw Mtg.m4a", "Raw Mtg", track=track) is True
+    assert track == {"base": "Titled Mtg"}
+    seen = []
+    real = run_batch.summarize_one
+    monkeypatch.setattr(run_batch, "summarize_one",
+                        lambda k, b=None, **kw: seen.append(b) or real(k, b, **kw))
+    assert run_batch.auto_summarize([("Raw Mtg.m4a", track["base"])]) == 0
+    assert seen == ["Titled Mtg"]
