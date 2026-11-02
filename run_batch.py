@@ -309,6 +309,48 @@ def iter_sources(source: Path):
             yield p
 
 
+def _sha256(path: Path):
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def safe_to_delete(src: Path, dest_audio: Path, src_fp, src_size):
+    """(ok, reason): may the batch delete the source now that the meeting
+    holds its copy (unified plan Phase 2 step 2)?
+
+    The source must still be the file the run started on (same size and
+    fingerprint as before processing), and the stored copy must hold the
+    same bytes: equal size and equal SHA-256. A video's stored audio is an
+    extracted track that shares no bytes with it, so for a video the check
+    is the source being unchanged plus a non-empty extracted track. Any
+    doubt keeps the source, which the manifest then skips."""
+    from stt import dupes
+    try:
+        size_now = src.stat().st_size
+        dsize = dest_audio.stat().st_size
+    except OSError as e:
+        return False, f"cannot read size ({e.__class__.__name__})"
+    if src_size is not None and size_now != src_size:
+        return False, "the source changed size during processing"
+    if src_fp and dupes.fingerprint(src) != src_fp:
+        return False, "the source changed during processing"
+    if src.suffix.lower() in config.VIDEO_EXTS:
+        return (dsize > 0, "ok" if dsize > 0 else "the extracted audio is empty")
+    if dsize != size_now:
+        return False, "the stored copy differs in size"
+    a, b = _sha256(src), _sha256(dest_audio)
+    if a is None or b is None or a != b:
+        return False, "the stored copy differs in content"
+    return True, "ok"
+
+
 def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     """Process a single file end-to-end (runs in a worker process under --parallel).
     Returns {ok, key, mtime, outputs, summary, duration_sec, stage_secs}.
@@ -398,8 +440,14 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
 
     success = res["txt"].exists() and res["json"].exists() and dest_audio.exists()
     if success and opts["do_move"] and src.resolve() != dest_audio.resolve():
-        src.unlink()
-        side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
+        ok, why = safe_to_delete(src, dest_audio, src_fp, src_size)
+        if ok:
+            src.unlink()
+            side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
+            from stt import provenance
+            provenance.sidecar_path(src).unlink(missing_ok=True)
+        else:
+            print(f"   kept the source {src.name}: {why}", file=sys.stderr, flush=True)
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
