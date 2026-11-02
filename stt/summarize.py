@@ -344,9 +344,11 @@ def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
     what = "notes on one long meeting" if notes else "one meeting transcript"
     return (
         f"Below is part {i} of {n} of {what}, in order. Write notes on THIS "
-        "part only, for someone who will summarize the whole meeting later:\n"
+        "part only, for someone who will summarize the whole meeting later. "
+        "Start with a line 'DECISIONS:' and list every decision made in this "
+        "part (or 'none'), then:\n"
         "- the topics discussed and what was said about each;\n"
-        "- every decision and every open question;\n"
+        "- every open question;\n"
         "- names, numbers, dates, and places exactly as they appear;\n"
         "- every concrete commitment, one per line, formatted exactly as:  "
         "- [<speaker name as labeled>] will <specific action> by <stated "
@@ -378,7 +380,9 @@ def _summary_source(base: str, backend: str) -> tuple:
             break
     body = body[:whole]
     return ("Below are notes on every part of one long meeting, in order, taken "
-            "from its whole transcript. Treat them as the meeting.",
+            "from its whole transcript. Treat them as the meeting. The summary "
+            "must state the main decisions the notes list, wherever in the "
+            "meeting they came.",
             f"NOTES:\n{body}", parts)
 
 
