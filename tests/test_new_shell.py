@@ -5902,14 +5902,17 @@ def test_the_key_sheet_lists_the_keys_phases_one_to_three_shipped():
 # recordings in Now, 22 raw labels on a To finish row, and the pill.
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
-def test_the_strip_counts_a_split_voice_once_as_the_row_does(running_server):
+def test_the_strip_counts_a_split_voice_once_as_the_row_does(running_server, monkeypatch):
     """The strip read "Voices 22" while the To finish row read "Voices 21" on
     the same board meeting: fsVoicesFrom made one voice per CLUSTER, and two
     clusters carry the one global id U068 ("Speaker 68"). Naming that id
     names both, so they are one voice. The meeting, its speaker options, and
     the unknown registry come from the server itself (/api/transcript and
     /api/state over tests/conftest.py's split_voice_meeting), and the strip's
-    count is FS.fin.voices after the transcript loads."""
+    count is FS.fin.voices after the transcript loads. The fixture's voices
+    talk for seconds, so the one-minute floor on the row's count is off here:
+    this test pins the split-voice count, not the floor."""
+    monkeypatch.setattr(srv, "VOICE_ASK_MIN_SECS", 0.0)
     split_voice_meeting()
     from urllib.parse import quote
     _, _, body = _get(running_server, "/api/transcript?base=" + quote(SPLIT_VOICE_BASE))
@@ -6288,7 +6291,7 @@ def _header_env():
     return "\n".join([
         _js_oneline("esc"), _js_oneline("escJs"), _js_fn("shortDate"),
         _js_fn("peopleMetaBits"), _js_fn("mMetaBits"), _js_fn("mHeadSync"),
-        _js_fn("_mHeader"),
+        _js_fn("draftChipHTML"), _js_fn("_mHeader"),
         "const bits=h=>{const m=/<span id=\"mmbits\">([\\s\\S]*?)<\\/span>\\s*<button class=\"mcat/.exec(h);"
         "return m?m[1]:null;};",
     ])

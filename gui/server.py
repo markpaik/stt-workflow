@@ -19,9 +19,13 @@ from pathlib import Path
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, identify, jobs, manifest,
                  output, queue_order, rates, recorder, review, search, status,
-                 unknowns)
+                 titles, unknowns)
 
 PORT = 8737
+# A voice with less talk than this hides behind a count instead of asking to
+# be named (plan Phase 1 step 4): most of these are a cough, a greeting, or a
+# one-line visitor, and naming them is not worth a person's time.
+VOICE_ASK_MIN_SECS = 60.0
 # The one relabel worker for this panel process, started by start_server(). None
 # means "no queue in this process" -- the CLI-only headless mode and the tests
 # that drive Handler directly -- and every caller falls back to the spawn path
@@ -531,6 +535,24 @@ def _meeting_meta(j: Path, dst_dir: Path):
         for s in d.get("speakers", []):
             if s.get("name"):
                 named[s["display"]] = named.get(s["display"], 0.0) + talk.get(s["id"], 0.0)
+        # the voice exemptions (plan Phase 1 step 4). A public download asks
+        # nothing: its voices are not the owner's working meetings. A voice
+        # under VOICE_ASK_MIN_SECS of talk hides behind a count. A split
+        # voice (two clusters, one display) counts its clusters' talk
+        # together. `unnamed_clusters` itself stays whole: the reader's
+        # legend still names any voice a person chooses to.
+        route = d.get("route") or titles.route_for(d.get("source_file") or "")
+        unnamed_talk = {}
+        for s in d.get("speakers", []):
+            if (not s.get("name") and s.get("id") != s.get("display")
+                    and s.get("id") not in dismissed):
+                unnamed_talk[s["display"]] = (unnamed_talk.get(s["display"], 0.0)
+                                              + talk.get(s.get("id"), 0.0))
+        if route == "public_download":
+            ask = {}
+        else:
+            ask = {disp: cid for disp, cid in unnamed.items()
+                   if unnamed_talk.get(disp, 0.0) >= VOICE_ASK_MIN_SECS}
         meta = {"base": j.stem,
                 "date": iso,
                 # display name: the folder carries the date so recurring
@@ -549,8 +571,14 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 # legend uses.
                 "unnamed_clusters": unnamed,
                 # the longest-talking unnamed voice's seconds, for the queue
-                "voice_secs": round(max((talk.get(c, 0.0) for c in unnamed.values()),
+                "voice_secs": round(max((unnamed_talk.get(dp, 0.0) for dp in ask),
                                         default=0.0), 1),
+                # the voices that ask (not public, at least a minute of talk),
+                # their talk seconds, and how many short ones hide behind a count
+                "ask_clusters": ask,
+                "ask_talk": {dp: round(unnamed_talk.get(dp, 0.0), 1) for dp in ask},
+                "short_voices": (0 if route == "public_download"
+                                 else len(unnamed) - len(ask)),
                 # the dismissed ids themselves, so a row or page that wants to
                 # SAY so (or offer an undo) can, without re-reading the json
                 "dismissed_voices": sorted(dismissed),
@@ -566,6 +594,17 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 # Meetings processed before the inbox existed carry no key at all,
                 # and must not retroactively flood it — so a missing key = reviewed.
                 "needs_review": d.get("reviewed") is False,
+                # the title rule (stt/titles.py). A missing state is a meeting
+                # from before the rule, and its needs_review decides alone.
+                "title_state": d.get("title_state"),
+                "title_source": d.get("title_source"),
+                "route": route,
+                "no_speech": bool(d.get("no_speech")),
+                "duration_sec": d.get("duration_sec"),
+                # the Needs you window's key: the STORED arrival stamp only.
+                # A meeting without one falls outside the window, so a
+                # backfill write can never bring an old meeting back.
+                "arrived_at": d.get("processed_at"),
                 "suggested": d.get("ai_title") or "",
                 # when transcription last ran (new or redo). Older transcripts
                 # predate this field — fall back to generated_at, then mtime.
@@ -756,16 +795,20 @@ def _finish(meta, uid_of=None) -> dict:
     is ONE voice to the queue, because naming it once names it everywhere, so
     "Name N voices" counts each uid once and each local voice once per
     meeting: the number of voices the queue will actually ask about."""
-    title = not meta["needs_review"]
-    unnamed = meta.get("unnamed_clusters") or {}
+    title = not titles.needs_title(meta)
+    ask = meta.get("ask_clusters")
+    unnamed = ask if ask is not None else (meta.get("unnamed_clusters") or {})
     voices = len(unnamed)
     flags = int(meta.get("flagged") or 0)
     uids = sorted({uid_of[(d, meta["base"])] for d in unnamed
                    if (d, meta["base"]) in (uid_of or {})})
+    # plan row 8: done unless the title is still needed. Voices and flags
+    # stay on the record as counts, and they block nothing.
     return {"title": title, "voices": voices, "flags": flags,
-            "done": title and not voices and not flags,
+            "done": title,
             "voice_secs": float(meta.get("voice_secs") or 0) if voices else 0.0,
-            "voice_uids": uids}
+            "voice_uids": uids,
+            "short_voices": int(meta.get("short_voices") or 0)}
 
 
 def _run_order(queue, pending, sweep):
@@ -859,7 +902,9 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                # reads); `flags` the substantial flagged lines. The meeting
                # page's finish strip walks these in order.
                "finish": _finish(meta, uid_of)}
-        if meta["needs_review"]:
+        if titles.needs_title(meta):
+            # the naming row opens only for title_state=needs_title, or for a
+            # meeting from before the title rule that still needs review.
             # the naming row is a review card, not a bare text box: the same
             # evidence the ready row shows (length, who was heard, what the
             # meeting was about) is exactly what a human needs to decide on a
@@ -977,15 +1022,14 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                      "detail": f"{pair_n} pair{'s' if pair_n != 1 else ''} "
                                f"look like the same meeting",
                      "target": "dupes", "count": pair_n})
-    for meta in meetings:
-        if meta["base"] not in active_bases and meta["flagged"] and not meta["needs_review"]:
-            tray.append({"kind": "review", "title": meta["title"],
-                         "detail": f"{meta['flagged']} segment"
-                                   f"{'s' if meta['flagged'] != 1 else ''} flagged for review",
-                         "target": meta["base"], "count": meta["flagged"]})
+    # flagged lines left this list (plan row 8): they stay as quiet markers
+    # in the reader, and the Has flags chip still finds them
+    public = {m["base"] for m in meetings if m.get("route") == "public_download"}
     for u in unknown_list:
         if u.get("archived"):  # hidden one-time voices never nag
             continue
+        if u.get("meetings") and all(m in public for m in u["meetings"]):
+            continue           # heard only in public downloads: they ask nothing
         n = len(u.get("meetings", []))
         tray.append({"kind": "unknown_voice", "title": u["display"],
                      "detail": f"heard in {n} meeting{'s' if n != 1 else ''} — who is this?",
@@ -1747,7 +1791,9 @@ class Handler(BaseHTTPRequestHandler):
             # meetings to one name still leaves them distinct
             return summarize.rename_meeting(bs, value or "")
         if action == "accept":
-            return summarize.apply_meeting_edits(bs, reviewed=True)
+            # a bulk Keep settles the title and claims nothing more: nobody
+            # opened these meetings, so `reviewed` stays as it is (plan row 17)
+            return summarize.apply_meeting_edits(bs, title_state="confirmed")
         if action == "archive":
             return archive.archive_meeting(bs)
         if action == "restore":
@@ -2663,10 +2709,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
+                # a Keep on ONE meeting: the title is confirmed, and a person
+                # did look at it
                 self._json(summarize.apply_meeting_edits(
                     b["base"], title=(b.get("name") or None),
                     date=(b.get("date") or None), category=b.get("category"),
-                    reviewed=True))
+                    reviewed=True, title_state="confirmed"))
             elif u.path == "/api/bulk":
                 # multi-select actions. Every op below gates on live/archived
                 # MEMBERSHIP internally before it builds a path, so an unknown or

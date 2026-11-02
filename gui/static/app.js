@@ -2427,11 +2427,20 @@ function mHeadSync(s){
   const h=mMetaBits(m).join(' &middot; ');
   if(el.dataset.h!==h){el.innerHTML=h;el.dataset.h=h;}
 }
+// the Draft title chip: a provisional title (a typed label, or the
+// amnesty's relabel) that no person has kept or edited. No count anywhere:
+// a count would turn the chip into a second backlog. A public download keeps
+// its published name and wears no chip.
+function draftChipHTML(m){
+  return (m&&m.title_state==='provisional'&&m.route!=='public_download')
+    ?'<span class="mchip draft" title="A draft title: edit it, or leave it">Draft title</span>':'';
+}
 function _mHeader(m,base){
   const bits=mMetaBits(m);
   const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
   const dotTitle=dot==='work'?'Work':dot==='personal'?'Personal':'Untagged';
   const strict=m.strict?'<span class="mchip">strict</span>':'';
+  const draft=draftChipHTML(m);
   const nfl=(m.flagged||0)+(m.flagged_minor||0);
   const flagged=nfl>0?`<span class="mflagnote">${nfl} flagged</span>`:'';
   // everything a row can do, the page can do: the same ⋯ menu, and the same
@@ -2444,7 +2453,7 @@ function _mHeader(m,base){
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta"><span id="mmbits">${bits.join(' &middot; ')}</span>
       <button class="mcat ${dot}" id="mcatdot" type="button"
-        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${strict}${flagged}</div>
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${strict}${flagged}</div>
   </div>`;
 }
 // header dot: same optimistic /api/set_category cycle as the library rows

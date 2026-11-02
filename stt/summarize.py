@@ -441,9 +441,15 @@ def _move_folder(base: str, new_base: str) -> list:
 
 
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
-                        reviewed=None) -> dict:
+                        reviewed=None, title_state=None) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
-    Work/Personal category, and whether it still needs review.
+    Work/Personal category, whether it still needs review, and the title's
+    state.
+
+    A title edit is a person's choice, so it also sets title_state=confirmed
+    and title_source=manual. `title_state` sets the state alone (a Keep on one
+    meeting or a bulk Keep). Neither touches `reviewed`: only the caller's
+    own `reviewed` argument does, so a bulk Keep never claims a person looked.
 
     The invariant it enforces: the folder is named "<title> MMDDYYYY". That is
     what keeps recurring meetings ('LT Weekly Meeting') unique on disk, and it is
@@ -455,7 +461,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     from the inbox without renaming) must not silently rename anything.
     Returns {ok, base, renamed, date, category, reviewed}.
     """
-    from . import dates, review
+    from . import dates, review, titles
 
     if base not in config.meeting_bases():
         return {"ok": False, "error": f"no meeting '{base}'"}
@@ -476,6 +482,9 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         cat = str(category or "").strip().lower()
         if cat and cat not in CATEGORIES:
             return {"ok": False, "error": "category must be work, personal, or empty"}
+
+    if title_state is not None and title_state not in titles.TITLE_STATES:
+        return {"ok": False, "error": f"unknown title state '{title_state}'"}
 
     new_title = None
     if title is not None:
@@ -498,6 +507,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 d.pop("category", None)
         if reviewed is not None:
             d["reviewed"] = bool(reviewed)
+        if title is not None:
+            d["title_state"], d["title_source"] = "confirmed", "manual"
+        elif title_state is not None:
+            d["title_state"] = title_state
 
         want = base
         if title is not None or date is not None:
@@ -552,7 +565,8 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 _write_json(j, d)          # no move: the source lock is enough
                 return {"ok": True, "base": base, "renamed": [],
                         "date": d.get("date"), "category": d.get("category"),
-                        "reviewed": d.get("reviewed")}
+                        "reviewed": d.get("reviewed"),
+                        "title_state": d.get("title_state")}
 
         # NAME order, and case-folded to one lock when the move is only a
         # capitalization fix: APFS is case-insensitive, so 'board prep' and
@@ -574,7 +588,8 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             _write_json(j, d)
             renamed = _move_folder(base, want)
         return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
-                "category": d.get("category"), "reviewed": d.get("reviewed")}
+                "category": d.get("category"), "reviewed": d.get("reviewed"),
+                "title_state": d.get("title_state")}
 
     return {"ok": False,
             "error": "another edit keeps taking that name -- try again in a moment"}
