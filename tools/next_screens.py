@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Screenshot the /next frame in headless Chrome (dev-only, plan Phase 4C).
+"""Screenshot the new shell in headless Chrome (dev-only, plan Phases 4C, 4D).
 
-Every route at 700px and 1440px, in light and dark, against a panel that
-is ALREADY running on a synthetic home (tools/demo_seed.py). The tool only
-reads pages: it starts Chrome with a throwaway profile, loads
-/next?theme=<t>#<route>, and writes one PNG per shot. It never starts or
-stops the panel, and it refuses the live panel's port.
+Every route, plus the first meeting's page and its Transcript tab, at 700px
+and 1440px, in light and dark, against a panel that is ALREADY running on a
+synthetic home (tools/demo_seed.py). The tool only reads pages: it starts
+Chrome with a throwaway profile, loads /?theme=<t>#<route>, and writes one
+PNG per shot. It never starts or stops the panel, and it refuses the live
+panel's port.
 
     STT_HOME=/tmp/x .venv/bin/python tools/demo_seed.py --dir /tmp/demo
     STT_HOME=/tmp/demo STT_PANEL_PORT=8791 .venv/bin/python -m gui.server &
@@ -22,6 +23,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -32,8 +35,8 @@ THEMES = ("light", "dark")
 
 
 def shot(port, route, width, theme, out: Path, profile: Path, height=1000) -> Path:
-    url = f"http://127.0.0.1:{port}/next?theme={theme}#{route}"
-    png = out / f"{route}-{width}-{theme}.png"
+    url = f"http://127.0.0.1:{port}/?theme={theme}#{route}"
+    png = out / f"{_name(route)}-{width}-{theme}.png"
     subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
                     f"--user-data-dir={profile}", "--no-first-run",
                     f"--window-size={width},{height}", "--virtual-time-budget=6000",
@@ -46,7 +49,7 @@ def overflow(port, route, width, theme, profile: Path) -> dict:
     """The page's scrollWidth against the window width, after the page
     settles. With ?probe=1, next.js writes both onto <body data-probe>, and
     --dump-dom reads the attribute back."""
-    url = f"http://127.0.0.1:{port}/next?theme={theme}&probe=1#{route}"
+    url = f"http://127.0.0.1:{port}/?theme={theme}&probe=1#{route}"
     r = subprocess.run([CHROME, "--headless=new", "--disable-gpu",
                         f"--user-data-dir={profile}", "--no-first-run",
                         f"--window-size={width},1000", "--virtual-time-budget=6000",
@@ -54,6 +57,21 @@ def overflow(port, route, width, theme, profile: Path) -> dict:
                        check=True, capture_output=True, text=True, timeout=90)
     m = re.search(r'data-probe="([^"]*)"', r.stdout)
     return json.loads(html.unescape(m.group(1))) if m else {}
+
+
+def _name(route: str) -> str:
+    """A file name for a route: a meeting's base is dropped."""
+    return "meeting-transcript" if "/t/" in route else "meeting" if route.startswith("m/") else route
+
+
+def meeting_routes(port) -> tuple:
+    """The first meeting's page, and its Transcript tab at its first second."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=10) as r:
+        meetings = json.load(r).get("meetings") or []
+    if not meetings:
+        return ()
+    m = "m/" + urllib.parse.quote(meetings[0]["base"], safe="")
+    return (m, m + "/t/1")
 
 
 def main(argv=None) -> int:
@@ -67,7 +85,7 @@ def main(argv=None) -> int:
     a.out.mkdir(parents=True, exist_ok=True)
     bad = []
     with tempfile.TemporaryDirectory(prefix="next-shots-") as prof:
-        for route in ROUTES:
+        for route in ROUTES + meeting_routes(a.port):
             for width in WIDTHS:
                 for theme in THEMES:
                     png = shot(a.port, route, width, theme, a.out, Path(prof))
