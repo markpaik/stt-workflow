@@ -1009,6 +1009,39 @@ console.log(JSON.stringify({more:calls.filter(c=>c[0].startsWith('/api/transcrip
     assert out == {"more": 1, "stamp": "S3"}
 
 
+@needs_node
+def test_a_rename_that_restamps_the_folder_drops_the_old_audio_and_reloads():
+    out = _run("""
+await openPage('Old 10202026',{segments:[seg(0,0,5,'S1','Speaker 1','words')]},{audio:'/x/old.m4a'});
+mAudio();const old=MP.audio;
+S.meetings.push({base:'New 10202026',title:'New',date:'2026-10-20',minutes:1,named:[],ask_clusters:{},audio:'/x/new.m4a'});
+answer=p=>p.startsWith('/api/transcript')?{generated_at:'S1',segments:[],speaker_options:[]}:{};
+mFollow('Old 10202026','New 10202026');await flush();
+console.log(JSON.stringify({paused:old.paused,audio:MP.audio,base:MP.base,hash:location.hash,
+ fetched:calls.filter(c=>c[0]==='/api/transcript?base=New%2010202026').length}));
+""")
+    assert out == {"paused": True, "audio": None, "base": "New 10202026",
+                   "hash": "#m/New%2010202026", "fetched": 1}
+
+
+@needs_node
+def test_a_typed_question_survives_a_forced_repaint_and_the_sheet_swallows_cmd_k():
+    out = _run("""
+await openPage('K2',{segments:[seg(0,0,5,'S1','Speaker 1','words')],speaker_options:[opt('S1','Speaker 1')]});
+const box={id:'m-askq',matches:()=>true};
+__els['tp-ask']=Object.assign({},{innerHTML:'typed panel',contains:x=>x===box});
+document.activeElement=box;
+mSync(mRow(),true);
+const kept=__els['tp-ask'].innerHTML;
+document.activeElement=null;
+vsOpenVoice('S1');
+let pal=0;const real=A.palette;A.palette=()=>{pal++;};
+const took=vsKey({key:'k',metaKey:true,target:{tagName:'BODY',matches:()=>false},preventDefault(){}});
+console.log(JSON.stringify({kept,took,pal}));
+""")
+    assert out == {"kept": "typed panel", "took": True, "pal": 0}
+
+
 # ==================================================================== ask ===
 
 @needs_node

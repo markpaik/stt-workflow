@@ -285,13 +285,15 @@ function mTeardown(){
 // the parts the poll may repaint, each only when its own markup changed and
 // nobody is typing inside it
 function mSync(m,force){
- const put=(id,html)=>{const el=document.getElementById(id);if(!el)return;
+ // `hold`: never replace this part while a field inside it has the focus,
+ // even on a forced repaint (a typed question survives a reload)
+ const put=(id,html,hold)=>{const el=document.getElementById(id);if(!el)return;
   if(!force&&MP.sig[id]===html)return;
-  const a=document.activeElement;if(!force&&a&&el.contains&&el.contains(a)&&a.matches&&a.matches('input,textarea,select'))return;
+  const a=document.activeElement;if((!force||hold)&&a&&el.contains&&el.contains(a)&&a.matches&&a.matches('input,textarea,select'))return;
   el.innerHTML=html;MP.sig[id]=html;};
  put('m-head',mHeadHTML(m));put('m-notice',mNoticeHTML(m));put('m-side',mSideHTML(m));
  put('tp-summary',mSummaryHTML(m));put('m-tabtool',mTabToolHTML(m));
- if(force||!MP.sig.ask){put('tp-ask',mAskHTML(m));MP.sig.ask=1;}
+ if(force||!MP.sig.ask){put('tp-ask',mAskHTML(m),true);MP.sig.ask=1;}
  if(force&&MP.editTitle){const i=document.getElementById('m-title-in');if(i&&i.focus)i.focus();}
 }
 // a relabel rewrote the transcript on screen: reload the lines, unless the
@@ -727,16 +729,20 @@ async function mAccept(name){
  if(!r||r.ok===false||r.error){UI.err['m-title']=(r&&r.error)||'That did not work.';mSync(mRow()||{},true);return;}
  delete UI.err['m-title'];MP.editTitle=false;MP.titleDraft=null;
  await refresh();
- if(r.base&&r.base!==base){mFollow(base,r.base);return;}
- render(true);toast(name?'Title saved.':'Title kept.');
+ if(r.base&&r.base!==base)mFollow(base,r.base);else render(true);
+ toast(name?'Title saved.':'Title kept.');
 }
 // the folder moved (a rename re-stamps it): carry the page state across
 function mFollow(oldBase,newBase){
  if(!MP||MP.base!==oldBase)return;
+ // the audio URL names the old folder: drop the player, the dock rebuilds
+ if(MP.audio){try{MP.audio.pause();}catch(e){}MP.audio=null;}
+ if(MP.tick){clearInterval(MP.tick);MP.tick=null;}
  MP.base=newBase;UI.mbase=newBase;MP.built=false;
+ const m=byBase(newBase);if(m)MP.hasAudio=!!m.audio;
  if(ASK[oldBase]){ASK[newBase]=ASK[oldBase];delete ASK[oldBase];}
  history.replaceState(null,'','#m/'+encodeURIComponent(newBase));
- render(true);
+ render(true);mReload();
 }
 function mCycleCat(){
  const m=mRow();if(!m)return;const cur=m.category==='work'||m.category==='personal'?m.category:'';

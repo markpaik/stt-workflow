@@ -332,8 +332,10 @@ function vsKey(e){
  // Enter never confirms a warning: Save anyway and the meeting-only save
  // stay one deliberate click each
  if(t&&t.id==='vs-in'&&e.key==='Enter'){e.preventDefault();VS.value=t.value;if(!VS.warn)vsSave();return true;}
+ // no palette over the sheet: Cmd K waits until the sheet closes
+ if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==='k'){e.preventDefault();return true;}
  if(typing||e.metaKey||e.ctrlKey||e.altKey)return false;
- if(VS.done)return false;
+ if(VS.done)return true;   // a focused button still takes its own Enter and Space
  if(e.key==='1'||e.key==='2'||e.key==='3'){if(vsFill(+e.key-1))e.preventDefault();return true;}
  if(e.key==='s'&&!VS.single){e.preventDefault();vsSkip();return true;}
  if(e.key===' '&&!(t&&t.tagName==='BUTTON')){e.preventDefault();vsPlay();return true;}
