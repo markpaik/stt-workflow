@@ -299,19 +299,104 @@ def has_speech(base: str) -> bool:
     return bool(d.get("segments"))
 
 
+# Whole-transcript summaries (unified plan Phase 4G). The summary used to
+# read a 12,000-character head/middle/tail sample, so a decision near the end
+# of a long meeting never reached it. Now the model reads every line:
+#   - a transcript up to SUMMARY_WHOLE_CHARS goes in one prompt, whole;
+#   - a longer one is cut at line breaks into parts of SUMMARY_PART_CHARS,
+#     the model writes notes on each part (topics, decisions, numbers, and
+#     every commitment in the next-steps line format), and the final prompt
+#     reads all the notes in order. Notes longer than the one-prompt limit
+#     are cut and noted again, at most SUMMARY_MAX_LEVELS times.
+# The limits keep each local prompt plus its answer inside Qwen3-8B's 32k
+# context at the module's ~4 characters a token. A cloud assistant takes up
+# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt. The output format, and so the
+# ai_next_steps lines chief-of-staff reads, is unchanged.
+SUMMARY_WHOLE_CHARS = 80_000          # ~20k tokens + a 3000-token answer
+SUMMARY_PART_CHARS = 60_000           # ~15k tokens + a 1500-token note
+SUMMARY_NOTE_TOKENS = 1500
+SUMMARY_CLOUD_WHOLE_CHARS = 400_000   # ~100k tokens, inside every cloud model
+SUMMARY_MAX_LEVELS = 3
+
+
+def _parts(text: str, size: int) -> list:
+    """`text` cut into pieces of at most `size` characters, at line breaks
+    where a line allows it."""
+    out, cur, n = [], [], 0
+    for line in text.splitlines(keepends=True):
+        while len(line) > size:               # one enormous line: hard cut
+            if cur:
+                out.append("".join(cur))
+                cur, n = [], 0
+            out.append(line[:size])
+            line = line[size:]
+        if n + len(line) > size and cur:
+            out.append("".join(cur))
+            cur, n = [], 0
+        cur.append(line)
+        n += len(line)
+    if cur:
+        out.append("".join(cur))
+    return [p for p in out if p.strip()]
+
+
+def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
+    what = "notes on one long meeting" if notes else "one meeting transcript"
+    return (
+        f"Below is part {i} of {n} of {what}, in order. Write notes on THIS "
+        "part only, for someone who will summarize the whole meeting later:\n"
+        "- the topics discussed and what was said about each;\n"
+        "- every decision and every open question;\n"
+        "- names, numbers, dates, and places exactly as they appear;\n"
+        "- every concrete commitment, one per line, formatted exactly as:  "
+        "- [<speaker name as labeled>] will <specific action> by <stated "
+        "deadline, or 'no date given'>\n"
+        "Plain lines, no preamble. Do not invent anything.\n\n"
+        f"PART {i} OF {n}:\n{text}"
+    )
+
+
+def _summary_source(base: str, backend: str) -> tuple:
+    """(heading, body, parts) for the final summary prompt: the whole
+    transcript when it fits, else the notes on every part. `parts` is 1 for
+    a whole transcript and the number of transcript parts otherwise."""
+    txt = config.meeting_file(base, ".txt").read_text(encoding="utf-8")
+    whole = SUMMARY_CLOUD_WHOLE_CHARS if backend != "local" else SUMMARY_WHOLE_CHARS
+    if len(txt) <= whole:
+        return "Below is a whole meeting transcript.", f"TRANSCRIPT:\n{txt}", 1
+    body, notes, parts = txt, False, 0
+    for _ in range(SUMMARY_MAX_LEVELS):
+        chunks = _parts(body, SUMMARY_PART_CHARS)
+        parts = parts or len(chunks)
+        got = []
+        for i, c in enumerate(chunks, 1):
+            got.append(f"PART {i} OF {len(chunks)}:\n" + _generate(
+                _part_prompt(i, len(chunks), c, notes),
+                max_tokens=SUMMARY_NOTE_TOKENS, backend=backend, think=False).strip())
+        body, notes = "\n\n".join(got), True
+        if len(body) <= whole:
+            break
+    body = body[:whole]
+    return ("Below are notes on every part of one long meeting, in order, taken "
+            "from its whole transcript. Treat them as the meeting.",
+            f"NOTES:\n{body}", parts)
+
+
 def suggest_title(base: str) -> dict:
     """Suggest a filename + detailed summary for a processed meeting from its
-    transcript. The result is persisted into the meeting's .json (ai_title /
-    ai_summary) so it stays visible in the panel afterwards.
+    WHOLE transcript (see SUMMARY_WHOLE_CHARS). The result is persisted into
+    the meeting's .json (ai_title / ai_summary / ai_next_steps, and
+    ai_summary_parts: 1 for a one-pass summary, else how many parts were
+    noted) so it stays visible in the panel afterwards.
 
     A transcript with 0 segments gets no call to the model at all: the result
     is an error that says no speech was found, and nothing is written."""
     if not has_speech(base):
         return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
     backend = _backend_for(base)  # strict meetings never reach a cloud LLM
-    sample, _ = _transcript_sample(base, max_chars=12000)
+    heading, source, parts = _summary_source(base, backend)
     prompt = (
-        "Below is a (partial) meeting transcript. Produce:\n"
+        f"{heading} Produce:\n"
         "1. A SHORT descriptive title for the recording file: 3-6 words, Title Case, "
         "no punctuation except spaces, naming the meeting type and main topic (key "
         "participant names only if clearly central).\n"
@@ -327,7 +412,7 @@ def suggest_title(base: str) -> dict:
         "exactly:  - none\n"
         "Answer in exactly this format:\n"
         "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
-        f"TRANSCRIPT:\n{sample}"
+        f"{source}"
     )
     out = _generate(prompt, max_tokens=3000, backend=backend, think=False)
     title, summary, steps = "", [], []
@@ -351,7 +436,7 @@ def suggest_title(base: str) -> dict:
     summary = " ".join(s for s in summary if s)
     title = re.sub(r'[<>:"/\\|?*]', "", title).strip() or "Untitled Meeting"
     result = {"title": title, "summary": summary, "next_steps": steps,
-              "suggested_name": f"{title} {_date_suffix(base)}"}
+              "suggested_name": f"{title} {_date_suffix(base)}", "parts": parts}
     # persist so the panel can show it without regenerating. Take the per-meeting
     # lock and re-read INSIDE it (the LLM call above can run for minutes, so a
     # read taken earlier would be stale) and write atomically, so this can't
@@ -363,6 +448,7 @@ def suggest_title(base: str) -> dict:
             d = json.loads(j.read_text())
             d["ai_title"], d["ai_summary"] = title, summary
             d["ai_next_steps"] = steps
+            d["ai_summary_parts"] = parts
             d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
             tmp = j.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))

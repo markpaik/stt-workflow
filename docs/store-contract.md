@@ -27,6 +27,8 @@ A reader may rely on these keys in `<base>.json`.
 | `arrived_at` | When the meeting first arrived | Never |
 | `reviewed` | A person looked at the meeting | A person's action only |
 | `title_state`, `title_source`, `route` | See `stt/titles.py` | A person's Keep or edit, or the amnesty |
+| `ai_summary`, `ai_next_steps` | The model's summary and next-steps lines (`[<speaker>] will <action> by <deadline>`), read from the whole transcript since Phase 4G | A summary run (Generate, or the batch after a meeting) |
+| `ai_summary_parts` | 1 when the summary read the transcript in one prompt, else how many parts the model noted first. Absent on a summary from before Phase 4G | With `ai_summary` |
 | `location_note` | The default place name Voice Memos gave a synced memo (a street address or a listed place), kept as a note because it is not a title | Never, once written |
 | `vm_uuid` | The Voice Memos id of a synced memo. A purge blocks it so the sync never copies it again | Never, once written |
 
