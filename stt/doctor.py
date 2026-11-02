@@ -20,12 +20,13 @@ drops):
   voiceprints folder is copied first);
 - manifest records whose outputs no longer exist: a flat path is rewritten
   to the folder layout, a record is relinked to the meeting whose stored
-  source time matches it, then to the one whose title words and date match,
-  and anything left is moved to manifest_retired.json;
+  source time matches it, then to the one whose title words and date match;
+  same-day twins that tie on title words are paired one to one by time
+  (`relink_tie`); anything left is moved to manifest_retired.json;
 - a live meeting with no manifest record gets one, keyed by its
   `source_name` with its `source_mtime`, so a re-dropped source is skipped;
 - queue holds on files that no longer exist;
-- failure dismissals for names with no recorded result;
+- failure dismissals whose name's latest recorded result is a success;
 - a stopping.flag left behind when no batch is running;
 - logs over their cap and calibration.jsonl over its cap.
 
@@ -128,7 +129,7 @@ def _linked(m: dict) -> set:
 def manifest_plan(store=None) -> list:
     """The manifest repairs, as actions. Reads only.
 
-    [{"op": "flat"|"relink_mtime"|"relink_title"|"retire"|"link",
+    [{"op": "flat"|"relink_mtime"|"relink_title"|"relink_tie"|"retire"|"link",
       "key": manifest key, "outputs": new outputs (not for retire),
       "meeting": base (not for retire), "mtime": (link only)}]"""
     store = _store(store)
@@ -138,6 +139,7 @@ def manifest_plan(store=None) -> list:
     jpath = {b: str(config.meeting_file(b, ".json", store)) for b in meets}
     free = {b for b in meets if jpath[b] not in linked}
     acts = []
+    ties = []
     for key, rec in sorted(m["processed"].items()):
         if not _stale(rec):
             continue
@@ -179,7 +181,11 @@ def manifest_plan(store=None) -> list:
                          "outputs": _rebase(outs, store, old_base, b)})
             free.discard(b)
             continue
+        if len(hits) > 1:
+            ties.append((key, rec, old_base, hits))
+            continue
         acts.append({"op": "retire", "key": key})
+    acts += _pair_ties(ties, free, meets, store)
     # R3: a live meeting with no record, rebuilt from its own keys
     for b in sorted(free):
         d = meets[b]
@@ -188,6 +194,46 @@ def manifest_plan(store=None) -> list:
             continue
         acts.append({"op": "link", "key": key, "meeting": b, "mtime": float(mt),
                      "outputs": [jpath[b], str(config.meeting_file(b, ".txt", store))]})
+    return acts
+
+
+def _rec_time(rec) -> str:
+    """A manifest record's processing time, for ordering twins."""
+    if rec.get("processed_at"):
+        return str(rec["processed_at"])
+    try:
+        return datetime.fromtimestamp(float(rec.get("mtime"))).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+def _meet_time(d) -> str:
+    """When a meeting was first processed: `arrived_at`, else `processed_at`."""
+    return str(d.get("arrived_at") or d.get("processed_at") or "")
+
+
+def _pair_ties(ties, free: set, meets: dict, store: Path) -> list:
+    """Relink records that tie on title words and date with two or more free
+    meetings (same-day twins).
+
+    Records are grouped by the set of meetings they tie with. A group pairs
+    one to one only when it holds as many records as meetings and every
+    meeting is still free: records in processing order against meetings in
+    arrival order. Any other group is retired, as before."""
+    groups = {}
+    for key, rec, old_base, hits in ties:
+        groups.setdefault(frozenset(hits), []).append((key, rec, old_base))
+    acts = []
+    for bases, recs in sorted(groups.items(), key=lambda g: sorted(g[0])):
+        if len(recs) != len(bases) or not bases <= free:
+            acts += [{"op": "retire", "key": k} for k, _, _ in recs]
+            continue
+        recs = sorted(recs, key=lambda r: (_rec_time(r[1]), r[0]))
+        order = sorted(bases, key=lambda b: (_meet_time(meets[b]), b))
+        for (key, rec, old_base), b in zip(recs, order):
+            acts.append({"op": "relink_tie", "key": key, "meeting": b,
+                         "outputs": _rebase(rec.get("outputs") or [], store, old_base, b)})
+            free.discard(b)
     return acts
 
 
@@ -210,11 +256,17 @@ def _dismissals_path() -> Path:
 
 
 def _stale_dismissals() -> list:
+    """Dismissed names whose latest recorded result is a success: the
+    failure they silenced is over. A name whose source is gone, or that has
+    no result at all, keeps its dismissal, because clearing it could bring
+    an old failure row back into the panel."""
     d = fj.read_json(_dismissals_path())
     if not isinstance(d, dict):
         return []
-    seen = {r.get("name") for r in status.history()}
-    return sorted(n for n in d if n not in seen)
+    latest = {}
+    for r in status.history():          # newest first
+        latest.setdefault(r.get("name"), r)
+    return sorted(n for n in d if n in latest and latest[n].get("ok") is True)
 
 
 def _batch_running() -> bool:
@@ -251,13 +303,14 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
                                        "stored length is longer than the audio", False))
     for a in manifest_plan(store):
         kind = {"flat": "manifest_flat", "relink_mtime": "manifest_stale",
-                "relink_title": "manifest_stale", "retire": "manifest_stale",
+                "relink_title": "manifest_stale", "relink_tie": "manifest_stale",
+                "retire": "manifest_stale",
                 "link": "manifest_unlinked"}[a["op"]]
         out.append(Finding(kind, a["key"], a["op"], True))
     for n in _stale_holds():
         out.append(Finding("stale_hold", n, "held file no longer exists", True))
     for n in _stale_dismissals():
-        out.append(Finding("stale_dismissal", n, "no recorded result to silence", True))
+        out.append(Finding("stale_dismissal", n, "latest result is a success", True))
     if _stop_flag().exists() and not _batch_running():
         out.append(Finding("stale_stop_flag", _stop_flag().name,
                            "left behind with no batch running", True))
@@ -415,6 +468,11 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
                         rec["outputs"] = a["outputs"]
                         rec["relinked"] = a["op"]
                         done.append(f"manifest: {a['op']} one record")
+                        if a["op"] == "relink_tie":
+                            # a pairing by order is a judgment: keep it on
+                            # record so a wrong pair can be found and swapped
+                            run.journal.write({"run": run.id, "tie": a["key"],
+                                               "meeting": a["meeting"]})
             if retired:
                 run.before(retired_p)
                 tmp = retired_p.with_suffix(".json.tmp")
@@ -460,6 +518,8 @@ def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
     the run wrote. A file changed since is kept and reported."""
     restored, kept = [], []
     for e in reversed(fj.entries(run_id, journal_dir)):
+        if "dir" not in e and "file" not in e:
+            continue                  # a note (a tie pairing), not a change
         if "dir" in e:
             d = Path(e["dir"])
             if _dir_hashes(d) != e["hashes_after"]:
