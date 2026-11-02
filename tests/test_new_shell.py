@@ -1709,10 +1709,10 @@ def test_needs_name_row_escapes_hostile_filenames_and_speaker_names():
         _js_fn("finishDotsHTML"), _js_fn("peopleMetaBits"), _js_fn("finishRowHTML"),
         r"""
 const row={state:'needs_name', id:"o'brien<b>", date:'2026-09-26',
-  source_file: "Mark C. Ashby <sync> \"weird\".m4a",
+  source_file: "Avery Q. O'Sample <sync> \"weird\".m4a",
   suggested_title: 'Something <i>else</i>', title: 'Something else',
-  speakers: ["Ashby <script>alert(1)</script>"],
-  named: ["Ashby <script>alert(1)</script>"],
+  speakers: ["O'Sample <script>alert(1)</script>"],
+  named: ["O'Sample <script>alert(1)</script>"],
   finish: fin(false,1,0)};
 console.log(JSON.stringify({row:finishRowHTML(row), title:fsTitleHTML(row)}));
 """])
@@ -1732,7 +1732,7 @@ console.log(JSON.stringify({row:finishRowHTML(row), title:fsTitleHTML(row)}));
     # the Title step: the file name only ever sits in an escaped attribute,
     # never inside an onclick string
     t = out["title"]
-    assert 'title="Mark C. O\'Halloran &lt;sync&gt; &quot;weird&quot;"' in t
+    assert 'title="Avery Q. O\'Sample &lt;sync&gt; &quot;weird&quot;"' in t
     assert 'onclick="fsUseFile()"' in t
 
 
@@ -2146,7 +2146,7 @@ def test_the_duplicate_line_survives_a_hostile_meeting_name():
         _js_oneline("esc"), _js_oneline("escJs"), _js_fn("dupNote"),
         r"""
 console.log(JSON.stringify({html:dupNote({dup_of:"o'brien<b>",
-  dup_title:"Ashby <script>alert(1)</script>", dup_reason:'identical'}),
+  dup_title:"O'Sample <script>alert(1)</script>", dup_reason:'identical'}),
   none:dupNote({state:'waiting'})}));
 """])
     r = subprocess.run([NODE, "-e", fixture], capture_output=True, text=True)
@@ -4374,7 +4374,7 @@ console.log(JSON.stringify({full,quiet,dupes,voice,vh,h:html()}));
     # the one voice row closes Needs you, and its verb walks the voices
     assert out["voice"] == ['"sec-now"', '"trayrow"', '"P"', '"sec-fin"', '"N"',
                             '"trayrow"', '"ghead mgroup"', '"V"', '"D"']
-    assert "Speaker 20" in out["vh"] and "fsVoicesStart()" in out["vh"]
+    assert "Speaker 20" in out["vh"] and "needsYouVoiceOpen('N','')" in out["vh"]
     assert ">Needs you<" in out["vh"] and "To finish" not in out["vh"]
     # a section with nothing in it renders nothing
     assert out["quiet"] == ['"ghead mgroup"', '"D"']
@@ -4414,7 +4414,7 @@ console.log(JSON.stringify({nomatch,empty,byName}));
     for key in ("nomatch", "empty"):
         h = out[key]
         assert 'id="sec-now"' in h and 'class="trayrow"' in h, key
-        assert "Speaker 20" in h and "fsVoicesStart()" in h, key
+        assert "Speaker 20" in h and "needsYouVoiceOpen('D','')" in h, key
     assert "No matches." in out["nomatch"]
     assert "Record from the menu bar, or drop an audio file here." in out["empty"]
     assert 'class="setup"' in out["empty"]
@@ -4804,7 +4804,7 @@ console.log(JSON.stringify({none,row,moved:s1!==s0}));
     r = out["row"]
     assert 'id="sec-fin"' in r and ">Needs you<" in r
     assert "Speaker 20" in r and "319 min of unnamed talk in 12 meetings" in r
-    assert "onclick=\"fsVoicesStart()\"" in r and "Name &#8594;" in r
+    assert "onclick=\"needsYouVoiceOpen('A','U020')\"" in r and "Name &#8594;" in r
     assert out["moved"] is True
 
 
@@ -6601,3 +6601,61 @@ def test_no_transcript_line_renders_a_raw_diarizer_id(running_server):
     assert all(c != "var(--sub)" for c in colours.values()), out["lines"]
     assert "Voice 9" in out["legend"]
     assert [h["who"] for h in hits] == ["Voice 9"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_the_needs_you_name_button_opens_its_own_voice():
+    """The row names one voice in one meeting inside the window. Its button
+    opens THAT voice, never the library-wide largest voice that
+    nextVoiceMeeting would pick (here a bigger voice in an older meeting)."""
+    out = _run_node("\n".join([
+        _js_oneline("esc"), _js_oneline("escJs"),
+        _js_fn("_trayVerb"), _js_fn("_trayRow"),
+        _js_fn("needsYouVoiceHTML"), _js_fn("needsYouVoiceOpen"),
+    ]) + """
+const calls=[];
+function openNamePanelByUid(uid,base){calls.push(['panel',uid,base]);}
+function fsVoiceCarry(base,a,b,c){calls.push(['carry',base]);}
+function fsVoicesStart(){calls.push(['start']);}
+function nextVoiceMeeting(){return {id:'Older Workshop 09152026'};}
+const S={timeline:[{id:'Older Workshop 09152026'}]};
+function click(st){
+  const h=needsYouVoiceHTML(st);
+  const m=h.match(/onclick="([^"]*)"/);
+  const js=m[1].replace(/&#39;/g,"'").replace(/&quot;/g,'"').replace(/&amp;/g,'&');
+  eval(js);
+}
+click({needs_you:[{kind:'voice',title:'Speaker 20',target:'Team Sync 10292026',
+  uid:'U020',detail:'7 min of unnamed talk in 1 meeting, most recently Team Sync'}]});
+click({needs_you:[{kind:'voice',title:'Voice 3',target:"Vendor's Call 10302026",
+  uid:null,detail:'6 min of unnamed talk in 1 meeting'}]});
+console.log(JSON.stringify({calls,none:needsYouVoiceHTML({needs_you:[]})}));
+""")
+    assert out["calls"] == [["panel", "U020", "Team Sync 10292026"],
+                            ["carry", "Vendor's Call 10302026"]]
+    assert out["none"] == ""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed -- JS behavior gate skipped")
+def test_a_silent_meeting_body_and_the_audio_note():
+    out = _run_node("\n".join([_js_fn("mBodyHTML"), _js_fn("audioNoteText")]) + """
+let MP={segs:[],noSpeech:true};
+const quiet=mBodyHTML();
+MP={segs:[],noSpeech:false};
+const empty=mBodyHTML();
+console.log(JSON.stringify({quiet,empty,one:audioNoteText(1),five:audioNoteText(5),
+  none:audioNoteText(null)}));
+""")
+    assert out["quiet"] == '<div class="msumbody muted">No speech found in this recording.</div>'
+    assert "mterr" not in out["quiet"]
+    assert "This transcript has no lines yet." in out["empty"]
+    assert out["one"] == "The audio is 1 minute shorter than the transcript: audio may be lost"
+    assert out["five"].startswith("The audio is 5 minutes shorter")
+    assert out["none"] == ""
+
+
+def test_the_meeting_header_holds_the_audio_note_and_both_loads_fill_it():
+    head = _js_fn("_mHeader")
+    assert 'id="maudionote" hidden' in head
+    assert NEW_JS.count("mAudioNote(d.audio_short_by);") == 2
+    assert NEW_JS.count("MP.noSpeech=!!d.no_speech;") == 2

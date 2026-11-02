@@ -106,6 +106,23 @@ def _title_fields(meta: dict, prev, src: Path, segments) -> None:
         meta.pop("no_speech", None)
 
 
+def _arrived_at(prev, processed_at: str) -> str:
+    """When this meeting first arrived. A new meeting arrives now. A Redo
+    keeps the stored stamp, so a bulk Redo never brings old meetings back
+    into Needs you. A meeting from before this key falls back to its stored
+    processed_at, then to its meeting date: both are no later than its true
+    arrival, and neither is the moment of the Redo."""
+    if prev is None:
+        return processed_at
+    for k in ("arrived_at", "processed_at"):
+        if prev.get(k):
+            return str(prev[k])
+    if prev.get("date"):
+        return f"{prev['date']}T00:00:00"
+    # no stamp and no date: the Unix epoch, which no window ever reaches
+    return "1970-01-01T00:00:00"
+
+
 def _src_mtime(src: Path):
     try:
         return round(src.stat().st_mtime, 3)
@@ -466,6 +483,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # lock so a set_meeting_date landing mid-write is not clobbered.
             "date": _meeting_date(src, json_path),
             "processed_at": processed_at,
+            # the Needs you window's key: written once, at first arrival,
+            # and carried by every Redo (_arrived_at)
+            "arrived_at": _arrived_at(prev, processed_at),
             "duration_sec": round(dur, 1),
             "asr_engine": asr_out["engine"],
             "diarizer": config.DIARIZATION_MODEL if do_diarize else None,

@@ -731,11 +731,20 @@ function headSectionsHTML(nowHTML,fin,acts,extra){
       +fin.map(finishRowHTML).join('')+(extra||''):'');
 }
 // the one voice row of Needs you: the unnamed voice with the most talk in
-// non-public meetings. Its verb walks the voices one at a time, the most
-// talk first (fsVoicesStart). Optional: ignoring it costs nothing.
+// non-public meetings. Its verb opens THAT voice (needsYouVoiceOpen), never
+// whichever meeting holds the most talk library-wide. Optional: ignoring it
+// costs nothing.
 function needsYouVoiceHTML(s){
   const v=((s&&s.needs_you)||[]).find(x=>x.kind==='voice');
-  return v?_trayRow(v.title,v.detail,_trayVerb('Name &#8594;','fsVoicesStart()')):'';
+  if(!v)return '';
+  const call=`needsYouVoiceOpen('${escJs(v.target)}','${escJs(v.uid||'')}')`;
+  return _trayRow(v.title,v.detail,_trayVerb('Name &#8594;',call));
+}
+// a registry voice opens the naming panel on itself, with the row's meeting
+// for its lines. A transcript-local voice opens its own meeting's Voices step.
+function needsYouVoiceOpen(target,uid){
+  if(uid){openNamePanelByUid(uid,target);return;}
+  fsVoiceCarry(target,[],[],[]);
 }
 
 /* ================ search chips, Said in, and the setup check ================ *
@@ -2409,9 +2418,11 @@ async function buildMeeting(base){
   const body=$('#mtbody');if(!body)return;
   if(d.error){body.innerHTML='<div class="mterr">'+esc(d.error)+'</div>';return;}
   MP.segs=d.segments||[];
+  MP.noSpeech=!!d.no_speech;
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
   MP.stamp=d.generated_at||null;
+  mAudioNote(d.audio_short_by);
   (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   body.innerHTML=mBodyHTML();
   mLegend(d);
@@ -2481,8 +2492,20 @@ function _mHeader(m,base){
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta"><span id="mmbits">${bits.join(' &middot; ')}</span>
       <button class="mcat ${dot}" id="mcatdot" type="button"
-        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${strict}${flagged}</div>
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${strict}${flagged}<span class="mflagnote" id="maudionote" hidden></span></div>
   </div>`;
+}
+// the audio-may-be-lost note: the Needs you row's words, kept on the
+// meeting's own header after the row leaves the list (plan row 10). Filled
+// from the transcript response, so only the open meeting pays for the probe.
+function audioNoteText(mins){
+  return mins?`The audio is ${mins} minute${mins!==1?'s':''} shorter than the transcript: audio may be lost`:'';
+}
+function mAudioNote(mins){
+  const el=document.getElementById('maudionote');
+  if(!el)return;
+  const t=audioNoteText(mins);
+  el.textContent=t;el.hidden=!t;
 }
 // header dot: same optimistic /api/set_category cycle as the library rows
 function mCycleCat(ev){
@@ -2812,7 +2835,11 @@ function mGapHTML(i){
     title="Add a line here: a voice the pipeline missed">&#65291; add line</div>`;
 }
 function mBodyHTML(){
-  if(!MP.segs.length)return '<div class="mterr">This transcript has no lines yet.</div>';
+  // a silent recording is a fact about the audio, not an error: the same
+  // muted words the summary uses
+  if(!MP.segs.length)return MP.noSpeech
+    ?'<div class="msumbody muted">No speech found in this recording.</div>'
+    :'<div class="mterr">This transcript has no lines yet.</div>';
   return mGapHTML(-1)+MP.segs.map((g,i)=>mSegHTML(g,i)+mGapHTML(i)).join('');
 }
 function mFindInput(){clearTimeout(mFindT);mFindT=setTimeout(()=>mFindRun(true),200);}
@@ -3164,9 +3191,11 @@ async function mReloadSegs(target){
   mCloseCard();
   MF=null;{const f=$('#mfind');if(f)f.value='';}mFindCount();
   MP.segs=d.segments||[];
+  MP.noSpeech=!!d.no_speech;
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
   if(d.generated_at)MP.stamp=d.generated_at;
+  mAudioNote(d.audio_short_by);
   MP.color={};(d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   MP.nowIdx=null;
   body.innerHTML=mBodyHTML();

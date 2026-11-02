@@ -604,7 +604,10 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 # the Needs you window's key: the STORED arrival stamp only.
                 # A meeting without one falls outside the window, so a
                 # backfill write can never bring an old meeting back.
-                "arrived_at": d.get("processed_at"),
+                # `arrived_at` is written once at first arrival and carried
+                # across a Redo (which re-stamps processed_at). A meeting
+                # from before that key arrived at its processed_at.
+                "arrived_at": d.get("arrived_at") or d.get("processed_at"),
                 "suggested": d.get("ai_title") or "",
                 # when transcription last ran (new or redo). Older transcripts
                 # predate this field — fall back to generated_at, then mtime.
@@ -1113,7 +1116,9 @@ def _needs_you(meetings, active_bases, unknown_list, now=None) -> list:
     items.sort(key=lambda x: _NY_RANK[x["kind"]])
     v = _top_voice(meetings, unknown_list, window)
     if v:
-        items.append(v)
+        # the voice row keeps its place: meeting rows fill the rest, so a
+        # day of new titles never pushes the one voice row out (plan row 12)
+        return items[:NEEDS_YOU_MAX - 1] + [v]
     return items[:NEEDS_YOU_MAX]
 
 
@@ -1706,8 +1711,8 @@ def _relabel_targets(vector=None, names=(), uids=(), first=None,
 # ---------- who a voice already looks like ----------
 
 # The audit of 2026-09-13 found nineteen unnamed clusters scoring 0.61 to 0.84
-# against an enrolled print and sitting under the automatic margin -- Riley
-# Stone at 0.84 in an Enrollment Data Review meeting among them. Refusing them
+# against an enrolled print and sitting under the automatic margin -- one
+# enrolled voice at 0.84 in a data review meeting among them. Refusing them
 # automatically is right: a margin that narrow is how a voiceprint learns the
 # wrong person. Showing the human nothing is not, and the same cluster came back
 # unnamed every week. These two helpers are that evidence, and nothing more:
@@ -2110,6 +2115,15 @@ class Handler(BaseHTTPRequestHandler):
                             # compared against what is really on screen
                             "generated_at": d.get("generated_at"),
                             "duration_sec": d.get("duration_sec", 0),
+                            # a silent recording: the transcript section says
+                            # so instead of reporting an error
+                            "no_speech": bool(d.get("no_speech")),
+                            # the audio-may-be-lost note stays on the meeting
+                            # after the Needs you row leaves (plan row 10)
+                            "audio_short_by": (None if d.get("no_speech") else
+                                               _audio_short_by({
+                                                   "audio": config.meeting_audio(base),
+                                                   "duration_sec": d.get("duration_sec")})),
                             "speakers": [s["display"] for s in d.get("speakers", [])],
                             # `dismissed` is what lets the legend drop the "?"
                             # without pretending the voice was ever named

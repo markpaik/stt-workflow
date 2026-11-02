@@ -154,3 +154,70 @@ def test_an_active_meeting_is_left_out(sandbox, monkeypatch):
     status.set_stage("New Recording 5.m4a", "writing", base="New Recording 5")
     monkeypatch.setattr(control, "snapshot", lambda: {"pids": [1], "mem_mb": 0})
     assert _ny() == []
+
+
+def test_the_voice_row_keeps_its_place_when_titles_fill_the_list(sandbox):
+    for i in range(7):
+        _m(f"New Recording {10 + i}", days_ago=1, reviewed=False,
+           title_state="needs_title", ai_title=f"Draft {i}")
+    _voice("Team Sync 10012026", "Speaker 20", 600.0)
+    items = _ny()
+    assert len(items) == 5
+    assert [x["kind"] for x in items] == ["needs_title"] * 4 + ["voice"]
+
+
+def test_without_a_voice_five_meeting_rows_still_show(sandbox):
+    for i in range(7):
+        _m(f"New Recording {20 + i}", days_ago=1, reviewed=False,
+           title_state="needs_title")
+    assert [x["kind"] for x in _ny()] == ["needs_title"] * 5
+
+
+def test_the_window_reads_the_first_arrival_stamp(sandbox):
+    """A Redo re-stamps processed_at but carries arrived_at, and the window
+    reads arrived_at first."""
+    _m("New Recording 30", days_ago=0, arrived_at=_iso(40), reviewed=False,
+       title_state="needs_title")
+    _m("Quiet Room 09012026", days_ago=0, arrived_at=_iso(40), segments=[],
+       no_speech=True)
+    _m("New Recording 31", days_ago=0, arrived_at=_iso(2), reviewed=False,
+       title_state="needs_title")
+    assert [x["target"] for x in _ny()] == ["New Recording 31"]
+
+
+def test_a_redo_carries_the_first_arrival(sandbox):
+    from stt import pipeline
+    now = "2026-11-02T09:00:00"
+    assert pipeline._arrived_at(None, now) == now
+    assert pipeline._arrived_at({"arrived_at": "2026-09-01T08:00:00",
+                                 "processed_at": "2026-10-01T08:00:00"}, now) \
+        == "2026-09-01T08:00:00"
+    # a meeting from before the key arrived at its stored processed_at
+    assert pipeline._arrived_at({"processed_at": "2026-10-01T08:00:00"}, now) \
+        == "2026-10-01T08:00:00"
+    # no stamp: its meeting date, never the moment of the Redo
+    assert pipeline._arrived_at({"date": "2026-08-03"}, now) == "2026-08-03T00:00:00"
+    assert pipeline._arrived_at({}, now) == "1970-01-01T00:00:00"
+
+
+def test_the_transcript_endpoint_carries_the_silent_and_short_notes(sandbox, monkeypatch):
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    _m("Quiet Room 10012026", segments=[], no_speech=True)
+    _m("Cut Short 10012026")
+    real = queue_order.duration
+    monkeypatch.setattr(queue_order, "duration",
+                        lambda p: 300.0 if "Cut Short" in str(p) else real(p))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        def get(base):
+            url = (f"http://127.0.0.1:{httpd.server_port}/api/transcript?base="
+                   + urllib.request.quote(base))
+            return json.loads(urllib.request.urlopen(url).read())
+        quiet, short = get("Quiet Room 10012026"), get("Cut Short 10012026")
+    finally:
+        httpd.shutdown()
+    assert quiet["no_speech"] is True and quiet["audio_short_by"] is None
+    assert short["no_speech"] is False and short["audio_short_by"] == 5
