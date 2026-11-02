@@ -175,3 +175,30 @@ def test_the_silent_summary_comes_back_on_undo(store):
 def test_field_without_undo_is_refused(store):
     with pytest.raises(SystemExit):
         amnesty.main(["--field", "route"])
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_a_keep_after_the_amnesty_keeps_its_source_through_undo(store, bulk):
+    """A Keep confirms the state and leaves the source. Undo then holds the
+    pair: a confirmed title never ends up with no title_source."""
+    r = amnesty.apply()
+    base = "Recording 10042026 1344"
+    if bulk:
+        res = summarize.apply_meeting_edits(base, title_state="confirmed")
+    else:
+        res = summarize.apply_meeting_edits(base, reviewed=True, title_state="confirmed")
+    assert res["ok"]
+    u = amnesty.undo(r["run"], dry_run=False)
+    d = _load(base)
+    assert (d["title_state"], d["title_source"]) == ("confirmed", "model")
+    assert {"base": base, "field": "title_source"} in u["kept"]
+    # a meeting nobody touched still comes back whole
+    assert "title_state" not in _load("1200 Example Ave 10052026")
+
+
+def test_undo_of_the_source_alone_holds_it_when_the_state_was_kept(store):
+    r = amnesty.apply()
+    base = "Recording 10042026 1344"
+    assert summarize.apply_meeting_edits(base, title_state="confirmed")["ok"]
+    amnesty.undo(r["run"], fields=["title_source"], dry_run=False)
+    assert _load(base)["title_source"] == "model"

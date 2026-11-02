@@ -250,9 +250,15 @@ def _bases_by_id(store=None) -> dict:
 def undo(run_id: str, fields=None, store=None, journal_dir=None, dry_run=True) -> dict:
     """Put back each journaled field whose current value still equals the
     amnesty's value. A field a person changed since keeps the change and is
-    reported as kept. `fields` limits the undo to those field names."""
-    entries = [e for e in _journal_entries(run_id, journal_dir)
-               if not fields or e["field"] in fields]
+    reported as kept. `fields` limits the undo to those field names.
+
+    `title_state` and `title_source` are one pair: when a person changed the
+    state since (a Keep confirms it and leaves the source alone), the source
+    is kept too, so undo never leaves a confirmed title with no source."""
+    every = _journal_entries(run_id, journal_dir)
+    state_new = {(e.get("meeting_id") or f"base:{e['base']}"): e["new"]
+                 for e in every if e["field"] == "title_state"}
+    entries = [e for e in every if not fields or e["field"] in fields]
     by_id = _bases_by_id(store)
     live = set(config.meeting_bases(store))
     groups = {}
@@ -272,9 +278,12 @@ def undo(run_id: str, fields=None, store=None, journal_dir=None, dry_run=True) -
 
         def _fold(d):
             done, held = [], []
+            state_kept = key in state_new and d.get("title_state") != state_new[key]
             for e in reversed(es):
                 cur = _get(d, e["field"])
-                if cur == e["new"] or (_is_missing(cur) and _is_missing(e["new"])):
+                if e["field"] == "title_source" and state_kept:
+                    held.append({"base": base, "field": e["field"]})
+                elif cur == e["new"] or (_is_missing(cur) and _is_missing(e["new"])):
                     _set(d, e["field"], e["old"])
                     done.append({"base": base, "field": e["field"]})
                 else:
