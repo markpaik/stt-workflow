@@ -4730,7 +4730,10 @@ function fsUseFile(){
 async function fsAccept(){
   if(!FS||FS.busy||FS.cur!=='title')return;
   const base=FS.base,ti=$('#fstitle'),di=$('#fsdate'),btn=$('#fsaccept'),err=$('#fserr');
-  const name=(ti&&ti.value.trim())||'',date=(di&&di.value)||'';
+  // the date goes only when it differs from the stored one: sending the
+  // prefilled date back would claim a person chose it (date_source=manual)
+  const stored=(FS.row&&FS.row.date)||'',picked=(di&&di.value)||'';
+  const name=(ti&&ti.value.trim())||'',date=(picked&&picked!==stored)?picked:'';
   FS.busy=true;if(btn){btn.disabled=true;btn.innerHTML='Saving&#8230;';}
   let r;
   try{r=await api('/api/accept_meeting',{base,name,date});}

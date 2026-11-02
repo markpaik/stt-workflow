@@ -14,6 +14,11 @@ Each rename goes through summarize.apply_meeting_edits, so the move also follows
 the speaker registries (or the ▶ voice clips die), the stored source_file, and
 the manifest (or a kept original re-transcribes into a duplicate). A meeting the
 batch is writing right now is skipped rather than forced.
+
+It fixes the same folders `doctor check` reports as `name_mismatch`: a name with
+no stamp, and a name whose date is written another way (a YYYYMMDD run is
+rewritten in place as MMDDYYYY). A twin's ' (N)' suffix is kept. The stored date
+does not change, so `date_source` stays as it was.
 """
 import argparse
 import json
@@ -39,7 +44,9 @@ def plan():
         if not iso:
             rows.append((base, None, "no stored date — skipped"))
             continue
-        want = dates.restamp(base, iso)
+        # the doctor's rule: restamp() peels a twin suffix, so put it back,
+        # or every '(2)' twin would look out of step with its own name
+        want = dates.restamp(base, iso) + dates.twin_suffix(base)
         if want != base:
             rows.append((base, want, iso))
     return rows

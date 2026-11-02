@@ -480,7 +480,8 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
 
     A date edit records where the date came from. `date_source` defaults to
     `manual`, because the panel is a person. A repair passes the real
-    source (`recorder`, `short_typed`, ...). `recorded_at` sets the true
+    source (`recorder`, `short_typed`, ...). A date equal to the stored one
+    leaves `date_source` alone unless the caller passes it explicitly. `recorded_at` sets the true
     start time with that date, None stores null, and DROP removes the key.
     Left out, a stored `recorded_at` on another day is cleared to null,
     because `date` must equal its date part whenever it is set.
@@ -589,10 +590,15 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
             d["title"] = dates.title_of(want)
-        if date is not None or d.get("date") != date_before:
-            # a date was set (the picker, a repair, or a typed stamp in a
-            # title): record where it came from
+        moved = d.get("date") != date_before
+        if moved or (date is not None and date_source is not None):
+            # the date changed (the picker, a repair, or a typed stamp in a
+            # title), or a repair names its source: record where it came
+            # from. Passing the date a meeting ALREADY has (an Accept with
+            # the prefilled date, a restore, a restamp) is no evidence of
+            # anything, so the stored source stays as it was.
             d["date_source"] = date_source or "manual"
+        if moved:
             if recorded_at is _UNSET:
                 ra = d.get("recorded_at")
                 if ra and str(ra)[:10] != d.get("date"):
