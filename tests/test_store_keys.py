@@ -425,3 +425,34 @@ def test_the_pipeline_writes_the_title_key_on_arrival_and_on_a_redo(sandbox, mon
     stored.write_bytes(b"x")
     _process(monkeypatch, stored)
     assert _load(base)["title"] == "Team Huddle"
+
+
+# ---------- the date badge ----------
+
+def test_the_panel_meta_carries_the_date_source(sandbox):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gui"))
+    import server
+    _m("Budget Review 09292026", date_source="mtime", recorded_at=None)
+    meta = server._meeting_meta(config.meeting_file("Budget Review 09292026", ".json"),
+                                config.meetings_dir())
+    assert meta["date_source"] == "mtime" and meta["recorded_at"] is None
+
+
+def test_the_meeting_page_shows_every_date_source_and_flags_the_guesses():
+    from test_new_shell import NODE, _js_fn, _js_oneline, _run_node
+    if NODE is None:
+        pytest.skip("node not installed")
+    out = _run_node("\n".join([_js_oneline("esc"), _js_fn("dateSourceHTML")]) + """
+const r={};
+for(const s of ['typed','recorder','short_typed','mtime','manual','<b>',null])
+  r[String(s)]=dateSourceHTML({date_source:s});
+console.log(JSON.stringify(r));
+""")
+    for src in ("typed", "recorder", "manual"):
+        assert "Date from" in out[src] and "Date uncertain" not in out[src], src
+    for src in ("mtime", "short_typed"):
+        assert out[src].startswith('<span class="mchip dateunsure"'), src
+        assert "Date from" in out[src]
+    assert "Date from the file time" in out["mtime"]
+    assert "<b>" not in out["<b>"]
+    assert out["null"] == ""

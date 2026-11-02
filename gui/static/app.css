@@ -734,6 +734,9 @@ body.route-meeting:not(.panes) .bulkbar{display:none!important}
 .mmeta .mchip{font:500 13px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;
   color:var(--attn);background:var(--attn-soft);border-radius:4px;padding:3px 8px}
 .mmeta .mflagnote{color:var(--attn)}
+/* where the date came from, on every meeting; a file-time or short typed
+   date also wears the Date uncertain chip (plan Phase 3 step 6) */
+.mmeta .mdatesrc{color:var(--sub);font-size:13px}
 /* the header's "N unnamed", as a To finish row's meta line wears it; the
    count and its word never part when the line wraps */
 .mmeta .unn{color:var(--attn);font-weight:500;white-space:nowrap}

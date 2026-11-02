@@ -6321,7 +6321,7 @@ def _header_env():
     return "\n".join([
         _js_oneline("esc"), _js_oneline("escJs"), _js_fn("shortDate"),
         _js_fn("peopleMetaBits"), _js_fn("mMetaBits"), _js_fn("mHeadSync"),
-        _js_fn("draftChipHTML"), _js_fn("_mHeader"),
+        _js_fn("draftChipHTML"), _js_fn("dateSourceHTML"), _js_fn("_mHeader"),
         "const bits=h=>{const m=/<span id=\"mmbits\">([\\s\\S]*?)<\\/span>\\s*<button class=\"mcat/.exec(h);"
         "return m?m[1]:null;};",
     ])

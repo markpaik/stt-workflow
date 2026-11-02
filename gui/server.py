@@ -600,6 +600,11 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "title_source": d.get("title_source"),
                 "route": route,
                 "no_speech": bool(d.get("no_speech")),
+                # where the date came from (stt/provenance.py). The page
+                # shows it, and a file-time or short typed date wears the
+                # Date uncertain chip. None on a meeting before the key.
+                "date_source": d.get("date_source"),
+                "recorded_at": d.get("recorded_at"),
                 "duration_sec": d.get("duration_sec"),
                 # the Needs you window's key: the STORED arrival stamp only.
                 # A meeting without one falls outside the window, so a
