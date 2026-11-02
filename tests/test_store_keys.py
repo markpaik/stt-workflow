@@ -87,6 +87,15 @@ def test_short_dates_parse_to_their_most_recent_past_day(name, ref, want):
     ("Grade 3/4 team", "2026-04-10"),
     ("v1.2 demo", "2026-01-20"),
     ("Demo v1.2", "2026-01-20"),
+    # a trailing range or count, not a day: grades six to eight is not June 8
+    ("Math PLC Grades 6-8", "2026-06-20"),
+    ("Science Gr. 6-8", "2026-06-20"),
+    ("Grade 3/4", "2026-04-10"),
+    ("Kinder Team K 1-2", "2026-01-20"),
+    ("Playgroup Ages 3-5", "2026-03-20"),
+    ("Book Study Chapters 4-5", "2026-04-20"),
+    ("Literacy Grades K-2 and 3-5", "2026-03-20"),
+    ("Data Talk 6-8, 9-12", "2026-09-20"),
 ])
 def test_what_is_not_a_short_date(name, ref):
     assert dates.short_date(name, ref) is None

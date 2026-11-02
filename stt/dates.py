@@ -99,6 +99,30 @@ _SHORT = re.compile(
     r"(?<![\w.:/\-])(\d{1,2})([.\-/])(\d{1,2})(?:\2(\d{2}|\d{4}))?\s*$")
 SHORT_MAX_DAYS = 60
 
+# A trailing run right after one of these words is a range or a count, not a
+# day: 'Math PLC Grades 6-8' is grades six to eight, never June 8. The word
+# is matched whole, case-blind, with an optional trailing period ('Gr.').
+_RANGE_WORDS = frozenset("""
+    grade grades gr grs k pk tk ages age yrs years
+    ch chapter chapters unit units lesson lessons module modules
+    week weeks wk wks page pages pg pgs pp level levels tier tiers
+    period periods session sessions part parts section sections
+    step steps days room rooms v ver version rev no
+    """.split())
+_WORD_BEFORE = re.compile(r"(\w+)\.?\s*$")
+# another range earlier in the title ('Grades K-2 and 3-5', '6-8, 9-12')
+# means the trailing one is a range too
+_RANGE_TOKEN = re.compile(r"(?<![\w.:/\-])(?:[A-Za-z]|\d{1,2})\s*[\-\u2013/]\s*\d{1,2}(?![\w.:/\-])")
+
+
+def _is_range(head: str) -> bool:
+    """True when the text before a trailing short run marks it as a range or
+    a count: a range word right before it, or another range earlier on."""
+    w = _WORD_BEFORE.search(head)
+    if w and w.group(1).lower() in _RANGE_WORDS:
+        return True
+    return bool(_RANGE_TOKEN.search(head))
+
 
 def short_date(name: str, ref_iso: str):
     """ISO date for the short typed date that ends `name`, resolved against
@@ -108,14 +132,19 @@ def short_date(name: str, ref_iso: str):
     2026-12-30: a year boundary resolves to the past. An explicit year
     ('9.14.26') is taken as written. A result after the reference day, or
     more than SHORT_MAX_DAYS before it, is rejected. 8-digit stamps never
-    match, because the pattern needs a separator."""
+    match, because the pattern needs a separator. A run that reads as a
+    range or a count ('Grades 6-8', 'Units 3/4', 'K-2 and 3-5') is
+    rejected (_is_range)."""
     try:
         ref = date.fromisoformat(str(ref_iso)[:10])
     except (TypeError, ValueError):
         return None
-    for m in _SHORT.finditer(str(name or "").rstrip()):
+    text = str(name or "").rstrip()
+    for m in _SHORT.finditer(text):
         mo, dy, yr = int(m.group(1)), int(m.group(3)), m.group(4)
         if not (1 <= mo <= 12 and 1 <= dy <= 31):
+            continue
+        if _is_range(text[:m.start()]):
             continue
         cands = []
         if yr:
