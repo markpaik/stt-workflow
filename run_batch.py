@@ -175,6 +175,11 @@ def summarize_one(key, base=None) -> bool:
         d = _json.loads(config.meeting_file(base, ".json").read_text())
         if d.get("ai_summary"):
             return False  # e.g. a re-queued file that was already summarized
+        if not summarize.has_speech(base):
+            # 0 segments: the model would invent a meeting. The pipeline
+            # already set no_speech, and the panel says "No speech found".
+            print(f"   no speech in {base}: no summary written", flush=True)
+            return False
         st.set_stage(key, "summarizing")
         summarize.suggest_title(base)
         return True
@@ -183,6 +188,22 @@ def summarize_one(key, base=None) -> bool:
         return False
     finally:
         st.clear_stage(key)
+
+
+def record_review_metrics() -> bool:
+    """Append today's review counts (tools/review_metrics.py) once a day, at
+    the end of a run. Counts only, never a title. A failure here never fails
+    the run."""
+    try:
+        import importlib.util
+        path = Path(__file__).resolve().parent / "tools" / "review_metrics.py"
+        spec = importlib.util.spec_from_file_location("review_metrics", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return bool(mod.record_today())
+    except Exception as e:
+        print(f"  (review metrics skipped: {e})", file=sys.stderr, flush=True)
+        return False
 
 
 def auto_summarize(keys) -> int:
@@ -816,6 +837,8 @@ def main():
             print(f"   queued relabel failed: {e}", file=sys.stderr)
 
     status.end_run()
+    if not args.dry_run:
+        record_review_metrics()
     print(f"\nSummary: {processed} processed, {skipped} skipped, {failed} failed.")
     if finish["asked"]:
         control.clear_finish()  # honored: the next run starts normally

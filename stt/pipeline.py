@@ -76,6 +76,53 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     return fallback
 
 
+def _title_fields(meta: dict, prev, src: Path, segments) -> None:
+    """Write the title rule's keys into a meeting's fresh metadata.
+
+    A Redo (`prev` is the stored json) carries every key in
+    titles.CARRY_KEYS that the stored json holds, so a Redo never undoes a
+    title decision or the amnesty. A meeting from before the rule (no
+    title_state stored) keeps a missing state: the panel's fallback to
+    `reviewed` still applies to it. Only `route` is filled in when missing,
+    because it is a fact about the file and not a decision.
+
+    A brand-new meeting gets its route and its first title state from
+    titles.initial_title. `no_speech` is recomputed on every run: it is set
+    only on a transcript with 0 segments, and dropped otherwise."""
+    from . import titles
+    if prev is not None:
+        for k in titles.CARRY_KEYS:
+            if k in prev:
+                meta[k] = prev[k]
+        if "route" not in meta:
+            meta["route"] = titles.route_for(prev.get("source_file") or src.name)
+    else:
+        route = titles.route_for(src.name, src)
+        state, source = titles.initial_title(src.name, route)
+        meta["title_state"], meta["title_source"], meta["route"] = state, source, route
+    if not segments:
+        meta["no_speech"] = True
+    else:
+        meta.pop("no_speech", None)
+
+
+def _arrived_at(prev, processed_at: str) -> str:
+    """When this meeting first arrived. A new meeting arrives now. A Redo
+    keeps the stored stamp, so a bulk Redo never brings old meetings back
+    into Needs you. A meeting from before this key falls back to its stored
+    processed_at, then to its meeting date: both are no later than its true
+    arrival, and neither is the moment of the Redo."""
+    if prev is None:
+        return processed_at
+    for k in ("arrived_at", "processed_at"):
+        if prev.get(k):
+            return str(prev[k])
+    if prev.get("date"):
+        return f"{prev['date']}T00:00:00"
+    # no stamp and no date: the Unix epoch, which no window ever reaches
+    return "1970-01-01T00:00:00"
+
+
 def _src_mtime(src: Path):
     try:
         return round(src.stat().st_mtime, 3)
@@ -405,7 +452,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # unannounced into a list of a hundred. (Meetings processed before this
         # existed carry NO reviewed key at all, and the panel treats a missing key
         # as already-reviewed — so nothing retroactively floods the inbox.)
-        category, reviewed = None, False
+        category, reviewed, prev = None, False, None
         try:
             import json as _json
             prev = _json.loads(json_path.read_text())
@@ -436,6 +483,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # lock so a set_meeting_date landing mid-write is not clobbered.
             "date": _meeting_date(src, json_path),
             "processed_at": processed_at,
+            # the Needs you window's key: written once, at first arrival,
+            # and carried by every Redo (_arrived_at)
+            "arrived_at": _arrived_at(prev, processed_at),
             "duration_sec": round(dur, 1),
             "asr_engine": asr_out["engine"],
             "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
@@ -450,6 +500,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         if category:
             meta["category"] = category
         meta["reviewed"] = bool(reviewed)
+        _title_fields(meta, prev, src, segments)
         if channel_layout:  # a recording that declared a me/them layout
             meta["channel_layout"] = channel_layout
             meta["mic_speaker"] = mic_speaker

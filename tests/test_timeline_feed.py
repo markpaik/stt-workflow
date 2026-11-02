@@ -10,6 +10,8 @@ The feed is STRICTLY ADDITIVE: every pre-existing /api/state key keeps its shape
 import json
 import time
 
+import pytest
+
 from gui import server as srv
 from stt import (archive, config, control, holds, manifest, recorder, status,
                  summarize, unknowns)
@@ -477,29 +479,32 @@ def test_unknown_count_matches_resolvable_meetings_only(sandbox):
         assert set(x["meetings"]) <= resolvable
 
 
-def test_tray_review_only_counts_substantial(sandbox):
+def test_tray_has_no_flag_review_entry(sandbox):
+    """Plan row 8: flags left the list. A meeting with flagged lines adds no
+    tray entry, and its row still carries the count for the Has flags chip."""
     _meeting("Flagged 04082026", date="2026-04-08",
              segments=[{"start": 0.0, "end": 3.0, "text": "a b c d e", "flags": ["x"]},
                        {"start": 3.0, "end": 5.0, "text": "f g h i j", "flags": ["y"]},
                        {"start": 5.0, "end": 5.3, "text": "ok", "flags": ["z"]}])  # minor
-    tray = srv.gather_state()["tray"]
-    rev = next(t for t in tray if t["kind"] == "review")
-    assert rev["count"] == 2 and rev["target"] == "Flagged 04082026"
+    st = srv.gather_state()
+    assert not [t for t in st["tray"] if t["kind"] == "review"]
+    assert _row(st, id="Flagged 04082026")["review_substantial"] == 2
 
 
-def test_tray_ranks_stall_failed_review_unknown(sandbox, monkeypatch, tmp_path):
-    """All four kinds at once must come back in strict rank order."""
+def test_tray_ranks_stall_failed_unknown(sandbox, monkeypatch, tmp_path):
+    """All three kinds at once must come back in strict rank order. A flagged
+    meeting adds no entry (plan row 8)."""
     _recording(monkeypatch, tmp_path, stalled=True)                   # recorder_stall
     _source("Broken.mp4")
     _history({"name": "Broken.mp4", "ok": False, "summary": "decode error",
               "at": "2026-07-09T02:41:55"})                           # failed
-    _meeting("Flagged 04082026", date="2026-04-08",                   # review
+    _meeting("Flagged 04082026", date="2026-04-08",                   # no entry
              segments=[{"start": 0.0, "end": 3.0, "text": "a b c d e", "flags": ["x"]}])
     _meeting("m")   # the unknown's ref must resolve to a real meeting
     (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps({"speakers": {
         "U007": {"file": "U007.npy", "meetings": ["m"]}}}))           # unknown_voice
     kinds = [t["kind"] for t in srv.gather_state()["tray"]]
-    assert kinds == ["recorder_stall", "failed", "review", "unknown_voice"]
+    assert kinds == ["recorder_stall", "failed", "unknown_voice"]
 
 
 def test_tray_failed_carries_error_and_target(sandbox):
@@ -540,9 +545,10 @@ def test_additive_keys(sandbox):
     assert BASELINE_KEYS <= set(st)
     # relabel_running joined them later (the honest "a relabel is happening
     # right now" signal next to the queued-behind-another relabel_pending),
-    # and `jobs` after it (the relabel queue's own running/queued/last report)
+    # and `jobs` after it (the relabel queue's own running/queued/last report),
+    # and `needs_you` (the one short list, unified plan Phase 1 step 8)
     assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running",
-                                       "jobs"}
+                                       "jobs", "needs_you"}
     assert isinstance(st["relabel_running"], bool)
     assert st["jobs"] == {"running": None, "queued": [], "last": None}, \
         "no queue in this process: the empty shape, never a missing key"
@@ -816,58 +822,68 @@ def _finish_of(base):
     return _row(srv.gather_state(), id=base)["finish"]
 
 
-def test_finish_on_a_meeting_waiting_for_its_title(sandbox):
+@pytest.fixture
+def every_voice_asks(monkeypatch):
+    """These tests pin how voices are COUNTED. The fixture voices talk for a
+    few seconds, under the one-minute floor that hides a short voice behind
+    a count (plan Phase 1 step 4), so the floor is set to 0 here. The floor
+    itself is pinned in tests/test_title_rules.py."""
+    monkeypatch.setattr(srv, "VOICE_ASK_MIN_SECS", 0.0)
+
+
+def test_finish_on_a_meeting_waiting_for_its_title(sandbox, every_voice_asks):
     _meeting("Recording 09262026 0915", date="2026-09-26", reviewed=False,
              ai_title="Budget Review", speakers=[dict(s) for s in FIN_SPEAKERS],
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_MINOR)])
     r = _row(srv.gather_state(), id="Recording 09262026 0915")
     assert r["state"] == "needs_name"
     assert r["finish"] == {"title": False, "voices": 2, "flags": 1, "done": False,
-                           "voice_secs": 0.0, "voice_uids": []}
+                           "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
 
 
-def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox):
+def test_finish_on_a_ready_meeting_with_open_voices_and_flags(sandbox, every_voice_asks):
     _meeting("Budget Review 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_MINOR)])
     r = _row(srv.gather_state(), id="Budget Review 09262026")
     assert r["state"] == "ready"
-    # the minor crumb is not a finish step: only substantial lines count
-    assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": False,
-                           "voice_secs": 0.0, "voice_uids": []}
+    # the minor crumb is not a finish step: only substantial lines count.
+    # Plan row 8: voices and flags no longer block done
+    assert r["finish"] == {"title": True, "voices": 2, "flags": 1, "done": True,
+                           "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
     assert r["review_substantial"] == r["finish"]["flags"]
 
 
-def test_finish_skips_dismissed_voices_and_minor_flags(sandbox):
+def test_finish_skips_dismissed_voices_and_minor_flags(sandbox, every_voice_asks):
     _meeting("Grumble 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
              segments=[dict(FIN_MINOR)])
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_02")
     assert _finish_of("Grumble 09262026") == {
-        "title": True, "voices": 1, "flags": 0, "done": False,
-        "voice_secs": 0.0, "voice_uids": []}
+        "title": True, "voices": 1, "flags": 0, "done": True,
+        "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
     summarize.dismiss_voice("Grumble 09262026", "SPEAKER_01")
     assert _finish_of("Grumble 09262026") == {
         "title": True, "voices": 0, "flags": 0, "done": True,
-        "voice_secs": 0.0, "voice_uids": []}
+        "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
 
 
-def test_finish_on_a_meeting_with_only_flags_left(sandbox):
+def test_finish_on_a_meeting_with_only_flags_left(sandbox, every_voice_asks):
     _meeting("Flags Only 09262026", speakers=[dict(FIN_SPEAKERS[0])],
              segments=[dict(FIN_SUBSTANTIAL), dict(FIN_SUBSTANTIAL, start=30.0, end=35.0)])
     assert _finish_of("Flags Only 09262026") == {
-        "title": True, "voices": 0, "flags": 2, "done": False,
-        "voice_secs": 0.0, "voice_uids": []}
+        "title": True, "voices": 0, "flags": 2, "done": True,
+        "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
 
 
-def test_finish_on_a_finished_meeting(sandbox):
+def test_finish_on_a_finished_meeting(sandbox, every_voice_asks):
     # the one speaker is named, nothing is flagged, and a missing `reviewed`
     # key reads as reviewed (pre-inbox meetings never flood the inbox)
     _meeting("Done Deal 09262026", speakers=[dict(FIN_SPEAKERS[0])])
     assert _finish_of("Done Deal 09262026") == {
         "title": True, "voices": 0, "flags": 0, "done": True,
-        "voice_secs": 0.0, "voice_uids": []}
+        "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
 
 
-def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox):
+def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox, every_voice_asks):
     # Speaker 2 talks 9.5s over two lines, Speaker 3 4s, the named speaker 30s
     # (never a naming target), and a textless line counts for nothing
     _meeting("Talkers 09262026", speakers=[dict(s) for s in FIN_SPEAKERS],
@@ -884,10 +900,10 @@ def test_finish_carries_the_longest_unnamed_voice_talk_time(sandbox):
     summarize.dismiss_voice("Talkers 09262026", "SPEAKER_02")
     assert _finish_of("Talkers 09262026") == {
         "title": True, "voices": 0, "flags": 0, "done": True,
-        "voice_secs": 0.0, "voice_uids": []}
+        "voice_secs": 0.0, "voice_uids": [], "short_voices": 0}
 
 
-def test_finish_names_the_registry_voices_among_the_open_ones(sandbox):
+def test_finish_names_the_registry_voices_among_the_open_ones(sandbox, every_voice_asks):
     """voice_uids lists the unknown-registry uids among a meeting's unnamed
     voices, matched as the page's mUnknownUid matches them (the display, and
     this meeting in the voice's meetings). A hidden voice still counts: its
@@ -919,7 +935,7 @@ def test_finish_names_the_registry_voices_among_the_open_ones(sandbox):
 
 
 
-def test_finish_counts_a_split_voice_once(sandbox):
+def test_finish_counts_a_split_voice_once(sandbox, every_voice_asks):
     """A board meeting's strip read "Voices 22" while its To finish row read
     "Voices 21". The diarizer split one person into two clusters that carry
     one global id, so both display "Speaker 68", and naming that id names
@@ -939,7 +955,7 @@ def test_finish_counts_a_split_voice_once(sandbox):
     assert f["voices"] - len(f["voice_uids"]) == 4
 
 
-def test_rows_name_their_people_once_most_talk_first(sandbox):
+def test_rows_name_their_people_once_most_talk_first(sandbox, every_voice_asks):
     """A To finish row lists named people, never raw labels, so the row
     carries them: each name once (a named split voice is two clusters with
     one name, a manual line's person counts too), the most talk first, and

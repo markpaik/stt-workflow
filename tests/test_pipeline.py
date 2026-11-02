@@ -278,15 +278,18 @@ def test_no_sidecar_is_pure_mono(sandbox, monkeypatch):
 
 
 def test_meeting_date_rejects_a_future_filename_date(sandbox, monkeypatch):
-    """A filename like '...10242026' parses to Oct 24 2026 (future). A recording
-    can't be from the future, so the stamped date must fall back to the file's
-    mtime instead of sorting above today's real meetings."""
+    """A filename stamped a year from today parses to a future date. A
+    recording can't be from the future, so the stamped date must fall back to
+    the file's mtime instead of sorting above today's real meetings. The
+    stamp is built from today, so the test never ages into the past."""
     from datetime import date
-    src = config.PROJECT_DIR / "Thrive ICD Sami 10242026.m4a"
+    today = date.today()
+    future = today.replace(year=today.year + 1, day=min(today.day, 28))
+    src = config.PROJECT_DIR / f"Vendor Call {future.strftime('%m%d%Y')}.m4a"
     src.write_bytes(b"x")
     d = pipeline._meeting_date(src)
-    assert d <= date.today().isoformat()
-    assert d != "2026-10-24"
+    assert d <= today.isoformat()
+    assert d != future.isoformat()
     # a PAST filename date is still trusted
     past = config.PROJECT_DIR / "LT Meeting 05212026.m4a"
     past.write_bytes(b"x")

@@ -629,9 +629,11 @@ function timelineSections(rows,now){
   const out={now:[],fin:[],rest:[]};
   for(const r of rows||[]){
     if(NOW_STATES.has(r.state))out.now.push(r);
-    else if(r.state==='needs_name'||toFinish(r,now))out.fin.push(r);
+    else if(toFinish(r,now))out.fin.push(r);
     else out.rest.push(r);
   }
+  // Needs you keeps the server's own rank
+  out.fin.sort((a,b)=>(a.needs_you_rank||0)-(b.needs_you_rank||0));
   // waiting files in the order they will run (the server's run_order:
   // shortest first); everything else newest first
   out.now.sort((a,b)=>(PIN_ORDER[a.state]-PIN_ORDER[b.state])
@@ -689,6 +691,8 @@ function peopleMetaBits(row){
 function finishRowHTML(row){
   const title=(row.state==='needs_name'&&row.suggested_title)||row.title||'';
   const bits=peopleMetaBits(row);
+  // a Needs you row says why it is there (no speech, audio short, no title)
+  if(row.needs_you_detail&&row.needs_you!=='needs_title')bits.unshift(esc(row.needs_you_detail));
   return `<a class="lrow" href="#m/${encodeURIComponent(row.id)}" data-id="${esc(row.id)}"`
     +` data-state="${esc(row.state)}"><span class="lt"><span class="ltitle">${esc(title)}</span>`
     +(row.date?`<span class="ldate">${esc(shortDate(row.date))}</span>`:'')+`</span>`
@@ -721,9 +725,26 @@ function finishActsHTML(nVoices,nFlagged,on,panel){
 }
 // the markup above the accordion: Now (urgent items, uploads, live rows), then
 // To finish (its eyebrow when it has rows or an action applies, then its rows)
-function headSectionsHTML(nowHTML,fin,acts){
+function headSectionsHTML(nowHTML,fin,acts,extra){
   return (nowHTML?secHeadHTML('Now','sec-now')+nowHTML:'')
-    +((fin.length||acts)?secHeadHTML('To finish','sec-fin',acts)+fin.map(finishRowHTML).join(''):'');
+    +((fin.length||acts||extra)?secHeadHTML('Needs you','sec-fin',acts)
+      +fin.map(finishRowHTML).join('')+(extra||''):'');
+}
+// the one voice row of Needs you: the unnamed voice with the most talk in
+// non-public meetings. Its verb opens THAT voice (needsYouVoiceOpen), never
+// whichever meeting holds the most talk library-wide. Optional: ignoring it
+// costs nothing.
+function needsYouVoiceHTML(s){
+  const v=((s&&s.needs_you)||[]).find(x=>x.kind==='voice');
+  if(!v)return '';
+  const call=`needsYouVoiceOpen('${escJs(v.target)}','${escJs(v.uid||'')}')`;
+  return _trayRow(v.title,v.detail,_trayVerb('Name &#8594;',call));
+}
+// a registry voice opens the naming panel on itself, with the row's meeting
+// for its lines. A transcript-local voice opens its own meeting's Voices step.
+function needsYouVoiceOpen(target,uid){
+  if(uid){openNamePanelByUid(uid,target);return;}
+  fsVoiceCarry(target,[],[],[]);
 }
 
 /* ================ search chips, Said in, and the setup check ================ *
@@ -913,6 +934,8 @@ function sigOf(r){
   // the finish record paints a To finish row's dots, and moves as voices are
   // named and flags checked while nothing else on the row changes
   r.finish?[r.finish.title,r.finish.voices,r.finish.flags].join(','):'',
+  // Needs you membership, place, and reason move without the row changing
+  r.needs_you,r.needs_you_rank,r.needs_you_detail,
   open?1:0,m?(m.summary||''):'',m?(m.next_steps||[]).join(''):''];}
 
 function drawTimeline(s){
@@ -948,9 +971,10 @@ function drawTimeline(s){
   // "Name N voices": the voices the queue will ask about, each once. With
   // none in a live meeting, the tray's unknown voices, which the button opens
   // one at a time in the naming panel (fsVoicesStart's fallback).
-  const vq=voiceQueueCount(s.timeline);
-  const acts=finishActsHTML(vq||trayCount(s,'unknown_voice'),chipCounts(all).flags,
-    LF.flags,!vq);
+  // Needs you asks for no flags and holds one voice row (needsYouVoiceHTML),
+  // so the eyebrow keeps only the way out of a pressed Has flags filter
+  const acts=finishActsHTML(0,0,LF.flags,false);
+  const nyv=needsYouVoiceHTML(s);
 
   // "Said in": the full-text hits for the query in the field, at the top of
   // the list. A meeting the chips filter out drops its lines too. SAID_TOP is
@@ -970,7 +994,7 @@ function drawTimeline(s){
   // an empty library: the setup check stands where the list would be
   const first=libraryEmpty(all);
   const setup=first?setupHTML(setupCheck(s)):'';
-  const fsig=ssig+'|'+setup;
+  const fsig=ssig+'|'+setup+'|'+nyv;
   const lfsig=LF.cat+':'+LF.flags+':'+LF.voices;
 
   // empty states (quiet, centered), rendered inside the timeline under Now.
@@ -981,7 +1005,7 @@ function drawTimeline(s){
     $('#rail').hidden=true;
     if(tl.dataset.sig===sig)return;
     tl.dataset.sig=sig;
-    tl.innerHTML=said+headSectionsHTML(urgent,[],acts)+empty;
+    tl.innerHTML=said+headSectionsHTML(urgent,[],acts,nyv)+empty;
     return;
   }
 
@@ -995,7 +1019,7 @@ function drawTimeline(s){
   let nest=false;                 // year sections only once the library spans 2+ years
   let head='',split='';
   if(sort==='name'){
-    head=headSectionsHTML(urgent,[],acts);
+    head=headSectionsHTML(urgent,[],acts,nyv);
     const ordered=rows.slice().sort((a,b)=>
       (a.title||'').toLowerCase().localeCompare((b.title||'').toLowerCase())
       ||(b.date||'').localeCompare(a.date||''));
@@ -1008,7 +1032,7 @@ function drawTimeline(s){
     const sec=timelineSections(rows);
     const qopen=grpForced()||grpOpen(QUEUE_FOLD);
     const nowRows=nowRowsHTML(sec.now,qopen);
-    const top=headSectionsHTML(urgent+upHTML+nowRows.html,sec.fin,acts);
+    const top=headSectionsHTML(urgent+upHTML+nowRows.html,sec.fin,acts,nyv);
     // the pinned group carries its own markup: the two sections, whole. The
     // queue fold's hidden rows ride it, so the selection can drop them.
     if(top)groups.push({key:'',pinned:true,rows:sec.now.concat(sec.fin),html:top,
@@ -1212,7 +1236,7 @@ function flashRows(ids){
 let TAB_SEEN=null;
 const TAB_JOINED=new Set();
 function finishIds(timeline,now){
-  return (timeline||[]).filter(r=>r.state==='needs_name'||toFinish(r,now)).map(r=>r.id);
+  return (timeline||[]).filter(r=>toFinish(r,now)).map(r=>r.id);
 }
 function tabJoins(prev,next){
   if(!prev)return [];
@@ -1230,10 +1254,23 @@ document.addEventListener('visibilitychange',()=>{
   if(document.hidden)return;
   TAB_JOINED.clear();document.title=tabTitle(0);
 });
+// the last look, for the menu bar's "new since last look" count: a POST
+// while the panel is in front of the owner, at most once a minute (or at
+// once when the window comes back). A hidden tab never counts as a look.
+let SEEN_AT=0;
+function markSeen(now){
+  if(document.hidden)return;
+  const t=Date.now();
+  if(!now&&t-SEEN_AT<60000)return;
+  SEEN_AT=t;
+  api('/api/seen',{}).catch(()=>{});
+}
+document.addEventListener('visibilitychange',()=>markSeen(true));
 async function refresh(){try{
   const prev=S;
   S=await api('/api/state');
   tabWatch(S);
+  markSeen(false);
   render();
   // the list view only: the meeting page answers a moved stamp by reloading
   // itself (relabelWatch), which is a louder signal than a tint. Two panes
@@ -2381,9 +2418,11 @@ async function buildMeeting(base){
   const body=$('#mtbody');if(!body)return;
   if(d.error){body.innerHTML='<div class="mterr">'+esc(d.error)+'</div>';return;}
   MP.segs=d.segments||[];
+  MP.noSpeech=!!d.no_speech;
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
   MP.stamp=d.generated_at||null;
+  mAudioNote(d.audio_short_by);
   (d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   body.innerHTML=mBodyHTML();
   mLegend(d);
@@ -2427,11 +2466,20 @@ function mHeadSync(s){
   const h=mMetaBits(m).join(' &middot; ');
   if(el.dataset.h!==h){el.innerHTML=h;el.dataset.h=h;}
 }
+// the Draft title chip: a provisional title (a typed label, or the
+// amnesty's relabel) that no person has kept or edited. No count anywhere:
+// a count would turn the chip into a second backlog. A public download keeps
+// its published name and wears no chip.
+function draftChipHTML(m){
+  return (m&&m.title_state==='provisional'&&m.route!=='public_download')
+    ?'<span class="mchip draft" title="A draft title: edit it, or leave it">Draft title</span>':'';
+}
 function _mHeader(m,base){
   const bits=mMetaBits(m);
   const dot=(m.category==='work'||m.category==='personal')?m.category:'none';
   const dotTitle=dot==='work'?'Work':dot==='personal'?'Personal':'Untagged';
   const strict=m.strict?'<span class="mchip">strict</span>':'';
+  const draft=draftChipHTML(m);
   const nfl=(m.flagged||0)+(m.flagged_minor||0);
   const flagged=nfl>0?`<span class="mflagnote">${nfl} flagged</span>`:'';
   // everything a row can do, the page can do: the same ⋯ menu, and the same
@@ -2444,8 +2492,20 @@ function _mHeader(m,base){
     <h1 class="mtitle" title="Click to rename" onclick="rowTitleEdit(event,'${escJs(base)}')">${esc(m.title||base)}</h1>
     <div class="mmeta"><span id="mmbits">${bits.join(' &middot; ')}</span>
       <button class="mcat ${dot}" id="mcatdot" type="button"
-        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${strict}${flagged}</div>
+        title="${dotTitle} (click to change tag)" onclick="mCycleCat(event)">${dot==='none'?'':dotTitle}</button>${draft}${strict}${flagged}<span class="mflagnote" id="maudionote" hidden></span></div>
   </div>`;
+}
+// the audio-may-be-lost note: the Needs you row's words, kept on the
+// meeting's own header after the row leaves the list (plan row 10). Filled
+// from the transcript response, so only the open meeting pays for the probe.
+function audioNoteText(mins){
+  return mins?`The audio is ${mins} minute${mins!==1?'s':''} shorter than the transcript: audio may be lost`:'';
+}
+function mAudioNote(mins){
+  const el=document.getElementById('maudionote');
+  if(!el)return;
+  const t=audioNoteText(mins);
+  el.textContent=t;el.hidden=!t;
 }
 // header dot: same optimistic /api/set_category cycle as the library rows
 function mCycleCat(ev){
@@ -2584,6 +2644,10 @@ function mFollowUI(){
 /* ------------------------------------------------------- summary section --- */
 function _mSummary(m){return `<section class="msection msummary" id="msummary">${_mSummaryInner(m)}</section>`;}
 function _mSummaryInner(m){
+  // a transcript with 0 segments: say so, and offer no Generate. A model
+  // given nothing writes a plausible summary of a meeting that never happened.
+  if(m.no_speech)return `<div class="mseclabel">Summary</div>
+    <div class="msumbody muted" id="msumbody">No speech found in this recording.</div>`;
   const has=m.summary&&m.summary.trim();
   const steps=(m.next_steps&&m.next_steps.length)
     ?`<div class="mstepshdr">Committed next steps</div><ul class="msteps">${m.next_steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>`:'';
@@ -2771,7 +2835,11 @@ function mGapHTML(i){
     title="Add a line here: a voice the pipeline missed">&#65291; add line</div>`;
 }
 function mBodyHTML(){
-  if(!MP.segs.length)return '<div class="mterr">This transcript has no lines yet.</div>';
+  // a silent recording is a fact about the audio, not an error: the same
+  // muted words the summary uses
+  if(!MP.segs.length)return MP.noSpeech
+    ?'<div class="msumbody muted">No speech found in this recording.</div>'
+    :'<div class="mterr">This transcript has no lines yet.</div>';
   return mGapHTML(-1)+MP.segs.map((g,i)=>mSegHTML(g,i)+mGapHTML(i)).join('');
 }
 function mFindInput(){clearTimeout(mFindT);mFindT=setTimeout(()=>mFindRun(true),200);}
@@ -3123,9 +3191,11 @@ async function mReloadSegs(target){
   mCloseCard();
   MF=null;{const f=$('#mfind');if(f)f.value='';}mFindCount();
   MP.segs=d.segments||[];
+  MP.noSpeech=!!d.no_speech;
   MP.spkOpts=d.speaker_options||[];
   MP.people=d.people||[];
   if(d.generated_at)MP.stamp=d.generated_at;
+  mAudioNote(d.audio_short_by);
   MP.color={};(d.speakers||[]).forEach((w,i)=>MP.color[w]=HUES[i%HUES.length]);
   MP.nowIdx=null;
   body.innerHTML=mBodyHTML();
@@ -4223,7 +4293,6 @@ function pnKey(e){
    real speaker", and the verdict bar (reviewStart) for flags. A meeting whose
    finish record was already done when the page opened shows no strip at all.
    ============================================================================ */
-const FINISH_DAYS=14;
 const FS_LABEL={title:'Title',voices:'Voices',flags:'Flags',done:'Done'};
 let FS=null;        // the open meeting's flow: {base,row,fin,past,voices,vi,
                     // cur,live,hand,looks,clip,busy}. live: the flow may take
@@ -4251,16 +4320,13 @@ function finishSteps(row,past){
   return steps;
 }
 function fsCur(steps){const c=(steps||[]).find(s=>s.state==='cur');return c?c.key:null;}
-// "to finish", as the proposal defines it: an open title, or any open step on
-// a meeting processed in the last 14 days. Older backlog is a filter, never a
-// to-do list, so it is never handed over.
+// in Needs you: the server computes the one short list on read (a silent
+// recording, audio shorter than its transcript, a title with only the
+// model's draft) over meetings that arrived in the last 14 days, at most 5
+// rows, and marks each row it holds. Older backlog is never handed over, and
+// flags and voices never put a meeting here (unified plan rows 8 and 10).
 function toFinish(row,now){
-  const f=row&&row.finish;
-  if(!f||f.done)return false;
-  if(!f.title)return true;
-  const t=Date.parse((row&&row.when)||'');
-  if(!isFinite(t))return false;
-  return ((now==null?Date.now():now)-t)<=FINISH_DAYS*864e5;
+  return !!(row&&row.needs_you);
 }
 // the next row after the current one, in timeline order, that is to finish;
 // wraps at the end and never answers the current row. dir -1 walks backward.
@@ -5362,7 +5428,7 @@ function dSpeakersHTML(s){
  * -- a list of five guesses is a decision, and this is meant to be a glance.
  *   - "Possibly the same voice as Speaker 12" : phase 4 wrote this when the
  *     cluster missed the link bar and minted its own number. Link merges them.
- *   - "Looks like Riley Stone"             : an enrolled person this voice
+ *   - "Looks like Avery Sample"             : an enrolled person this voice
  *     resembles above MATCH_MIN but under the automatic margin (the audit's
  *     nineteen). Name opens the panel with the name already typed, so the
  *     human confirms rather than the machine guessing. */

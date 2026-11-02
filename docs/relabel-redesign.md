@@ -279,7 +279,7 @@ The report on the live registry, read-only, on the day this shipped:
 
 ```
 Registry check:
-  [fixable] dangling    Morgan Vale: sample source 'Evaluation Process and District Questions 07232026' names no meeting on disk
+  [fixable] dangling    Riley Testcase: sample source 'Synthetic Planning Session 07232026' names no meeting on disk
   [fixable] stale_next  unknowns.json: next=6 is below max+1=57, so a number already handed out would be handed out again
   [fixable] split       U050: stack spans two voices (min pairwise cosine 0.481 < 0.6)
   dangling: 1, split: 1, stale_next: 1

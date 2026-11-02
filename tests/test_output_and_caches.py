@@ -338,14 +338,14 @@ def test_promoted_split_voice_does_not_resurrect_as_new_unknown(sandbox):
     rng = np.random.default_rng(7)
     va, vb = rng.normal(size=256), rng.normal(size=256)   # split: far apart
     uids = unknowns.assign({"SA": va, "SB": vb}, {"SA": None, "SB": None}, "Mtg T")
-    assert unknowns.promote(uids["SA"], "Devon Park")
-    assert unknowns.promote(uids["SB"], "Devon Park")
+    assert unknowns.promote(uids["SA"], "Casey Example")
+    assert unknowns.promote(uids["SB"], "Casey Example")
     assert unknowns.load()["speakers"] == {}
-    assert identify.load_registry()["Devon Park"]["n_samples"] == 2
+    assert identify.load_registry()["Casey Example"]["n_samples"] == 2
 
     # relabel pass: cluster A won the name, cluster B lost the race
     out = unknowns.assign({"SA": va, "SB": vb},
-                          {"SA": "Devon Park", "SB": None}, "Mtg T")
+                          {"SA": "Casey Example", "SB": None}, "Mtg T")
     assert "SB" not in out                       # suppressed, no global label
     assert unknowns.load()["speakers"] == {}     # and nothing was minted
 

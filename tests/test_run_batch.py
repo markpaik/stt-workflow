@@ -4,6 +4,10 @@ import types
 
 import run_batch
 
+# one spoken line: the summary guard skips a transcript with 0 segments (unified
+# plan, Phase 1 step 5), so a fixture that expects a summary must hold speech
+SPOKEN = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "we will ship it"}]
+
 
 def _args(**over):
     base = dict(files=None, paths=None, force=False, strict=False,
@@ -143,10 +147,10 @@ def test_auto_summarize_only_new_meetings(sandbox, monkeypatch):
     from stt import status, summarize
 
     mfile("Fresh Mtg", ".json").write_text(json.dumps(
-        {"source_file": "Fresh Mtg.m4a", "segments": [], "speakers": [], "words": []}))
+        {"source_file": "Fresh Mtg.m4a", "segments": SPOKEN, "speakers": [], "words": []}))
     mfile("Done Mtg", ".json").write_text(json.dumps(
         {"source_file": "Done Mtg.m4a", "ai_summary": "already have one",
-         "segments": [], "speakers": [], "words": []}))
+         "segments": SPOKEN, "speakers": [], "words": []}))
 
     calls = []
     monkeypatch.setattr(summarize, "available", lambda: True)
@@ -174,7 +178,7 @@ def test_auto_summarize_one_failure_never_stops_the_rest(sandbox, monkeypatch):
 
     for b in ("A Mtg", "B Mtg"):
         mfile(b, ".json").write_text(json.dumps(
-            {"source_file": f"{b}.m4a", "segments": [], "speakers": [], "words": []}))
+            {"source_file": f"{b}.m4a", "segments": SPOKEN, "speakers": [], "words": []}))
     calls = []
 
     def boom_then_ok(base):
@@ -252,7 +256,7 @@ def test_sweep_shells_scrubs_unknown_refs_for_each_removed_folder(sandbox):
 
     mfile("Real 05012026", ".json").write_text(json.dumps(
         {"source_file": "Real 05012026.m4a",
-         "segments": [], "speakers": [], "words": []}))
+         "segments": SPOKEN, "speakers": [], "words": []}))
     (config.MEETINGS_DIR / "Shell A").mkdir()                       # empty shell
     (config.MEETINGS_DIR / "Shell B").mkdir()                       # stray-txt shell
     (config.MEETINGS_DIR / "Shell B" / "Shell B.txt").write_text("x")
@@ -284,7 +288,7 @@ def test_warns_when_registry_empty_but_meetings_have_names(sandbox, monkeypatch)
                         lambda *a, **k: calls.append(a) or types.SimpleNamespace(stdout=""))
     mfile("Mtg", ".json").write_text(json.dumps(
         {"speakers": [{"id": "Jules", "name": "Jules"}],
-         "segments": [], "words": []}))
+         "segments": SPOKEN, "words": []}))
     assert run_batch.warn_if_registry_lost(config.MEETINGS_DIR) is True
     assert calls  # user-facing notification attempted
 
@@ -446,10 +450,10 @@ def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
     from stt import status, summarize
 
     mfile("Fresh Mtg", ".json").write_text(json.dumps(
-        {"source_file": "Fresh Mtg.m4a", "segments": [], "speakers": [], "words": []}))
+        {"source_file": "Fresh Mtg.m4a", "segments": SPOKEN, "speakers": [], "words": []}))
     mfile("Done Mtg", ".json").write_text(json.dumps(
         {"source_file": "Done Mtg.m4a", "ai_summary": "have one",
-         "segments": [], "speakers": [], "words": []}))
+         "segments": SPOKEN, "speakers": [], "words": []}))
     calls = []
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
@@ -483,7 +487,7 @@ def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):
         events.append(("process", base))
         j = mfile(base, ".json")
         j.write_text(json.dumps({"source_file": f"{base}.m4a",
-                                 "segments": [], "speakers": [], "words": []}))
+                                 "segments": SPOKEN, "speakers": [], "words": []}))
         mfile(base, ".txt").write_text("[00:00] A: hi")
         return {"ok": True, "key": f"{base}.m4a",
                 "mtime": (src / f"{base}.m4a").stat().st_mtime,
@@ -673,7 +677,7 @@ def test_selection_never_skips_a_file_the_panel_flags_as_a_duplicate(sandbox, ca
     audio = b"RIFF" + b"\x07" * 9000
     mfile("Board Prep 05012026", ".json").write_text(_json.dumps(
         {"source_file": "board prep.m4a", "duration_sec": 600.0,
-         "speakers": [], "segments": [], "words": []}))
+         "speakers": [], "segments": SPOKEN, "words": []}))
     mfile("Board Prep 05012026", ".m4a").write_bytes(audio)
 
     src = config.source_dir()

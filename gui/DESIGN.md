@@ -8,9 +8,10 @@ deleted 2026-07-12 after the shell reached full parity.
 ## The idea
 
 A meeting is one object. Its row is its queue entry, its progress bar, and
-its transcript link. The default screen is what is happening Now, what is
-left To finish, and then the library (revised 2026-09-27: the amber tray that
-once headed the screen folded into those two sections). At 900px and wider an
+its transcript link. The default screen is what is happening Now, what
+Needs you, and then the library (revised 2026-09-27: the amber tray that
+once headed the screen folded into those two sections; revised 2026-11-02:
+"To finish" became "Needs you", the one short list of the unified plan). At 900px and wider an
 open meeting reads beside that list instead of replacing it (see "Two panes").
 All machinery lives behind one popover (runs) and one drawer (settings).
 
@@ -25,7 +26,7 @@ All machinery lives behind one popover (runs) and one drawer (settings).
   server restart.
 - The shell consumes the `timeline` and `tray` keys of `/api/state` and
   reuses the existing action endpoints unchanged. No band renders the `tray`
-  key any more: its items feed the Now and To finish sections. Meetings, review, and
+  key any more: its items feed the Now and Needs you sections. Meetings, review, and
   naming all open inside the shell; no deep-link query params remain.
 
 ## Newsprint tokens
@@ -166,21 +167,32 @@ expanding (2026-07-12). Every kind it offered has a home in the list now:
   duplicate transcripts: one compact row each at the top of Now (below);
 - a failed file: its own failed row in Now, which already carries Retry or
   the dismiss for a gone source, so Now never repeats it;
-- "N voices need names": the To finish eyebrow's "Name N voices"; each voice
-  is also in the drawer's Speakers section;
-- "Flagged lines in N meetings": the To finish eyebrow's "Review flags",
-  which presses the "Has flags" chip, a FILTER at any count (full-size rows;
-  the chip itself clears it too; revised 2026-09-27, it was a "flagged only ✕"
-  chip beside the category select). There is never a second, smaller
-  library.
+- "N voices need names": ONE Needs you row (revised 2026-11-02), the
+  unnamed voice with the most talk in non-public meetings among the voices
+  heard in a meeting inside the window; its "Name →" walks the voices one at
+  a time. A public download asks for no voice, and a voice under a minute of
+  talk hides behind a count (finish.short_voices). Every voice is also in
+  the drawer's Speakers section;
+- "Flagged lines in N meetings": no longer an ask (revised 2026-11-02, plan
+  row 8). Flags stay as quiet markers in the reader, and the "Has flags"
+  chip is the FILTER that finds them; the Needs you eyebrow shows "Review
+  flags ✕" only while that chip is pressed, as a second way to clear it.
+  There is never a second, smaller library.
 
 Timeline: a centered list on paper in three zones (revised 2026-09-27; see
 "To finish and Now" under the Finish flow). First "Now": recording,
 processing, failed, held, and waiting rows in that order, under the tray's
 urgent rows. These never sink into date groups no matter how old their files
-are (a failed April file must sit at the top, not buried in April). Then "To
-finish": a meeting waiting for its title, or with an open step and processed
-in the last 14 days, as compact rows. Below them, the rest of the ready
+are (a failed April file must sit at the top, not buried in April). Then
+"Needs you" (revised 2026-11-02, unified plan rows 10 and 11): the server's
+`needs_you` list, computed on read, at most 5 rows and no "N older" line,
+over meetings that ARRIVED in the last 14 days by their stored
+`processed_at` (a meeting without one never appears). In rank order: no
+speech in the recording, audio over a minute shorter than its transcript, a
+title with only the model's draft (`title_state=needs_title`), then the one
+voice row. Each meeting row carries `needs_you`, its rank, and its reason,
+and the section holds exactly those rows. Voices and flags never put a
+meeting here. Below them, the rest of the ready
 meetings (every finished one, and older backlog) sorted AND grouped by the same
 key: meeting date, newest first, with month group headers in uppercase semibold sans
 (`JULY 2026 · 6`) and Today/Yesterday labels only for rows actually dated
@@ -219,11 +231,17 @@ The right rail's pill is the state:
               busy-blue hairline progress bar along the card's bottom edge
               (Boardroom; supersedes the accent progress); no actions (Stop
               lives in the Process ▾ popover)
-- needs_name  a compact To finish row (revised 2026-09-27; the tall form
+- needs_name  a compact row (revised 2026-09-27; the tall form
               row and its 4px accent edge are retired): the suggested
               title, the step dots with Title open, and a click opens the
               meeting, where the finish strip's Title step names it. No
               separate inbox card exists, and the list holds no form.
+              Since 2026-11-02 the state means `title_state=needs_title`,
+              or a meeting from before the title rule with `reviewed`
+              False. A provisional title (a typed label, a public
+              download, the amnesty) is `ready`, and the reader header
+              wears a "Draft title" chip with no count (no chip on a
+              public download).
 - ready       meta = `MMM D · NN min · speakers`; the review count sits in
               the right rail beneath the state pill (Boardroom; supersedes
               the in-meta placement) as plain amber TEXT, no chip
@@ -294,8 +312,8 @@ menu bar, or drop an audio file here." (it read "Record a meeting from the
 menu bar, …" before 2026-09-27); a search that matches no title and no line
 said → "No matches.", in sub text, centered. A search whose words were said
 but match no title shows its Said in group and no "No matches.". A section
-with nothing in it renders nothing; Now's urgent rows and the To finish
-actions stay above an empty state, in either sort.
+with nothing in it renders nothing; Now's urgent rows and the Needs you
+voice row stay above an empty state, in either sort.
 
 ## Reviewing and editing on the meeting page
 
@@ -380,7 +398,8 @@ evidence:
   focuses the box FIRST; the line fills in when the response lands. A preview
   that fails paints nothing. A save is never blocked on it.
 - **The looks-like chips.** Under the line, when the voice already resembles
-  somebody enrolled: ordinary `.nchip` buttons reading "Looks like Riley Stone · 0.84", best first, at most three, score in mono. Clicking one fills
+  somebody enrolled: ordinary `.nchip` buttons reading "Looks like Avery
+  Sample · 0.84", best first, at most three, score in mono. Clicking one fills
   the name box and nothing else. These are the clusters the automatic margin
   rule refuses on purpose (at or above MATCH_MIN, under the margin) — a machine
   must not name them, and a human should not have to rediscover them. Evidence,
@@ -401,7 +420,7 @@ evidence:
 - **The suggestion lines.** In the drawer's Speakers section, under an unknown
   voice that has one: "Possibly the same voice as Speaker 12 · 0.72" with a
   [Link] button (one `/api/merge_speakers` by uid, toasted with the save's own
-  sentence), and "Looks like Riley Stone · 0.84" with a [Name] button that
+  sentence), and "Looks like Avery Sample · 0.84" with a [Name] button that
   opens this panel with the name already typed. Best candidate only, one line
   each, inset ground, no chips — a wall of guesses is a decision, and this is a
   glance.
