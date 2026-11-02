@@ -928,6 +928,40 @@ def test_speaker_select_restores_prior_selection_on_cancel():
     assert "if(!nm){sel.selectedIndex=0;return}" not in js
 
 
+def _new_shell_js():
+    static = Path(srv.__file__).resolve().parent / "static"
+    return "\n".join((static / f).read_text(encoding="utf-8")
+                     for f in ("next.js", "next-meeting.js", "next-voice.js"))
+
+
+def test_new_shell_flag_reason_is_escaped():
+    """The new shell's port of the flag-title test above: a flag code (a
+    speaker name flows into `possible:<name>`) reaches the line and the card
+    only through esc()."""
+    js = _new_shell_js()
+    assert "${esc(mFlagWhy(g))}" in js and "${esc(mFlagWhy(it))}" in js
+    assert "${mFlagWhy(" not in js
+
+
+def test_new_shell_new_person_never_falls_back_to_the_first_speaker():
+    """The new shell's port of the select-restore test above: "New person"
+    with an empty name box refuses the save (mSpkValue answers __new__ and
+    every caller refuses it), so a line is never silently given to option 0."""
+    js = _new_shell_js()
+    assert "return v?'name:'+v:'__new__';" in js
+    for fn in ("mEditSave", "mRevApply", "mRevSave", "mSplitSave", "mInsertSave"):
+        body = js[js.index("function " + fn):]
+        body = body[:body.index("\n}\n")]
+        assert "__new__" in body, fn
+    assert "selectedIndex=0" not in js
+
+
+@pytest.mark.parametrize("path", ["/", "/next", "/classic"])
+def test_every_page_route_is_origin_gated(running_server, path):
+    status, _ = _get(running_server, path, headers={"Origin": "https://evil.example.com"})
+    assert status == 403
+
+
 # ---------- /api/snippet: stale meeting reference falls back, never 400s ----------
 
 def test_snippet_with_stale_meeting_falls_back_to_search(running_server, monkeypatch):

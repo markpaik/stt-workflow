@@ -1,5 +1,5 @@
-"""The /next frame (plan Phase 4C): the second composed page, served beside
-the classic shell until the 4D swap.
+"""The new shell's frame (plan Phase 4C), served at / since the 4D swap,
+with the classic page kept at /classic for 30 days.
 
 The routes, the read-only search endpoint, the token contrast, the type
 floor, the 20-surface table in gui/DESIGN.md, and the frame's pure logic run
@@ -23,12 +23,19 @@ STATIC = Path(srv.__file__).resolve().parent / "static"
 DESIGN = Path(srv.__file__).resolve().parent / "DESIGN.md"
 
 
+# the new shell's script: three plain files joined in this fixed order
+NEXT_JS_FILES = ("next.js", "next-meeting.js", "next-voice.js")
+
+
+def _next_js():
+    return "\n".join((STATIC / f).read_text(encoding="utf-8") for f in NEXT_JS_FILES)
+
+
 def _compose_next():
-    """Independent re-implementation of the composer for the /next parts."""
+    """Independent re-implementation of the composer for the new shell's parts."""
     page = (STATIC / "next.html").read_text(encoding="utf-8")
     css = (STATIC / "next.css").read_text(encoding="utf-8")
-    js = (STATIC / "next.js").read_text(encoding="utf-8")
-    return page.replace("/*@NEXT_CSS@*/", css).replace("//@NEXT_JS@", js)
+    return page.replace("/*@NEXT_CSS@*/", css).replace("//@NEXT_JS@", _next_js())
 
 
 @pytest.fixture
@@ -64,30 +71,35 @@ def _meeting(base, text, **extra):
 
 # ------------------------------------------------------------------ routes ---
 
-def test_next_serves_the_composed_frame_and_root_keeps_the_classic(running_server):
-    status, ctype, body = _get(running_server, "/next")
-    assert status == 200 and ctype.startswith("text/html")
-    assert body == _compose_next().encode()
-    html = body.decode()
+def test_root_serves_the_new_shell_and_classic_keeps_the_old_page(running_server):
+    # the 4D swap: / is the new shell, /classic the old page for 30 days, and
+    # the 4C preview address /next still answers with the new shell
+    for path in ("/", "/next", "/?ui=stale-bookmark"):
+        status, ctype, body = _get(running_server, path)
+        assert status == 200 and ctype.startswith("text/html"), path
+        assert body == _compose_next().encode(), path
+    html = _get(running_server, "/")[2].decode()
     assert "@NEXT_CSS@" not in html and "@NEXT_JS@" not in html
-    # the old page still serves / (plan 4C gate), and it is not the frame
-    status, _, root = _get(running_server, "/")
-    assert status == 200 and b'id="processBtn"' in root and b'id="side"' not in root
+    status, _, classic = _get(running_server, "/classic")
+    assert status == 200 and b'id="processBtn"' in classic and b'id="side"' not in classic
 
 
 def test_next_frame_reloads_from_disk_without_a_restart(sandbox, tmp_path, monkeypatch):
     d = tmp_path / "static"
     d.mkdir()
-    for f in ("next.html", "next.css", "next.js"):
+    for f in ("next.html", "next.css") + NEXT_JS_FILES:
         shutil.copy(STATIC / f, d / f)
     monkeypatch.setattr(srv, "_STATIC_DIR", d)
     monkeypatch.setattr(srv, "_next_cache", {"mtimes": None, "html": None})
     first = srv._next_html()
-    (d / "next.js").write_text("const ZEBRA_MARKER=1;", encoding="utf-8")
     import os
-    st = (d / "next.js").stat()
-    os.utime(d / "next.js", ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
-    assert "ZEBRA_MARKER" in srv._next_html() and "ZEBRA_MARKER" not in first
+    # every part reloads on its own, the last script included
+    for f in ("next.js", "next-voice.js"):
+        marker = "ZEBRA_" + f.replace(".", "_").replace("-", "_").upper()
+        (d / f).write_text(f"const {marker}=1;", encoding="utf-8")
+        st = (d / f).stat()
+        os.utime(d / f, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+        assert marker in srv._next_html() and marker not in first
 
 
 def test_search_meetings_is_read_only_and_origin_gated(running_server):
@@ -107,7 +119,10 @@ def test_get_routes_the_frame_reads_never_write_a_meeting(running_server):
     _meeting("Orchard Survey 10202026", "We counted the pear trees by the north fence.")
     j = config.meeting_file("Orchard Survey 10202026", ".json")
     before = j.read_bytes()
-    for path in ("/next", "/api/state", "/api/search?q=pear", "/api/search_meetings?q=pear",
+    for path in ("/", "/next", "/classic", "/api/state", "/api/search?q=pear",
+                 "/api/search_meetings?q=pear", "/api/transcript?base=Orchard%20Survey%2010202026",
+                 "/api/review?base=Orchard%20Survey%2010202026",
+                 "/api/voice_lines?base=Orchard%20Survey%2010202026&speaker=Speaker%201",
                  "/api/history", "/api/archived", "/api/dupes",
                  "/api/suggest?base=Orchard%20Survey%2010202026"):
         status, _, _ = _get(running_server, path)
@@ -180,7 +195,7 @@ def test_each_surface_token_is_present_in_the_frame():
 
 
 def test_frame_routes_cover_the_4c_pages_and_nothing_from_later_phases():
-    js = (STATIC / "next.js").read_text(encoding="utf-8")
+    js = _next_js()
     for r in ("home", "recordings", "activity", "speakers", "archive", "settings"):
         assert f"#{r}" in js or f"'{r}'" in js
     # Groups and Ask are Phases 4E and 4F: no dead nav entry for them yet
@@ -189,7 +204,7 @@ def test_frame_routes_cover_the_4c_pages_and_nothing_from_later_phases():
 
 
 def test_writes_from_the_frame_are_posts():
-    js = (STATIC / "next.js").read_text(encoding="utf-8")
+    js = _next_js()
     # every api(path,body) with a body is a POST in api(); GET calls carry
     # no body. The write endpoints must never appear in a body-less call.
     writes = ("rename", "set_date", "set_category", "accept_meeting", "bulk", "archive_meeting",
@@ -197,7 +212,8 @@ def test_writes_from_the_frame_are_posts():
               "queue_hold", "queue_delete", "name", "hide_unknown", "merge_speakers",
               "rename_speaker", "remove_speaker", "remove_sample", "reassign_sample",
               "cloud_keys", "llm_backend", "automation", "schedule", "model", "punctuate",
-              "mic_speaker", "seen", "suggest")
+              "mic_speaker", "seen", "suggest", "review", "ask", "forget", "dismiss_voice",
+              "name_preview", "retranscribe")
     for w in writes:
         for m in re.finditer(r"api\('/api/" + w + r"'(\)|,)", js):
             assert m.group(1) == ",", f"/api/{w} called without a body (a GET)"
@@ -216,12 +232,13 @@ globalThis.addEventListener=()=>{};globalThis.setInterval=()=>0;
 globalThis.location={hash:'',search:'',href:''};globalThis.innerWidth=1440;globalThis.innerHeight=900;
 globalThis.localStorage={getItem:()=>null,setItem(){},removeItem(){}};
 globalThis.fetch=()=>Promise.reject(new Error('offline'));
-globalThis.CSS={escape:s=>s};globalThis.window={scrollTo(){}};
+globalThis.CSS={escape:s=>s};globalThis.window={scrollTo(){},scrollY:0};globalThis.scrollTo=()=>{};
+globalThis.history={replaceState(){}};globalThis.Audio=function(){return {play:()=>Promise.resolve(),pause(){},addEventListener(){}};};
 """
 
 
 def _run_node(body):
-    js = _STUB + (STATIC / "next.js").read_text(encoding="utf-8") + "\n;(()=>{" + body + "})();"
+    js = _STUB + _next_js() + "\n;(()=>{" + body + "})();"
     r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout.strip().splitlines()[-1])
@@ -303,7 +320,7 @@ const vl=needsCard({kind:'voice',target:'m1',title:'Speaker 4',uid:null,detail:'
 const ns=needsCard({kind:'no_speech',target:'m1',title:'Raw Title',detail:''},2);
 console.log(JSON.stringify({
  prefill:t.includes('value="Orchard Planning"'),primary:t.includes('btn primary'),keep:t.includes('data-act="keep"'),
- uid:vu.includes('data-act="name-voice"')&&vu.includes('U004'),local:vl.includes('/#m/m1'),
+ uid:vu.includes('data-act="name-voice"')&&vu.includes('U004')&&vu.includes('data-base="m1"'),local:vl.includes('href="#m/m1"'),
  silent:ns.includes('No speech found')&&ns.includes('data-act="archive"')}));
 """)
     assert all(out.values()), out
@@ -319,8 +336,8 @@ UI.pres={q:'pear',total:1,meetings:[{base:'Budget 2',title:'Budget'}],
  hits:[{base:'Orchard 1',start:61.4,who:'Speaker 1',snippet:'the pear trees'}]};
 const h=palResults();
 UI.pq='orch';UI.pres=null;const h2=palResults();
-console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('/#m/Orchard%201/t/61'),
- fromIdx:h.includes('/#m/Budget%202'),mark:h.includes('<mark>pear</mark>'),
+console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('href="#m/Orchard%201/t/61"'),
+ fromIdx:h.includes('href="#m/Budget%202"'),mark:h.includes('<mark>pear</mark>'),
  local:h2.includes('<mark>Orch</mark>ard Survey'),pending:h2.includes('Searching')}));
 """)
     assert out == {"said": True, "deep": True, "fromIdx": True, "mark": True,
@@ -343,7 +360,8 @@ def test_meeting_links_escape_the_base():
     out = _run_node("""
 console.log(JSON.stringify({a:meetingHref('A/B #1'),b:meetingHref('x',12.9)}));
 """)
-    assert out == {"a": "/#m/A%2FB%20%231", "b": "/#m/x/t/12"}
+    # the meeting page lives in this page now: an in-page hash, no reload
+    assert out == {"a": "#m/A%2FB%20%231", "b": "#m/x/t/12"}
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
@@ -366,29 +384,33 @@ console.log(JSON.stringify({a:hl('R&D plan','amp'),b:hl('a<b','lt'),c:hl('R&D pl
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_select_and_name_from_home_survive_the_route_change():
+def test_select_from_home_survives_the_route_change_and_name_opens_the_sheet_in_place():
+    # rewritten for 4D: Select still carries across to Recordings, and Name on
+    # a Home voice card opens the voice sheet over Home with the card's
+    # meeting as context, instead of a trip to Speakers
     out = _run_node("""
 S={meetings:[{base:'m1',title:'Alpha',date:'2026-10-01',minutes:3,named:[],ask_clusters:{}}],
- needs_you:[],enrolled:[],unknown:[{uid:'U004',meetings:['m1']}]};
+ needs_you:[],enrolled:[],unknowns:[{uid:'U004',display:'Speaker 4',meetings:['m1']}]};
 // a browser hash reads back with its leading '#'
 let _h='';Object.defineProperty(location,'hash',{get:()=>_h?'#'+_h:'',set:v=>{_h=String(v).replace(/^#/,'');}});
+api=()=>new Promise(()=>{});
 UI.route='home';
 A.select({dataset:{base:'m1'}});
 const hashA=location.hash;route();
 const sel={route:UI.route,size:UI.sel.size,has:UI.sel.has('m1')};
 location.hash='home';route();
 const cleared=UI.sel.size;
-A['name-voice']({dataset:{uid:'U004'}});
-const hashB=location.hash;route();
-const nm={route:UI.route,uid:UI.naming&&UI.naming.uid,carry:UI.carry};
+A['name-voice']({dataset:{uid:'U004',base:'m1'}});
+const nm={hash:location.hash,route:UI.route,vs:VS&&{uid:VS.list[0].uid,base:VS.base,single:VS.single,title:vsHTML().includes('Who is Speaker 4?')}};
 location.hash='recordings';route();
-console.log(JSON.stringify({hashA,sel,cleared,hashB,nm,after:UI.naming}));
+console.log(JSON.stringify({hashA,sel,cleared,nm,after:VS}));
 """)
-    assert out["hashA"] == "#recordings" and out["hashB"] == "#speakers"
+    assert out["hashA"] == "#recordings"
     assert out["sel"] == {"route": "recordings", "size": 1, "has": True}
-    # an ordinary route change still clears the selection and the form
+    # an ordinary route change still clears the selection, and closes the sheet
     assert out["cleared"] == 0 and out["after"] is None
-    assert out["nm"] == {"route": "speakers", "uid": "U004", "carry": None}
+    assert out["nm"] == {"hash": "#home", "route": "home",
+                         "vs": {"uid": "U004", "base": "m1", "single": True, "title": True}}
 
 
 # ------------------------------------------------- classic seek deep link ---

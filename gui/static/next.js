@@ -1,14 +1,16 @@
 'use strict';
 /* ============================================================================
-   The /next frame (plan Phase 4C). A sidebar with routes for Home,
+   The panel's frame (plan Phases 4C and 4D). A sidebar with routes for Home,
    Recordings, Activity, Speakers, Archive, and Settings, a search palette on
-   the FTS5 index, and a narrow-window fallback below 900px. It reads the same
-   GET /api/state poll as the classic page and calls only existing endpoints,
-   so both pages can run side by side until the 4D swap. A meeting still opens
-   in the classic reader at /#m/<base>: the new meeting page is Phase 4D.
+   the FTS5 index, and a narrow-window fallback below 900px. A meeting opens
+   at #m/<base> (next-meeting.js), and voices are named in the voice sheet
+   (next-voice.js). The server joins this file, next-meeting.js, and
+   next-voice.js in that fixed order into one script: no modules, no build.
 
-   Where each of the 20 classic surfaces went is in gui/DESIGN.md, "The /next
-   frame". tests/test_next_shell.py pins that table and this file together.
+   Since the 4D swap, / serves this page and /classic keeps the old one for
+   30 days. Both read the same GET /api/state poll and call only existing
+   endpoints. Where each of the 20 classic surfaces went is in gui/DESIGN.md.
+   tests/test_next_shell.py and tests/test_next_meeting.py pin them.
    ============================================================================ */
 
 const ICON={
@@ -27,7 +29,9 @@ const ICON={
  close:'<path d="m6 6 12 12M18 6 6 18"/>',
  next:'<path d="m10 6 6 6-6 6"/>',
  down:'<path d="m6 10 6 6 6-6"/>',
- theme:'<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>'
+ theme:'<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/>',
+ back:'<path d="m14 6-6 6 6 6"/>',
+ edit:'<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13 7 4 4"/>'
 };
 const ic=n=>`<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]||''}</svg>`;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -36,7 +40,7 @@ const fmtT=t=>{t=Math.max(0,Math.round(+t||0));const h=Math.floor(t/3600),m=Math
  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s).padStart(2,'0');};
 const fmtMin=secs=>{const m=Math.max(1,Math.round((+secs||0)/60));return m>=60?`${Math.floor(m/60)}h ${m%60}m`:`${m}m`;};
 const plural=(n,one,many)=>`${n} ${n===1?one:(many||one+'s')}`;
-const meetingHref=(base,t)=>'/#m/'+encodeURIComponent(base)+(t!=null?'/t/'+Math.floor(+t):'');
+const meetingHref=(base,t)=>'#m/'+encodeURIComponent(base)+(t!=null?'/t/'+Math.floor(+t):'');
 
 /* ---------------------------------------------------------------- data ---- */
 async function api(path,body){
@@ -50,7 +54,7 @@ async function api(path,body){
 let S=null;
 const UI={route:'home',q:'',chip:'all',sort:'new',fold:{},sel:new Set(),menu:false,palette:false,keys:false,
  pq:'',pres:null,actTab:'all',hist:null,histQ:'',histF:'all',dupes:null,archived:null,confirm:null,
- naming:null,carry:null,openSamples:null,err:{},keysOpen:false,prefsSub:null,updates:null};
+ naming:null,carry:null,openSamples:null,err:{},keysOpen:false,prefsSub:null,updates:null,mbase:null,mseek:null};
 const STAGE_NICE={downloading:'Downloading',converting:'Preparing',transcribing:'Transcribing',
  diarizing:'Speakers',verifying:'Verifying',writing:'Writing',summarizing:'Summary'};
 const NEEDS_DAYS=14;
@@ -80,6 +84,8 @@ const urgent=()=>((S&&S.tray)||[]).filter(t=>['recorder_stall','failed','dupe_fi
 const NAV=[['home','Home','home'],['recordings','Recordings','list'],['speakers','Speakers','voice']];
 const NAV2=[['activity','Activity','act'],['archive','Archive','arch'],['settings','Settings','gear']];
 const TITLES={home:'Home',recordings:'Recordings',activity:'Activity',speakers:'Speakers',archive:'Archive',settings:'Settings'};
+// the page's name in the tab and the top bar: a meeting shows its title
+function pageTitle(){if(UI.route==='meeting'){const m=byBase(UI.mbase);return m?m.title:'Recording';}return TITLES[UI.route]||'Meetings';}
 function pillText(){
  if(!S)return '';
  const rec=S.recording;
@@ -98,7 +104,7 @@ function pillText(){
 function pillHTML(){const p=pillText();if(!p)return '';
  return `<button class="pill ${p.cls}" type="button" data-act="go" data-to="activity" title="Open Activity">${esc(p.t)}</button>`;}
 function navHTML(){
- const c=UI.route;const ny=needsYou().length;const urg=urgent().length;
+ const c=UI.route==='meeting'?'recordings':UI.route;const ny=needsYou().length;const urg=urgent().length;
  const item=([to,l,i])=>{let n='';if(to==='home'&&ny)n=`<span class="count" title="Needs you">${ny}</span>`;
   if(to==='activity'&&urg)n=`<span class="count" title="Needs attention">${urg}</span>`;
   return `<a class="nav-item" href="#${to}" ${c===to?'aria-current="page"':''}>${ic(i)}<span>${l}</span>${n}</a>`;};
@@ -111,8 +117,8 @@ function renderFrame(){
   <button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>
   <button class="searchbtn" type="button" data-act="palette" title="Search titles and words (/ or Cmd K)">${ic('search')}<span>Search</span></button>
   ${navHTML()}
-  <div class="side-foot"><span>Preview of the new layout.</span><a href="/">Open the classic page</a><a href="#" data-act="keys">Keys</a></div>`;
- $('#topbar').innerHTML=`<button class="icon-btn" type="button" data-act="menu" aria-label="Open the menu">${ic('menu')}</button><span class="t">${esc(TITLES[UI.route]||'Meetings')}</span>${pillHTML()}<button class="icon-btn" type="button" data-act="palette" aria-label="Search">${ic('search')}</button>`;
+  <div class="side-foot"><a href="/classic">Open the classic page</a><a href="#" data-act="keys">Keys</a></div>`;
+ $('#topbar').innerHTML=`<button class="icon-btn" type="button" data-act="menu" aria-label="Open the menu">${ic('menu')}</button>${UI.route==='meeting'?`<a class="icon-btn" href="#recordings" aria-label="Back to Recordings">${ic('back')}</a>`:''}<span class="t">${esc(pageTitle())}</span>${pillHTML()}<button class="icon-btn" type="button" data-act="palette" aria-label="Search">${ic('search')}</button>`;
 }
 
 /* ---------------------------------------------------------------- rows ---- */
@@ -172,7 +178,7 @@ function needsCard(x,i){
    <div class="meta">${esc(whenText(m))} · ${m.minutes||0} min · Only the model drafted this title</div>${errLine('keep:'+x.target)}</div>`;
  }
  if(x.kind==='voice'){
-  const act=x.uid?`<button class="btn ${i===0?'primary':'quiet'}" type="button" data-act="name-voice" data-uid="${esc(x.uid)}">Name</button>`:`<a class="btn ${i===0?'primary':'quiet'}" href="${meetingHref(x.target)}">Open the meeting</a>`;
+  const act=x.uid?`<button class="btn ${i===0?'primary':'quiet'}" type="button" data-act="name-voice" data-uid="${esc(x.uid)}" data-base="${esc(x.target)}">Name</button>`:`<a class="btn ${i===0?'primary':'quiet'}" href="${meetingHref(x.target)}">Open the meeting</a>`;
   return `<div class="ask-card"><div class="ask-line" style="justify-content:space-between"><div style="min-width:0"><div class="row-title">Who is ${esc(x.title)}?</div><div class="meta">${esc(x.detail)}</div></div>${act}</div></div>`;
  }
  const what=x.kind==='no_speech'?'No speech found in this recording.':x.detail;
@@ -322,9 +328,10 @@ function speakersView(){
  const hidden=(S.unknowns||[]).filter(u=>u.archived);
  const enr=S.enrolled||[];
  if(!unk.length&&!enr.length&&!hidden.length)return `<h1>Speakers</h1><div class="empty"><strong>No voices yet</strong><span>Voices appear after the first meeting. Name one once, and it is recognized in every later meeting.</span></div>`;
- const unkRow=u=>{const n=(u.meetings||[]).length;const look=(u.looks_like||[])[0];const open=UI.naming&&UI.naming.uid===u.uid;
-  return `<div class="row static" data-row tabindex="0" id="v-${esc(u.uid)}"><div style="min-width:0"><div class="row-title">${esc(u.display)}</div><div class="meta">In ${plural(n,'meeting')}${look?` · Looks like <span class="nb">${esc(look.name)} · <span class="mono">${(+look.score).toFixed(2)}</span></span>`:''}</div>${open?nameForm(u):''}</div>
-   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button>${open?'':`<button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}">Name</button>`}<button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
+ const unkRow=u=>{const n=(u.meetings||[]).length;const look=(u.looks_like||[])[0];const same=(u.suggested||[]).filter(x=>x&&x.uid).slice(0,2);
+  return `<div class="row static" data-row tabindex="0" id="v-${esc(u.uid)}"><div style="min-width:0"><div class="row-title">${esc(u.display)}</div><div class="meta">In ${plural(n,'meeting')}${look?` · Looks like <span class="nb">${esc(look.name)} · <span class="mono">${(+look.score).toFixed(2)}</span></span>`:''}</div>
+   ${same.length?`<div class="tools">${same.map(x=>`<button class="btn plain" type="button" data-act="link-voice" data-src="${esc(u.uid)}" data-dst="${esc(x.uid)}">Same voice as ${esc(x.display)} · <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('')}</div>`:''}</div>
+   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
  const others=enr.map(e=>e.name);
  const enrRow=e=>{const conf=UI.confirm==='rm:'+e.name;const open=UI.openSamples===e.name;const mine=S.mic_speaker===e.name;
   return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(e.name)}${mine?'<span class="chip draft">Your voice</span>':''}</div><div class="meta">${plural(e.samples||0,'voice sample')}${(e.sources||[]).length?' · from '+plural(e.sources.length,'meeting'):''}</div>
@@ -337,17 +344,6 @@ function speakersView(){
   <div class="stack sections"><section><div class="eyebrow">Unknown voices <span class="n">${unk.length}</span></div><div class="stack">${unk.map(unkRow).join('')||'<div class="none-line sub">Every voice has a name.</div>'}</div></section>
   <section><div class="eyebrow">Named people <span class="n">${enr.length}</span></div><div class="stack">${enr.map(enrRow).join('')}</div></section>
   ${hidden.length?`<section><div class="eyebrow">Hidden voices <span class="n">${hidden.length}</span></div><div class="stack">${hidden.map(u=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(u.display)}</div><div class="meta">In ${plural((u.meetings||[]).length,'meeting')}</div></div><div class="rail"><button class="btn quiet" type="button" data-act="unhide-voice" data-uid="${esc(u.uid)}">Restore</button></div></div>`).join('')}</div></section>`:''}</div>`;
-}
-function nameForm(u){
- const N=UI.naming;const chips=(u.looks_like||[]).map(l=>l.name).filter((n,i,a)=>n&&a.indexOf(n)===i).slice(0,3);
- const same=(u.suggested||[]).filter(x=>x&&x.uid).slice(0,2);
- const names=(S.enrolled||[]).map(e=>`<option value="${esc(e.name)}">`).join('');
- return `<div class="name-form"><div class="ask-line"><input type="text" id="vn-in" list="vn-list" placeholder="Type a name" value="${esc(N.value||'')}" aria-label="Name for ${esc(u.display)}" autocomplete="off"><datalist id="vn-list">${names}</datalist>
-  <button class="btn primary" type="button" data-act="vsave" ${N.busy?'disabled':''}>${N.busy?'Saving…':(N.force?'Save anyway':'Save')}</button><button class="btn plain" type="button" data-act="vcancel">Cancel</button></div>
-  ${chips.length?`<div class="chips" style="margin-inline:0">${chips.map(n=>`<button class="nchip" type="button" data-act="vfill" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div>`:''}
-  <div class="meta">Names this voice in every meeting it was heard in (${plural((u.meetings||[]).length,'meeting')}).</div>
-  ${same.length?`<div class="tools">${same.map(x=>`<button class="btn plain" type="button" data-act="link-voice" data-src="${esc(u.uid)}" data-dst="${esc(x.uid)}">Same voice as ${esc(x.display)} · <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('')}</div>`:''}
-  ${N.warn?`<div class="meta attn-t">${esc(N.warn)}</div>`:''}${N.err?`<div class="err">${esc(N.err)}</div>`:''}</div>`;
 }
 function renameForm(e){const N=UI.naming;
  return `<div class="name-form"><div class="ask-line"><input type="text" id="rn-in" value="${esc(N.value!=null?N.value:e.name)}" aria-label="New name for ${esc(e.name)}" autocomplete="off"><button class="btn primary" type="button" data-act="rn-save" ${N.busy?'disabled':''}>Rename</button><button class="btn plain" type="button" data-act="vcancel">Cancel</button></div>${N.err?`<div class="err">${esc(N.err)}</div>`:''}</div>`;}
@@ -418,12 +414,14 @@ function settingsView(){
 /* ------------------------------------------------------------ overlays ---- */
 function layersHTML(){
  let h='';
- if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button><div class="side-foot"><a href="/">Open the classic page</a></div></div>`;
+ if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button><div class="side-foot"><a href="/classic">Open the classic page</a></div></div>`;
  if(UI.palette)h+=`<div class="veil" data-act="close-layer"></div><div class="palette" role="dialog" aria-label="Search"><input type="search" id="pal-in" placeholder="Search titles and words" aria-label="Search" value="${esc(UI.pq)}" autocomplete="off"><div class="res" id="pal-res">${palResults()}</div></div>`;
  if(UI.keys)h+=`<div class="veil" data-act="close-layer"></div><div class="palette keysheet" role="dialog" aria-label="Keyboard keys"><div class="keysheet-head"><strong>Keys</strong><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><div class="keys">${KEYS.map(([k,d])=>`<span>${k.split(' ').map(x=>/^(or|then)$/.test(x)?`<span class="sub">${x}</span>`:`<kbd>${esc(x)}</kbd>`).join(' ')}</span><span>${esc(d)}</span>`).join('')}</div></div>`;
  $('#layers').innerHTML=h;
 }
-const KEYS=[['/ or Cmd K','Search titles and words'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row'],['x','Select the row'],['Esc','Back out one layer'],['?','This sheet']];
+const KEYS=[['/ or Cmd K','Search titles and words (/ on a Transcript tab finds in it)'],['g then h','Go to Home'],['g then r','Go to Recordings'],['g then a','Go to Activity'],['g then s','Go to Speakers'],['g then e','Go to Archive'],['g then ,','Go to Settings'],['j k','Move through rows'],['Enter','Open the row, keep the title, save the voice'],['x','Select the row'],
+ ['1 2 3','Summary, Transcript, Ask (on a meeting)'],['[ ]','Previous or next recording'],['Space','Play or pause. In the voice sheet, replay the clip'],['v','Name voices'],['n p','Next or previous uncertain line'],['a u','Accept and go on, or use the second reading'],['Cmd F','Find in the transcript'],['Cmd Enter','Save the line card'],
+ ['1 2 3 or s','In the voice sheet: fill from a chip, or skip'],['Esc','Back out one layer, then back to the list'],['?','This sheet']];
 // match in the raw text, then escape each slice, so a mark never lands inside an entity
 function hl(text,q){const t=String(text==null?'':text);if(!q)return esc(t);const i=t.toLowerCase().indexOf(String(q).toLowerCase());if(i<0)return esc(t);const j=i+String(q).length;return esc(t.slice(0,i))+'<mark>'+esc(t.slice(i,j))+'</mark>'+esc(t.slice(j));}
 function palResults(){
@@ -483,6 +481,7 @@ let LAST_SIG='',REC_SIG='';
 function render(force){
  if(!S)return;
  renderFrame();
+ if(UI.route==='meeting'){LAST_SIG='';mRender(force);renderBulk();return;}
  const views={home:homeView,recordings:recordingsView,activity:activityView,speakers:speakersView,archive:archiveView,settings:settingsView};
  // a 2s poll must never wipe a field being typed into. The frame repaints
  // anyway, the Recordings list below its filter keeps up, and the rest of
@@ -512,19 +511,32 @@ function toast(msg){const t=$('#toast');t.hidden=false;t.textContent=msg;clearTi
 function route(){
  const h=(location.hash||'').slice(1)||'home';
  hidePop();UI.menu=false;UI.palette=false;UI.keys=false;UI.confirm=null;
- const r=TITLES[h]?h:'home';
- if(r!==UI.route){UI.sel.clear();UI.naming=null;if(r==='archive')UI.archived=null;if(r==='activity'){UI.hist=null;UI.dupes=null;}}
- // an action on one page that opens another (Select from Home, Name from a
- // Home voice card) carries its state across the clear above
+ // #m/<base> and #m/<base>/t/<secs>: the meeting page (next-meeting.js)
+ const mh=parseMeetingHash(h);
+ const r=mh?'meeting':TITLES[h]?h:'home';
+ const sameMeeting=mh&&UI.route==='meeting'&&UI.mbase===mh.base;
+ if(r!==UI.route||(mh&&!sameMeeting)){UI.sel.clear();UI.naming=null;if(r==='archive')UI.archived=null;if(r==='activity'){UI.hist=null;UI.dupes=null;}}
+ if(r!=='meeting'){mTeardown();UI.mbase=null;}
+ // the voice sheet stays only for a hand-off into the meeting it walks
+ if(VS&&!(mh&&VCARRY&&VCARRY.base===mh.base))vsClose();
+ if(mh){UI.mbase=mh.base;UI.mseek=mh.seek;if(sameMeeting&&mh.seek!=null&&MP&&MP.loaded){UI.route=r;mSeekLine(mh.seek);return;}}
+ // Select from a Home row menu carries its selection across the clear above
  const c=UI.carry;UI.carry=null;const carried=c&&c.to===r;
- if(carried){(c.sel||[]).forEach(b=>UI.sel.add(b));if(c.naming)UI.naming=c.naming;}
+ if(carried){(c.sel||[]).forEach(b=>UI.sel.add(b));}
  UI.route=r;document.title=tabTitle();
- layersHTML();render(true);window.scrollTo(0,0);
+ layersHTML();render(true);if(!sameMeeting)window.scrollTo(0,0);
  if(carried&&c.after)c.after();
 }
 function goCarry(to,c){UI.carry=Object.assign({to},c);go(to);}
-function focusVoice(uid){const r=document.getElementById('v-'+uid);if(r&&r.scrollIntoView)r.scrollIntoView({block:'center'});const i=$('#vn-in');if(i)i.focus();}
 function go(to){if(location.hash==='#'+to)route();else location.hash=to;}
+// the Recordings list's order as it stands: the filter, the chip, the sort.
+// A meeting's previous and next walk it. Outside the filter, all of it.
+function recOrder(){
+ let rows=filtered();if(UI.mbase&&!rows.some(m=>m.base===UI.mbase))rows=meetings().slice();
+ const by={old:(a,b)=>String(a.date).localeCompare(String(b.date)),long:(a,b)=>(b.minutes||0)-(a.minutes||0),az:(a,b)=>a.title.localeCompare(b.title)}[UI.sort]
+  ||((a,b)=>String(b.date).localeCompare(String(a.date))||String(b.recorded_at||'').localeCompare(String(a.recorded_at||'')));
+ return [...rows].sort(by).map(m=>m.base);
+}
 
 /* ------------------------------------------------------------- actions ---- */
 async function act(path,body,errKey,after){
@@ -546,18 +558,6 @@ function play(el){
  PLAYER.onended=stop;PLAYER.onerror=()=>{stop();toast('No clip could be cut for this voice.');};
  PLAYER.play().catch(stop);
 }
-async function saveName(){
- const N=UI.naming;if(!N||N.busy)return;const i=$('#vn-in');const n=(i?i.value:N.value||'').trim();N.value=n;
- if(!n){N.err='Type a name first.';render(true);return;}
- N.busy=true;N.err=null;render(true);
- const r=await api('/api/name',{uid:N.uid,name:n,confirm:!!N.force}).catch(()=>null);
- N.busy=false;
- if(!r){N.err='Could not reach the panel.';render(true);return;}
- if(!r.ok){
-  if(r.warn){N.force=true;N.warn=`This voice matches ${n}'s saved samples at only ${(+r.own).toFixed(2)}${r.cross_name&&+r.cross>+r.own?`, and matches ${r.cross_name} better (${(+r.cross).toFixed(2)})`:''}. It may be the wrong person.`;render(true);return;}
-  N.err=r.error||'Could not save the name.';render(true);return;}
- UI.naming=null;toast(`Named ${n}. The meetings update in the background.`);await refresh();render(true);
-}
 const A={
  go(el){go(el.dataset.to);},
  theme(){const r=document.documentElement;const cur=r.getAttribute('data-theme')||'auto';const nx={auto:'light',light:'dark',dark:'auto'}[cur];setTheme(nx);},
@@ -573,7 +573,7 @@ const A={
  'row-menu'(el){if(!$('#pop').hidden&&POP_ANCHOR===el){hidePop();return;}showPop(el,rowMenu(el.dataset.base));},
  'spk-menu'(el){const n=el.dataset.name;const others=(S.enrolled||[]).filter(e=>e.name!==n);
   showPop(el,`<button class="mi" type="button" data-act="rn-open" data-name="${esc(n)}">Rename…</button>${others.length?`<div class="pop-form"><label class="meta" for="mg-sel">Merge into</label><select id="mg-sel">${others.map(e=>`<option value="${esc(e.name)}">${esc(e.name)}</option>`).join('')}</select><div class="row-btns"><button class="btn" type="button" data-act="merge" data-name="${esc(n)}">Merge</button></div></div>`:''}<hr><button class="mi danger" type="button" data-act="rm-ask" data-name="${esc(n)}">Remove…<small>Forgets the voice. Meetings keep the name.</small></button>`);},
- open(el){hidePop();location.href=meetingHref(el.dataset.base);},
+ open(el){hidePop();location.hash=meetingHref(el.dataset.base).slice(1);},
  select(el){hidePop();const b=el.dataset.base;if(UI.route!=='recordings')goCarry('recordings',{sel:[b]});else{UI.sel.add(b);render(true);}},
  'cancel-pop'(){hidePop();},
  'pop-rename'(el){const m=byBase(el.dataset.base)||{};showPop(POP_ANCHOR||el,popForm('rename',el.dataset.base,'New title',m.title||''));},
@@ -581,8 +581,8 @@ const A={
  'pop-redo'(el){const m=byBase(el.dataset.base)||{};showPop(POP_ANCHOR||el,`<div class="pop-note"><strong>Redo ${esc(m.title||'')}?</strong><span class="meta">Re-runs transcription and speaker detection from the stored audio. The transcript is replaced, and any manual edits are archived next to it.</span></div>${m.audio?`<button class="mi" type="button" data-act="redo" data-base="${esc(m.base)}">Redo</button>`:'<div class="pop-note err">The stored audio is missing, so a Redo cannot run.</div>'}<button class="mi" type="button" data-act="cancel-pop">Cancel</button>`);},
  async redo(el){const m=byBase(el.dataset.base)||{};hidePop();if(!m.audio)return;await act('/api/run',{paths:[m.audio],force:true,...runOpts(),parallel:1});toast('Redo queued.');},
  'pop-del'(el){const m=byBase(el.dataset.base)||{};showPop(POP_ANCHOR||el,`<div class="pop-note"><strong>Delete ${esc(m.title||'')}?</strong><span class="meta">This is final. The audio and transcript are removed, and only a backup can bring them back.</span></div><button class="mi danger" type="button" data-act="del" data-base="${esc(el.dataset.base)}">Delete</button><button class="mi" type="button" data-act="archive" data-base="${esc(el.dataset.base)}">Archive instead</button><button class="mi" type="button" data-act="cancel-pop">Cancel</button>`);},
- async del(el){hidePop();UI.sel.delete(el.dataset.base);await act('/api/delete_meeting',{base:el.dataset.base,confirm:true});toast('Deleted.');},
- async archive(el){hidePop();UI.sel.delete(el.dataset.base);const r=await act('/api/archive_meeting',{base:el.dataset.base});if(r.ok!==false)toast('Archived. Restore it from Archive.');},
+ async del(el){hidePop();const b=el.dataset.base;UI.sel.delete(b);const r=await act('/api/delete_meeting',{base:b,confirm:true});if(r.ok!==false&&!r.error){toast('Deleted.');if(UI.route==='meeting'&&UI.mbase===b)go('recordings');}},
+ async archive(el){hidePop();const b=el.dataset.base;UI.sel.delete(b);const r=await act('/api/archive_meeting',{base:b});if(r.ok!==false&&!r.error){toast('Archived. Restore it from Archive.');if(UI.route==='meeting'&&UI.mbase===b)go('recordings');}},
  async cat(el){hidePop();await act('/api/set_category',{base:el.dataset.base,category:el.dataset.v});},
  async export(el){hidePop();const f=el.dataset.fmt;const r=await act('/api/export',{base:el.dataset.base,fmt:f});if(r.ok!==false&&!r.error)toast(f==='reveal'?'Shown in Finder.':'Exported and shown in Finder.');},
  async copy(el){hidePop();try{const r=await fetch('/api/txt?base='+encodeURIComponent(el.dataset.base));const t=await r.text();if(!r.ok)throw 0;await navigator.clipboard.writeText(t);toast('Copied the transcript.');}catch(e){toast('Could not copy the transcript.');}},
@@ -590,7 +590,9 @@ const A={
   let r;if(k==='rename')r=await api('/api/rename',{base:b,new:v});else if(k==='date')r=await api('/api/set_date',{base:b,date:v});
   else if(k==='bulk-rename'||k==='bulk-date'){r=await api('/api/bulk',{action:k==='bulk-rename'?'rename':'date',bases:[...UI.sel],value:v});}
   if(!r||r.error||r.ok===false){err.hidden=false;err.textContent=(r&&r.error)||((r&&r.results)||[]).filter(x=>!x.ok).map(x=>x.error).filter(Boolean)[0]||'That did not work.';return;}
-  hidePop();if(k.startsWith('bulk'))UI.sel.clear();await refresh();render(true);toast('Saved.');},
+  hidePop();if(k.startsWith('bulk'))UI.sel.clear();await refresh();
+  if(r.base&&r.base!==b&&UI.route==='meeting'&&UI.mbase===b){mFollow(b,r.base);toast('Saved.');return;}
+  render(true);toast('Saved.');},
  async keep(el){const b=el.dataset.base;const i=document.getElementById('nt-'+b);const name=i?i.value.trim():'';
   await act('/api/accept_meeting',{base:b,name:name||undefined},'keep:'+b);toast('Title kept.');},
  async 'keep-all'(){if(UI.confirm!=='keep-all'){UI.confirm='keep-all';render(true);return;}UI.confirm=null;
@@ -622,14 +624,12 @@ const A={
  async 'dupe-scan'(){await act('/api/dupe_scan',{go:true},'dupes');UI.dupes=null;render(true);},
  async 'dupe-ignore'(el){await act('/api/dupe_ignore',{a:el.dataset.a,b:el.dataset.b},'dupes');UI.dupes=null;render(true);},
  play(el){play(el);},
- 'name-voice'(el){const uid=el.dataset.uid;const N={uid,value:'',force:false};
-  if(UI.route!=='speakers'){goCarry('speakers',{naming:N,after:()=>focusVoice(uid)});return;}
-  UI.naming=N;render(true);focusVoice(uid);},
- vfill(el){const i=$('#vn-in');if(i){i.value=el.dataset.n;i.focus();}if(UI.naming){UI.naming.value=el.dataset.n;UI.naming.force=false;UI.naming.warn=null;}},
- vsave(){saveName();},
+ // the voice sheet, over whatever page is open. A Home card knows the
+ // meeting the voice was heard in, so the sheet shows what it said there.
+ 'name-voice'(el){vsOpenUid(el.dataset.uid,el.dataset.base||null);},
  vcancel(){UI.naming=null;render(true);},
  async 'hide-voice'(el){await act('/api/hide_unknown',{uid:el.dataset.uid,hide:true});toast('Hidden. Restore it under Hidden voices.');},
- async 'link-voice'(el){UI.naming=null;await act('/api/merge_speakers',{src:'uid:'+el.dataset.src,dst:'uid:'+el.dataset.dst});toast('Linked. The two voices are one now.');},
+ async 'link-voice'(el){const r=await act('/api/merge_speakers',{src:'uid:'+el.dataset.src,dst:'uid:'+el.dataset.dst});if(r.ok!==false&&!r.error)toast('Linked. The two voices are one now.');},
  async 'unhide-voice'(el){await act('/api/hide_unknown',{uid:el.dataset.uid,hide:false});},
  samples(el){UI.openSamples=UI.openSamples===el.dataset.name?null:el.dataset.name;render(true);},
  'rn-open'(el){hidePop();UI.naming={rename:el.dataset.name,value:null};render(true);const i=$('#rn-in');if(i){i.focus();i.select();}},
@@ -660,6 +660,7 @@ document.addEventListener('click',e=>{
  const pop=$('#pop');
  if(!pop.hidden&&!e.target.closest('#pop')&&!(el&&['row-menu','new','spk-menu','bulk-form'].includes(el.dataset.act)))hidePop();
  if(e.target.matches('input[type=checkbox]'))return;
+ if(el&&el.disabled)return;
  if(e.target.closest('a[href^="#"]')&&(UI.menu||UI.palette)){UI.menu=false;UI.palette=false;layersHTML();}
  if(!el)return;
  if(el.tagName==='A')e.preventDefault();
@@ -687,25 +688,28 @@ document.addEventListener('input',e=>{
  if(t.id==='rec-q'){UI.q=t.value;renderRecList();}
  else if(t.id==='pal-in'){UI.pq=t.value;$('#pal-res').innerHTML=palResults();palSearch();}
  else if(t.id==='hist-q'){UI.histQ=t.value;}
- else if(t.id==='vn-in'&&UI.naming){UI.naming.value=t.value;if(UI.naming.force){UI.naming.force=false;UI.naming.warn=null;}}
 });
 document.addEventListener('focusout',e=>{if(e.target.id==='hist-q')setTimeout(()=>render(true),0);});
 let gPending=0;
 document.addEventListener('keydown',e=>{
  const t=e.target,typing=t.matches&&t.matches('input,textarea,select');
+ if(e.key==='Escape'&&!$('#pop').hidden){hidePop();return;}
+ if(VS&&vsKey(e))return;                 // the voice sheet owns every key while open
  if(e.key==='Escape'){
-  if(!$('#pop').hidden){hidePop();return;}
   if(UI.keys||UI.palette||UI.menu){closeLayer();return;}
   if(UI.naming){UI.naming=null;render(true);return;}
+  if(UI.route==='meeting'&&mKey(e))return;
   if(typing){t.blur();return;}
   if(UI.sel.size){UI.sel.clear();render(true);}
   return;
  }
  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();A.palette();return;}
+ // an open popover owns the plain keys, except inside its own form
+ if(!$('#pop').hidden&&!e.metaKey&&!e.ctrlKey&&!(t.closest&&t.closest('#pop')))return;
+ if(!UI.palette&&!UI.menu&&!UI.keys&&UI.route==='meeting'&&mKey(e))return;
  if(t.id==='pal-in'&&(e.key==='ArrowDown'||e.key==='ArrowUp')){const hs=[...document.querySelectorAll('#pal-res .hit')];if(!hs.length)return;e.preventDefault();
   let i=hs.findIndex(h=>h.classList.contains('sel'));hs.forEach(h=>h.classList.remove('sel'));i=e.key==='ArrowDown'?Math.min(hs.length-1,i+1):Math.max(0,i-1);hs[i].classList.add('sel');hs[i].scrollIntoView({block:'nearest'});return;}
  if(t.id==='pal-in'&&e.key==='Enter'){const h=document.querySelector('#pal-res .hit.sel')||document.querySelector('#pal-res .hit');if(h)location.href=h.getAttribute('href');return;}
- if(t.id==='vn-in'&&e.key==='Enter'){e.preventDefault();saveName();return;}
  if(t.id==='rn-in'&&e.key==='Enter'){e.preventDefault();A['rn-save']();return;}
  if(t.id==='pf-in'&&e.key==='Enter'){e.preventDefault();A['pf-save']();return;}
  if(t.id&&t.id.startsWith('nt-')&&e.key==='Enter'){e.preventDefault();A.keep({dataset:{base:t.dataset.base}});return;}
@@ -719,7 +723,7 @@ document.addEventListener('keydown',e=>{
  if(e.key==='j'||e.key==='k'){const rows=[...document.querySelectorAll('#view [data-row]')];if(!rows.length)return;e.preventDefault();
   const i=rows.indexOf(t.closest?t.closest('[data-row]'):null);const n=e.key==='j'?Math.min(rows.length-1,i+1):Math.max(0,i-1);rows[n<0?0:n].focus();return;}
  const row=t.closest&&t.closest('[data-row]');
- if(row&&e.key==='Enter'&&row.dataset.base&&t===row){location.href=meetingHref(row.dataset.base);return;}
+ if(row&&e.key==='Enter'&&row.dataset.base&&t===row){location.hash=meetingHref(row.dataset.base).slice(1);return;}
  if(row&&e.key==='x'&&row.dataset.base){const c=row.querySelector('input[type=checkbox]');if(c){c.checked=!c.checked;c.dispatchEvent(new Event('change',{bubbles:true}));}return;}
 });
 
@@ -741,7 +745,7 @@ addEventListener('drop',async e=>{if(!hasFiles(e))return;e.preventDefault();drag
 // the same "(N) Meetings" the classic page shows. A visible tab marks the
 // look for the menu bar's "new since last look" count.
 let HIDDEN_BASE=null;
-function tabTitle(){const n=HIDDEN_BASE==null?0:Math.max(0,needsYou().length-HIDDEN_BASE);return (n?`(${n}) `:'')+(TITLES[UI.route]||'Meetings')+' · Meetings';}
+function tabTitle(){const n=HIDDEN_BASE==null?0:Math.max(0,needsYou().length-HIDDEN_BASE);return (n?`(${n}) `:'')+pageTitle()+' · Meetings';}
 document.addEventListener('visibilitychange',()=>{
  if(document.hidden){HIDDEN_BASE=needsYou().length;}
  else{HIDDEN_BASE=null;document.title=tabTitle();api('/api/seen',{}).catch(()=>{});refresh().then(()=>render());}
