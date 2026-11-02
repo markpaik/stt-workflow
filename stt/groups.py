@@ -17,8 +17,13 @@ How a group forms:
 2. People and hour. A meeting whose title has no strong word (a recorder
    default, a marker name) joins the title cluster whose members share its
    exact set of named people (the owner left out) at the same hour of day,
-   give or take one. Failing that, such meetings group with each other on
-   the same people at the same hour.
+   give or take one (23:30 and 00:10 are near). Failing that, such meetings
+   group with each other on the same people at the same hour. The hour is
+   the hour of `recorded_at`. A meeting without `recorded_at` (every meeting
+   from before the true-date keys) takes it from an HHMM stamp after the
+   eight-digit date in its folder name ("Recording 10152026 1402") or in
+   its `source_name` ("20261015 140200-...m4a"). With neither, the meeting
+   has no hour, and this rule passes it by.
 3. A group needs two or more meetings. A meeting with no match has no group,
    and nothing asks about it.
 
@@ -46,6 +51,7 @@ import os
 import re
 import sys
 import threading
+import unicodedata
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -73,7 +79,7 @@ _WEAK = {
     "debrief", "prep", "discussion", "chat", "intro", "kickoff", "office",
     "hours", "huddle", "connect", "catch", "1on1",
 }
-_WORD = re.compile(r"[a-z0-9]+")
+_WORD = re.compile(r"[^\W_]+")
 _DIGITS = re.compile(r"^\d+$")
 _lock = threading.RLock()
 
@@ -84,6 +90,8 @@ def words(title: str) -> frozenset:
     """The meeting's word set: lowercase words of its title, without stop
     words or bare numbers (dates and times say nothing about the series)."""
     t = str(title or "").lower().replace("1-on-1", "1on1").replace("1:1", "1on1")
+    # fold accents so "Réunion" is "reunion", not "r" and "union"
+    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
     out = set()
     for w in _WORD.findall(t):
         if w in _STOP or (_DIGITS.match(w) and w != "1"):
@@ -115,6 +123,10 @@ def _linkable(a, b) -> float:
 _row_cache = {}   # json path -> (mtime, row)
 
 
+# an HHMM (or HHMMSS) stamp right after an eight-digit date
+_STAMP = re.compile(r"(?<!\d)\d{8}[ _-](\d{2})(\d{2})(?:\d{2})?(?!\d)")
+
+
 def _hour(ra):
     if not ra:
         return None
@@ -122,6 +134,24 @@ def _hour(ra):
         return datetime.fromisoformat(str(ra)).hour
     except ValueError:
         return None
+
+
+def _stamp_hour(name):
+    m = _STAMP.search(str(name or ""))
+    if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
+        return int(m.group(1))
+    return None
+
+
+def row_hour(row: dict):
+    """The hour of day a meeting started: recorded_at, else an HHMM stamp in
+    the folder name, else one in source_name. None when nothing says."""
+    h = _hour(row.get("recorded_at"))
+    if h is None:
+        h = _stamp_hour(row.get("base"))
+    if h is None:
+        h = _stamp_hour(row.get("source_name"))
+    return h
 
 
 def row_from_json(base: str, d: dict) -> dict:
@@ -139,6 +169,7 @@ def row_from_json(base: str, d: dict) -> dict:
             "title": d.get("title") or dates.title_of(base),
             "named": named,
             "recorded_at": ra,
+            "source_name": d.get("source_name") if isinstance(d.get("source_name"), str) else None,
             "date": d.get("date") or dates.meeting_date(base),
             "duration_sec": float(d.get("duration_sec") or 0.0)}
 
@@ -324,7 +355,11 @@ def _people(row, me):
 
 
 def _near(h1, h2) -> bool:
-    return h1 is not None and h2 is not None and abs(h1 - h2) <= HOUR_SLACK
+    """The same hour of day, give or take HOUR_SLACK, across midnight too."""
+    if h1 is None or h2 is None:
+        return False
+    d = abs(h1 - h2) % 24
+    return min(d, 24 - d) <= HOUR_SLACK
 
 
 def _name_and_why(kind, members, sig):
@@ -373,13 +408,13 @@ def compute(rows: list, me=None, overrides=None) -> list:
     leftovers = []
     for b in untitled:
         r = by_base[b]
-        ppl, h = _people(r, me), _hour(r.get("recorded_at"))
+        ppl, h = _people(r, me), row_hour(r)
         best, score = None, 0
         if ppl and h is not None:
             for g in out:
                 n = sum(1 for m in g["members"]
                         if _people(by_base[m], me) == ppl
-                        and _near(_hour(by_base[m].get("recorded_at")), h))
+                        and _near(row_hour(by_base[m]), h))
                 if n > score:
                     best, score = g, n
         if best is not None:
@@ -389,7 +424,7 @@ def compute(rows: list, me=None, overrides=None) -> list:
     pk = {}
     for b in leftovers:
         r = by_base[b]
-        pk.setdefault((_people(r, me), _hour(r.get("recorded_at"))), []).append(b)
+        pk.setdefault((_people(r, me), row_hour(r)), []).append(b)
     for (ppl, h), members in pk.items():
         out.append({"kind": "people",
                     "sig": (",".join(sorted(ppl)), str(h)), "members": members})

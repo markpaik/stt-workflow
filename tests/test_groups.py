@@ -141,6 +141,43 @@ def test_default_titles_join_by_people_and_hour(sandbox, monkeypatch):
     assert "11 AM" in g["why"]
 
 
+def test_accented_title_words_stay_whole():
+    """QA 4E #6: "Réunion" is one word, not "r" and "union"."""
+    assert groups.words("Réunion Équipe Budget") == {"reunion", "equipe", "budget"}
+    assert groups.words("Reunion Equipe Budget 10012026") == groups.words("Réunion Équipe Budget")
+
+
+def test_the_hour_wraps_at_midnight():
+    """QA 4E #7: 23:30 and 00:10 are near."""
+    assert groups._near(23, 0) and groups._near(0, 23)
+    assert groups._near(14, 15) and not groups._near(14, 16)
+    assert not groups._near(None, 3)
+
+
+def test_the_hour_falls_back_to_a_folder_or_source_stamp():
+    """QA 4E #3: the live store has no recorded_at, so the people-and-hour
+    rule reads the HHMM stamp in the folder name, then in source_name."""
+    assert groups.row_hour({"base": "Recording 10152026 1402"}) == 14
+    assert groups.row_hour({"base": "Old Name 10152026",
+                            "source_name": "20261015 091500-ABCDEF12.m4a"}) == 9
+    assert groups.row_hour({"base": "Recording 10152026 1402",
+                            "recorded_at": "2026-10-15T08:00:00-04:00"}) == 8
+    assert groups.row_hour({"base": "Budget 10152026"}) is None
+    assert groups.row_hour({"base": "Recording 10152026 2675"}) is None
+
+
+def test_default_titles_join_by_folder_hour_without_recorded_at(sandbox, monkeypatch):
+    monkeypatch.setattr(config, "mic_speaker", lambda: "Owner Person")
+    ppl = ("Owner Person", "Avery Stone")
+    _mk("Recording 10012026 1405", people=ppl)
+    _mk("Recording 10082026 1420", people=ppl)
+    _mk("Recording 10092026 0900", people=ppl)
+    k = _group_of("Recording 10012026 1405")
+    assert k and k == _group_of("Recording 10082026 1420")
+    assert _group_of("Recording 10092026 0900") is None
+    assert "2 PM" in _keys()[k]["why"]
+
+
 def test_meetings_without_amnesty_keys_still_group(sandbox):
     # no meeting_id, no recorded_at, no date_source, no route: older files
     _mk("Board Prep 09012026")

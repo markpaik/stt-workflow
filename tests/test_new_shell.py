@@ -6664,3 +6664,13 @@ def test_the_meeting_header_holds_the_audio_note_and_both_loads_fill_it():
     assert 'id="maudionote" hidden' in head
     assert NEW_JS.count("mAudioNote(d.audio_short_by);") == 2
     assert NEW_JS.count("MP.noSpeech=!!d.no_speech;") == 2
+
+
+def test_screen_names_for_routes_with_a_slash():
+    """QA 4F #8: groups/<key> and ask/<id> shoot to a file in OUT."""
+    from tools import next_screens
+    assert next_screens._name("groups/gabc123") == "groups-gabc123"
+    assert next_screens._name("ask/0123456789ab") == "ask-0123456789ab"
+    assert next_screens._name("m/Some Base 10012026") == "meeting"
+    assert next_screens._name("m/Some Base 10012026/t/12") == "meeting-transcript"
+    assert next_screens._name("home") == "home"

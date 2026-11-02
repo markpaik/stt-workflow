@@ -60,8 +60,13 @@ def overflow(port, route, width, theme, profile: Path) -> dict:
 
 
 def _name(route: str) -> str:
-    """A file name for a route: a meeting's base is dropped."""
-    return "meeting-transcript" if "/t/" in route else "meeting" if route.startswith("m/") else route
+    """A file name for a route: a meeting's base is dropped, and a slash
+    (groups/<key>, ask/<id>) becomes a dash so the file lands in OUT."""
+    if "/t/" in route:
+        return "meeting-transcript"
+    if route.startswith("m/"):
+        return "meeting"
+    return route.replace("/", "-")
 
 
 def meeting_routes(port) -> tuple:

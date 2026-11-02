@@ -153,7 +153,8 @@ The open group shows its name, count, hours, and one line on why these
 meetings group, then its rows. Groups form on the server (`stt/groups.py`)
 from title words (average linkage, weak words such as "weekly" never join
 alone), then the same people at the same hour for a meeting with a default
-title. A group needs two meetings. A grouped row shows its group on the meta
+title. The hour comes from `recorded_at`, else from an HHMM stamp in the
+folder name or `source_name`. A group needs two meetings. A grouped row shows its group on the meta
 line, and its row menu ends with "Not part of this group", the one write
 this page makes (`POST /api/group_override`, keyed on `meeting_id`), with an
 Undo line. Nothing on disk moves. Opening a group posts one
