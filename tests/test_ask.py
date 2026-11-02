@@ -280,3 +280,14 @@ def test_the_evaluation_refuses_a_real_home(monkeypatch):
     monkeypatch.setenv("STT_HOME", str(config.Path.home() / "Projects/brain/meetings"))
     with pytest.raises(SystemExit):
         ask_eval._guard()
+
+
+def test_purge_finds_a_thread_citing_an_accented_name_without_an_id(sandbox, monkeypatch, tmp_path):
+    from tools import purge
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _mk("Café Budget 10012026", FILL + ["The roof reserve is 412 thousand dollars."] + FILL)
+    r = ask.ask("roof reserve?", generate=_cite_first)
+    assert r["citations"][0]["meeting_id"] is None
+    t = ask.save_message(None, {"kind": "all"}, "All recordings", "roof", r)
+    assert purge.plan("Café Budget 10012026")["threads"] == [
+        str(ask.threads_dir() / f"{t['id']}.json")]

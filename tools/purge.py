@@ -163,7 +163,10 @@ def _threads(base: str, mid) -> list:
             text = p.read_text()
         except OSError:
             continue
-        if (mid and mid in text) or json.dumps(base) in text:
+        # threads are written with ensure_ascii=False (stt/ask.py), so a
+        # name with an accent appears raw, not as \u escapes
+        if ((mid and mid in text) or json.dumps(base) in text
+                or json.dumps(base, ensure_ascii=False) in text):
             out.append(p)
     return out
 
