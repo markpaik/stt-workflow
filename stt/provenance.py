@@ -295,17 +295,31 @@ _probe_cache = {}
 
 def _probe_once(src: Path) -> dict:
     """probe_tags() for a new arrival, once per file version: the folder
-    name and the stored keys both ask, and each ask would run ffprobe."""
+    name and the stored keys both ask, and each ask would run ffprobe.
+
+    A dataless iCloud placeholder is never probed: the batch names the
+    meeting folder before it downloads the file, and the placeholder keeps
+    its size and mtime after the download, so a cached empty probe would
+    hide the Voice Memos creation_time tag for good. An empty or timed-out
+    result is not cached either, so the next ask probes again."""
+    from . import icloud
+    empty = {"tags": {}, "duration": None}
     try:
         st = src.stat()
         key = (str(src), st.st_size, st.st_mtime)
     except OSError:
-        return {"tags": {}, "duration": None}
-    if key not in _probe_cache:
-        if len(_probe_cache) > 256:
-            _probe_cache.clear()
-        _probe_cache[key] = probe_tags(src)
-    return _probe_cache[key]
+        return empty
+    if key in _probe_cache:
+        return _probe_cache[key]
+    if not icloud._fully_present(src):
+        return empty
+    got = probe_tags(src)
+    if not got.get("tags") and got.get("duration") is None:
+        return got
+    if len(_probe_cache) > 256:
+        _probe_cache.clear()
+    _probe_cache[key] = got
+    return got
 
 
 def fresh(src, sidecar=None, today=None, probe=True):

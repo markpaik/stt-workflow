@@ -454,6 +454,10 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     report("downloading")
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
+    # resolved again now the bytes are here: a Voice Memos date tag cannot
+    # be read from a dataless placeholder, so the first answer may have
+    # fallen back to the file day. process_file resolves the same way.
+    resolved_base = pipeline.resolve_base(src, dest)
 
     # the meeting recorder drops a <base>.opts.json next to a stereo capture,
     # declaring its me/them channel layout; its contents are copied into the

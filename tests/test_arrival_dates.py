@@ -135,3 +135,33 @@ def test_a_redo_keeps_the_frozen_source_name_and_fingerprint(sandbox, monkeypatc
     after = _json(base)
     for k in ("source_name", "audio_fp", "date_source", "recorded_at"):
         assert after[k] == first[k], k
+
+
+def test_a_dataless_placeholder_is_not_probed_and_an_empty_probe_is_not_kept(
+        sandbox, monkeypatch):
+    """The batch names the meeting folder before it downloads an iCloud
+    file. A probe of the placeholder came back empty and was cached by
+    (path, size, mtime), which the download does not change, so the Voice
+    Memos creation_time tag was lost for good."""
+    from stt import icloud
+    src = _src("Team Huddle.m4a", "2026-10-20")
+    mt = src.stat().st_mtime
+    start = datetime.fromtimestamp(mt - 1200).astimezone()
+    tags = {"tags": {"voice-memo-uuid": "u1",
+                     "creation_time": start.isoformat()}, "duration": 600.0}
+    calls = []
+    provenance._probe_cache.clear()
+    monkeypatch.setattr(provenance, "probe_tags", lambda p: calls.append(p) or tags)
+    monkeypatch.setattr(icloud, "_fully_present", lambda p: False)
+    assert provenance.fresh(src)[0] == "mtime"
+    assert calls == []
+    monkeypatch.setattr(icloud, "_fully_present", lambda p: True)
+    assert provenance.fresh(src)[0] == "recorder"
+    assert len(calls) == 1
+    # a probe that timed out (empty) is asked again, not kept
+    provenance._probe_cache.clear()
+    monkeypatch.setattr(provenance, "probe_tags",
+                        lambda p: calls.append(p) or {"tags": {}, "duration": None})
+    provenance.fresh(src)
+    provenance.fresh(src)
+    assert len(calls) == 3
