@@ -244,6 +244,29 @@ def test_answer_question_flags_a_sampled_long_transcript(sandbox, monkeypatch):
     assert "omitted" in p                                  # the model is told
 
 
+def test_answer_question_keeps_a_multi_hour_transcript_inside_the_cap(sandbox, monkeypatch):
+    """A ~234k-char transcript (the longest kind on disk, ~58k tokens) must
+    reach the model as a sample no bigger than QA_MAX_CHARS plus the fixed
+    rules and question, so the prompt stays inside Qwen3-8B's 32k context."""
+    line = "[1:02:03] Speaker: synthetic filler line for a long session.\n"
+    half = line * (117_000 // len(line))
+    body = "HEADMARK\n" + half + "MIDMARK\n" + half + "TAILMARK\n"
+    assert 230_000 < len(body) < 240_000
+    mfile("Long", ".txt").write_text(body)
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "ok")
+    r = summarize.answer_question("Long", "anything?",
+                                  history=[{"q": "q" * 5000, "a": "a" * 9000}] * 9)
+    assert r["ok"] and r["truncated"] is True
+    (p,) = prompts
+    assert "HEADMARK" in p and "MIDMARK" in p and "TAILMARK" in p
+    # transcript sample + rules + clipped history (3 x (2000 + 4000)) + question
+    assert len(p) <= summarize.QA_MAX_CHARS + 3 * 6000 + 2000
+    # at the module's ~4 chars/token, prompt + a 2000-token answer fit in 32k
+    assert len(p) // 4 + 2000 <= 32_768
+
+
 def test_answer_question_rejects_empty_and_missing(sandbox, monkeypatch):
     _meeting()
     called = []

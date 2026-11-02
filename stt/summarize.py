@@ -206,9 +206,12 @@ def _transcript_sample(base: str, max_chars: int = 9000) -> tuple[str, bool]:
             + "\n[...]\n" + txt[-third:]), True
 
 
-QA_MAX_CHARS = 80_000   # ~20k tokens: every meeting on disk so far fits whole,
-                        # and Qwen3's 32k context still has room for history +
-                        # a 2000-token answer
+QA_MAX_CHARS = 80_000   # ~20k tokens, so Qwen3-8B's 32k context still has room
+                        # for history + a 2000-token answer. Most meetings fit
+                        # whole, but multi-hour sessions do not (transcripts on
+                        # disk reach ~234k chars, ~58k tokens): those go through
+                        # _transcript_sample's head/middle/tail cut, and Ask
+                        # tells the model and the user that parts were omitted
 QA_MAX_HISTORY = 3      # last N exchanges sent back so follow-ups make sense
 
 
