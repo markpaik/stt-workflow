@@ -147,7 +147,7 @@ echo "  First transcription downloads the models automatically (~3 GB)."
 if yes_no "Pre-download them now so the first run is fast?"; then
   "$BASE/.venv/bin/python" - <<'PY' || warn "pre-download hit an error — models will download on first use instead"
 from huggingface_hub import snapshot_download
-for repo in ("mlx-community/parakeet-tdt-0.6b-v2",):
+for repo in ("mlx-community/parakeet-tdt-0.6b-v3",):
     print(f"  downloading {repo}…", flush=True)
     snapshot_download(repo)
 print("  done — Whisper/diarization models fetch on first use (token-gated).")

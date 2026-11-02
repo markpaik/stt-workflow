@@ -44,7 +44,7 @@ needs you, and all machinery lives behind one Process button and one settings
 drawer.
 
 The engine room underneath: two GPU-accelerated transcription engines on
-Apple's MLX framework (NVIDIA Parakeet TDT 0.6B v2, ~30x realtime and the
+Apple's MLX framework (NVIDIA Parakeet TDT 0.6B v3, ~30x realtime and the
 English word-error-rate leader among local models, and Whisper
 large-v3/turbo for punctuation and noise robustness), pyannote diarization,
 and your own voiceprint library attaching real names. Anything ffmpeg reads
