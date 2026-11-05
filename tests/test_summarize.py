@@ -546,10 +546,10 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
     assert backends[-1] == "anthropic"
 
 
-def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
-    """suggest_title runs the local model with think=False (measured ~4x faster,
-    grounding held on real meetings); answer_question keeps the reasoning pass
-    (the no-think model gave up on a question the thinking model answered)."""
+def test_summary_uses_the_chosen_think_setting_and_ask_keeps_it(sandbox, monkeypatch):
+    """suggest_title runs with summarize.DESCRIPTION_THINK (on since the
+    2026-11-05 A/B on Qwen 3.8: better next-steps recall at about the same
+    wall time); answer_question keeps the reasoning pass."""
     _meeting_with_segment("M")
     calls = []
 
@@ -560,7 +560,7 @@ def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "_generate", fake_gen)
     summarize.suggest_title("M")
     summarize.answer_question("M", "What was decided?")
-    assert calls == [False, True]
+    assert calls == [summarize.DESCRIPTION_THINK, True]
 
 
 def test_a_restamp_holds_the_destination_name_it_moves_onto(sandbox):
@@ -694,7 +694,7 @@ def test_a_mid_length_meeting_goes_in_whole(sandbox, monkeypatch):
     assert body in p and "[...]" not in p and "(partial)" not in p
     assert "whole meeting transcript" in p
     assert "PLUM-417" in r["summary"] and r["parts"] == 1
-    assert k.get("think") is False
+    assert k.get("think") is summarize.DESCRIPTION_THINK
 
 
 def test_a_cloud_assistant_takes_a_long_meeting_in_one_prompt(sandbox, monkeypatch):
