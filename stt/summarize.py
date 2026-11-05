@@ -70,9 +70,8 @@ def llm_backend() -> str:
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen3.8:27b-mlx"
 # Measured 2026-11-05 on this Mac (48 GB): prompt ~350-450 tokens/s, answer
-# ~25 tokens/s, ~4.2 transcript characters a token. A 53k-token prompt
-# (the longest meeting is 238k characters) read in 150 s without a cut.
-# The model's own context is 262k tokens; 64k bounds memory (~25 GB resident).
+# ~25 tokens/s, 3.7-4.2 transcript characters a token. The model's own
+# context is 262k tokens. 64k bounds memory (~29 GB resident at 64k).
 OLLAMA_NUM_CTX = 65536
 OLLAMA_TIMEOUT = 1800
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
@@ -515,11 +514,15 @@ SUMMARY_WHOLE_CHARS = 80_000          # ~20k tokens + a 3000-token answer
 SUMMARY_PART_CHARS = 60_000           # ~15k tokens + a 1500-token note
 SUMMARY_NOTE_TOKENS = 1500
 SUMMARY_CLOUD_WHOLE_CHARS = 400_000   # ~100k tokens, inside every cloud model
-# Qwen 3.8 on Ollama: a 64k-token window (OLLAMA_NUM_CTX) at ~4.2 characters
-# a token holds 220k characters plus the prompt and a 3000-token answer. Every
-# meeting in the library but the three longest fits whole.
-SUMMARY_OLLAMA_WHOLE_CHARS = 220_000
-SUMMARY_OLLAMA_PART_CHARS = 160_000
+# Qwen 3.8 on Ollama, sized from a measured run (2026-11-05): with num_ctx
+# 65536 the server loads a 65536-token context (api/ps), and a 230,000-char
+# transcript (61,762 prompt tokens, ~3.7 characters a token) kept a note
+# placed at its start AND one at its end. The whole-transcript limit leaves
+# room for the ~2,000-token fixed prompt and the 3,000-token answer:
+# (65,536 - 5,500) tokens x 3.5 characters, rounded down. Only the two
+# longest meetings in the library go through part notes.
+SUMMARY_OLLAMA_WHOLE_CHARS = 210_000
+SUMMARY_OLLAMA_PART_CHARS = 150_000
 SUMMARY_MAX_LEVELS = 3
 
 
