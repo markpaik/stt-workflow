@@ -85,10 +85,12 @@ def _write_private(p: Path, text: str):
 
 
 def prompt_version() -> str:
-    """Changes when the catalog, the tags or the prompt change, so a cached
+    """Changes when the catalog, the tags, the prompt or the think setting
+    change, so a cached
     reply to an older prompt is never reused."""
     probe = summarize.description_prompt("H", "S", "T", ["P"], "O")
-    return hashlib.sha256(f"{VERSION}|{probe}".encode()).hexdigest()[:12]
+    return hashlib.sha256(f"{VERSION}|{summarize.DESCRIPTION_THINK}|{probe}"
+                          .encode()).hexdigest()[:12]
 
 
 # ---------------------------------------------------------- batch guards ---

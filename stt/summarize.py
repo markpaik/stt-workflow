@@ -756,6 +756,9 @@ def normalize_step(line: str) -> str:
     """A next-steps line in the one format chief-of-staff parses: a line
     the model left without its 'by <deadline>' gets 'by no date given'."""
     s = re.sub(r"\s+", " ", str(line or "")).strip().rstrip(".")
+    # a stray "no date given" inside the action ("..., no date given by no
+    # date given", "... (no date given) by ...") is noise: one ending says it
+    s = re.sub(r"\s*[,(]\s*no date given\)?(?=\s+by\b|$)", "", s, flags=re.I)
     if s.startswith("[") and " will " in s and not re.search(r"\bby\b", s.split(" will ", 1)[1]):
         s += " by no date given"
     return s
@@ -794,9 +797,11 @@ def gist_problems(gist: str, people=(), series_name: str = "") -> list:
     return out
 
 
-# think on or off for the description call. Chosen by the A/B of
-# 2026-11-05 (see the retitle report): set from its result, not by taste.
-DESCRIPTION_THINK = False
+# think on or off for the description call, chosen by an A/B on four
+# meetings of 8-27 minutes (2026-11-05). Think on found 20 next steps where
+# think off found 12, cleared one gist-rule miss, and kept every series;
+# wall time was 544 s against 479 s. Part notes stay off: they only collect.
+DESCRIPTION_THINK = True
 
 
 def describe(base: str, old_title: str = None, backend: str = None,

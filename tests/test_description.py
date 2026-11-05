@@ -381,3 +381,22 @@ def test_the_fixed_prompt_comes_first_and_the_transcript_last(owner, monkeypatch
     assert pa[:cut] == pb[:cut]                    # one cached prefix
     assert "Mtg A" not in pa[:cut] and series.catalog_text() in pa[:cut]
     assert pa.rstrip().endswith("[00:04] Robin Cole: Agreed.")
+
+
+def test_next_step_lines_keep_one_deadline_ending():
+    n = summarize.normalize_step
+    assert n("[A] will serve as admin, no date given by no date given") == \
+        "[A] will serve as admin by no date given"
+    assert n("[A] will run it (no date given) by no date given") == "[A] will run it by no date given"
+    assert n("[A] will send it to B") == "[A] will send it to B by no date given"
+    assert n("[A] will post by Friday.") == "[A] will post by Friday"
+
+
+def test_the_description_call_uses_the_chosen_think_setting(owner, monkeypatch):
+    base = _meeting()
+    seen = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, think=None, **k: seen.append(think) or REPLY)
+    summarize.describe(base)
+    summarize.describe(base, think=False)
+    assert seen == [summarize.DESCRIPTION_THINK, False]
