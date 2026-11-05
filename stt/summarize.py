@@ -504,14 +504,13 @@ def has_speech(base: str) -> bool:
 # of a long meeting never reached it. Now the model reads every line:
 #   - a transcript up to SUMMARY_WHOLE_CHARS goes in one prompt, whole;
 #   - a longer one is cut at line breaks into parts of SUMMARY_PART_CHARS,
-#     the model writes notes on each part (topics, decisions, numbers, and
-#     every commitment in the next-steps line format), and the final prompt
+#     the model writes notes on each part (topics, decisions, open
+#     questions, names and numbers), and the final prompt
 #     reads all the notes in order. Notes longer than the one-prompt limit
 #     are cut and noted again, at most SUMMARY_MAX_LEVELS times.
 # The limits keep each local prompt plus its answer inside Qwen3-8B's 32k
 # context at the module's ~4 characters a token. A cloud assistant takes up
-# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt. The output format, and so the
-# ai_next_steps lines chief-of-staff reads, is unchanged.
+# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt.
 SUMMARY_WHOLE_CHARS = 80_000          # ~20k tokens + a 3000-token answer
 SUMMARY_PART_CHARS = 60_000           # ~15k tokens + a 1500-token note
 SUMMARY_NOTE_TOKENS = 1500
@@ -573,9 +572,6 @@ def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
         "- the topics discussed and what was said about each;\n"
         "- every open question;\n"
         "- names, numbers, dates, and places exactly as they appear;\n"
-        "- every concrete commitment, one per line, formatted exactly as:  "
-        "- [<speaker name as labeled>] will <specific action> by <stated "
-        "deadline, or 'no date given'>\n"
         "Plain lines, no preamble. Do not invent anything.\n\n"
         f"PART {i} OF {n}:\n{text}"
     )
@@ -620,22 +616,23 @@ def _summary_source(base: str, backend: str, think: bool = False) -> tuple:
 # --- the description (gist, sections, tags) and the catalog title ---------
 # One model call per meeting gives everything: the series and topic the
 # title is built from (stt/series.py), a gist for the list row, the
-# Decisions / Open questions / Next steps sections, and 3-5 topic tags.
+# Decisions and Open questions sections, and 3-5 topic tags. Next steps
+# were removed entirely (owner, 2026-11-05): no prompt line, no field, and
+# every write of a description deletes an old ai_next_steps.
 #
 # Stored fields. The new ones: ai_gist, ai_decisions, ai_open_questions,
 # ai_tags, ai_series, ai_topic, ai_person, ai_tmpl (the speaker template,
 # stt/speaker_text.py), ai_model. Kept for every existing reader:
-# ai_title (the catalog title without its date), ai_next_steps (the same
-# "[name] will ... by ..." lines chief-of-staff parses), and ai_summary,
+# ai_title (the catalog title without its date) and ai_summary,
 # which is now the gist plus the Decisions and Open questions lists as
 # plain text (speaker_text.compose_summary). ai_stale marks a description
 # a Redo left out of date.
 GIST_MAX_WORDS = 20
-DESCRIPTION_KEYS = ("ai_title", "ai_summary", "ai_next_steps", "ai_gist",
+DESCRIPTION_KEYS = ("ai_title", "ai_summary", "ai_gist",
                     "ai_decisions", "ai_open_questions", "ai_tags", "ai_series",
                     "ai_topic", "ai_person", "ai_tmpl", "ai_model",
                     "ai_summary_parts", "ai_generated_at")
-_NONE_ITEMS = {"none", "none stated", "none stated.", "none.", "n/a", "no date given"}
+_NONE_ITEMS = {"none", "none stated", "none stated.", "none.", "n/a"}
 _GIST_OPENERS = re.compile(
     r"^(the|this|a|an|our|in|during|at)\s+(meeting|call|session|discussion|"
     r"check[\s-]?in|conversation|dialogue|workshop|team|group|board)\b", re.I)
@@ -700,15 +697,9 @@ def description_prompt(heading: str, source: str, old_title: str = "",
         "- none\n"
         "7. OPEN QUESTIONS: the questions left unresolved, at most 4, one per "
         "line. If none, write exactly:  - none\n"
-        "8. NEXT STEPS: every concrete commitment someone made, one per line, "
-        "formatted exactly as:  - [<speaker name as labeled in the transcript>] "
-        "will <specific action> by <stated deadline, or 'no date given'>\n"
-        "Only include commitments actually stated; if there are none, write "
-        "exactly:  - none\n"
         "Do not invent anything. Answer in exactly this format:\n"
         "SERIES: <id>\nPERSON: <name or none>\nTOPIC: <topic>\nGIST: <gist>\n"
-        "TAGS: <tag>, <tag>, <tag>\nDECISIONS:\n- ...\nOPEN QUESTIONS:\n- ...\n"
-        "NEXT STEPS:\n- ...\n\n")
+        "TAGS: <tag>, <tag>, <tag>\nDECISIONS:\n- ...\nOPEN QUESTIONS:\n- ...\n\n")
     meeting = (
         "THE MEETING\n"
         "The recording's current title (it may be a default name, messy, or "
@@ -722,10 +713,12 @@ def description_prompt(heading: str, source: str, old_title: str = "",
 _HEADS = {"SERIES": "series", "PERSON": "person", "TOPIC": "topic",
           "GIST": "gist", "TAGS": "tags", "TITLE": "title", "SUMMARY": "summary",
           "DECISIONS": "decisions", "OPEN QUESTIONS": "open_questions",
+          # read only so an older reply's commitments never spill into the
+          # open questions: next steps were removed (owner, 2026-11-05)
           "NEXT STEPS": "next_steps"}
 _LIST_FIELDS = ("decisions", "open_questions", "next_steps")
 # a header line as the model may dress it: "## 1. **DECISIONS:**", "SERIES:",
-# "6) Open questions:", "**Next steps**". The header word must end the line
+# "6) Open questions:", "**Decisions**". The header word must end the line
 # or meet a colon, so a sentence that starts with "Decisions were..." is text.
 _HEAD_RX = re.compile(
     r"^(?:[#>]+\s*)?(?:\d+[.)]\s*)?[*_`]*\s*(" + "|".join(_HEADS) + r")\s*[*_`]*\s*"
@@ -783,18 +776,6 @@ def parse_description(out: str) -> dict:
     return f
 
 
-def normalize_step(line: str) -> str:
-    """A next-steps line in the one format chief-of-staff parses: a line
-    the model left without its 'by <deadline>' gets 'by no date given'."""
-    s = re.sub(r"\s+", " ", str(line or "")).strip().rstrip(".")
-    # a stray "no date given" inside the action ("..., no date given by no
-    # date given", "... (no date given) by ...") is noise: one ending says it
-    s = re.sub(r"\s*[,(]\s*no date given\)?(?=\s+by\b|$)", "", s, flags=re.I)
-    if s.startswith("[") and " will " in s and not re.search(r"\bby\b", s.split(" will ", 1)[1]):
-        s += " by no date given"
-    return s
-
-
 def clip_gist(gist: str, limit: int = GIST_MAX_WORDS) -> str:
     """At most `limit` words, ending on a full stop."""
     words = re.sub(r"\s+", " ", str(gist or "")).strip().split()
@@ -830,10 +811,10 @@ def gist_problems(gist: str, people=(), series_name: str = "") -> list:
     return out
 
 
-# think on or off for the description call, chosen by an A/B on four
-# meetings of 8-27 minutes (2026-11-05). Think on found 20 next steps where
-# think off found 12, cleared one gist-rule miss, and kept every series;
-# wall time was 544 s against 479 s. Part notes stay off: they only collect.
+# think on or off for the description call. The owner picks it from a
+# side-by-side A/B of the next-steps-free prompt (work/retitle/think_ab.md,
+# 2026-11-05). Until then it stays on, as the first A/B left it. Part
+# notes stay off: they only collect.
 DESCRIPTION_THINK = True
 
 
@@ -932,7 +913,7 @@ def build_description(out: str, ctx: dict) -> dict:
     if legacy:
         title = re.sub(r'[<>:"/\\|?*]', "", f["title"]).strip() or "Untitled Meeting"
         gist, problems = "", []
-        fields = {"summary": f["summary"], "next_steps": f["next_steps"]}
+        fields = {"summary": f["summary"]}
     else:
         title = series.build_title(sid, topic_src, person)
         raw_gist = f["gist"] or f["summary"].split(". ")[0]
@@ -940,9 +921,7 @@ def build_description(out: str, ctx: dict) -> dict:
         problems = gist_problems(raw_gist, people + ([owner] if owner else []), series_name)
         gist = clip_gist(raw_gist)
         fields = {"gist": gist, "decisions": f["decisions"],
-                  "open_questions": f["open_questions"], "next_steps": f["next_steps"]}
-    if fields.get("next_steps"):
-        fields["next_steps"] = [normalize_step(x) for x in fields["next_steps"]]
+                  "open_questions": f["open_questions"]}
     tags = series.normalize_tags(f["tags"])
     tmpl = speaker_text.make(fields, snap, raw_turns)
     rendered = speaker_text.render(tmpl, snap)
@@ -957,7 +936,6 @@ def build_description(out: str, ctx: dict) -> dict:
         "tags": tags, "tags_raw": f["tags"],
         "decisions": rendered.get("ai_decisions", []),
         "open_questions": rendered.get("ai_open_questions", []),
-        "next_steps": rendered.get("ai_next_steps", []),
         "summary": rendered.get("ai_summary", gist or f["summary"]),
         "tmpl": tmpl, "parts": ctx.get("parts", 1), "engine": engine,
         "model": local_model_name(engine) if engine in ("ollama", "mlx") else engine,
@@ -982,6 +960,8 @@ def store_description(base: str, desc: dict, title: str = None) -> dict:
             labels.setdefault(k, v)
         rendered = speaker_text.render(tmpl, d, labels)
         d.pop("ai_stale", None)
+        # next steps are gone (owner, 2026-11-05): an old list never lingers
+        d.pop("ai_next_steps", None)
         stale_clear(d.get("meeting_id") or f"base:{base}")
         if "gist" not in (tmpl.get("fields") or {}):
             # an older-shaped reply: no gist or sections, so none may linger
@@ -1032,7 +1012,6 @@ def suggest_title(base: str) -> dict:
             "gist": rendered.get("ai_gist", desc["gist"]),
             "decisions": rendered.get("ai_decisions", desc["decisions"]),
             "open_questions": rendered.get("ai_open_questions", desc["open_questions"]),
-            "next_steps": rendered.get("ai_next_steps", desc["next_steps"]),
             "tags": desc["tags"], "series": desc["series"],
             "suggested_name": f"{title} {_date_suffix(base)}"
                               if dates.strip_stamp(title) == title else title,

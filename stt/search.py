@@ -42,7 +42,7 @@ from pathlib import Path
 
 from . import config, dates, output
 
-SCHEMA = "4"
+SCHEMA = "5"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
 _RAW_TOKENIZE = "unicode61 remove_diacritics 2"
 _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
@@ -167,16 +167,14 @@ def _schema(conn):
 # ---------------------------------------------------------------- indexing ---
 
 def _summary_text(d) -> str:
-    steps = d.get("ai_next_steps") or []
-    if isinstance(steps, str):
-        steps = [steps]
+    # next steps are not indexed (removed, owner 2026-11-05). SCHEMA "5"
+    # rebuilds every docs row so no old next-steps text stays searchable
     # ai_summary already holds the gist and the decision and question lists;
     # the tags go in by label, so a search for "Special education" finds them
     from . import series
     tags = [series.TAG_LABELS.get(t, t) for t in (d.get("ai_tags") or [])
             if isinstance(t, str)]
-    parts = ([d.get("ai_title"), d.get("ai_summary")] + [str(s) for s in steps]
-             + ([" · ".join(tags)] if tags else []))
+    parts = [d.get("ai_title"), d.get("ai_summary")] + ([" · ".join(tags)] if tags else [])
     return "\n".join(str(p) for p in parts if p)
 
 

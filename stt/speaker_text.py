@@ -1,7 +1,7 @@
 """Keep a meeting's description in step with its speaker names, with no
 model call.
 
-The description (gist, decisions, open questions, next steps) names people
+The description (gist, decisions, open questions) names people
 as the transcript labeled them when the model read it: "Speaker 3",
 "Jordan Lee". When a voice is named, renamed, merged, or relabeled later,
 that text goes stale. This module stores the description once as a
@@ -38,9 +38,11 @@ from . import config
 TMPL_VERSION = 1
 _TOK = re.compile("⟦([sf]):([^⟧]{1,80})⟧")
 _GENERIC = re.compile(r"^(speaker|voice)\s+\d+$", re.I)
-# the description fields a template may hold, and the json key each renders to
+# the description fields a template may hold, and the json key each renders
+# to. A stored template with a field not listed here (an old "next_steps")
+# renders nothing for it.
 FIELD_KEYS = {"gist": "ai_gist", "decisions": "ai_decisions",
-              "open_questions": "ai_open_questions", "next_steps": "ai_next_steps",
+              "open_questions": "ai_open_questions",
               "summary": "ai_summary"}
 
 
@@ -216,8 +218,7 @@ def render(tmpl: dict, data: dict, labels_now: dict | None = None) -> dict:
 
 def compose_summary(gist, decisions=None, open_questions=None) -> str:
     """ai_summary for readers that know one text field: the gist, then the
-    decisions and the open questions as short lists. Next steps stay in
-    ai_next_steps."""
+    decisions and the open questions as short lists."""
     parts = [str(gist or "").strip()]
     if decisions:
         parts.append("Decisions:\n" + "\n".join(f"- {d}" for d in decisions))
@@ -228,14 +229,8 @@ def compose_summary(gist, decisions=None, open_questions=None) -> str:
 
 def legacy_fields(data: dict) -> dict:
     """The template fields of a description written before templates: the
-    prose summary and the next steps."""
-    out = {}
-    if data.get("ai_summary"):
-        out["summary"] = str(data["ai_summary"])
-    steps = data.get("ai_next_steps")
-    if isinstance(steps, list) and steps:
-        out["next_steps"] = [str(s) for s in steps]
-    return out
+    prose summary. (Next steps were removed, so they are never templated.)"""
+    return {"summary": str(data["ai_summary"])} if data.get("ai_summary") else {}
 
 
 def rerender(data: dict, raw_turns=None, before: dict | None = None) -> bool:

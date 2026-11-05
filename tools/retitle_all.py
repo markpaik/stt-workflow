@@ -4,7 +4,7 @@
 The local model (Qwen 3.8 on Ollama, else Qwen3-8B) reads each meeting once.
 It names a series from stt/series.py (or one_off), the other person for a
 1:1 series, and a short topic, and it writes the new description: a gist,
-Decisions, Open questions, Next steps, and 3 to 5 topic tags. Code builds
+Decisions, Open questions, and 3 to 5 topic tags. Code builds
 the title from the catalog ("LT Weekly Meeting – Budget Reallocation"); the
 folder keeps its MMDDYYYY date stamp.
 
@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stt import config, control, dates, series, status, summarize, titles  # noqa: E402
 
-VERSION = 1
+VERSION = 2   # 2: next steps removed from the prompt (2026-11-05)
 JOURNAL_NAME = "retitle-journal.jsonl"
 STRAY_DATE = re.compile(r"(?<!\d)(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{1,2}:\d{2})(?!\d)")
 
@@ -287,7 +287,7 @@ def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
             "person": desc.get("person"), "topic": desc.get("topic"),
             "gist": desc.get("gist"), "tags": desc.get("tags"),
             "decisions": desc.get("decisions"), "open_questions": desc.get("open_questions"),
-            "next_steps": desc.get("next_steps"), "trust": trust, "flags": flags,
+            "trust": trust, "flags": flags,
             "model": desc.get("model"), "engine": desc.get("engine"),
             # what --apply checks before it writes anything: the transcript
             # and the diarization this description was written from

@@ -62,8 +62,7 @@ def _describe(base):
     desc = {"tmpl": speaker_text.make(
         {"gist": f"Pricing settled after {b} pushed back.",
          "decisions": [f"{a} owns the vendor shortlist."],
-         "open_questions": [], "next_steps": [f"[{a}] will send the shortlist by Friday",
-                                              f"[{b}] will check the budget by no date given"]},
+         "open_questions": [f"Can {b} check the budget before {a} signs?"]},
         d, speaker_text.load_raw_turns(base)),
         "title": "Vendor Pricing", "tags": ["budget-finance"], "series": "one_off"}
     summarize.store_description(base, desc)
@@ -116,25 +115,24 @@ def test_the_description_follows_a_naming_and_a_rename_with_no_model_call(sandbo
     _describe(base)
     d = _load(base)
     old_a = _by_cluster(d, base)["SPEAKER_00"]["display"]
-    assert d["ai_next_steps"][0] == f"[{old_a}] will send the shortlist by Friday"
+    assert d["ai_decisions"][0] == f"{old_a} owns the vendor shortlist."
 
     identify.enroll("Alice Chen", a, source="Elsewhere")
     assert relabel.relabel_one(base)
     d = _load(base)
-    assert d["ai_next_steps"][0] == "[Alice Chen] will send the shortlist by Friday"
     assert d["ai_decisions"] == ["Alice Chen owns the vendor shortlist."]
     assert "Alice Chen owns the vendor shortlist." in d["ai_summary"]
 
     assert identify.rename_person("Alice Chen", "Alice Wong")
     assert relabel.relabel_one(base)
     d = _load(base)
-    assert d["ai_next_steps"][0] == "[Alice Wong] will send the shortlist by Friday"
+    assert d["ai_decisions"] == ["Alice Wong owns the vendor shortlist."]
 
     assert summarize.set_local_name(base, "SPEAKER_01", "Jordan Lee")["ok"]
     assert relabel.relabel_one(base)
     d = _load(base)
     assert d["ai_gist"] == "Pricing settled after Jordan Lee pushed back."
-    assert d["ai_next_steps"][1] == "[Jordan Lee] will check the budget by no date given"
+    assert d["ai_open_questions"] == ["Can Jordan Lee check the budget before Alice Wong signs?"]
 
 
 def test_a_registry_merge_renumbers_the_unknown_and_the_text_follows(sandbox, monkeypatch):
@@ -166,13 +164,11 @@ def test_a_description_from_before_templates_is_templated_once_on_relabel(sandbo
     d = _load(base)
     old_a = _by_cluster(d, base)["SPEAKER_00"]["display"]
     d["ai_summary"] = f"{old_a} walked through the budget."
-    d["ai_next_steps"] = [f"[{old_a}] will send it by Friday"]
     config.meeting_file(base, ".json").write_text(json.dumps(d))
     identify.enroll("Alice Chen", a, source="Elsewhere")
     assert relabel.relabel_one(base)
     d = _load(base)
     assert d["ai_summary"] == "Alice Chen walked through the budget."
-    assert d["ai_next_steps"] == ["[Alice Chen] will send it by Friday"]
     assert d["ai_tmpl"]["v"] == speaker_text.TMPL_VERSION
 
 
@@ -215,7 +211,7 @@ def test_a_review_edit_keeps_the_description_rendered(sandbox):
          "segments": [{"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "name": "Alice Chen",
                        "display": "Alice Chen", "text": "hello", "flags": [], "overlap": False}],
          "words": []}
-    d["ai_tmpl"] = speaker_text.make({"gist": "Alice Chen opened.", "next_steps": []}, d)
+    d["ai_tmpl"] = speaker_text.make({"gist": "Alice Chen opened."}, d)
     d.update(speaker_text.render(d["ai_tmpl"], d))
     mfile(base, ".json").write_text(json.dumps(d))
     mfile(base, ".txt").write_text("stub")

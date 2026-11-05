@@ -66,9 +66,8 @@ def test_the_reply_becomes_a_catalog_title_gist_sections_and_tags(owner, monkeyp
     assert d["ai_tags"] == ["hiring-staffing", "budget-finance", "team-operations"]
     assert d["ai_decisions"] == ["Robin Cole owns the posting.", "The budget drops by ten percent."]
     assert d["ai_open_questions"] == []
-    # chief-of-staff's line format, with the missing deadline filled in
-    assert d["ai_next_steps"] == ["[Robin Cole] will post both roles by Friday",
-                                  "[Owen Park] will send the budget sheet to Robin by no date given"]
+    # next steps were removed: a reply that still lists them stores none
+    assert "ai_next_steps" not in d and "post both roles" not in d["ai_summary"]
     assert d["ai_summary"].startswith(d["ai_gist"])
     assert "Decisions:\n- Robin Cole owns the posting." in d["ai_summary"]
     assert d["ai_title"] == r["title"]
@@ -123,7 +122,7 @@ def test_the_description_is_rendered_against_the_roster_at_write_time(owner, mon
     monkeypatch.setattr(summarize, "_generate", slow)
     summarize.suggest_title(base)
     d = _load(base)
-    assert d["ai_next_steps"][0] == "[Robin Cole-Ash] will post both roles by Friday"
+    assert d["ai_decisions"][0] == "Robin Cole-Ash owns the posting."
 
 
 def test_a_strict_meeting_never_reaches_a_cloud_backend_for_descriptions(sandbox, monkeypatch):
@@ -269,11 +268,12 @@ def test_hardware_settings_come_from_stt_env(sandbox, monkeypatch):
 def test_a_redo_carries_the_description_marked_out_of_date(sandbox):
     from stt import pipeline
     prev = {"source_file": "x.m4a", "ai_summary": "S", "ai_gist": "G", "ai_tags": ["math"],
-            "ai_next_steps": ["[A] will x by y"], "ai_tmpl": {"v": 1}}
+            "ai_next_steps": ["[A] will x by y"], "ai_decisions": ["D"], "ai_tmpl": {"v": 1}}
     meta = {}
     pipeline._title_fields(meta, prev, Path("x.m4a"), SPOKEN)
     assert meta["ai_stale"] is True
-    assert meta["ai_gist"] == "G" and meta["ai_next_steps"] == ["[A] will x by y"]
+    assert meta["ai_gist"] == "G" and meta["ai_decisions"] == ["D"]
+    assert "ai_next_steps" not in meta      # removed: a Redo never carries it
     assert "ai_tmpl" not in meta            # its clusters died with the Redo
     fresh = {}
     pipeline._title_fields(fresh, {"source_file": "x.m4a"}, Path("x.m4a"), SPOKEN)
@@ -353,9 +353,10 @@ def test_the_shell_shows_the_gist_sections_and_tag_filter():
     meet = (static / "next-meeting.js").read_text()
     assert "m.gist||" in nxt                                  # the row preview
     assert "(m.tags||[]).some(t=>t.toLowerCase()===q)" in nxt  # tag filter
-    for s in ("'Decisions'", "'Open questions'", "'Next steps'", "data-act=\"m-tag\"",
+    for s in ("'Decisions'", "'Open questions'", "data-act=\"m-tag\"",
               "'m-tag'(el)", "summary_stale"):
         assert s in meet
+    assert "'Next steps'" not in meet and "next_steps" not in meet
 
 
 def test_search_indexes_tag_labels(sandbox):
@@ -393,13 +394,35 @@ def test_the_fixed_prompt_comes_first_and_the_transcript_last(owner, monkeypatch
     assert pa.rstrip().endswith("[00:04] Robin Cole: Agreed.")
 
 
-def test_next_step_lines_keep_one_deadline_ending():
-    n = summarize.normalize_step
-    assert n("[A] will serve as admin, no date given by no date given") == \
-        "[A] will serve as admin by no date given"
-    assert n("[A] will run it (no date given) by no date given") == "[A] will run it by no date given"
-    assert n("[A] will send it to B") == "[A] will send it to B by no date given"
-    assert n("[A] will post by Friday.") == "[A] will post by Friday"
+def test_next_steps_are_gone_from_prompt_panel_search_and_storage(owner, monkeypatch):
+    from gui import server as srv
+    from stt import search
+    base = _meeting()
+    j = config.meeting_file(base, ".json")
+    d = _load(base)
+    d["ai_next_steps"] = ["[Robin Cole] will keep this by Friday"]
+    j.write_text(json.dumps(d))
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: prompts.append(p) or REPLY)
+    r = summarize.suggest_title(base)
+    assert "NEXT STEPS" not in prompts[0] and "next_steps" not in r
+    d = _load(base)
+    assert "ai_next_steps" not in d                       # never lingers
+    assert all("next_steps" not in str(k) for k in d["ai_tmpl"]["fields"])
+    srv._meet_cache.clear()
+    assert "next_steps" not in srv._meeting_meta(j, config.meetings_dir())
+    assert "will keep this" not in search._summary_text(
+        {"ai_summary": "S", "ai_next_steps": ["[A] will keep this by Friday"]})
+    assert not hasattr(summarize, "normalize_step")      # its one user is gone
+
+
+def test_an_old_template_with_next_steps_renders_nothing_for_them(sandbox):
+    from stt import speaker_text
+    d = {"speakers": [{"id": "S1", "name": "Alice Chen", "display": "Alice Chen"}], "segments": []}
+    tmpl = speaker_text.make({"gist": "Alice Chen opened."}, d)
+    tmpl["fields"]["next_steps"] = ["\u27e6s:S1\u27e7 will x by y"]
+    out = speaker_text.render(tmpl, d)
+    assert "ai_next_steps" not in out and out["ai_gist"] == "Alice Chen opened."
 
 
 def test_the_description_call_uses_the_chosen_think_setting(owner, monkeypatch):

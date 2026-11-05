@@ -107,7 +107,7 @@ def test_apply_renames_journals_resumes_and_keeps_registries_in_step(lib):
     assert d["renamed_from"] == "Robin Check-in 10-5 10012026"
     assert d["ai_gist"] == "Hiring plan approved for spring."
     assert d["ai_series"] == "weekly_checkin"
-    assert d["ai_next_steps"] == ["[Robin Cole] will post the role by Friday"]
+    assert "ai_next_steps" not in d
     assert d["title_state"] == "provisional" and d["title_source"] == "model"
     # a needs_title meeting becomes provisional, never confirmed
     dd = json.loads(config.meeting_file(config.base_of("mid-d"), ".json").read_text())

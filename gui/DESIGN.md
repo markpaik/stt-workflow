@@ -236,12 +236,12 @@ card, the voice sheet, a find, or a title edit is open. The change is held,
 not lost: the next poll tries again. A reload never starts another reload.
 
 **Summary.** The gist (one sentence of 20 words or fewer, weight 500),
-then three sections, each an eyebrow with a mono count over a list:
-Decisions, Open questions, Next steps. An empty section is left out. Then
+then two sections, each an eyebrow with a mono count over a list:
+Decisions and Open questions. An empty section is left out. Next steps
+are not shown (removed 2026-11-05). Then
 the topic tags, 3 to 5 from the fixed vocabulary in `stt/series.py`, as
 quiet bordered chips; a click opens Recordings filtered to that tag. A
-description written before the gist existed shows its summary paragraphs
-and the next steps, as before. A description a Redo left out of date says
+description written before the gist existed shows its summary paragraphs. A description a Redo left out of date says
 so in one meta line ("It refreshes by itself when the batch is idle, or
 press Regenerate.") and stays readable. Speaker renames, namings, merges
 and relabels re-render the names in it with no model call. States: no summary

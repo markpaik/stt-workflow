@@ -182,7 +182,7 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         # the description names people as the roster labeled them when the
         # model read it: re-render it from its template against the roster
         # just rebuilt, so a naming, rename, merge or registry change reaches
-        # the gist, sections and next steps with no model call. The clusters
+        # the gist and sections with no model call. The clusters
         # (raw_turns) are the stable key (stt/speaker_text.py). A description
         # from before templates is templated against the old roster, once.
         from stt import speaker_text

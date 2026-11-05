@@ -263,10 +263,11 @@ def test_meetings_matches_title_and_summary(sandbox):
     _mk("Ops Sync 03032026", ["nothing relevant"], title="Ops Sync",
         ai_summary="The team agreed on a new substitute pool.",
         ai_next_steps=["Draft the onboarding checklist"])
+    # next steps are no longer indexed (removed 2026-11-05)
     _mk("Other 03042026", ["also nothing"], title="Other")
     assert search.meetings("substitute pool") == [
         {"base": "Ops Sync 03032026", "title": "Ops Sync"}]
-    assert search.meetings("onboarding checklists")[0]["base"] == "Ops Sync 03032026"
+    assert search.meetings("onboarding checklists") == []
     assert search.meetings("ops sync")[0]["base"] == "Ops Sync 03032026"
     # a summary match is not a transcript line, so /api/search does not list it
     assert search.query("substitute pool")["total"] == 0

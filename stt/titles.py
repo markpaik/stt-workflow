@@ -38,7 +38,7 @@ CARRY_KEYS = ("title_state", "title_source", "route",
 # stays readable until the batch regenerates it when idle. The speaker
 # template (ai_tmpl) is NOT carried: it keys names by the diarizer's
 # cluster ids, and a Redo re-clusters the voices.
-DESCRIPTION_CARRY_KEYS = ("ai_title", "ai_summary", "ai_next_steps", "ai_gist",
+DESCRIPTION_CARRY_KEYS = ("ai_title", "ai_summary", "ai_gist",
                           "ai_decisions", "ai_open_questions", "ai_tags",
                           "ai_series", "ai_topic", "ai_person", "ai_model",
                           "ai_summary_parts", "ai_generated_at")

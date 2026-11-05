@@ -27,7 +27,10 @@ A reader may rely on these keys in `<base>.json`.
 | `arrived_at` | When the meeting first arrived | Never |
 | `reviewed` | A person looked at the meeting | A person's action only |
 | `title_state`, `title_source`, `route` | See `stt/titles.py` | A person's Keep or edit, or the amnesty |
-| `ai_summary`, `ai_next_steps` | The model's summary and next-steps lines (`[<speaker>] will <action> by <deadline>`), read from the whole transcript since Phase 4G | A summary run (Generate, or the batch after a meeting) |
+| `ai_summary` | The description as one text: the gist, then the Decisions and Open questions lists (an older meeting holds a prose summary). Read from the whole transcript since Phase 4G | A summary run (Generate, the batch after a meeting, or tools/retitle_all.py --apply) |
+| `ai_gist`, `ai_decisions`, `ai_open_questions`, `ai_tags`, `ai_series`, `ai_topic`, `ai_person`, `ai_tmpl`, `ai_model` | The description's parts, its catalog series, and its speaker template (stt/speaker_text.py) | A summary run. A speaker change re-renders the names with no model call |
+| `ai_stale` | A Redo left the description out of date. The batch regenerates it when idle | A Redo sets it; a summary run clears it |
+| `ai_next_steps` | Removed 2026-11-05. Older meetings may still hold the list. Every summary run deletes it | A summary run deletes it |
 | `ai_summary_parts` | 1 when the summary read the transcript in one prompt, else how many parts the model noted first. Absent on a summary from before Phase 4G | With `ai_summary` |
 | `location_note` | The default place name Voice Memos gave a synced memo (a street address or a listed place), kept as a note because it is not a title | Never, once written |
 | `vm_uuid` | The Voice Memos id of a synced memo. A purge blocks it so the sync never copies it again | Never, once written |

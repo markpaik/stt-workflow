@@ -330,7 +330,7 @@ through `llm.lock`, never in parallel, and Ollama's `num_thread` and
 `num_gpu` are left at the server's defaults.
 
 **Descriptions.** Each meeting gets a gist of 20 words or fewer (the list
-row), Decisions, Open questions and Next steps (the meeting page), and 3 to
+row), Decisions and Open questions (the meeting page), and 3 to
 5 topic tags from the fixed vocabulary in `stt/series.py`. Renaming,
 naming, merging or relabeling a speaker re-renders the names in it with no
 model call. A Redo marks it out of date, and the batch regenerates it when

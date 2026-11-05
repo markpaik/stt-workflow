@@ -611,7 +611,6 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "flagged_minor": sum(1 for s in d.get("segments", [])
                                      if s.get("flags") and review.is_minor(s)),
                 "summary": d.get("ai_summary", ""),
-                "next_steps": d.get("ai_next_steps", []),
                 # the description's parts (stt/summarize.py): the gist the
                 # list row shows, the sections and tags the meeting page
                 # shows. Empty on a description written before them, where
@@ -3024,7 +3023,7 @@ class Handler(BaseHTTPRequestHandler):
                 d = ready.mark_seen()
                 self._json({"ok": True, "seen_at": d["seen_at"]})
             elif u.path == "/api/suggest":
-                # title, summary, and next steps from the local model, saved to
+                # title and description from the local model, saved to
                 # the meeting .json (the call that used to be a GET)
                 if not self._require_base(b.get("base")):
                     return

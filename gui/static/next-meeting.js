@@ -136,21 +136,19 @@ function mSummaryHTML(m){
  const where=S.llm_backend==='local'||m.strict?'Runs on this Mac. Nothing leaves it.':'Uses your cloud assistant.';
  const err=g.err?`<div class="err">${esc(g.err)}</div>`:'';
  if(!has)return `<div class="empty"><strong>No summary yet</strong><span>${where}</span><button class="btn primary" type="button" data-act="m-gen" ${g.busy?'disabled':''}>${g.busy?'Writing…':'Generate'}</button>${err}</div>`;
- const steps=(m.next_steps||[]).map(s=>typeof s==='string'?s:(s&&s.text)||'').filter(Boolean);
  const sec=(t,xs)=>xs.length?`<section class="reading"><div class="eyebrow">${t} <span class="n">${xs.length}</span></div><ul class="steps">${xs.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></section>`:'';
  const stale=m.summary_stale&&!g.busy?'<div class="meta">This summary is from before the last Redo. It refreshes by itself when the batch is idle, or press Regenerate.</div>':'';
  const busy=g.busy?'<div class="meta">Writing a new summary. This one stays until the new one is ready.</div>':'';
  // a description with a gist (stt/summarize.py) reads as the gist, then
- // Decisions, Open questions and Next steps, then the tags. One written
- // before it is the summary paragraphs and the next steps, as before.
+ // Decisions and Open questions, then the tags. One written before it is
+ // its summary paragraphs. Next steps are not shown (removed 2026-11-05).
  if((m.gist||'').trim()){
   const tags=(m.tags||[]).length?`<div class="tags" aria-label="Topics">${m.tags.map(t=>`<button class="chip tag" type="button" data-act="m-tag" data-tag="${esc(t)}" title="Show recordings tagged ${esc(t)}">${esc(t)}</button>`).join('')}</div>`:'';
   return `${busy}${stale}${err}<p class="gist reading">${esc(m.gist)}</p>
-   ${sec('Decisions',m.decisions||[])}${sec('Open questions',m.open_questions||[])}${sec('Next steps',steps)}${tags}`;
+   ${sec('Decisions',m.decisions||[])}${sec('Open questions',m.open_questions||[])}${tags}`;
  }
  return `${busy}${stale}${err}
-  <div class="prose reading">${has.split(/\n{2,}/).map(p=>`<p>${esc(p)}</p>`).join('')}</div>
-  ${sec('Next steps',steps)}`;
+  <div class="prose reading">${has.split(/\n{2,}/).map(p=>`<p>${esc(p)}</p>`).join('')}</div>`;
 }
 function mTabToolHTML(m){
  if(MP.tab==='summary'&&!m.no_speech&&(m.summary||'').trim())
