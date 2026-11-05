@@ -423,7 +423,7 @@ def test_rate_sample_tags_true_concurrency_not_stale_worker_count(sandbox, monke
 
     recorded = []
     monkeypatch.setattr(rates, "record",
-                        lambda dur, ss, key, n_active=1: recorded.append((dur, n_active)))
+                        lambda dur, ss, key, n_active=1, **k: recorded.append((dur, n_active)))
 
     monkeypatch.setattr(sys, "argv",
                         ["run_batch.py", "--no-diarize", "--parallel", "2",
@@ -475,6 +475,8 @@ def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):
 
     from conftest import mfile
     from stt import config, summarize
+    # diarization is stubbed, so no real token is needed (and the shell may have none)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "synthetic")
 
     src = sandbox / "source"
     for b in ("A Mtg", "B Mtg"):

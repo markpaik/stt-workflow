@@ -100,6 +100,24 @@ if ! "$BASE/.venv/bin/python" -c "import parakeet_mlx, pyannote.audio" 2>/dev/nu
 fi
 ok "pipeline dependencies installed"
 
+# speakrs: the fast Core ML speaker-separation helper (native/speakrs).
+# Without it the pipeline falls back to pyannote on CPU, ~40x slower.
+SPK_BIN="$BASE/native/speakrs/target/release/stt-speakrs"
+if [ ! -x "$SPK_BIN" ]; then
+  if command -v cargo >/dev/null 2>&1; then
+    echo "  Building the speakrs helper (one time, ~1 minute)…"
+    (cd "$BASE/native/speakrs" && CARGO_TARGET_DIR="$BASE/native/speakrs/target" \
+       cargo build --release --locked -q) || warn "speakrs build failed — pyannote fallback stays in use"
+  else
+    warn "Rust not installed (brew install rust) — speaker separation uses the slower pyannote path"
+  fi
+fi
+if [ -x "$SPK_BIN" ]; then
+  "$BASE/.venv/bin/python" "$BASE/tools/fetch_speakrs_models.py" >/dev/null \
+    && ok "speakrs helper and Core ML models ready" \
+    || warn "speakrs model download failed — re-run init.sh; pyannote fallback in use"
+fi
+
 # ---------- 4. folders ----------
 bold "4/7  Your folders"
 DEFAULT_SRC="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings"

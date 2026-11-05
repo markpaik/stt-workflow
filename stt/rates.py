@@ -61,8 +61,16 @@ def current_asr_key() -> str:
     return backend
 
 
-def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1):
-    """Append one completed file's measurements. Called by the batch parent only."""
+def diarizer_family(engine) -> str:
+    """"speakrs" or "pyannote" for a stored engine id. Rows from before the
+    field existed (None) were all pyannote."""
+    return "speakrs" if engine and str(engine).startswith("speakrs") else "pyannote"
+
+
+def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
+           diarizer: str = None):
+    """Append one completed file's measurements. Called by the batch parent only.
+    `diarizer` is the engine that actually ran (a fallback file is pyannote)."""
     try:
         if not duration or duration < MIN_AUDIO_SEC:
             return
@@ -73,6 +81,8 @@ def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1):
         row = {"at": datetime.now().isoformat(timespec="seconds"),
                "duration": round(float(duration), 1),
                "asr": asr_key, "n": int(n_active), "secs": secs}
+        # rows written before this field were all pyannote (see _samples)
+        row["diar"] = diarizer_family(diarizer) if diarizer else config.DIARIZER
         with open(RATES_LOG, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:
@@ -91,11 +101,13 @@ def _rows():
     return rows
 
 
-def _samples(rows) -> dict:
+def _samples(rows, diarizer: str = None) -> dict:
     """Bucket the rows into (duration, secs) samples per model key, oldest
     first: {"convert": [...], "asr": {"parakeet@1": [...]}, "diarize": {"1":
     [...]}, "writing": [...]}. Pure, so tools/eta_backtest.py can replay any
-    prefix of the log."""
+    prefix of the log. Diarize samples count only for `diarizer` (default:
+    config.DIARIZER): pyannote hours must not teach the speakrs estimate."""
+    want = diarizer or config.DIARIZER
     buckets = {"convert": [], "asr": {}, "diarize": {}, "writing": []}
     for r in rows:
         d, secs, n = r.get("duration", 0), r.get("secs", {}), str(r.get("n", 1))
@@ -106,7 +118,7 @@ def _samples(rows) -> dict:
         if secs.get("transcribing"):
             buckets["asr"].setdefault(f"{r.get('asr', 'parakeet')}@{n}", []).append(
                 (d, secs["transcribing"]))
-        if secs.get("diarizing"):
+        if secs.get("diarizing") and r.get("diar", "pyannote") == want:
             buckets["diarize"].setdefault(n, []).append((d, secs["diarizing"]))
         if secs.get("verifying"):
             # the verify pass IS a transcription by the secondary engine —
@@ -178,12 +190,12 @@ def _median_model(pairs, flat=False):
     return m, _tail([s * m / d for d, s in recent])
 
 
-def _learn(rows) -> dict:
+def _learn(rows, diarizer: str = None) -> dict:
     """The model built from `rows`. The median keys ("convert", "asr",
     "diarize", "writing", "runs") keep the shape the panel's summary reads;
     "fit" holds the power laws where they are well posed and "tail" each
     model's overrun fraction (the fit's when there is one)."""
-    b = _samples(rows)
+    b = _samples(rows, diarizer)
     out = {"runs": len(rows), "asr": {}, "diarize": {},
            "fit": {"asr": {}, "diarize": {}},
            "tail": {"asr": {}, "diarize": {}}}

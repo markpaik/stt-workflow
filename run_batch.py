@@ -546,7 +546,8 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "fp": src_fp, "size": src_size,
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
-            "duration_sec": res["duration_sec"], "stage_secs": stage_secs}
+            "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
+            "diarizer": res.get("diarizer")}
 
 
 def _requeue_if_unintended(claimed_job) -> bool:
@@ -797,7 +798,8 @@ def main():
                 # placed DURING the run was never honored and must survive.
                 holds.release(res["key"])
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
-                         rates.current_asr_key(), n_active=n_active)
+                         rates.current_asr_key(), n_active=n_active,
+                         diarizer=res.get("diarizer"))
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             processed += 1
