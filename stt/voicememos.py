@@ -24,6 +24,7 @@ The allow-list. A memo is copied only when all of these hold:
 - its file has not changed for STABLE_SECONDS (5 minutes), and the
   recording ended at least that long ago, so a memo in progress is left
   alone;
+- it is not in Voice Memos' Recently Deleted;
 - it was never copied before, and no purge blocked it.
 
 No capture marker is required. Every other memo counts as skipped by reason.
@@ -190,13 +191,17 @@ def read_rows(container: Path = None) -> list:
         conn = sqlite3.connect(str(db))
         try:
             check_schema(conn)
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({TABLE})")}
+            # ZEVICTIONDATE is set while a memo sits in Recently Deleted.
+            # Optional: an older schema without it reads every memo as live.
+            ev = "ZEVICTIONDATE" if "ZEVICTIONDATE" in cols else "NULL"
             rows = conn.execute(
-                f"SELECT ZUNIQUEID, ZPATH, ZDATE, ZDURATION, ZENCRYPTEDTITLE "
+                f"SELECT ZUNIQUEID, ZPATH, ZDATE, ZDURATION, ZENCRYPTEDTITLE, {ev} "
                 f"FROM {TABLE}").fetchall()
         finally:
             conn.close()
     return [{"uuid": r[0], "path": r[1], "zdate": r[2], "duration": r[3],
-             "title": r[4]} for r in rows]
+             "title": r[4], "deleted": r[5] is not None} for r in rows]
 
 
 def start_of(row: dict):
@@ -291,6 +296,9 @@ def eligible(row: dict, now: float, since: str, container: Path):
     """(ok, reason, start, from_path)."""
     if not row.get("uuid") or not row.get("path"):
         return False, "no_file", None, False
+    if row.get("deleted"):
+        # the owner deleted it in Voice Memos (Recently Deleted): never import
+        return False, "deleted", None, False
     start, from_path = start_of(row)
     if start is None:
         return False, "no_start", None, False

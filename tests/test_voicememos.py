@@ -312,3 +312,11 @@ def test_every_reader_of_the_source_folders_sees_the_voice_memos_staging(sandbox
          "segments": [], "speakers": [], "words": []}))
     r = archive.delete_meeting("Staged Memo 05012026")
     assert r["ok"] and "re-transcribed" in (r["note"] or "")
+
+
+def test_memo_in_recently_deleted_is_never_eligible(tmp_path):
+    from stt import voicememos as vm
+    row = {"uuid": "u1", "path": "20261105 100000-ABCDEF12.m4a", "zdate": 0,
+           "duration": 600.0, "title": "x", "deleted": True}
+    ok, why, _, _ = vm.eligible(row, 2e9, "2000-01-01", tmp_path)
+    assert not ok and why == "deleted"
