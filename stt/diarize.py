@@ -324,11 +324,19 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     pipe = _get_pipeline()  # the embedder serves naming + per-turn embeddings under both engines
     raw = None
     hints = any(v is not None for v in (num_speakers, min_speakers, max_speakers))
-    if config.DIARIZER == "speakrs" and not hints:
+    ready, why = (speakrs_diar.available() if config.DIARIZER == "speakrs" and not hints
+                  else (False, ""))
+    if why:
+        print(f"   warning: {why} — falling back to pyannote for this file")
+    if ready:
         try:
             raw = _run_speakrs(wav_path, progress)
         except speakrs_diar.SpeakrsUnavailable as e:
             print(f"   warning: {e} — falling back to pyannote for this file")
+            if progress:
+                # speakrs already reported SPEAKRS_SHARE: never move backward
+                _cb = progress
+                progress = lambda f: _cb(max(f, SPEAKRS_SHARE))  # noqa: E731
     if raw is None:
         raw = _pyannote_raw(pipe, wav_path, num_speakers, min_speakers, max_speakers,
                             progress)

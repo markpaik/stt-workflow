@@ -34,7 +34,9 @@ def test_centroids_use_clean_rows_and_key_by_cluster_id():
 def _fake_helper(tmp_path, monkeypatch, result, exit_code=0):
     """A stand-in stt-speakrs that writes `result` plus tiny arrays."""
     models = tmp_path / "models"
-    (models / "segmentation-3.0.mlmodelc").mkdir(parents=True)
+    for f in speakrs_diar.model_files():
+        (models / f).parent.mkdir(parents=True, exist_ok=True)
+        (models / f).write_bytes(b"")
     emb = np.ones((1, 2, 3), dtype="<f4")
     hc = np.array([[0, 1]], dtype="<i4")
     clean = np.full((1, 2), 500, dtype="<f4")
@@ -49,7 +51,7 @@ def _fake_helper(tmp_path, monkeypatch, result, exit_code=0):
     binp.chmod(0o755)
     monkeypatch.setattr(config, "SPEAKRS_BIN", binp)
     monkeypatch.setattr(config, "SPEAKRS_MODELS", models)
-    monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
 
 
 def test_run_reads_helper_output(tmp_path, monkeypatch):
@@ -72,14 +74,46 @@ def test_run_failure_raises_unavailable(tmp_path, monkeypatch):
         speakrs_diar.run(tmp_path / "x.wav")
 
 
+def test_run_malformed_output_raises_unavailable(tmp_path, monkeypatch):
+    # a segment row with the wrong arity must fall back, not fail the file
+    _fake_helper(tmp_path, monkeypatch, {
+        "emb_shape": [1, 2, 3], "segments": [[0.0, 2.0]],
+        "exclusive_segments": [[0.0, 2.0, "SPEAKER_00"]]})
+    with pytest.raises(speakrs_diar.SpeakrsUnavailable):
+        speakrs_diar.run(tmp_path / "x.wav")
+
+
 def test_missing_models_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SPEAKRS_BIN", tmp_path / "nope")
     ok, why = speakrs_diar.available()
     assert not ok and "not built" in why
 
 
+def test_partial_model_bundle_is_unavailable(tmp_path, monkeypatch):
+    binp = tmp_path / "stt-speakrs"
+    binp.write_text("")
+    models = tmp_path / "models"
+    (models / "segmentation-3.0.mlmodelc").mkdir(parents=True)  # download cut short
+    monkeypatch.setattr(config, "SPEAKRS_BIN", binp)
+    monkeypatch.setattr(config, "SPEAKRS_MODELS", models)
+    ok, why = speakrs_diar.available()
+    assert not ok and "incomplete" in why
+
+
+def test_missing_helper_estimates_at_pyannote_speed(tmp_path, monkeypatch):
+    monkeypatch.setattr(rates, "RATES_LOG", tmp_path / "rates.jsonl")
+    monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (False, "not built"))
+    rates._cache["sig"] = None
+    assert rates.effective_diarizer() == "pyannote"
+    assert rates.diarize_rate(1) == config.EST_RATES["diarize"]["pyannote"]
+    rows = [{"duration": 3600, "n": 1, "diar": "pyannote", "secs": {"diarizing": 1600}}]
+    assert rates._samples(rows)["diarize"]["1"] == [(3600, 1600)]
+
+
 def test_diarize_falls_back_to_pyannote(monkeypatch):
     monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
     monkeypatch.setattr(diarize, "_get_pipeline", lambda: object())
 
     def boom(*a, **k):
@@ -113,6 +147,7 @@ def test_pyannote_samples_do_not_teach_the_speakrs_rate(tmp_path, monkeypatch):
     monkeypatch.setattr(rates, "RATES_LOG", tmp_path / "rates.jsonl")
     rates._cache["sig"] = None
     monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
     rows = [{"duration": 3600, "n": 1, "secs": {"diarizing": 1600}},           # old pyannote row
             {"duration": 3600, "n": 1, "diar": "speakrs", "secs": {"diarizing": 120}}]
     b = rates._samples(rows)

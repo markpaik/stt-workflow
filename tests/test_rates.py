@@ -13,7 +13,7 @@ def _reset_cache():
 
 def test_no_data_uses_config_defaults(sandbox):
     assert rates.asr_rate("parakeet", 1) == config.EST_RATES["asr"]["parakeet"]
-    assert rates.diarize_rate(1) == config.EST_RATES["diarize"]
+    assert rates.diarize_rate(1) == config.EST_RATES["diarize"][rates.effective_diarizer()]
     assert rates.writing_secs() == config.EST_RATES["writing_fixed_sec"]
 
 

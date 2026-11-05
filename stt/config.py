@@ -78,9 +78,11 @@ DIARIZATION_MODEL = os.environ.get(
 # community-1 recipe in Rust on Core ML, about 100x faster, and matched or beat
 # pyannote against a Scribe v2 reference on every benchmark meeting. "pyannote"
 # is the original CPU path and the automatic fallback when the speakrs helper
-# or its models are missing or the run fails. Per-turn embeddings, absorption
-# splitting and voiceprint naming use the pyannote embedder under BOTH engines,
-# so enrolled voiceprints stay comparable.
+# or its models are missing or the run fails. Per-turn embeddings and
+# absorption splitting use the pyannote embedder under BOTH engines. Cluster
+# centroids (centroid naming, unknown ids, enroll --audio) come from the engine
+# that ran: under speakrs, its Core ML port of the same WeSpeaker embedder
+# (cosine 0.995-1.000 to pyannote's centroids in the bakeoff).
 DIARIZER = os.environ.get("STT_DIARIZER", "speakrs").strip().lower()
 # AHC merge threshold. speakrs' default 0.6 merged two late speakers into the
 # main one in a 4-hour meeting; 0.55 kept them apart and changed nothing else.
@@ -293,10 +295,11 @@ BATTERY_FLOOR = int(os.environ.get("STT_BATTERY_FLOOR", "20"))
 EST_RATES = {
     "convert": 80.0,
     "asr": {"parakeet": 30.0, "mlxwhisper:large-v3": 4.2, "mlxwhisper:turbo": 8.6},
+    # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
     # but the pyannote-embedder turn pass and model load dominate after it:
     # 31.6x end to end on a 24-minute meeting. Learned rates replace this.
-    "diarize": 30.0 if DIARIZER == "speakrs" else 2.25,
+    "diarize": {"pyannote": 2.25, "speakrs": 30.0},
     "writing_fixed_sec": 20.0,  # merge + punctuation + output, roughly flat
 }
 

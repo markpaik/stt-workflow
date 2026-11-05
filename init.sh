@@ -101,9 +101,12 @@ fi
 ok "pipeline dependencies installed"
 
 # speakrs: the fast Core ML speaker-separation helper (native/speakrs).
-# Without it the pipeline falls back to pyannote on CPU, ~40x slower.
-SPK_BIN="$BASE/native/speakrs/target/release/stt-speakrs"
-if [ ! -x "$SPK_BIN" ]; then
+# Without it the pipeline falls back to pyannote on CPU, much slower.
+# Rebuilt when its source or pin is newer than the binary (after a pull).
+SPK_DIR="$BASE/native/speakrs"
+SPK_BIN="$SPK_DIR/target/release/stt-speakrs"
+if [ ! -x "$SPK_BIN" ] || [ -n "$(find "$SPK_DIR/src" "$SPK_DIR/Cargo.toml" "$SPK_DIR/Cargo.lock" \
+                                   -newer "$SPK_BIN" 2>/dev/null | head -1)" ]; then
   if command -v cargo >/dev/null 2>&1; then
     echo "  Building the speakrs helper (one time, ~1 minute)…"
     (cd "$BASE/native/speakrs" && CARGO_TARGET_DIR="$BASE/native/speakrs/target" \

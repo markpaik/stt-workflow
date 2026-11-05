@@ -17,24 +17,15 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from stt import config  # noqa: E402
+from stt import config, speakrs_diar  # noqa: E402
 
 REPO = "avencera/speakrs-models"
-PLAIN = ["plda_lda.npy", "plda_tr.npy", "plda_mu.npy", "plda_psi.npy",
-         "plda_mean1.npy", "plda_mean2.npy",
-         "wespeaker-voxceleb-resnet34.min_num_samples.txt"]
-STEMS = ["segmentation-3.0", "segmentation-3.0-b32", "segmentation-3.0-b64",
-         "wespeaker-fbank", "wespeaker-fbank-b32", "wespeaker-fbank-30s",
-         "wespeaker-multimask-tail-b32", "wespeaker-voxceleb-resnet34-tail",
-         "wespeaker-voxceleb-resnet34-tail-b3", "wespeaker-voxceleb-resnet34-tail-b32",
-         "wespeaker-chunk-emb-p1s-w21", "wespeaker-chunk-emb-p1s-w36",
-         "wespeaker-chunk-emb-p1s-w51", "wespeaker-chunk-emb-p1s-w81",
-         "wespeaker-chunk-emb-p1s-w111"]
-PARTS = ("model.mil", "coremldata.bin", "weights/weight.bin", "analytics/coremldata.bin")
 
 
 def wanted_files():
-    return PLAIN + [f"{s}.mlmodelc/{p}" for s in STEMS for p in PARTS]
+    # one list, shared with speakrs_diar.available(), so the readiness check
+    # and the download can never disagree on what a complete bundle is
+    return speakrs_diar.model_files()
 
 
 def sha256(path):

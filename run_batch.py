@@ -90,6 +90,10 @@ def clean_scratch():
     if config.WORK_DIR.exists():
         for p in config.WORK_DIR.glob("*.wav"):
             p.unlink(missing_ok=True)
+        # speakrs helper output left by a killed run (its finally never ran)
+        from stt import speakrs_diar
+        for p in config.WORK_DIR.glob(speakrs_diar.TMP_PREFIX + "*"):
+            shutil.rmtree(p, ignore_errors=True)
     for p in (list(config.MEETINGS_DIR.glob("*.tmp")) + list(config.MEETINGS_DIR.glob("*/*.tmp"))
               + list(config.MEETINGS_DIR.glob("*.part")) + list(config.MEETINGS_DIR.glob("*/*.part"))):
         p.unlink(missing_ok=True)

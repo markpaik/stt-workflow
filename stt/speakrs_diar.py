@@ -32,6 +32,28 @@ ENGINE = "speakrs-0.7.0-coreml"
 FRAME_STEP_SEC = 0.016875   # segmentation-3.0 frame step
 MIN_CLEAN_SEC = 2.0         # speakrs CleanFrameDuration default
 _SANDBOX = "(version 1)\n(allow default)\n(deny network*)\n"
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+TMP_PREFIX = "speakrs-"     # run_batch.clean_scratch sweeps WORK_DIR/speakrs-*
+
+# The model bundle (huggingface.co/avencera/speakrs-models). The fetch tool
+# downloads exactly these files; available() requires every one of them, so an
+# interrupted download never passes as a usable bundle.
+MODEL_PLAIN = ["plda_lda.npy", "plda_tr.npy", "plda_mu.npy", "plda_psi.npy",
+               "plda_mean1.npy", "plda_mean2.npy",
+               "wespeaker-voxceleb-resnet34.min_num_samples.txt"]
+MODEL_STEMS = ["segmentation-3.0", "segmentation-3.0-b32", "segmentation-3.0-b64",
+               "wespeaker-fbank", "wespeaker-fbank-b32", "wespeaker-fbank-30s",
+               "wespeaker-multimask-tail-b32", "wespeaker-voxceleb-resnet34-tail",
+               "wespeaker-voxceleb-resnet34-tail-b3", "wespeaker-voxceleb-resnet34-tail-b32",
+               "wespeaker-chunk-emb-p1s-w21", "wespeaker-chunk-emb-p1s-w36",
+               "wespeaker-chunk-emb-p1s-w51", "wespeaker-chunk-emb-p1s-w81",
+               "wespeaker-chunk-emb-p1s-w111"]
+MODEL_PARTS = ("model.mil", "coremldata.bin", "weights/weight.bin",
+               "analytics/coremldata.bin")
+
+
+def model_files() -> list:
+    return MODEL_PLAIN + [f"{s}.mlmodelc/{p}" for s in MODEL_STEMS for p in MODEL_PARTS]
 
 
 class SpeakrsUnavailable(RuntimeError):
@@ -39,17 +61,20 @@ class SpeakrsUnavailable(RuntimeError):
 
 
 def available() -> tuple:
-    """(ok, reason). ok is False when the binary or the models are missing."""
+    """(ok, reason). ok is False when the binary or any model file is missing."""
     if not Path(config.SPEAKRS_BIN).is_file():
-        return False, f"speakrs helper not built ({config.SPEAKRS_BIN}); run setup.sh"
-    if not (Path(config.SPEAKRS_MODELS) / "segmentation-3.0.mlmodelc").is_dir():
-        return False, (f"speakrs models missing ({config.SPEAKRS_MODELS}); "
+        return False, f"speakrs helper not built ({config.SPEAKRS_BIN}); run init.sh"
+    models = Path(config.SPEAKRS_MODELS)
+    missing = [f for f in model_files() if not (models / f).is_file()]
+    if missing:
+        return False, (f"speakrs models missing or incomplete ({models}: "
+                       f"{len(missing)} file(s), e.g. {missing[0]}); "
                        "run python3 tools/fetch_speakrs_models.py")
     return True, ""
 
 
-def engine_id() -> str:
-    return f"{ENGINE} ahc={config.SPEAKRS_AHC:g}"
+def engine_id(engine: str = ENGINE) -> str:
+    return f"{engine} ahc={config.SPEAKRS_AHC:g}"
 
 
 def overlap_spans(segments):
@@ -98,17 +123,18 @@ def run(wav_path) -> dict:
     ok, why = available()
     if not ok:
         raise SpeakrsUnavailable(why)
-    work = Path(config.PROJECT_DIR) / "work"
-    work.mkdir(parents=True, exist_ok=True)
-    out_dir = Path(tempfile.mkdtemp(prefix="speakrs-", dir=work))
+    # fail closed: the helper never runs without the network-deny profile
+    if not Path(SANDBOX_EXEC).exists():
+        raise SpeakrsUnavailable(f"{SANDBOX_EXEC} missing; the helper will not "
+                                 "run without network access denied")
+    config.WORK_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(tempfile.mkdtemp(prefix=TMP_PREFIX, dir=config.WORK_DIR))
     try:
-        cmd = [str(config.SPEAKRS_BIN), str(config.SPEAKRS_MODELS), str(wav_path),
+        cmd = [SANDBOX_EXEC, "-p", _SANDBOX,
+               str(config.SPEAKRS_BIN), str(config.SPEAKRS_MODELS), str(wav_path),
                str(out_dir), f"{config.SPEAKRS_AHC:g}"]
-        sandbox = shutil.which("sandbox-exec") or "/usr/bin/sandbox-exec"
-        if Path(sandbox).exists():
-            cmd = [sandbox, "-p", _SANDBOX] + cmd
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True,
+            p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
                                timeout=config.SPEAKRS_TIMEOUT_SEC)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise SpeakrsUnavailable(f"speakrs did not finish: {e}") from e
@@ -122,17 +148,22 @@ def run(wav_path) -> dict:
             emb = np.fromfile(out_dir / "emb.f32", dtype="<f4").reshape(chunks, spk, dim)
             hc = np.fromfile(out_dir / "clusters.i32", dtype="<i4").reshape(chunks, spk)
             clean = np.fromfile(out_dir / "clean.f32", dtype="<f4").reshape(chunks, spk)
-        except (OSError, ValueError, KeyError, json.JSONDecodeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             raise SpeakrsUnavailable(f"speakrs output unreadable: {e}") from e
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
 
-    excl = [(float(s), float(e), str(k)) for s, e, k in r["exclusive_segments"] if e > s]
-    segs = [(float(s), float(e), str(k)) for s, e, k in r["segments"] if e > s]
-    labels = sorted({k for _, _, k in segs} | {k for _, _, k in excl})
-    raw_turns = sorted(({"start": round(s, 3), "end": round(e, 3), "cluster": k}
-                        for s, e, k in excl), key=lambda t: t["start"])
+    # any malformed segment or label must fall back too, not fail the file
+    try:
+        excl = [(float(s), float(e), str(k)) for s, e, k in r["exclusive_segments"] if e > s]
+        segs = [(float(s), float(e), str(k)) for s, e, k in r["segments"] if e > s]
+        labels = sorted({k for _, _, k in segs} | {k for _, _, k in excl})
+        raw_turns = sorted(({"start": round(s, 3), "end": round(e, 3), "cluster": k}
+                            for s, e, k in excl), key=lambda t: t["start"])
+        cents = centroids(emb, hc, clean, labels)
+    except (KeyError, ValueError, TypeError, IndexError) as e:
+        raise SpeakrsUnavailable(f"speakrs output malformed: {e!r}") from e
     return {"labels": labels, "raw_turns": raw_turns,
-            "overlaps": overlap_spans(segs),
-            "centroids": centroids(emb, hc, clean, labels),
-            "engine": engine_id(), "run_sec": r.get("pipeline_run_sec")}
+            "overlaps": overlap_spans(segs), "centroids": cents,
+            "engine": engine_id(str(r.get("engine") or ENGINE)),
+            "run_sec": r.get("pipeline_run_sec")}
