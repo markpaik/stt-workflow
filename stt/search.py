@@ -170,7 +170,13 @@ def _summary_text(d) -> str:
     steps = d.get("ai_next_steps") or []
     if isinstance(steps, str):
         steps = [steps]
-    parts = [d.get("ai_title"), d.get("ai_summary")] + [str(s) for s in steps]
+    # ai_summary already holds the gist and the decision and question lists;
+    # the tags go in by label, so a search for "Special education" finds them
+    from . import series
+    tags = [series.TAG_LABELS.get(t, t) for t in (d.get("ai_tags") or [])
+            if isinstance(t, str)]
+    parts = ([d.get("ai_title"), d.get("ai_summary")] + [str(s) for s in steps]
+             + ([" · ".join(tags)] if tags else []))
     return "\n".join(str(p) for p in parts if p)
 
 

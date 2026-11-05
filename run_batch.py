@@ -230,6 +230,46 @@ def _auto_title(base) -> str:
     return base
 
 
+# descriptions a Redo left out of date, regenerated per run once the queue
+# is empty: a few at a time, so a burst of Redos never holds the batch (and
+# the files that land meanwhile) for an hour
+STALE_PER_RUN = 3
+
+
+def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
+    """Regenerate up to `limit` descriptions marked out of date (ai_stale,
+    set by a Redo), shortest transcript first. Runs only when the batch is
+    idle: the caller calls it after the queue is done, and it stops early
+    when a "stop after this file" is asked or a panel job is queued. The
+    meeting's title is never touched. A failure is printed and never breaks
+    the run. Returns how many were regenerated."""
+    from stt import status as st, summarize
+    if limit <= 0 or not summarize.available():
+        return 0
+    n = 0
+    for base in summarize.stale_bases():
+        if n >= limit or control.finish_requested() or jobs.items():
+            break
+        print(f"   refreshing the out-of-date description of {base}", flush=True)
+        t0 = time.monotonic()
+        try:
+            st.set_stage(base, "summarizing", base=base)
+            r = summarize.suggest_title(base)
+            if isinstance(r, dict) and r.get("ok") is False:
+                print(f"   description not refreshed for {base}: {r.get('error')}",
+                      file=sys.stderr, flush=True)
+            else:
+                n += 1
+        except Exception as e:
+            print(f"   description refresh failed for {base}: {e}",
+                  file=sys.stderr, flush=True)
+        finally:
+            st.clear_stage(base)
+        # the duty cycle (stt/config.py): rest after each one
+        config.llm_rest(time.monotonic() - t0, log=print)
+    return n
+
+
 DOCTOR_EVERY_SECONDS = 24 * 3600
 
 
@@ -278,7 +318,12 @@ def auto_summarize(keys) -> int:
     n = 0
     for item in keys:  # (key, resolved_base) pairs; bare keys tolerated
         key, base = item if isinstance(item, tuple) else (item, None)
-        n += bool(summarize_one(key, base))
+        t0 = time.monotonic()
+        did = bool(summarize_one(key, base))
+        n += did
+        if did:
+            # the duty cycle: rest after each summary the model wrote
+            config.llm_rest(time.monotonic() - t0, log=print)
     return n
 
 
@@ -1009,6 +1054,13 @@ def main():
             _relabel.relabel_all()
         except Exception as e:
             print(f"   queued relabel failed: {e}", file=sys.stderr)
+
+    # idle now: the queue is done. Refresh descriptions a Redo left out of
+    # date, unless a stop was asked or a panel job waits (it chains below)
+    if not args.dry_run and not finish["asked"] and not jobs.items():
+        n_re = regenerate_stale()
+        if n_re:
+            print(f"  refreshed {n_re} out-of-date description(s)", flush=True)
 
     status.end_run()
     if not args.dry_run:

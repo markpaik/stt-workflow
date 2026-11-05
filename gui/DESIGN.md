@@ -136,13 +136,15 @@ link to Recordings. An empty library shows the setup check instead: recorder,
 watched folder, your voice, and the line "Record from the menu bar, let Voice
 Memos sync, or drop an audio file here." No calendar.
 
-**Recordings.** A filter field (title or person), a sort menu (newest,
+**Recordings.** A filter field (title, person, or topic tag), a sort menu (newest,
 oldest, longest, A to Z), and the chips All, Work, Personal, Draft title, Has
 voices. Sections: Today, Yesterday, This week, then months. This month and
 the newest older month stay open, and older months fold. A filter opens
 every section. A row: title with its chips (No speech, Draft title, Date
 uncertain), one meta line (when, minutes, up to three named people with +N,
-"N unnamed" in teal, the tag), and a two-sentence preview. The row menu:
+"N unnamed" in teal, the tag), and a one-line preview: the gist, or the
+first two sentences of an older summary. The filter matches a title, a
+person, or a whole topic tag. The row menu:
 Open, Select, Rename, Set date, the tags, Export Word and PDF, Copy
 transcript, Show files, Redo, Archive, Delete. Selecting shows the bulk bar:
 Keep titles, Work, Personal, Clear tag, Rename, Set date, Archive, Delete
@@ -233,7 +235,16 @@ relabel (the row's `generated_at` moved) reloads the lines, but not while a
 card, the voice sheet, a find, or a title edit is open. The change is held,
 not lost: the next poll tries again. A reload never starts another reload.
 
-**Summary.** The summary paragraphs and the next steps. States: no summary
+**Summary.** The gist (one sentence of 20 words or fewer, weight 500),
+then three sections, each an eyebrow with a mono count over a list:
+Decisions, Open questions, Next steps. An empty section is left out. Then
+the topic tags, 3 to 5 from the fixed vocabulary in `stt/series.py`, as
+quiet bordered chips; a click opens Recordings filtered to that tag. A
+description written before the gist existed shows its summary paragraphs
+and the next steps, as before. A description a Redo left out of date says
+so in one meta line ("It refreshes by itself when the batch is idle, or
+press Regenerate.") and stays readable. Speaker renames, namings, merges
+and relabels re-render the names in it with no model call. States: no summary
 yet (Generate, and where it runs); writing (the old summary stays until the
 new one lands, "Writing a new summary"); failed (the error in red, Generate
 again); silent ("No speech found", no summary, no Generate, never invented).

@@ -45,20 +45,29 @@ def test_parses_title_summary_and_next_steps(sandbox, monkeypatch):
     assert d["ai_summary"] == r["summary"]
 
 
-def test_summary_prompt_asks_for_brief_varied_prose(sandbox, monkeypatch):
-    """Guards the restyle: summaries must be asked for as 2-3 sentences that
-    do not all open with 'The meeting ...' — a prompt revert would quietly
-    bring the samey, long summaries back."""
+def test_summary_prompt_asks_for_a_short_gist_sections_and_catalog(sandbox, monkeypatch):
+    """Guards the description contract: a gist of 20 words or fewer that
+    never opens with 'The meeting', the three sections, tags from the fixed
+    vocabulary, and the series catalog the title is built from. The
+    next-steps line format chief-of-staff parses is unchanged."""
+    from stt import series
     _meeting()
     prompts = []
     monkeypatch.setattr(summarize, "_generate",
-                        lambda p, **k: prompts.append(p) or "TITLE: T\nSUMMARY: S\n")
+                        lambda p, **k: prompts.append(p) or "SERIES: one_off\nGIST: G\n")
     summarize.suggest_title("Mtg")
     (p,) = prompts
-    assert "2-3 sentences" in p
-    assert "Never begin with 'The meeting'" in p
-    # the output contract the parser and panel depend on is unchanged
-    assert "TITLE: <title>" in p and "NEXT STEPS" in p
+    assert "at most 20 words" in p
+    assert "Never open with 'The meeting'" in p
+    for head in ("SERIES: <id>", "GIST: <gist>", "TAGS:", "DECISIONS:",
+                 "OPEN QUESTIONS:", "NEXT STEPS:"):
+        assert head in p
+    assert ("- [<speaker name as labeled in the transcript>] will <specific "
+            "action> by <stated deadline, or 'no date given'>") in p
+    for s in series.SERIES:
+        assert f"- {s.id}:" in p
+    for slug, _, _ in series.TAGS:
+        assert f"- {slug}:" in p
 
 
 def test_the_title_prompt_never_carries_the_source_file_name(sandbox, monkeypatch):
@@ -527,7 +536,9 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
                         backends.append(backend) or "TITLE: T\nSUMMARY: S\n")
     summarize.suggest_title("Confidential")
     r = summarize.answer_question("Confidential", "what was said?")
-    assert r["ok"] and backends == ["local", "local"]
+    # the summary names the on-device engine it sized its prompt for (Ollama
+    # is off in tests, so MLX); Ask passes "local". Never a cloud backend.
+    assert r["ok"] and backends == ["mlx", "local"]
 
     # a NON-strict meeting with the same settings does use the cloud backend
     _meeting("Open Mtg")

@@ -116,6 +116,14 @@ def _title_fields(meta: dict, prev, src: Path, segments) -> None:
         for k in titles.CARRY_KEYS:
             if k in prev:
                 meta[k] = prev[k]
+        # the description survives a Redo, marked out of date: the batch
+        # regenerates it when idle (run_batch.regenerate_stale), and until
+        # then the panel shows the old text with a note
+        if prev.get("ai_summary") or prev.get("ai_gist"):
+            for k in titles.DESCRIPTION_CARRY_KEYS:
+                if k in prev:
+                    meta[k] = prev[k]
+            meta["ai_stale"] = True
         if "route" not in meta:
             meta["route"] = titles.route_for(prev.get("source_file") or src.name)
     else:

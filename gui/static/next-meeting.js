@@ -137,9 +137,20 @@ function mSummaryHTML(m){
  const err=g.err?`<div class="err">${esc(g.err)}</div>`:'';
  if(!has)return `<div class="empty"><strong>No summary yet</strong><span>${where}</span><button class="btn primary" type="button" data-act="m-gen" ${g.busy?'disabled':''}>${g.busy?'Writing…':'Generate'}</button>${err}</div>`;
  const steps=(m.next_steps||[]).map(s=>typeof s==='string'?s:(s&&s.text)||'').filter(Boolean);
- return `${g.busy?'<div class="meta">Writing a new summary. This one stays until the new one is ready.</div>':''}${err}
+ const sec=(t,xs)=>xs.length?`<section class="reading"><div class="eyebrow">${t} <span class="n">${xs.length}</span></div><ul class="steps">${xs.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></section>`:'';
+ const stale=m.summary_stale&&!g.busy?'<div class="meta">This summary is from before the last Redo. It refreshes by itself when the batch is idle, or press Regenerate.</div>':'';
+ const busy=g.busy?'<div class="meta">Writing a new summary. This one stays until the new one is ready.</div>':'';
+ // a description with a gist (stt/summarize.py) reads as the gist, then
+ // Decisions, Open questions and Next steps, then the tags. One written
+ // before it is the summary paragraphs and the next steps, as before.
+ if((m.gist||'').trim()){
+  const tags=(m.tags||[]).length?`<div class="tags" aria-label="Topics">${m.tags.map(t=>`<button class="chip tag" type="button" data-act="m-tag" data-tag="${esc(t)}" title="Show recordings tagged ${esc(t)}">${esc(t)}</button>`).join('')}</div>`:'';
+  return `${busy}${stale}${err}<p class="gist reading">${esc(m.gist)}</p>
+   ${sec('Decisions',m.decisions||[])}${sec('Open questions',m.open_questions||[])}${sec('Next steps',steps)}${tags}`;
+ }
+ return `${busy}${stale}${err}
   <div class="prose reading">${has.split(/\n{2,}/).map(p=>`<p>${esc(p)}</p>`).join('')}</div>
-  ${steps.length?`<section class="reading"><div class="eyebrow">Next steps <span class="n">${steps.length}</span></div><ul class="steps">${steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></section>`:''}`;
+  ${sec('Next steps',steps)}`;
 }
 function mTabToolHTML(m){
  if(MP.tab==='summary'&&!m.no_speech&&(m.summary||'').trim())
@@ -782,6 +793,8 @@ Object.assign(A,{
  'm-cat'(){mCycleCat();},
  'm-prev'(){mStep(-1);},'m-next'(){mStep(1);},
  'm-gen'(){mGenerate();},
+ // a topic tag opens Recordings filtered to that tag
+ 'm-tag'(el){UI.q=el.dataset.tag||'';UI.chip='all';go('recordings');},
  'm-seek'(el){const t=+el.dataset.t||0;mSeek(t);const i=MP.segs.findIndex(g=>t>=g.start&&t<g.end);if(i>=0){MP.nowIdx=null;mHighlight();}},
  'm-voice'(el){vsOpenVoice(el.dataset.id);},
  'm-restore'(el){mRestore(el.dataset.id);},

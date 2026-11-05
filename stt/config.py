@@ -363,6 +363,58 @@ def mic_speaker() -> str | None:
     return _env_file().get("STT_MIC_SPEAKER") or MIC_SPEAKER
 
 
+# --- Local LLM hardware limits (the owner's rule: keep the fan quiet) ---
+# Every local LLM run (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback) runs at
+# lowered priority: the Ollama processes are reniced to STT_LLM_NICE before
+# each call, and the MLX subprocess starts under `nice -n STT_LLM_NICE`.
+# A loop over many meetings (tools/retitle_all.py, the batch's summaries)
+# rests after each meeting for STT_LLM_REST_RATIO times the wall time it
+# took, and at least STT_LLM_REST_MIN_SEC. One panel request (Regenerate,
+# Ask) never rests. Read fresh from stt.env, so a change needs no restart.
+LLM_NICE_DEFAULT = 10
+LLM_REST_RATIO_DEFAULT = 0.5
+LLM_REST_MIN_SEC_DEFAULT = 20.0
+
+
+def _num_setting(name, default, cast=float, lo=0):
+    raw = _env_file().get(name) or os.environ.get(name)
+    try:
+        v = cast(raw) if raw not in (None, "") else default
+    except ValueError:
+        v = default
+    return max(lo, v)
+
+
+def llm_nice() -> int:
+    return min(20, _num_setting("STT_LLM_NICE", LLM_NICE_DEFAULT, int))
+
+
+def llm_rest_ratio() -> float:
+    return _num_setting("STT_LLM_REST_RATIO", LLM_REST_RATIO_DEFAULT)
+
+
+def llm_rest_min_sec() -> float:
+    return _num_setting("STT_LLM_REST_MIN_SEC", LLM_REST_MIN_SEC_DEFAULT)
+
+
+def llm_rest_seconds(work_sec: float) -> float:
+    """How long a multi-meeting LLM loop rests after one meeting that took
+    `work_sec` of wall time."""
+    return max(llm_rest_min_sec(), llm_rest_ratio() * max(0.0, float(work_sec or 0)))
+
+
+def llm_rest(work_sec: float, log=None, sleep=None) -> float:
+    """Rest after one meeting of a multi-meeting LLM loop, and log it."""
+    import time as _t
+    sec = llm_rest_seconds(work_sec)
+    if sec > 0:
+        if log:
+            log(f"   resting {sec:.0f}s after {float(work_sec or 0):.0f}s of model work "
+                "(STT_LLM_REST_RATIO / STT_LLM_REST_MIN_SEC)")
+        (sleep or _t.sleep)(sec)
+    return sec
+
+
 # --- Per-meeting folder layout ---
 # Every meeting's artifacts live in their own folder:
 #   <meetings_dir>/<base>/<base>.json  (+ .txt, .m4a, .diar.npz, .emb.npz,

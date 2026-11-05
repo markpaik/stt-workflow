@@ -136,7 +136,7 @@ function rowHTML(m,o={}){
  const named=(m.named||[]).slice(0,3);let ppl=named.join(', ');if((m.named||[]).length>3)ppl+=` +${m.named.length-3}`;
  const bits=[esc(o.day?(timeOf(m)||dayLabel(m.date)):whenText(m)),`${m.minutes||0} min`];if(ppl)bits.push(esc(ppl));
  const u=unnamedN(m);const sel=UI.sel.has(m.base);
- const prev=m.no_speech?'No speech found in this recording.':(m.summary||'').split(/(?<=[.!?])\s+/).slice(0,2).join(' ');
+ const prev=m.no_speech?'No speech found in this recording.':(m.gist||(m.summary||'').split(/(?<=[.!?])\s+/).slice(0,2).join(' '));
  return `<div class="row ${sel?'selected':''}" data-row data-base="${esc(m.base)}" tabindex="0">
   <label class="ck" title="Select"><input type="checkbox" data-sel="${esc(m.base)}" ${sel?'checked':''} aria-label="Select ${esc(m.title)}"></label>
   <a href="${meetingHref(m.base)}" style="min-width:0;color:inherit;text-decoration:none" data-open><div class="row-title"><span>${esc(m.title)}</span>${chipsFor(m)}</div>
@@ -211,14 +211,14 @@ const SOURCE_NICE={label:'your label',shortcut:'the Shortcut',public_download:'t
 /* ---------------------------------------------------------- recordings ---- */
 function recordingsView(){
  if(!meetings().length)return `<h1>Recordings</h1><div class="empty"><strong>No recordings yet</strong><span>Record from the menu bar, let Voice Memos sync, or drop an audio file here.</span><button class="btn primary" type="button" data-act="new">${ic('plus')}New</button></div>`;
- return `<div class="head"><h1>Recordings</h1><div class="tools" style="flex:1 1 320px;justify-content:flex-end"><input type="search" id="rec-q" placeholder="Filter by title or person" value="${esc(UI.q)}" aria-label="Filter recordings" style="flex:1 1 200px;max-width:320px">
+ return `<div class="head"><h1>Recordings</h1><div class="tools" style="flex:1 1 320px;justify-content:flex-end"><input type="search" id="rec-q" placeholder="Filter by title, person, or tag" value="${esc(UI.q)}" aria-label="Filter recordings" style="flex:1 1 200px;max-width:320px">
   <select id="rec-sort" aria-label="Sort"><option value="new" ${UI.sort==='new'?'selected':''}>Newest first</option><option value="old" ${UI.sort==='old'?'selected':''}>Oldest first</option><option value="long" ${UI.sort==='long'?'selected':''}>Longest first</option><option value="az" ${UI.sort==='az'?'selected':''}>Title A to Z</option></select></div></div>
   <div class="chips" id="rec-chips"></div><div id="rec-list" class="stack sections"></div>`;
 }
 function filtered(){
  const q=UI.q.trim().toLowerCase();
  return meetings().filter(m=>{
-  if(q&&!(m.title.toLowerCase().includes(q)||(m.named||[]).some(n=>n.toLowerCase().includes(q))))return false;
+  if(q&&!(m.title.toLowerCase().includes(q)||(m.named||[]).some(n=>n.toLowerCase().includes(q))||(m.tags||[]).some(t=>t.toLowerCase()===q)))return false;
   if(UI.chip==='work'&&m.category!=='work')return false;
   if(UI.chip==='personal'&&m.category!=='personal')return false;
   if(UI.chip==='draft'&&!isDraft(m))return false;

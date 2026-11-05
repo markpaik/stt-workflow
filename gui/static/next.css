@@ -284,6 +284,10 @@ input.m-title-input[type=text]{font-size:var(--fs-sub);font-weight:600;flex:1 1 
 .reading{max-width:76ch}
 .prose{display:grid;gap:var(--s3);font-size:var(--fs-title);line-height:1.55}
 .steps{margin:0;padding-left:var(--s5);display:grid;gap:var(--s1);font-size:var(--fs-title);line-height:1.5}
+.gist{margin:0;font-size:var(--fs-title);line-height:1.55;font-weight:500}
+.tags{display:flex;flex-wrap:wrap;gap:var(--s1);margin-top:var(--s1)}
+.chip.tag{border:1px solid var(--hair);color:var(--sub)}
+.chip.tag:hover{color:var(--ink);border-color:var(--line)}
 .ts{border:0;background:none;padding:0;cursor:pointer;font:400 var(--fs-meta) var(--mono);font-variant-numeric:tabular-nums;color:var(--sub);white-space:nowrap;line-height:20px}
 button.ts:hover{color:var(--accent-text);text-decoration:underline}
 .ts.lnk{font-family:var(--sans);color:var(--accent-text);font-weight:500}

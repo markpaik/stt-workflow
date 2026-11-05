@@ -301,6 +301,39 @@ uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'
 Summaries, Ask, and suggested titles light up automatically once `.venv-llm`
 exists; everything else works without it.
 
+**Preferred local LLM: Qwen 3.8 on Ollama.** When Ollama answers on this Mac
+with `qwen3.8:27b-mlx` pulled, summaries, Ask, and titles use it, and
+Qwen3-8B (above) becomes the fallback for when Ollama is not reachable.
+Ollama is only ever called on a loopback address, so strict meetings stay on
+this Mac either way. Settings in `stt.env`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `STT_LOCAL_LLM` | `auto` | `auto` (Ollama when it answers, else MLX), `ollama`, or `mlx` |
+| `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A non-loopback host is refused. |
+| `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | the Ollama model |
+| `STT_OLLAMA_KEEP_ALIVE` | `10m` | how long Ollama keeps the model loaded after a call |
+
+**Hardware limits for local LLM runs** (kept quiet on purpose, `stt/config.py`):
+
+| Setting | Default | What it does |
+|---|---|---|
+| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are reniced to this; the MLX fallback starts under `nice -n` this value. A renice failure never stops a run. |
+| `STT_LLM_REST_RATIO` | `0.5` | a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
+| `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds. Each rest is logged. |
+
+One panel request (Regenerate, Ask) never rests. Requests go one at a time
+through `llm.lock`, never in parallel, and Ollama's `num_thread` and
+`num_gpu` are left at the server's defaults.
+
+**Descriptions.** Each meeting gets a gist of 20 words or fewer (the list
+row), Decisions, Open questions and Next steps (the meeting page), and 3 to
+5 topic tags from the fixed vocabulary in `stt/series.py`. Renaming,
+naming, merging or relabeling a speaker re-renders the names in it with no
+model call. A Redo marks it out of date, and the batch regenerates it when
+idle. `tools/retitle_all.py` retitles the library by the series catalog
+(dry run first, then `--apply`, with an undo journal).
+
 **Folders.** The watched folder defaults to iCloud Drive's `Voice
 Recordings`; transcripts land where you point them. Change either in the
 drawer's Settings or via `STT_ICLOUD_DIR` / `STT_MEETINGS_DIR` in `stt.env`.

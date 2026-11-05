@@ -54,6 +54,12 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                   f"({type(e).__name__}) -- it will pick up the new name on the "
                   "next pass")
             return False
+        # the roster and lines as they stand BEFORE this rebuild: what an
+        # untemplated description was written against
+        before = {"speakers": [dict(x) for x in data.get("speakers") or []],
+                  "segments": [{"start": x.get("start"), "end": x.get("end"),
+                                "speaker": x.get("speaker")}
+                               for x in data.get("segments") or []]}
         # heal ASR hallucination loops in transcripts processed before the guard
         from stt import sanitize
         words, loop_spans = sanitize.collapse_repeats(words)
@@ -173,6 +179,14 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         for s in data["speakers"]:
             if s.get("id") in local_names:
                 s["local"] = True
+        # the description names people as the roster labeled them when the
+        # model read it: re-render it from its template against the roster
+        # just rebuilt, so a naming, rename, merge or registry change reaches
+        # the gist, sections and next steps with no model call. The clusters
+        # (raw_turns) are the stable key (stt/speaker_text.py). A description
+        # from before templates is templated against the old roster, once.
+        from stt import speaker_text
+        speaker_text.rerender(data, raw_turns=raw_turns, before=before)
         data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
         data["strict"] = strict
         data["punctuated"] = bool(config.PUNCTUATE)
