@@ -98,3 +98,7 @@ dismissed_failures.json
 
 # speakrs helper build output
 native/speakrs/target/
+
+# out-of-date description index (meeting names)
+stale_descriptions.json
+stale_descriptions.lock

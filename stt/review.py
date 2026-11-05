@@ -165,6 +165,10 @@ def accept_minor(base: str) -> dict:
 
 def _rewrite(jpath, data):
     """Persist mutated data: atomic json + regenerated txt with the shared header."""
+    # a line edit can add a speaker (a MANUAL_ person) but never relabels a
+    # cluster, so the description re-renders from the labels it last saw
+    from . import speaker_text
+    speaker_text.rerender(data)
     segments, words, speakers = data["segments"], data["words"], data["speakers"]
     meta = {k: v for k, v in data.items()
             if k not in ("speakers", "segments", "words", "generated_at")}

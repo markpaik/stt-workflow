@@ -25,8 +25,14 @@ def _meeting(base="Mtg"):
          "speakers": [], "segments": SPOKEN, "words": []}))
 
 
-def test_parses_title_summary_and_next_steps(sandbox, monkeypatch):
+def test_parses_title_and_summary_and_drops_next_steps(sandbox, monkeypatch):
+    """Next steps were removed (owner, 2026-11-05): a reply that still holds
+    them stores none, and an old ai_next_steps is deleted."""
     _meeting()
+    j = config.meeting_file("Mtg", ".json")
+    d0 = json.loads(j.read_text())
+    d0["ai_next_steps"] = ["[Alex Rivera] will ship it by Friday"]
+    j.write_text(json.dumps(d0))
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
         "TITLE: Budget Planning Session\n"
         "SUMMARY: The team reviewed the draft budget.\n"
@@ -37,28 +43,36 @@ def test_parses_title_summary_and_next_steps(sandbox, monkeypatch):
     r = summarize.suggest_title("Mtg")
     assert r["title"] == "Budget Planning Session"
     assert r["summary"] == "The team reviewed the draft budget. It was mostly agreed."
-    assert r["next_steps"] == [
-        "[Alex Rivera] will circulate the revised budget by Friday",
-        "[Jordan Lee] will confirm vendor pricing by no date given"]
+    assert "next_steps" not in r
     d = json.loads(config.meeting_file("Mtg", ".json").read_text())
-    assert d["ai_next_steps"] == r["next_steps"]  # persisted for the panel
+    assert "ai_next_steps" not in d
     assert d["ai_summary"] == r["summary"]
+    assert "Alex Rivera" not in d["ai_summary"]
 
 
-def test_summary_prompt_asks_for_brief_varied_prose(sandbox, monkeypatch):
-    """Guards the restyle: summaries must be asked for as 2-3 sentences that
-    do not all open with 'The meeting ...' — a prompt revert would quietly
-    bring the samey, long summaries back."""
+def test_summary_prompt_asks_for_a_short_gist_sections_and_catalog(sandbox, monkeypatch):
+    """Guards the description contract: a gist of 20 words or fewer that
+    never opens with 'The meeting', the three sections, tags from the fixed
+    vocabulary, and the series catalog the title is built from. The
+    next-steps line format chief-of-staff parses is unchanged."""
+    from stt import series
     _meeting()
     prompts = []
     monkeypatch.setattr(summarize, "_generate",
-                        lambda p, **k: prompts.append(p) or "TITLE: T\nSUMMARY: S\n")
+                        lambda p, **k: prompts.append(p) or "SERIES: one_off\nGIST: G\n")
     summarize.suggest_title("Mtg")
     (p,) = prompts
-    assert "2-3 sentences" in p
-    assert "Never begin with 'The meeting'" in p
-    # the output contract the parser and panel depend on is unchanged
-    assert "TITLE: <title>" in p and "NEXT STEPS" in p
+    assert "at most 20 words" in p
+    assert "Never open with 'The meeting'" in p
+    for head in ("SERIES: <id>", "GIST: <gist>", "TAGS:", "DECISIONS:",
+                 "OPEN QUESTIONS:"):
+        assert head in p
+    # next steps were removed entirely
+    assert "NEXT STEPS" not in p and "commitment" not in p.lower()
+    for s in series.SERIES:
+        assert f"- {s.id}:" in p
+    for slug, _, _ in series.TAGS:
+        assert f"- {slug}:" in p
 
 
 def test_the_title_prompt_never_carries_the_source_file_name(sandbox, monkeypatch):
@@ -84,27 +98,12 @@ def test_the_title_prompt_never_carries_the_source_file_name(sandbox, monkeypatc
         assert "[00:00] Alex: We will ship it." in p
 
 
-def test_no_commitments_yields_empty_list(sandbox, monkeypatch):
-    _meeting()
-    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
-        "TITLE: Casual Catch Up\n"
-        "SUMMARY: General discussion, no decisions.\n"
-        "NEXT STEPS:\n"
-        "- none\n"))
-    r = summarize.suggest_title("Mtg")
-    assert r["next_steps"] == []
-    d = json.loads(config.meeting_file("Mtg", ".json").read_text())
-    assert d["ai_next_steps"] == []
-
-
-def test_missing_next_steps_section_is_tolerated(sandbox, monkeypatch):
-    """An older/other-model reply without the section must not break parsing."""
+def test_an_older_reply_without_next_steps_is_tolerated(sandbox, monkeypatch):
     _meeting()
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: (
         "TITLE: Legacy Reply\nSUMMARY: Just a summary.\n"))
     r = summarize.suggest_title("Mtg")
     assert r["summary"] == "Just a summary."
-    assert r["next_steps"] == []
 
 
 def _meeting_with_segment(base="Mtg"):
@@ -527,7 +526,9 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
                         backends.append(backend) or "TITLE: T\nSUMMARY: S\n")
     summarize.suggest_title("Confidential")
     r = summarize.answer_question("Confidential", "what was said?")
-    assert r["ok"] and backends == ["local", "local"]
+    # the summary names the on-device engine it sized its prompt for (Ollama
+    # is off in tests, so MLX); Ask passes "local". Never a cloud backend.
+    assert r["ok"] and backends == ["mlx", "local"]
 
     # a NON-strict meeting with the same settings does use the cloud backend
     _meeting("Open Mtg")
@@ -535,10 +536,10 @@ def test_strict_meeting_never_reaches_a_cloud_backend(sandbox, monkeypatch):
     assert backends[-1] == "anthropic"
 
 
-def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
-    """suggest_title runs the local model with think=False (measured ~4x faster,
-    grounding held on real meetings); answer_question keeps the reasoning pass
-    (the no-think model gave up on a question the thinking model answered)."""
+def test_summary_uses_the_chosen_think_setting_and_ask_keeps_it(sandbox, monkeypatch):
+    """suggest_title runs with summarize.DESCRIPTION_THINK (on since the
+    2026-11-05 A/B on Qwen 3.8: better next-steps recall at about the same
+    wall time); answer_question keeps the reasoning pass."""
     _meeting_with_segment("M")
     calls = []
 
@@ -549,7 +550,7 @@ def test_summary_skips_thinking_and_ask_keeps_it(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "_generate", fake_gen)
     summarize.suggest_title("M")
     summarize.answer_question("M", "What was decided?")
-    assert calls == [False, True]
+    assert calls == [summarize.DESCRIPTION_THINK, True]
 
 
 def test_a_restamp_holds_the_destination_name_it_moves_onto(sandbox):
@@ -607,12 +608,6 @@ def test_a_destination_taken_after_the_plan_is_re_planned(sandbox):
 
 
 # ---------- whole-transcript summaries (unified plan Phase 4G) ----------
-
-# the next-steps line grammar chief-of-staff reads (cos/commitments.py
-# NEXT_STEP_RE, copied as the contract): owner in optional brackets, "will",
-# the rest. A summary change that broke this would stop the commitments feed.
-COS_NEXT_STEP_RE = __import__("re").compile(
-    r"^\[?(?P<owner>[^\]]+?)\]?\s+will\s+(?P<rest>.+?)\.?$")
 
 _FILL = "[{t}] Speaker 1: synthetic filler line about the agenda and nothing else.\n"
 
@@ -683,7 +678,7 @@ def test_a_mid_length_meeting_goes_in_whole(sandbox, monkeypatch):
     assert body in p and "[...]" not in p and "(partial)" not in p
     assert "whole meeting transcript" in p
     assert "PLUM-417" in r["summary"] and r["parts"] == 1
-    assert k.get("think") is False
+    assert k.get("think") is summarize.DESCRIPTION_THINK
 
 
 def test_a_cloud_assistant_takes_a_long_meeting_in_one_prompt(sandbox, monkeypatch):
@@ -696,26 +691,20 @@ def test_a_cloud_assistant_takes_a_long_meeting_in_one_prompt(sandbox, monkeypat
     assert body in p and k["backend"] == "anthropic"
 
 
-def test_next_steps_from_a_long_meeting_still_feed_chief_of_staff(sandbox, monkeypatch):
+def test_part_notes_of_a_long_meeting_ask_for_no_commitments(sandbox, monkeypatch):
     _long_meeting("Feed", 234_000, "Avery will send the PLUM-417 report by Friday.")
     prompts = []
     monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
-    r = summarize.suggest_title("Feed")
+    summarize.suggest_title("Feed")
     d = json.loads(config.meeting_file("Feed", ".json").read_text())
-    assert d["ai_next_steps"] == r["next_steps"] == [
-        "[Avery Stone] will send the PLUM-417 report by Friday"]
-    for line in d["ai_next_steps"]:
-        m = COS_NEXT_STEP_RE.match(line)
-        assert m and m.group("owner") == "Avery Stone"
-    # each part is asked for commitments in that same line format
+    assert "ai_next_steps" not in d
     part = next(p for p, _ in prompts if p.startswith("Below is part"))
-    assert "will <specific action> by <stated deadline" in part
+    assert "commitment" not in part and "will <specific action>" not in part
 
 
-def test_old_next_steps_stay_until_a_new_summary_runs(sandbox, monkeypatch):
-    """A meeting summarized before 4G keeps its ai_next_steps and has no
-    ai_summary_parts: a new summary of ANOTHER meeting rewrites nothing
-    else, so chief-of-staff reads the old lines as before."""
+def test_a_summary_of_one_meeting_rewrites_no_other(sandbox, monkeypatch):
+    """A meeting summarized before 4G keeps its fields: a new summary of
+    ANOTHER meeting rewrites nothing else."""
     _meeting("Old")
     j = config.meeting_file("Old", ".json")
     d = json.loads(j.read_text())

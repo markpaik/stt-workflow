@@ -1,7 +1,9 @@
 """LLM features: title/summary suggestions and per-meeting Q&A.
 
-The DEFAULT backend is Qwen3-8B (4-bit, MLX) fully on-device — transcripts never
-leave the machine, which matters because some recordings are sensitive. A cloud
+The DEFAULT backend is local and fully on-device: Qwen 3.8 (27B) served by
+Ollama on this Mac, with Qwen3-8B (4-bit, MLX) as the fallback when Ollama is
+not reachable (local_engine). Transcripts never leave the machine, which
+matters because some recordings are sensitive. A cloud
 assistant (Anthropic Claude or OpenAI) can be selected in Settings for machines
 that can't run the local model or want faster answers; transcript text is then
 uploaded to that provider for these features ONLY, and STRICT-mode recordings
@@ -58,9 +60,85 @@ def llm_backend() -> str:
     return b if b in LLM_BACKENDS else "local"
 
 
+# --- the local engines -----------------------------------------------------
+# "local" is two engines behind one name. Qwen 3.8 (27B) served by Ollama on
+# this Mac is the default. Qwen3-8B through mlx-lm (.venv-llm) is the
+# fallback when Ollama is not reachable. Both run on-device, so both keep
+# the strict rule: Ollama is only ever called on a loopback address.
+# STT_LOCAL_LLM picks: "auto" (the default: Ollama when it answers, else
+# MLX), "ollama", or "mlx". STT_OLLAMA_URL="off" turns Ollama off.
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3.8:27b-mlx"
+# Measured 2026-11-05 on this Mac (48 GB): prompt ~350-450 tokens/s, answer
+# ~25 tokens/s, 3.7-4.2 transcript characters a token. The model's own
+# context is 262k tokens. 64k bounds memory (~29 GB resident at 64k).
+OLLAMA_NUM_CTX = 65536
+OLLAMA_TIMEOUT = 1800
+_LOOPBACK = {"localhost", "127.0.0.1", "::1"}
+_ollama_seen = {"at": 0.0, "up": False, "key": None}
+
+
+def _ollama_url():
+    """The Ollama base URL, or None when it is off or not a loopback
+    address. A remote host would carry transcripts off this Mac, so it is
+    refused, never used."""
+    from urllib.parse import urlparse
+    url = (_setting("STT_OLLAMA_URL", OLLAMA_URL) or "").strip().rstrip("/")
+    if not url or url.lower() in ("off", "0", "none", "false"):
+        return None
+    try:
+        host = urlparse(url).hostname
+    except ValueError:
+        return None
+    return url if host in _LOOPBACK else None
+
+
+def ollama_model() -> str:
+    return _setting("STT_OLLAMA_MODEL", OLLAMA_MODEL)
+
+
+def ollama_up(ttl: float = 10.0) -> bool:
+    """Ollama answers on a loopback address and has the model pulled.
+    Cached for `ttl` seconds: the panel asks on every poll."""
+    url, model = _ollama_url(), ollama_model()
+    if not url:
+        return False
+    key = (url, model)
+    now = time.monotonic()
+    if _ollama_seen["key"] == key and now - _ollama_seen["at"] < ttl:
+        return _ollama_seen["up"]
+    up = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url + "/api/tags", timeout=1.5) as r:
+            tags = json.loads(r.read().decode("utf-8"))
+        names = {m.get("name") for m in tags.get("models", [])} | {
+            m.get("model") for m in tags.get("models", [])}
+        up = model in names
+    except Exception:
+        up = False
+    _ollama_seen.update(at=now, up=up, key=key)
+    return up
+
+
+def local_engine() -> str:
+    """Which on-device engine a local request uses now: "ollama" or "mlx"."""
+    pick = (_setting("STT_LOCAL_LLM", "auto") or "auto").strip().lower()
+    if pick == "mlx":
+        return "mlx"
+    if pick == "ollama":
+        return "ollama" if _ollama_url() else "mlx"
+    return "ollama" if ollama_up() else "mlx"
+
+
+def local_model_name(engine: str = None) -> str:
+    engine = engine or local_engine()
+    return ollama_model() if engine == "ollama" else MODEL
+
+
 def backend_available(backend: str) -> bool:
     if backend == "local":
-        return LLM_PY.exists()
+        return LLM_PY.exists() or ollama_up()
     if backend == "anthropic":
         return bool(_setting("STT_ANTHROPIC_KEY"))
     if backend == "openai":
@@ -87,7 +165,7 @@ def _backend_for(base: str) -> str:
     strict meeting downgrades to local (or refuses if local isn't installed)."""
     backend = llm_backend()
     if backend != "local" and _strict_meeting(base):
-        if LLM_PY.exists():
+        if LLM_PY.exists() or ollama_up():
             return "local"
         raise RuntimeError(
             "this is a strict recording — its transcript never leaves this "
@@ -134,19 +212,37 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
     think=False skips Qwen3's reasoning pass (measured ~4x faster). Use it for
     extraction-shaped work (summaries), where grounding held on real meetings;
     keep it on for Ask, where the no-think model gave up on a question the
-    thinking model answered well. Cloud backends ignore the flag."""
+    thinking model answered well. Cloud backends ignore the flag. Ollama
+    gets it as its own think flag."""
     backend = backend or llm_backend()
     if backend == "anthropic":
         return _generate_anthropic(prompt, max_tokens)
     if backend == "openai":
         return _generate_openai(prompt, max_tokens)
+    # "local" picks its engine now; "ollama" and "mlx" name one outright
+    # (a caller that sized its prompt for one engine keeps it)
+    engine = backend if backend in ("ollama", "mlx") else local_engine()
+    if engine == "ollama":
+        try:
+            with _llm_lock(lock_timeout):
+                return _generate_ollama(prompt, max_tokens, think)
+        except OllamaDown:
+            if backend == "ollama" or not LLM_PY.exists():
+                # still an OllamaDown: describe() catches it, re-sizes the
+                # prompt for the 8B model and falls back to MLX
+                raise OllamaDown("the local model (Ollama) is not reachable")
+            _ollama_seen.update(at=time.monotonic(), up=False)
+            # the fallback: Qwen3-8B, under the same lock semantics below
 
     import subprocess
     if not LLM_PY.exists():
         raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
-        r = subprocess.run([str(LLM_PY), "-c", _RUNNER],
+        # the MLX fallback runs at lowered priority too: background QoS
+        # (taskpolicy -b) and nice (config.llm_nice)
+        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(config.llm_nice()),
+                            str(LLM_PY), "-c", _RUNNER],
                            input=json.dumps({"model": MODEL, "prompt": prompt,
                                              "max_tokens": max_tokens, "think": think}),
                            capture_output=True, text=True, timeout=600)
@@ -154,6 +250,91 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
         raise RuntimeError(f"LLM runner failed: {r.stderr[-400:]}")
     out = json.loads(r.stdout.strip().splitlines()[-1])["text"]
     # Qwen3 emits <think>...</think> before the answer; keep only the answer
+    out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL)
+    return out.strip()
+
+
+class OllamaDown(RuntimeError):
+    """Ollama did not answer: the caller may fall back to MLX."""
+
+
+# Ollama reasons apart from its answer: with think on, the reasoning
+# trace counts against num_predict, so it gets its own budget.
+OLLAMA_THINK_TOKENS = 4000
+
+
+def renice_ollama() -> int:
+    """Lower the Ollama server and runner processes to nice
+    config.llm_nice() and background QoS before a call, so local LLM work yields the CPU and
+    keeps the fan quiet. Best effort: a failure never stops the run.
+    Returns how many processes were reniced."""
+    import subprocess
+    pids = set()
+    for args in (["pgrep", "-x", "ollama"], ["pgrep", "-f", "ollama runner"]):
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=5).stdout
+            pids.update(int(x) for x in out.split() if x.strip().isdigit())
+        except Exception:
+            pass
+    n = 0
+    for pid in sorted(pids):
+        ok = False
+        # renice lowers the CPU priority; taskpolicy -b puts the process on
+        # background QoS, which also lowers its GPU priority (the fan)
+        for cmd in (["renice", "-n", str(config.llm_nice()), "-p", str(pid)],
+                    ["taskpolicy", "-b", "-p", str(pid)]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                ok = ok or r.returncode == 0
+            except Exception:
+                pass
+        n += ok
+    return n
+
+
+def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
+    """One chat turn to Ollama on this Mac. The caller holds llm.lock: one
+    large model works at a time, whichever engine serves it. A connection
+    failure raises OllamaDown. A reply with an error raises RuntimeError.
+    One request at a time: llm.lock serializes every caller, so nothing
+    sends to Ollama in parallel."""
+    import urllib.error
+    import urllib.request
+    url = _ollama_url()
+    if not url:
+        raise OllamaDown("Ollama is off")
+    renice_ollama()
+    body = {"model": ollama_model(), "stream": False, "think": bool(think),
+            "messages": [{"role": "user", "content": prompt}],
+            # long enough that a run over many meetings never reloads the
+            # 18 GB model between them
+            "keep_alive": _setting("STT_OLLAMA_KEEP_ALIVE", "30m"),
+            # extraction wants a steady hand: low temperature, Qwen's
+            # non-thinking top_p
+            # the reasoning trace counts against num_predict: give it its own
+            # budget so a long answer is never cut by the thinking before it
+            # num_thread and num_gpu are never set: the server's defaults
+            # are the ceiling (the owner's hardware rule, stt/config.py)
+            "options": {"num_ctx": OLLAMA_NUM_CTX,
+                        "num_predict": int(max_tokens) + (OLLAMA_THINK_TOKENS if think else 0),
+                        "temperature": 0.3, "top_p": 0.8}}
+    req = urllib.request.Request(url + "/api/chat", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode("utf-8")).get("error", "")
+        except Exception:
+            pass
+        raise RuntimeError(f"Ollama request failed ({e.code}): {detail[:200]}") from e
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+        raise OllamaDown(str(e)) from e
+    if d.get("error"):
+        raise RuntimeError(f"Ollama request failed: {str(d['error'])[:200]}")
+    out = (d.get("message") or {}).get("content") or ""
     out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL)
     return out.strip()
 
@@ -273,6 +454,11 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
     )
     t0 = time.monotonic()
     answer = _generate(prompt, max_tokens=2000, lock_timeout=15.0, backend=backend)
+    if not answer.strip():
+        # Ollama returns its reasoning apart from the answer: a reply that
+        # spent every token reasoning comes back empty
+        return {"ok": False, "error": "the model ran out of room reasoning "
+                                      "about this one; try a more specific question"}
     if "<think>" in answer:
         # generation stopped mid-reasoning: the closing tag never arrived, so
         # _generate's strip didn't match and raw chain-of-thought would leak
@@ -318,18 +504,40 @@ def has_speech(base: str) -> bool:
 # of a long meeting never reached it. Now the model reads every line:
 #   - a transcript up to SUMMARY_WHOLE_CHARS goes in one prompt, whole;
 #   - a longer one is cut at line breaks into parts of SUMMARY_PART_CHARS,
-#     the model writes notes on each part (topics, decisions, numbers, and
-#     every commitment in the next-steps line format), and the final prompt
+#     the model writes notes on each part (topics, decisions, open
+#     questions, names and numbers), and the final prompt
 #     reads all the notes in order. Notes longer than the one-prompt limit
 #     are cut and noted again, at most SUMMARY_MAX_LEVELS times.
 # The limits keep each local prompt plus its answer inside Qwen3-8B's 32k
 # context at the module's ~4 characters a token. A cloud assistant takes up
-# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt. The output format, and so the
-# ai_next_steps lines chief-of-staff reads, is unchanged.
+# to SUMMARY_CLOUD_WHOLE_CHARS in one prompt.
 SUMMARY_WHOLE_CHARS = 80_000          # ~20k tokens + a 3000-token answer
 SUMMARY_PART_CHARS = 60_000           # ~15k tokens + a 1500-token note
 SUMMARY_NOTE_TOKENS = 1500
 SUMMARY_CLOUD_WHOLE_CHARS = 400_000   # ~100k tokens, inside every cloud model
+# Qwen 3.8 on Ollama, sized from a measured run (2026-11-05): with num_ctx
+# 65536 the server loads a 65536-token context (api/ps), and a 230,000-char
+# transcript (61,762 prompt tokens, ~3.7 characters a token) kept a note
+# placed at its start AND one at its end. The whole-transcript limit is
+# what is left of the window after the answer budget (num_predict, which
+# with think on also holds the reasoning trace) and the fixed prompt, at a
+# careful 3.5 characters a token: ollama_whole_chars(think).
+OLLAMA_FIXED_PROMPT_TOKENS = 2500
+OLLAMA_CHARS_PER_TOKEN = 3.5
+DESCRIPTION_MAX_TOKENS = 3000
+
+
+def ollama_whole_chars(think: bool, max_tokens: int = None) -> int:
+    """The longest transcript one Ollama prompt holds whole, rounded down
+    to 5,000 characters: 210,000 with think off, 195,000 with it on."""
+    answer = (DESCRIPTION_MAX_TOKENS if max_tokens is None else max_tokens) + (
+        OLLAMA_THINK_TOKENS if think else 0)
+    room = OLLAMA_NUM_CTX - answer - OLLAMA_FIXED_PROMPT_TOKENS
+    return int(room * OLLAMA_CHARS_PER_TOKEN) // 5000 * 5000
+
+
+SUMMARY_OLLAMA_WHOLE_CHARS = 210_000   # think off; see ollama_whole_chars
+SUMMARY_OLLAMA_PART_CHARS = 150_000
 SUMMARY_MAX_LEVELS = 3
 
 
@@ -364,27 +572,30 @@ def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
         "- the topics discussed and what was said about each;\n"
         "- every open question;\n"
         "- names, numbers, dates, and places exactly as they appear;\n"
-        "- every concrete commitment, one per line, formatted exactly as:  "
-        "- [<speaker name as labeled>] will <specific action> by <stated "
-        "deadline, or 'no date given'>\n"
         "Plain lines, no preamble. Do not invent anything.\n\n"
         f"PART {i} OF {n}:\n{text}"
     )
 
 
-def _summary_source(base: str, backend: str) -> tuple:
+def _summary_source(base: str, backend: str, think: bool = False) -> tuple:
     """(heading, body, parts) for the final summary prompt: the whole
     transcript when it fits, else the notes on every part. `parts` is 1 for
     a whole transcript and the number of transcript parts otherwise. The
     header line with the source file name is left out: the model copied
     its words into the title."""
     txt = _model_text(base)
-    whole = SUMMARY_CLOUD_WHOLE_CHARS if backend != "local" else SUMMARY_WHOLE_CHARS
+    if backend == "ollama":
+        whole = ollama_whole_chars(think)
+        part_size = min(SUMMARY_OLLAMA_PART_CHARS, ollama_whole_chars(False))
+    elif backend in ("local", "mlx"):
+        whole, part_size = SUMMARY_WHOLE_CHARS, SUMMARY_PART_CHARS
+    else:
+        whole, part_size = SUMMARY_CLOUD_WHOLE_CHARS, SUMMARY_PART_CHARS
     if len(txt) <= whole:
         return "Below is a whole meeting transcript.", f"TRANSCRIPT:\n{txt}", 1
     body, notes, parts = txt, False, 0
     for _ in range(SUMMARY_MAX_LEVELS):
-        chunks = _parts(body, SUMMARY_PART_CHARS)
+        chunks = _parts(body, part_size)
         parts = parts or len(chunks)
         got = []
         for i, c in enumerate(chunks, 1):
@@ -402,80 +613,530 @@ def _summary_source(base: str, backend: str) -> tuple:
             f"NOTES:\n{body}", parts)
 
 
+# --- the description (gist, sections, tags) and the catalog title ---------
+# One model call per meeting gives everything: the series and topic the
+# title is built from (stt/series.py), a gist for the list row, the
+# Decisions and Open questions sections, and 3-5 topic tags. Next steps
+# were removed entirely (owner, 2026-11-05): no prompt line, no field, and
+# every write of a description deletes an old ai_next_steps.
+#
+# Stored fields. The new ones: ai_gist, ai_decisions, ai_open_questions,
+# ai_tags, ai_series, ai_topic, ai_person, ai_tmpl (the speaker template,
+# stt/speaker_text.py), ai_model. Kept for every existing reader:
+# ai_title (the catalog title without its date) and ai_summary,
+# which is now the gist plus the Decisions and Open questions lists as
+# plain text (speaker_text.compose_summary). ai_stale marks a description
+# a Redo left out of date.
+GIST_MAX_WORDS = 20
+DESCRIPTION_KEYS = ("ai_title", "ai_summary", "ai_gist",
+                    "ai_decisions", "ai_open_questions", "ai_tags", "ai_series",
+                    "ai_topic", "ai_person", "ai_tmpl", "ai_model",
+                    "ai_summary_parts", "ai_generated_at")
+_NONE_ITEMS = {"none", "none stated", "none stated.", "none.", "n/a"}
+_GIST_OPENERS = re.compile(
+    r"^(the|this|a|an|our|in|during|at)\s+(meeting|call|session|discussion|"
+    r"check[\s-]?in|conversation|dialogue|workshop|team|group|board)\b", re.I)
+_GIST_DATE = re.compile(
+    r"^(on\s+)?(\d|(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d"
+    r"|(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|yesterday)\b)",
+    re.I)
+
+
+def _owner() -> str:
+    return config.mic_speaker() or ""
+
+
+def _known_people() -> list:
+    """Every enrolled person's name (the voiceprint registry's keys)."""
+    try:
+        from . import identify
+        return sorted(str(k) for k in identify.load_registry())
+    except Exception:
+        return []
+
+
+def _named_roster(d: dict) -> list:
+    """The meeting's named speakers, most talk first, each once."""
+    from . import titles
+    return titles._talk_by_name(d)
+
+
+def description_prompt(heading: str, source: str, old_title: str = "",
+                       people=(), owner: str = "", known_series: str = None) -> str:
+    """The one prompt per meeting. Everything that is the same for every
+    meeting comes first (the rules, the series catalog, the tags, the
+    format), and the transcript comes last, so Ollama reuses the cached
+    prefix from one meeting to the next. Only the short block before the
+    transcript and the transcript itself differ."""
+    from . import series
+    who = ", ".join(people) if people else "none named"
+    fixed = (
+        "You describe one recorded meeting. "
+        f"The owner of these recordings is {owner or 'unknown'}.\n"
+        "Produce:\n"
+        "1. SERIES: which meeting series this recording belongs to, as one id "
+        "from this catalog. Use the current title and the content. Use "
+        f"{series.ONE_OFF} when none fits. When the meeting block below says "
+        "the series is known, write that id.\n"
+        f"{series.catalog_text()}\n"
+        "2. PERSON: for a series whose name has <Person>, the full name of the "
+        "other participant as labeled in the transcript (never the owner). "
+        "Two people: 'A and B'. Otherwise: none\n"
+        "3. TOPIC: the main subject in 2-5 words, Title Case, no dates, no "
+        "people's names, no meeting-type words such as Weekly, Check-in, "
+        "Meeting, Call. For a one-off, 3-7 words that may name an outside "
+        "organization when it is central.\n"
+        f"4. GIST: one sentence of at most {GIST_MAX_WORDS} words that a person "
+        "scanning a list reads first. Lead with the topic or the main decision "
+        "itself. Never open with 'The meeting', 'This meeting', a date, a "
+        "person's name, or the meeting type.\n"
+        "5. TAGS: 3 to 5 tags, comma-separated, ONLY from this list:\n"
+        f"{series.tags_text()}\n"
+        "6. DECISIONS: the decisions actually made, most important first, at "
+        "most 6, one per line, short and specific. If none, write exactly:  "
+        "- none\n"
+        "7. OPEN QUESTIONS: the questions left unresolved, at most 4, one per "
+        "line. If none, write exactly:  - none\n"
+        "Do not invent anything. Answer in exactly this format:\n"
+        "SERIES: <id>\nPERSON: <name or none>\nTOPIC: <topic>\nGIST: <gist>\n"
+        "TAGS: <tag>, <tag>, <tag>\nDECISIONS:\n- ...\nOPEN QUESTIONS:\n- ...\n\n")
+    meeting = (
+        "THE MEETING\n"
+        "The recording's current title (it may be a default name, messy, or "
+        f"wrong): {old_title or 'none'}\n"
+        + (f"The series is known: {known_series}\n" if known_series else "")
+        + f"Named speakers: {who}\n"
+        f"{heading}\n\n")
+    return fixed + meeting + source
+
+
+_HEADS = {"SERIES": "series", "PERSON": "person", "TOPIC": "topic",
+          "GIST": "gist", "TAGS": "tags", "TITLE": "title", "SUMMARY": "summary",
+          "DECISIONS": "decisions", "OPEN QUESTIONS": "open_questions",
+          # read only so an older reply's commitments never spill into the
+          # open questions: next steps were removed (owner, 2026-11-05)
+          "NEXT STEPS": "next_steps"}
+_LIST_FIELDS = ("decisions", "open_questions", "next_steps")
+# a header line as the model may dress it: "## 1. **DECISIONS:**", "SERIES:",
+# "6) Open questions:", "**Decisions**". The header word must end the line
+# or meet a colon, so a sentence that starts with "Decisions were..." is text.
+_HEAD_RX = re.compile(
+    r"^(?:[#>]+\s*)?(?:\d+[.)]\s*)?[*_`]*\s*(" + "|".join(_HEADS) + r")\s*[*_`]*\s*"
+    r"(?::|$)\s*[*_`]*\s*(.*)$", re.I)
+_ITEM_RX = re.compile(r"^(?:[-•*]|\d+[.)])\s*")
+
+
+def _clean_value(v: str) -> str:
+    """A header's value without markdown emphasis around it."""
+    return re.sub(r"^[*_`\s]+|[*_`\s]+$", "", str(v or ""))
+
+
+def parse_description(out: str) -> dict:
+    """The model's reply as fields. Tolerates a missing section, bullets
+    of any kind, numbered or markdown headers ("1. SERIES: ...",
+    "**DECISIONS:**"), and an older reply in the TITLE/SUMMARY format (its
+    summary becomes the gist source)."""
+    f = {"series": "", "person": "", "topic": "", "gist": "", "tags": "",
+         "decisions": [], "open_questions": [], "next_steps": [],
+         "title": "", "summary": []}
+    mode = None
+
+    def add(field, text):
+        item = _clean_value(_ITEM_RX.sub("", _clean_value(text)))
+        if item and item != "-" and item.lower() not in _NONE_ITEMS:
+            f[field].append(item)
+
+    for line in (out or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        m = _HEAD_RX.match(raw)
+        if m:
+            k = _HEADS[re.sub(r"\s+", " ", m.group(1).upper())]
+            rest = _clean_value(m.group(2))
+            if k in _LIST_FIELDS:
+                mode = k
+                if rest:
+                    add(k, rest)
+            elif k == "summary":
+                mode = "summary"
+                if rest:
+                    f["summary"].append(rest)
+            else:
+                f[k] = rest
+                mode = k if k == "gist" else None
+            continue
+        if mode in _LIST_FIELDS and _ITEM_RX.match(raw):
+            add(mode, raw)
+        elif mode == "summary":
+            f["summary"].append(raw)
+        elif mode == "gist" and not f["gist"]:
+            f["gist"] = _clean_value(raw)
+    f["summary"] = " ".join(x for x in f["summary"] if x)
+    return f
+
+
+def clip_gist(gist: str, limit: int = GIST_MAX_WORDS) -> str:
+    """At most `limit` words, ending on a full stop."""
+    words = re.sub(r"\s+", " ", str(gist or "")).strip().split()
+    if len(words) > limit:
+        words = words[:limit]
+        words[-1] = words[-1].rstrip(",;:-")
+    g = " ".join(words)
+    if g and g[-1] not in ".!?":
+        g += "."
+    return g
+
+
+def gist_problems(gist: str, people=(), series_name: str = "") -> list:
+    """What breaks the gist rule: too long, or it opens with 'The meeting',
+    a date, a person, or the meeting type."""
+    g = str(gist or "").strip()
+    out = []
+    if not g:
+        return ["empty"]
+    if len(g.split()) > GIST_MAX_WORDS:
+        out.append("long")
+    if _GIST_OPENERS.match(g):
+        out.append("opens with the meeting")
+    if _GIST_DATE.match(g):
+        out.append("opens with a date")
+    # the first word without punctuation or a possessive ("Robin's"). The
+    # old strip took every trailing "s", so "James" never matched.
+    first = re.sub(r"['\u2019]s$", "", g.split()[0]).strip(",.;:!?\"'")
+    if any(first and first == (p.split() or [""])[0] for p in people):
+        out.append("opens with a person")
+    if series_name and g.lower().startswith(series_name.lower()[:12]):
+        out.append("opens with the meeting type")
+    return out
+
+
+# think on or off for the description call. The owner picks it from a
+# side-by-side A/B of the next-steps-free prompt (work/retitle/think_ab.md,
+# 2026-11-05). Until then it stays on, as the first A/B left it. Part
+# notes stay off: they only collect.
+DESCRIPTION_THINK = True
+
+
+def _roster_snapshot(d: dict) -> dict:
+    """The parts of a meeting json a description is templated against: the
+    roster and each line's speaker and times. Small enough to cache."""
+    return {"speakers": [dict(x) for x in d.get("speakers") or []],
+            "segments": [{"start": x.get("start"), "end": x.get("end"),
+                          "speaker": x.get("speaker")} for x in d.get("segments") or []]}
+
+
+def describe(base: str, old_title: str = None, backend: str = None,
+             think: bool = None) -> dict:
+    """Run the model over one meeting and return its description, title
+    parts and speaker template. Writes nothing (the retitle dry run uses
+    this). Raises on a model failure. `backend` defaults to the meeting's
+    allowed backend, so a strict meeting never reaches a cloud LLM.
+
+    One model call per meeting, unless the transcript is longer than one
+    prompt holds (_summary_source). When Ollama stops answering after the
+    probe, the meeting is re-sized for Qwen3-8B and runs on MLX, as the
+    README promises. The reply (`raw`) and the context it was read in
+    (`ctx`) are part of the result, so build_description() can re-parse a
+    cached reply with no model call."""
+    from . import dates, series
+    backend = backend or _backend_for(base)
+    engine = local_engine() if backend == "local" else backend
+    think = DESCRIPTION_THINK if think is None else bool(think)
+    j = config.meeting_file(base, ".json")
+    snap = json.loads(j.read_text())         # the roster the model will read
+    owner = _owner()
+    people = _named_roster(snap)
+    old_title = dates.title_of(base) if old_title is None else old_title
+    # a title that IS a catalog series name: code makes the series choice
+    exact_sid, _ = series.exact_series(old_title)
+    t0 = time.monotonic()
+
+    def run(eng):
+        heading, source, parts = _summary_source(base, eng, think=think)
+        prompt = description_prompt(heading, source, old_title, people, owner,
+                                    known_series=exact_sid)
+        return _generate(prompt, max_tokens=DESCRIPTION_MAX_TOKENS, backend=eng,
+                         think=think), parts
+    try:
+        out, parts = run(engine)
+    except OllamaDown:
+        if backend != "local" or not LLM_PY.exists():
+            raise
+        _ollama_seen.update(at=time.monotonic(), up=False)
+        engine = "mlx"
+        out, parts = run(engine)
+    ctx = {"v": 1, "base": base, "old_title": old_title, "owner": owner,
+           "people": people, "snap": _roster_snapshot(snap), "parts": parts,
+           "engine": engine, "elapsed_sec": round(time.monotonic() - t0, 1)}
+    return build_description(out, ctx)
+
+
+def context_for(base: str, old_title: str = None, engine: str = None, parts: int = 1,
+                elapsed_sec: float = 0.0) -> dict:
+    """A description context from the meeting as it stands now: for a
+    cached reply that was stored without its own context."""
+    from . import dates
+    d = json.loads(config.meeting_file(base, ".json").read_text())
+    return {"v": 1, "base": base,
+            "old_title": dates.title_of(base) if old_title is None else old_title,
+            "owner": _owner(), "people": _named_roster(d), "snap": _roster_snapshot(d),
+            "parts": parts, "engine": engine or local_engine(),
+            "elapsed_sec": elapsed_sec}
+
+
+def build_description(out: str, ctx: dict) -> dict:
+    """The description from a model reply `out` read in context `ctx`
+    (describe). Pure apart from reading the diar cache and the enrolled
+    names: no model call, so a cached reply re-parses with a fixed parser."""
+    from . import series, speaker_text
+    base, snap = ctx["base"], ctx["snap"]
+    owner, people = ctx.get("owner") or "", list(ctx.get("people") or [])
+    raw_turns = speaker_text.load_raw_turns(base)
+    exact_sid, exact_person = series.exact_series(ctx.get("old_title") or "")
+    f = parse_description(out)
+    # a reply in the older TITLE/SUMMARY shape (a cloud model that kept to
+    # it) keeps its prose summary and free title: there is no series to
+    # build from, and cutting the prose to a gist would lose most of it
+    legacy = not f["series"] and not f["gist"] and bool(f["summary"] or f["title"])
+    sid = None if legacy else (exact_sid or series.normalize_series(f["series"]))
+    if exact_sid and exact_person and (not f["person"] or f["person"].lower() == "none"):
+        f["person"] = exact_person
+    known = _known_people()
+    person_full = ""
+    if sid in series.BY_ID and series.BY_ID[sid].has_person:
+        person_full = series.resolve_person(f["person"], roster=people,
+                                            known=known, me=owner)
+    person = series.label_people(person_full, known + people) if person_full else ""
+    topic_src = f["topic"] or f["title"]
+    series_name = (series.BY_ID[sid].name(person) if sid in series.BY_ID else "")
+    if legacy:
+        title = re.sub(r'[<>:"/\\|?*]', "", f["title"]).strip() or "Untitled Meeting"
+        gist, problems = "", []
+        fields = {"summary": f["summary"]}
+    else:
+        title = series.build_title(sid, topic_src, person)
+        raw_gist = f["gist"] or f["summary"].split(". ")[0]
+        # checked BEFORE clipping, or "long" could never fire
+        problems = gist_problems(raw_gist, people + ([owner] if owner else []), series_name)
+        gist = clip_gist(raw_gist)
+        fields = {"gist": gist, "decisions": f["decisions"],
+                  "open_questions": f["open_questions"]}
+    tags = series.normalize_tags(f["tags"])
+    tmpl = speaker_text.make(fields, snap, raw_turns)
+    rendered = speaker_text.render(tmpl, snap)
+    engine = ctx.get("engine")
+    return {
+        "series": sid, "series_raw": f["series"], "series_by_code": bool(exact_sid),
+        "person": person,
+        "person_raw": f["person"], "person_full": person_full,
+        "topic": series.split_title(title)[1] if sid in series.BY_ID else title,
+        "topic_raw": topic_src, "title": title,
+        "gist": rendered.get("ai_gist", gist), "gist_problems": problems,
+        "tags": tags, "tags_raw": f["tags"],
+        "decisions": rendered.get("ai_decisions", []),
+        "open_questions": rendered.get("ai_open_questions", []),
+        "summary": rendered.get("ai_summary", gist or f["summary"]),
+        "tmpl": tmpl, "parts": ctx.get("parts", 1), "engine": engine,
+        "model": local_model_name(engine) if engine in ("ollama", "mlx") else engine,
+        "elapsed_sec": ctx.get("elapsed_sec", 0.0), "raw": out, "ctx": ctx,
+    }
+
+
+def store_description(base: str, desc: dict, title: str = None) -> dict:
+    """Write a description from describe() into the meeting json, under
+    the meeting's lock with a fresh read, re-rendered against the CURRENT
+    roster (the speakers may have changed while the model ran). `title`
+    overrides ai_title. Clears ai_stale. Returns the rendered fields."""
+    from . import review, speaker_text
+    j = config.meeting_file(base, ".json")
+    with review.lock_meeting(base):
+        d = json.loads(j.read_text())
+        raw_turns = speaker_text.load_raw_turns(base)
+        tmpl = desc["tmpl"]
+        labels = (speaker_text.labels_for(d, raw_turns) if raw_turns
+                  else dict(tmpl.get("labels") or {}))
+        for k, v in (tmpl.get("labels") or {}).items():
+            labels.setdefault(k, v)
+        rendered = speaker_text.render(tmpl, d, labels)
+        d.pop("ai_stale", None)
+        # next steps are gone (owner, 2026-11-05): an old list never lingers
+        d.pop("ai_next_steps", None)
+        stale_clear(d.get("meeting_id") or f"base:{base}")
+        if "gist" not in (tmpl.get("fields") or {}):
+            # an older-shaped reply: no gist or sections, so none may linger
+            for k in ("ai_gist", "ai_decisions", "ai_open_questions"):
+                d.pop(k, None)
+        d["ai_tmpl"] = {**tmpl, "labels": {k: labels.get(k, v) for k, v
+                                           in (tmpl.get("labels") or {}).items()}}
+        d.update(rendered)
+        d["ai_title"] = title if title is not None else desc["title"]
+        d["ai_tags"] = list(desc.get("tags") or [])
+        if desc.get("series"):
+            d["ai_series"] = desc["series"]
+        else:
+            d.pop("ai_series", None)
+        d["ai_topic"] = desc.get("topic")
+        d["ai_person"] = desc.get("person") or None
+        d["ai_model"] = desc.get("model")
+        d["ai_summary_parts"] = desc.get("parts", 1)
+        d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
+        _write_json(j, d)
+    return rendered
+
+
 def suggest_title(base: str) -> dict:
-    """Suggest a filename + detailed summary for a processed meeting from its
-    WHOLE transcript (see SUMMARY_WHOLE_CHARS). The result is persisted into
-    the meeting's .json (ai_title / ai_summary / ai_next_steps, and
-    ai_summary_parts: 1 for a one-pass summary, else how many parts were
-    noted) so it stays visible in the panel afterwards.
+    """Write a meeting's description from its WHOLE transcript (see
+    SUMMARY_WHOLE_CHARS) and draft its catalog title. The result is
+    persisted into the meeting's .json (see DESCRIPTION_KEYS) so it stays
+    visible in the panel afterwards. It never renames the folder: the
+    title is only a suggestion here (apply_auto_title uses it for a
+    meeting that arrived with no typed title).
 
     A transcript with 0 segments gets no call to the model at all: the result
     is an error that says no speech was found, and nothing is written."""
+    from . import dates
     if not has_speech(base):
         return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
-    backend = _backend_for(base)  # strict meetings never reach a cloud LLM
-    heading, source, parts = _summary_source(base, backend)
-    prompt = (
-        f"{heading} Produce:\n"
-        "1. A SHORT descriptive title for the recording file: 3-6 words, Title Case, "
-        "no punctuation except spaces, naming the meeting type and main topic (key "
-        "participant names only if clearly central).\n"
-        "2. A BRIEF summary of 2-3 sentences covering the main topics, any "
-        "decisions made, and open questions. Plain prose, no bullet points, "
-        "specific rather than generic. Never begin with 'The meeting', 'This "
-        "meeting', or similar; open with the substance itself (the main topic, "
-        "a decision, or who wanted what) so different meetings read differently.\n"
-        "3. NEXT STEPS: every concrete commitment someone made, one per line, "
-        "formatted exactly as:  - [<speaker name as labeled in the transcript>] "
-        "will <specific action> by <stated deadline, or 'no date given'>\n"
-        "Only include commitments actually stated; if there are none, write "
-        "exactly:  - none\n"
-        "Answer in exactly this format:\n"
-        "TITLE: <title>\nSUMMARY: <summary>\nNEXT STEPS:\n- ...\n\n"
-        f"{source}"
-    )
-    out = _generate(prompt, max_tokens=3000, backend=backend, think=False)
-    title, summary, steps = "", [], []
-    mode = None
-    for line in out.splitlines():
-        u = line.upper()
-        if u.startswith("TITLE:"):
-            title = line.split(":", 1)[1].strip()
-            mode = None
-        elif u.startswith("SUMMARY:"):
-            summary.append(line.split(":", 1)[1].strip())
-            mode = "summary"
-        elif u.startswith("NEXT STEPS"):
-            mode = "steps"
-        elif mode == "summary" and line.strip():
-            summary.append(line.strip())
-        elif mode == "steps" and line.strip().startswith("-"):
-            item = line.strip().lstrip("-").strip()
-            if item and item.lower() not in ("none", "none stated", "none stated."):
-                steps.append(item)
-    summary = " ".join(s for s in summary if s)
-    title = re.sub(r'[<>:"/\\|?*]', "", title).strip() or "Untitled Meeting"
-    result = {"title": title, "summary": summary, "next_steps": steps,
-              "suggested_name": f"{title} {_date_suffix(base)}", "parts": parts}
-    # persist so the panel can show it without regenerating. Take the per-meeting
-    # lock and re-read INSIDE it (the LLM call above can run for minutes, so a
-    # read taken earlier would be stale) and write atomically, so this can't
-    # clobber a concurrent human review edit of the same json.
+    desc = describe(base)
+    rendered, stored = {}, False
+    try:
+        rendered = store_description(base, desc)
+        stored = True
+    except Exception as e:
+        # the reply still goes back to the panel; `stored` says it did not land
+        print(f"   description not stored for {base}: {e}", file=sys.stderr, flush=True)
+    title = desc["title"]
+    return {"title": title, "stored": stored,
+            "summary": rendered.get("ai_summary", desc["summary"]),
+            "gist": rendered.get("ai_gist", desc["gist"]),
+            "decisions": rendered.get("ai_decisions", desc["decisions"]),
+            "open_questions": rendered.get("ai_open_questions", desc["open_questions"]),
+            "tags": desc["tags"], "series": desc["series"],
+            "suggested_name": f"{title} {_date_suffix(base)}"
+                              if dates.strip_stamp(title) == title else title,
+            "parts": desc["parts"]}
+
+
+# --- the out-of-date index -------------------------------------------------
+# A Redo marks a description out of date (ai_stale in the json) AND lists the
+# meeting here, keyed by meeting_id. The batch reads only this small file
+# when it is idle, never every meeting's json. A failed regeneration backs
+# the meeting off: STALE_BACKOFF_SEC doubled per failure, capped at a day.
+STALE_INDEX_NAME = "stale_descriptions.json"
+STALE_BACKOFF_SEC = 900
+STALE_BACKOFF_MAX_SEC = 86400
+
+
+def _stale_path() -> Path:
+    return config.PROJECT_DIR / STALE_INDEX_NAME
+
+
+@contextlib.contextmanager
+def _stale_index():
+    """The index under its own flock: pipeline workers, the batch and the
+    panel all write it."""
+    p = _stale_path()
+    with open(p.with_suffix(".lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            try:
+                idx = json.loads(p.read_text())
+                if not isinstance(idx, dict):
+                    idx = {}
+            except (OSError, ValueError):
+                idx = {}
+            before = json.dumps(idx, sort_keys=True)
+            yield idx
+            if json.dumps(idx, sort_keys=True) != before:
+                tmp = p.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(idx, indent=1, ensure_ascii=False))
+                os.replace(tmp, p)
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
+
+
+def _stale_key(base: str) -> str:
+    return config.id_of(base) or f"base:{base}"
+
+
+def stale_mark(key: str, base: str):
+    with _stale_index() as idx:
+        idx[key] = {"base": base, "fails": 0, "next_after": 0}
+
+
+def stale_clear(key: str):
+    try:
+        with _stale_index() as idx:
+            idx.pop(key, None)
+    except OSError:
+        pass
+
+
+def clear_stale(base: str) -> bool:
+    """Drop a meeting's out-of-date flag without regenerating (a meeting
+    with no speech has nothing to describe)."""
     from . import review
     j = config.meeting_file(base, ".json")
-    try:
-        with review.lock_meeting(base):
+    with review.lock_meeting(base):
+        try:
             d = json.loads(j.read_text())
-            d["ai_title"], d["ai_summary"] = title, summary
-            d["ai_next_steps"] = steps
-            d["ai_summary_parts"] = parts
-            d["ai_generated_at"] = datetime.now().isoformat(timespec="seconds")
-            tmp = j.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-            os.replace(tmp, j)
-    except Exception:
-        pass
-    return result
+        except (OSError, ValueError):
+            return False
+        had = d.pop("ai_stale", None) is not None
+        if had:
+            _write_json(j, d)
+    stale_clear(_stale_key(base))
+    return had
+
+
+def stale_failed(base: str, error: str = "") -> int:
+    """Count one failed regeneration and back the meeting off. Returns the
+    failure count."""
+    key = _stale_key(base)
+    with _stale_index() as idx:
+        e = idx.setdefault(key, {"base": base, "fails": 0, "next_after": 0})
+        e["fails"] = int(e.get("fails") or 0) + 1
+        e["next_after"] = time.time() + min(STALE_BACKOFF_MAX_SEC,
+                                            STALE_BACKOFF_SEC * 2 ** (e["fails"] - 1))
+        e["error"] = str(error)[:200]
+        return e["fails"]
+
+
+def stale_bases(now: float = None) -> list:
+    """Live meetings whose description a Redo left out of date and that are
+    due (not backed off), shortest transcript first. Reads the index, and
+    the json of the listed meetings only. An entry whose meeting is gone or
+    no longer stale is dropped."""
+    now = time.time() if now is None else now
+    try:
+        with _stale_index() as idx:
+            items = list(idx.items())
+    except OSError:
+        return []
+    out, drop = [], []
+    for key, e in items:
+        base = (config.base_of(key) if not key.startswith("base:") else None) \
+            or e.get("base") or key[5:]
+        try:
+            d = json.loads(config.meeting_file(base, ".json").read_text())
+        except (OSError, ValueError):
+            drop.append(key)
+            continue
+        if not d.get("ai_stale"):
+            drop.append(key)
+            continue
+        if float(e.get("next_after") or 0) > now:
+            continue
+        try:
+            size = config.meeting_file(base, ".txt").stat().st_size
+        except OSError:
+            size = 0
+        out.append((size, base))
+    for key in drop:
+        stale_clear(key)
+    return [b for _, b in sorted(out)]
+
 
 
 def _unique_base(candidate: str, current: str) -> str:
@@ -583,7 +1244,7 @@ DROP = "$drop"
 
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                         reviewed=None, title_state=None, date_source=None,
-                        recorded_at=_UNSET, auto_title=False) -> dict:
+                        recorded_at=_UNSET, auto_title=False, retitle=False) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
     Work/Personal category, whether it still needs review, and the title's
     state.
@@ -604,6 +1265,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     pipeline's own (titles.AUTO_TITLE_STATE and AUTO_TITLE_SOURCE) instead. `title_state` sets the state alone (a Keep on one
     meeting or a bulk Keep). Neither touches `reviewed`: only the caller's
     own `reviewed` argument does, so a bulk Keep never claims a person looked.
+    `retitle=True` is the catalog retitle (tools/retitle_all.py): the title
+    is the model's, so title_source becomes `model`, and a needs_title state
+    becomes provisional. Any other state is kept as it was, and a meeting
+    from before the title rule keeps no state at all.
 
     The invariant it enforces: the folder is named "<title> MMDDYYYY". That is
     what keeps recurring meetings ('LT Weekly Meeting') unique on disk, and it is
@@ -673,7 +1338,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 d.pop("category", None)
         if reviewed is not None:
             d["reviewed"] = bool(reviewed)
-        if title is not None and auto_title:
+        if title is not None and retitle:
+            if d.get("title_state"):
+                d["title_source"] = titles.AUTO_TITLE_SOURCE
+                if d["title_state"] == "needs_title":
+                    d["title_state"] = titles.AUTO_TITLE_STATE
+        elif title is not None and auto_title:
             d["title_state"] = titles.AUTO_TITLE_STATE
             d["title_source"] = titles.AUTO_TITLE_SOURCE
         elif title is not None:

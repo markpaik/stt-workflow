@@ -5,6 +5,18 @@ import pytest
 from stt import config, control, holds, jobs, manifest, rates, status
 
 
+@pytest.fixture(autouse=True)
+def _no_live_ollama(monkeypatch):
+    """No test may reach the real Ollama on this Mac: the local engine falls
+    back to the (faked) MLX path unless a test turns Ollama on itself."""
+    monkeypatch.setenv("STT_OLLAMA_URL", "off")
+    # the LLM duty cycle sleeps between meetings: never in a test
+    monkeypatch.setenv("STT_LLM_REST_MIN_SEC", "0")
+    monkeypatch.setenv("STT_LLM_REST_RATIO", "0")
+    from stt import summarize
+    monkeypatch.setattr(summarize, "_ollama_seen", {"at": 0.0, "up": False, "key": None})
+
+
 def mfile(base, suffix):
     """A meeting artifact's path in the per-meeting-folder layout, creating
     the folder — what test fixtures use to build meetings on disk."""

@@ -34,6 +34,15 @@ CARRY_KEYS = ("title_state", "title_source", "route",
               "recorded_at", "date_source", "source_name", "audio_fp", "title",
               "location_note", "vm_uuid")
 
+# the description a Redo carries, marked out of date (ai_stale): the text
+# stays readable until the batch regenerates it when idle. The speaker
+# template (ai_tmpl) is NOT carried: it keys names by the diarizer's
+# cluster ids, and a Redo re-clusters the voices.
+DESCRIPTION_CARRY_KEYS = ("ai_title", "ai_summary", "ai_gist",
+                          "ai_decisions", "ai_open_questions", "ai_tags",
+                          "ai_series", "ai_topic", "ai_person", "ai_model",
+                          "ai_summary_parts", "ai_generated_at")
+
 # --- what counts as "no label" -------------------------------------------
 # A recording name that says nothing about the meeting: the recorder's and
 # Voice Memos' defaults, a capture-Shortcut marker, a conference export, or a
@@ -240,6 +249,11 @@ def auto_title(d: dict, me=None):
     topic = re.sub(r"\s+", " ", str(d.get("ai_title") or "")).strip()
     if topic.lower() in _NO_TOPIC:
         return None
+    if d.get("ai_series"):
+        # a catalog title (stt/series.py): built from the series, the person
+        # and a short topic, so it is whole already. Appending the speakers
+        # made one-off titles run to "... with A, B and others".
+        return topic
     who = _talk_by_name(d, exclude={me} if me else ())
     if not who:
         return topic

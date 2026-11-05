@@ -20,7 +20,7 @@ from pathlib import Path
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, groups, identify, jobs,
                  manifest, output, queue_order, rates, recorder, review, search,
-                 status, titles, unknowns)
+                 series, status, titles, unknowns)
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -611,7 +611,19 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "flagged_minor": sum(1 for s in d.get("segments", [])
                                      if s.get("flags") and review.is_minor(s)),
                 "summary": d.get("ai_summary", ""),
-                "next_steps": d.get("ai_next_steps", []),
+                # the description's parts (stt/summarize.py): the gist the
+                # list row shows, the sections and tags the meeting page
+                # shows. Empty on a description written before them, where
+                # the panel falls back to `summary`.
+                "gist": d.get("ai_gist") or "",
+                "decisions": d.get("ai_decisions") or [],
+                "open_questions": d.get("ai_open_questions") or [],
+                "tags": [series.TAG_LABELS[t] for t in (d.get("ai_tags") or [])
+                         if t in series.TAG_LABELS],
+                "series": d.get("ai_series"),
+                # a Redo left the description out of date; the batch
+                # regenerates it when idle
+                "summary_stale": bool(d.get("ai_stale")),
                 "category": d.get("category"),  # work | personal | None
                 # ONLY an explicit False means "not yet named/dated by a human".
                 # Meetings processed before the inbox existed carry no key at all,
@@ -3011,7 +3023,7 @@ class Handler(BaseHTTPRequestHandler):
                 d = ready.mark_seen()
                 self._json({"ok": True, "seen_at": d["seen_at"]})
             elif u.path == "/api/suggest":
-                # title, summary, and next steps from the local model, saved to
+                # title and description from the local model, saved to
                 # the meeting .json (the call that used to be a GET)
                 if not self._require_base(b.get("base")):
                     return
