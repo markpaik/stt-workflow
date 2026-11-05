@@ -52,7 +52,8 @@ def replay(rows):
     for i, row in enumerate(rows):
         if not row.get("duration") or not row.get("secs"):
             continue
-        L = rates._learn(rows[:i])
+        # each row is predicted from the engine that actually ran it
+        L = rates._learn(rows[:i], diarizer=row.get("diar", "pyannote"))
         rec = {"duration": row["duration"],
                "actual": sum(row["secs"].values()),
                "diar": row["secs"].get("diarizing")}

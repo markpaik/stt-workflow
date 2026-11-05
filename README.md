@@ -46,7 +46,9 @@ drawer.
 The engine room underneath: two GPU-accelerated transcription engines on
 Apple's MLX framework (NVIDIA Parakeet TDT 0.6B v3, ~30x realtime and the
 English word-error-rate leader among local models, and Whisper
-large-v3/turbo for punctuation and noise robustness), pyannote diarization,
+large-v3/turbo for punctuation and noise robustness), speaker separation
+with speakrs (the pyannote community-1 recipe on Core ML, ~100x faster than
+pyannote on CPU, which stays as the automatic fallback),
 and your own voiceprint library attaching real names. Anything ffmpeg reads
 is accepted, video included.
 
@@ -269,7 +271,14 @@ pins either, and the choice persists:
 brew install ffmpeg uv
 uv venv --python 3.12 .venv          # 3.13+/3.14 lack wheels for some ML deps
 uv pip install --python .venv/bin/python -r requirements.txt
+# fast speaker separation (needs Rust: brew install rust); init.sh does both
+(cd native/speakrs && cargo build --release --locked)
+.venv/bin/python tools/fetch_speakrs_models.py   # one-time, ~270 MB, checksum-verified
 ```
+
+Without the speakrs helper the pipeline uses pyannote on CPU instead
+(`STT_DIARIZER=pyannote` forces it). The helper runs with network access
+denied.
 
 **Hugging Face token (one-time, required for speaker identification):**
 1. Signed in on huggingface.co, open
@@ -346,7 +355,7 @@ nothing you try there can touch your real meetings.
 watched folder / recorder                        transcripts folder
   new .m4a/.mp4 ─► materialize ─► ffmpeg ─► ASR (MLX GPU or cloud) ─► loop-collapse
                                                │
-             pyannote diarization (CPU) ───────┤
+             speakrs diarization (Core ML) ────┤
              voiceprint matching               ▼
              identity refinement ─► word↔speaker merge ─► punctuate
                                                │

@@ -61,8 +61,31 @@ def current_asr_key() -> str:
     return backend
 
 
-def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1):
-    """Append one completed file's measurements. Called by the batch parent only."""
+def diarizer_family(engine) -> str:
+    """"speakrs" or "pyannote" for a stored engine id. Rows from before the
+    field existed (None) were all pyannote."""
+    return "speakrs" if engine and str(engine).startswith("speakrs") else "pyannote"
+
+
+def effective_diarizer() -> str:
+    """The engine diarize() will actually run: config.DIARIZER, except that a
+    speakrs setting with the helper or models missing runs pyannote (any
+    other value runs pyannote too). The ETA and its learned samples follow
+    this, not the setting, so a fallback install is estimated at CPU speed."""
+    if config.DIARIZER != "speakrs":
+        return "pyannote"
+    from . import speakrs_diar
+    return "speakrs" if speakrs_diar.available()[0] else "pyannote"
+
+
+def _est_diarize_rate() -> float:
+    return config.EST_RATES["diarize"][effective_diarizer()]
+
+
+def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
+           diarizer: str = None):
+    """Append one completed file's measurements. Called by the batch parent only.
+    `diarizer` is the engine that actually ran (a fallback file is pyannote)."""
     try:
         if not duration or duration < MIN_AUDIO_SEC:
             return
@@ -73,6 +96,8 @@ def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1):
         row = {"at": datetime.now().isoformat(timespec="seconds"),
                "duration": round(float(duration), 1),
                "asr": asr_key, "n": int(n_active), "secs": secs}
+        # rows written before this field were all pyannote (see _samples)
+        row["diar"] = diarizer_family(diarizer) if diarizer else effective_diarizer()
         with open(RATES_LOG, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:
@@ -91,11 +116,13 @@ def _rows():
     return rows
 
 
-def _samples(rows) -> dict:
+def _samples(rows, diarizer: str = None) -> dict:
     """Bucket the rows into (duration, secs) samples per model key, oldest
     first: {"convert": [...], "asr": {"parakeet@1": [...]}, "diarize": {"1":
     [...]}, "writing": [...]}. Pure, so tools/eta_backtest.py can replay any
-    prefix of the log."""
+    prefix of the log. Diarize samples count only for `diarizer` (default:
+    effective_diarizer()): pyannote hours must not teach the speakrs estimate."""
+    want = diarizer or effective_diarizer()
     buckets = {"convert": [], "asr": {}, "diarize": {}, "writing": []}
     for r in rows:
         d, secs, n = r.get("duration", 0), r.get("secs", {}), str(r.get("n", 1))
@@ -106,7 +133,7 @@ def _samples(rows) -> dict:
         if secs.get("transcribing"):
             buckets["asr"].setdefault(f"{r.get('asr', 'parakeet')}@{n}", []).append(
                 (d, secs["transcribing"]))
-        if secs.get("diarizing"):
+        if secs.get("diarizing") and r.get("diar", "pyannote") == want:
             buckets["diarize"].setdefault(n, []).append((d, secs["diarizing"]))
         if secs.get("verifying"):
             # the verify pass IS a transcription by the secondary engine —
@@ -178,12 +205,12 @@ def _median_model(pairs, flat=False):
     return m, _tail([s * m / d for d, s in recent])
 
 
-def _learn(rows) -> dict:
+def _learn(rows, diarizer: str = None) -> dict:
     """The model built from `rows`. The median keys ("convert", "asr",
     "diarize", "writing", "runs") keep the shape the panel's summary reads;
     "fit" holds the power laws where they are well posed and "tail" each
     model's overrun fraction (the fit's when there is one)."""
-    b = _samples(rows)
+    b = _samples(rows, diarizer)
     out = {"runs": len(rows), "asr": {}, "diarize": {},
            "fit": {"asr": {}, "diarize": {}},
            "tail": {"asr": {}, "diarize": {}}}
@@ -210,9 +237,12 @@ def learned() -> dict:
     "writing": secs, "runs": n, "fit": {...}, "tail": {...}} — see _learn.
     Cached until rates.jsonl changes."""
     try:
-        sig = RATES_LOG.stat().st_mtime if RATES_LOG.exists() else 0
+        mtime = RATES_LOG.stat().st_mtime if RATES_LOG.exists() else 0
     except OSError:
-        sig = 0
+        mtime = 0
+    # the engine is part of the key: building the helper (or losing its
+    # models) changes which diarize samples apply without touching the log
+    sig = (mtime, effective_diarizer())
     if _cache["sig"] == sig and _cache["learned"] is not None:
         return _cache["learned"]
     out = _learn(_rows())
@@ -238,7 +268,7 @@ def diarize_rate(n_active: int = 1) -> float:
     got = L.get(str(n_active))
     if got:
         return got
-    base = L.get("1") or config.EST_RATES["diarize"]
+    base = L.get("1") or _est_diarize_rate()
     return base / (CONTENTION if n_active > 1 else 1.0)  # measured contention fallback
 
 
@@ -274,7 +304,7 @@ def _default(stage, duration, asr_key):
     if stage == "writing":
         return config.EST_RATES["writing_fixed_sec"]
     if stage == "diarizing":
-        return duration / config.EST_RATES["diarize"]
+        return duration / _est_diarize_rate()
     return duration / config.EST_RATES["asr"].get(asr_key, 30.0)
 
 

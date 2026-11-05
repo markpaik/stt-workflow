@@ -95,3 +95,6 @@ dismissed_failures.json
 # sidecars, which hold titles and places) waiting for the batch
 /voicememos/
 *.vm.json
+
+# speakrs helper build output
+native/speakrs/target/

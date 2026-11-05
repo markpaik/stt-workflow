@@ -1,4 +1,9 @@
-"""Speaker diarization via pyannote community-1 (CPU), with identity-first refinement.
+"""Speaker diarization, with identity-first refinement.
+
+Engine: speakrs (config.DIARIZER, default) runs the community-1 recipe on Core
+ML via native/speakrs (see stt/speakrs_diar.py). pyannote community-1 on CPU is
+the fallback and the alternative engine. Both engines share the pyannote
+embedder below for per-turn embeddings, splitting and voiceprint naming.
 
 pyannote's MPS path has a wontfix bug that can silently corrupt segment
 timestamps, so we pin the pipeline to CPU — fine for overnight batch on 48 GB.
@@ -25,7 +30,7 @@ overlapped audio contaminates the very identity evidence refinement leans on.
 """
 import numpy as np
 
-from . import config, identify, refine
+from . import config, identify, refine, speakrs_diar
 
 _pipeline = None
 
@@ -100,10 +105,11 @@ class _ProgressHook:
                 pass
 
 
-def _embed_turns(pipe, wav_path, turns, overlaps, progress=None):
+def _embed_turns(pipe, wav_path, turns, overlaps, progress=None, lo=0.90):
     """Embed each turn on its longest overlap-free subspan (>=0.5s); fall back to the
     full span when overlap swallows the turn. Returns (embeddings, failures).
-    Reports the 0.90-1.00 tail of the diarization stage."""
+    Reports the lo..1.00 part of the diarization stage: the 0.90 tail after
+    pyannote, but most of the stage after speakrs, whose own run is short."""
     import soundfile as sf
     import torch
 
@@ -116,7 +122,7 @@ def _embed_turns(pipe, wav_path, turns, overlaps, progress=None):
     for i, t in enumerate(turns):
         if progress and i % 25 == 0:
             try:
-                progress(0.90 + 0.10 * i / n)
+                progress(lo + (1.0 - lo) * i / n)
             except Exception:
                 pass
         clean = _clean_subspans(t["start"], t["end"], overlaps)
@@ -228,12 +234,8 @@ def embed_spans(wav_path, spans, min_dur=0.5):
     return out
 
 
-def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
-            allowed_names=None, num_speakers=None, min_speakers=None,
-            max_speakers=None, context="", progress=None) -> dict:
-    if do_refine is None:
-        do_refine = config.REFINE
-    pipe = _get_pipeline()
+def _pyannote_raw(pipe, wav_path, num_speakers, min_speakers, max_speakers, progress):
+    """The original CPU path: labels, exclusive turns, overlaps and centroids."""
     hook = _ProgressHook(progress) if progress else None
     try:
         out = pipe(str(wav_path), num_speakers=num_speakers,
@@ -267,6 +269,79 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     raw_turns = [{"start": round(float(s.start), 3), "end": round(float(s.end), 3), "cluster": spk}
                  for s, _, spk in excl.itertracks(yield_label=True)]
     raw_turns.sort(key=lambda t: t["start"])
+    return {"labels": labels, "overlaps": overlaps, "centroids": cent_emb,
+            "raw_turns": raw_turns, "engine": config.DIARIZATION_MODEL}
+
+
+# Share of the diarizing stage the speakrs run itself takes. Measured on a
+# 24-minute meeting: speakrs 4.7 s of 45 s; the rest is the pyannote-embedder
+# pass over every turn (naming and refinement evidence).
+SPEAKRS_SHARE = 0.10
+SPEAKRS_SPEED = 140.0   # audio seconds per wall second for the helper alone
+
+
+def _run_speakrs(wav_path, progress):
+    """speakrs_diar.run with a clock-driven progress tick (the helper reports
+    nothing while it runs): 0 -> SPEAKRS_SHARE over its expected time."""
+    if not progress:
+        return speakrs_diar.run(wav_path)
+    import threading
+    import time as _t
+
+    import soundfile as sf
+    try:
+        expect = max(2.0, sf.info(str(wav_path)).duration / SPEAKRS_SPEED)
+    except Exception:
+        expect = 30.0
+    stop, t0 = threading.Event(), _t.monotonic()
+
+    def tick():
+        while not stop.wait(2.0):
+            f = min(0.95, (_t.monotonic() - t0) / expect) * SPEAKRS_SHARE
+            try:
+                progress(f)
+            except Exception:
+                pass
+
+    th = threading.Thread(target=tick, daemon=True)
+    th.start()
+    try:
+        return speakrs_diar.run(wav_path)
+    finally:
+        stop.set()
+        th.join(timeout=3)
+        try:
+            progress(SPEAKRS_SHARE)
+        except Exception:
+            pass
+
+
+def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
+            allowed_names=None, num_speakers=None, min_speakers=None,
+            max_speakers=None, context="", progress=None) -> dict:
+    if do_refine is None:
+        do_refine = config.REFINE
+    pipe = _get_pipeline()  # the embedder serves naming + per-turn embeddings under both engines
+    raw = None
+    hints = any(v is not None for v in (num_speakers, min_speakers, max_speakers))
+    ready, why = (speakrs_diar.available() if config.DIARIZER == "speakrs" and not hints
+                  else (False, ""))
+    if why:
+        print(f"   warning: {why} — falling back to pyannote for this file")
+    if ready:
+        try:
+            raw = _run_speakrs(wav_path, progress)
+        except speakrs_diar.SpeakrsUnavailable as e:
+            print(f"   warning: {e} — falling back to pyannote for this file")
+            if progress:
+                # speakrs already reported SPEAKRS_SHARE: never move backward
+                _cb = progress
+                progress = lambda f: _cb(max(f, SPEAKRS_SHARE))  # noqa: E731
+    if raw is None:
+        raw = _pyannote_raw(pipe, wav_path, num_speakers, min_speakers, max_speakers,
+                            progress)
+    labels, overlaps, cent_emb, raw_turns = (raw["labels"], raw["overlaps"],
+                                             raw["centroids"], raw["raw_turns"])
 
     vps = voiceprints if voiceprints is not None else identify.load_voiceprints()
     if allowed_names is not None:
@@ -283,8 +358,9 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     raw_turns, n_cuts = _split_absorbed_turns(
         pipe, wav_path, raw_turns, vps if do_refine else {}, strict_resolved)
 
+    lo = SPEAKRS_SHARE if raw["engine"].startswith("speakrs") else 0.90
     turn_embeddings, emb_failures = _embed_turns(pipe, wav_path, raw_turns, overlaps,
-                                                 progress=progress)
+                                                 progress=progress, lo=lo)
     if raw_turns and emb_failures / len(raw_turns) > 0.3:
         print(f"   warning: {emb_failures}/{len(raw_turns)} turn embeddings failed "
               "— identity refinement degraded for this file")
@@ -298,7 +374,7 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     return {"turns": turns, "names": names, "labels": sorted(names.keys()),
             "embeddings": cent_emb, "raw_turns": raw_turns,
             "turn_embeddings": turn_embeddings, "cluster_names": cluster_names,
-            "overlaps": overlaps, "refine_stats": stats}
+            "overlaps": overlaps, "refine_stats": stats, "engine": raw["engine"]}
 
 
 def build_attribution(raw_turns, turn_embeddings, cluster_names, voiceprints,

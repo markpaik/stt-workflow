@@ -510,7 +510,8 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             "arrived_at": _arrived_at(prev, processed_at),
             "duration_sec": round(dur, 1),
             "asr_engine": asr_out["engine"],
-            "diarizer": config.DIARIZATION_MODEL if do_diarize else None,
+            "diarizer": ((diar or {}).get("engine") or config.DIARIZATION_MODEL)
+                        if do_diarize else None,
             "n_speakers": len(labels),
             "strict": strict,
             "one_time_speakers": not track_unknowns,
@@ -583,4 +584,5 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     return {
         "base": base, "txt": txt_path, "json": json_path, "emb": saved_emb,
         "duration_sec": dur, "n_speakers": len(labels), "identified": named,
+        "diarizer": (diar or {}).get("engine"),
     }
