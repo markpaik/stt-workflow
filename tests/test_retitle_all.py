@@ -126,6 +126,77 @@ def test_apply_renames_journals_resumes_and_keeps_registries_in_step(lib):
     assert r2["counts"].get("applied", 0) == 0 and r2["counts"]["already done"] == 4
 
 
+def test_finding2_a_rename_that_landed_without_its_description_is_finished_and_undone(
+        lib, monkeypatch):
+    rt.dry_run(log=lambda *_: None)
+    real = summarize.store_description
+    state = {"fail": True}
+
+    def flaky(base, desc, title=None):
+        if state["fail"]:
+            raise OSError("disk full")
+        return real(base, desc, title=title)
+    monkeypatch.setattr(summarize, "store_description", flaky)
+    r = rt.apply(log=lambda *_: None)
+    assert r["counts"]["failed"] == 4
+    ev = [e["event"] for e in rt.journal_entries() if e["meeting_id"] == "mid-a"]
+    assert ev == ["begin", "renamed", "fail"]
+    # undo knows the folder moved, though no description landed
+    assert rt.undo(dry=True, log=lambda *_: None)["counts"]["would undo"] == 4
+    # a rerun finishes it instead of calling it "renamed since the dry run"
+    state["fail"] = False
+    r = rt.apply(log=lambda *_: None)
+    assert r["counts"]["applied"] == 4
+    assert "renamed since the dry run" not in r["counts"]
+    d = json.loads(config.meeting_file(config.base_of("mid-a"), ".json").read_text())
+    assert d["ai_gist"] == "Hiring plan approved for spring."
+
+
+def test_finding8_apply_skips_a_meeting_whose_transcript_or_diar_changed(lib):
+    rt.dry_run(log=lambda *_: None)
+    # a text edit on one meeting, a new diar cache on another, a Redo on a third
+    a = config.meeting_file("Robin Check-in 10-5 10012026", ".json")
+    d = json.loads(a.read_text())
+    d["words"] = [{"start": 0.0, "end": 1.0, "word": "changed"}]
+    a.write_text(json.dumps(d))
+    mfile("LT Weekly Meeting 10022026", ".diar.npz").write_bytes(b"new cache")
+    c = config.meeting_file("Recording 10032026 1200", ".json")
+    d = json.loads(c.read_text())
+    d["ai_stale"] = True
+    c.write_text(json.dumps(d))
+    r = rt.apply(log=lambda *_: None)
+    assert r["counts"]["changed since the dry run"] == 3
+    assert r["counts"]["applied"] == 1
+    assert config.base_of("mid-a") == "Robin Check-in 10-5 10012026"
+    assert json.loads(c.read_text())["ai_stale"] is True     # never cleared
+
+
+def test_finding8_a_proposal_without_signatures_is_never_applied(lib):
+    rt.dry_run(log=lambda *_: None)
+    doc = json.loads(rt.proposals_path().read_text())
+    for p in doc["proposals"]:
+        p.pop("words_sig", None)
+    rt.proposals_path().write_text(json.dumps(doc))
+    r = rt.apply(log=lambda *_: None)
+    assert r["counts"]["changed since the dry run"] == 4 and "applied" not in r["counts"]
+
+
+def test_cached_replies_are_re_parsed_with_the_current_parser(lib, monkeypatch):
+    rt.dry_run(log=lambda *_: None)
+    # a cache entry written by the old parser: a bad decisions list, no ctx
+    f = next((rt.out_dir() / "cache").glob("mid-b.json"))
+    c = json.loads(f.read_text())
+    c["desc"]["raw"] = c["desc"]["raw"].replace("DECISIONS:", "**DECISIONS:**")
+    c["desc"]["decisions"] = ["", "Robin Cole posts the role."]
+    c["desc"].pop("ctx", None)
+    f.write_text(json.dumps(c))
+    lib.clear()
+    doc = rt.dry_run(log=lambda *_: None)
+    assert not lib                                   # no model call
+    b = next(p for p in doc["proposals"] if p["meeting_id"] == "mid-b")
+    assert b["decisions"] == ["Robin Cole posts the role."]
+
+
 def test_apply_finishes_a_meeting_a_stop_left_half_done(lib, monkeypatch):
     rt.dry_run(log=lambda *_: None)
     real = summarize.store_description

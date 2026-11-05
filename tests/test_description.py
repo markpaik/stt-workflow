@@ -283,6 +283,11 @@ def test_a_redo_carries_the_description_marked_out_of_date(sandbox):
 def test_the_batch_regenerates_stale_descriptions_when_idle(owner, monkeypatch):
     import run_batch
     a, b, c = (_meeting(f"Mtg {n} 10012026") for n in "abc")
+    for n, base in enumerate((a, b, c)):
+        d = _load(base)
+        d["meeting_id"] = f"mid-s{n}"
+        config.meeting_file(base, ".json").write_text(json.dumps(d))
+        config.index_set(d["meeting_id"], base)
     for base in (a, b):
         d = _load(base)
         meta = {"ai_stale": True, "ai_summary": "old"}
@@ -290,15 +295,18 @@ def test_the_batch_regenerates_stale_descriptions_when_idle(owner, monkeypatch):
         d = {**{k: v for k, v in d.items() if k not in ("speakers", "segments", "words")},
              **meta, "speakers": d["speakers"], "segments": d["segments"], "words": []}
         config.meeting_file(base, ".json").write_text(json.dumps(d, indent=2))
+        summarize.stale_mark(d["meeting_id"], base)       # what a Redo does
     assert summarize.stale_bases() == sorted([a, b])
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(summarize, "_generate", lambda *a_, **k: REPLY)
     rests = []
     monkeypatch.setattr(config, "llm_rest", lambda sec, log=None, sleep=None: rests.append(sec))
     assert run_batch.regenerate_stale(limit=1) == 1
-    assert len(summarize.stale_bases()) == 1 and len(rests) == 1
+    # the limit is reached: no rest after the last one this run does
+    assert len(summarize.stale_bases()) == 1 and rests == []
     assert run_batch.regenerate_stale() == 1
-    assert summarize.stale_bases() == []
+    assert summarize.stale_bases() == [] and rests == []
+    assert json.loads(summarize._stale_path().read_text()) == {}
     for base in (a, b):
         d = _load(base)
         assert "ai_stale" not in d and d["ai_gist"]
@@ -313,6 +321,8 @@ def test_regeneration_stops_for_a_stop_request(owner, monkeypatch):
     d = _load(base)
     d = {"ai_stale": True, "ai_summary": "old", **d}
     config.meeting_file(base, ".json").write_text(json.dumps(d, indent=2))
+    config.index_set("mid-1", base)
+    summarize.stale_mark("mid-1", base)
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(control, "finish_requested", lambda: True)
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: pytest.fail("no call"))
@@ -400,3 +410,143 @@ def test_the_description_call_uses_the_chosen_think_setting(owner, monkeypatch):
     summarize.describe(base)
     summarize.describe(base, think=False)
     assert seen == [summarize.DESCRIPTION_THINK, False]
+
+
+# ------------------------------------------------- review findings 1-10 ---
+def _stale_meeting(base, mid, speech=True):
+    _meeting(base)
+    d = _load(base)
+    d.update({"meeting_id": mid, "ai_stale": True, "ai_summary": "old"})
+    if not speech:
+        d["segments"] = []
+    config.meeting_file(base, ".json").write_text(json.dumps(d))
+    config.index_set(mid, base)
+    summarize.stale_mark(mid, base)
+
+
+def test_finding1_the_whole_limit_leaves_room_for_the_think_budget():
+    on, off = summarize.ollama_whole_chars(True), summarize.ollama_whole_chars(False)
+    assert on < off
+    budget = summarize.DESCRIPTION_MAX_TOKENS + summarize.OLLAMA_THINK_TOKENS
+    tokens = on / summarize.OLLAMA_CHARS_PER_TOKEN + summarize.OLLAMA_FIXED_PROMPT_TOKENS
+    assert tokens + budget <= summarize.OLLAMA_NUM_CTX
+
+
+def test_finding1_a_long_meeting_goes_to_parts_with_think_on(owner, monkeypatch):
+    base = _meeting()
+    line = "[00:00] Owen Park: " + "budget " * 20 + "\n"
+    n = summarize.ollama_whole_chars(True) // len(line) + 50
+    mfile(base, ".txt").write_text(line * n)          # between the two limits
+    assert summarize.ollama_whole_chars(True) < len(line) * n < summarize.ollama_whole_chars(False)
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: "DECISIONS: none")
+    heading, body, parts = summarize._summary_source(base, "ollama", think=True)
+    assert parts > 1
+    assert summarize._summary_source(base, "ollama", think=False)[2] == 1
+
+
+def test_finding3_and_6_markdown_and_numbered_headers_parse():
+    f = summarize.parse_description("**DECISIONS:**\n- Move funds\n**NEXT STEPS:**\n"
+                                    "- [A] will x by y\n")
+    assert f["decisions"] == ["Move funds"] and f["next_steps"] == ["[A] will x by y"]
+    f = summarize.parse_description(
+        "1. SERIES: lt_weekly\n2. PERSON: none\n3. TOPIC: Budget\n4. GIST: Budget moved.\n"
+        "5. TAGS: math\n6. DECISIONS:\n1. One\n2. Two\n7. OPEN QUESTIONS:\n- none\n"
+        "8. NEXT STEPS:\n- [A] will x by y\n")
+    assert (f["series"], f["topic"], f["gist"], f["tags"]) == ("lt_weekly", "Budget",
+                                                                "Budget moved.", "math")
+    assert f["decisions"] == ["One", "Two"] and f["open_questions"] == []
+    f = summarize.parse_description("## **SERIES:** lt_weekly\n**GIST:** Budget moved.\n"
+                                    "Decisions were made later.\nDECISIONS: one thing\n")
+    assert f["series"] == "lt_weekly" and f["gist"] == "Budget moved."
+    assert f["decisions"] == ["one thing"]
+
+
+def test_finding5_catalog_names_normalize_to_ids():
+    assert series.normalize_series("LT Weekly Meeting") == "lt_weekly"
+    assert series.normalize_series("Weekly Check-in") == "weekly_checkin"
+    assert series.normalize_series("Robin Weekly Check-in") == "weekly_checkin"
+    assert series.normalize_series("Committee of the Whole.") == "board_cotw"
+
+
+def test_finding7_ollama_dying_after_the_probe_falls_back_to_mlx(owner, monkeypatch):
+    base = _meeting()
+    monkeypatch.setattr(summarize, "local_engine", lambda: "ollama")
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    seen = []
+
+    def gen(prompt, backend=None, **k):
+        seen.append(backend)
+        if backend == "ollama":
+            raise summarize.OllamaDown("gone")
+        return REPLY
+    monkeypatch.setattr(summarize, "_generate", gen)
+    desc = summarize.describe(base)
+    assert seen == ["ollama", "mlx"] and desc["engine"] == "mlx"
+    assert desc["series"] == "weekly_checkin"
+
+
+def test_finding10_gist_rules_see_the_unclipped_gist_and_whole_names(owner, monkeypatch):
+    assert "opens with a person" in summarize.gist_problems(
+        "James approved the budget.", ["James Lee"])
+    base = _meeting()
+    long = " ".join(["Budget"] + ["word"] * 30) + "."
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: REPLY.replace(
+        REPLY.split("GIST: ")[1].split("\n")[0], long))
+    desc = summarize.describe(base)
+    assert "long" in desc["gist_problems"]
+    assert len(desc["gist"].split()) == summarize.GIST_MAX_WORDS
+
+
+def test_finding4_regeneration_clears_no_speech_and_backs_off_failures(owner, monkeypatch):
+    import run_batch
+    _stale_meeting("Quiet 10012026", "mid-q", speech=False)
+    _stale_meeting("Bad 10022026", "mid-b")
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(config, "llm_rest", lambda *a, **k: 0)
+    # the store fails: suggest_title still answers, but nothing landed
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: REPLY)
+    monkeypatch.setattr(summarize, "store_description",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    assert run_batch.regenerate_stale() == 0
+    assert "ai_stale" not in _load("Quiet 10012026")      # no speech: flag cleared
+    idx = json.loads(summarize._stale_path().read_text())
+    assert list(idx) == ["mid-b"] and idx["mid-b"]["fails"] == 1
+    # backed off: the next run does not retry it
+    assert summarize.stale_bases() == []
+    import time as _t
+    assert summarize.stale_bases(now=_t.time() + summarize.STALE_BACKOFF_SEC + 1) == ["Bad 10022026"]
+
+
+def test_finding9_stale_lookup_reads_the_index_not_every_json(owner, monkeypatch):
+    _stale_meeting("Listed 10012026", "mid-l")
+    _meeting("Unlisted 10022026")
+    reads = []
+    real = Path.read_text
+
+    def spy(self, *a, **k):
+        if self.suffix == ".json" and self.parent.parent == config.meetings_dir():
+            reads.append(self.name)
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", spy)
+    assert summarize.stale_bases() == ["Listed 10012026"]
+    assert reads == ["Listed 10012026.json"]
+
+
+def test_finding9_auto_summarize_does_not_rest_after_the_last(sandbox, monkeypatch):
+    import run_batch
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda k, b=None: True)
+    rests = []
+    monkeypatch.setattr(config, "llm_rest", lambda sec, log=None, sleep=None: rests.append(sec))
+    assert run_batch.auto_summarize([("a", None), ("b", None), ("c", None)]) == 3
+    assert len(rests) == 2
+
+
+def test_a_redo_lists_the_meeting_in_the_stale_index(sandbox):
+    from stt import pipeline
+    meta = {"meeting_id": "mid-r"}
+    pipeline._title_fields(meta, {"source_file": "x.m4a", "ai_summary": "S"},
+                           Path("x.m4a"), SPOKEN)
+    assert meta["ai_stale"] is True
+    src = (Path(__file__).resolve().parent.parent / "stt" / "pipeline.py").read_text()
+    assert "_summ.stale_mark(meta[\"meeting_id\"], base)" in src

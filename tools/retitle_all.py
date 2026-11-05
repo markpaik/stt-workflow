@@ -260,7 +260,8 @@ def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
             except Exception as e:
                 proposals.append({**row, "skip": f"model failed: {str(e)[:160]}"})
                 log(f"[{i}/{len(bases)}] {base}: model failed ({e})")
-                config.llm_rest(time.monotonic() - t_one, log=log)
+                if i < len(bases):
+                    config.llm_rest(time.monotonic() - t_one, log=log)
                 continue
             _cache_put(key, sig, pv, desc)
             # the duty cycle (stt/config.py): rest after each meeting the
@@ -268,6 +269,9 @@ def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
             rest_after = time.monotonic() - t_one
         else:
             rest_after = None
+        # re-parse the stored reply with the current parser: a parser fix
+        # reaches cached meetings with no model call
+        desc = reparse(base, desc)
         trust, flags = assess(base, d, desc)
         new_base = _predict_base(desc["title"], d, base, taken)
         if new_base.lower() != base.lower():
@@ -285,6 +289,10 @@ def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
             "decisions": desc.get("decisions"), "open_questions": desc.get("open_questions"),
             "next_steps": desc.get("next_steps"), "trust": trust, "flags": flags,
             "model": desc.get("model"), "engine": desc.get("engine"),
+            # what --apply checks before it writes anything: the transcript
+            # and the diarization this description was written from
+            "words_sig": words_sig(d), "diar_sig": diar_sig(base),
+            "stale_at_dry_run": bool(d.get("ai_stale")),
             "parts": desc.get("parts"), "desc": desc, "skip": None})
         log(f"[{i}/{len(bases)}] {'(cached) ' if cached else ''}{desc.get('elapsed_sec', 0) if not cached else 0}s"
             f"  trust {trust:3d}  {desc.get('series')}")
@@ -298,6 +306,36 @@ def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
     _write_private(proposals_path(), json.dumps(doc, ensure_ascii=False, indent=1))
     _write_private(proposals_path().with_suffix(".tsv"), tsv(proposals))
     return doc
+
+
+def reparse(base: str, desc: dict) -> dict:
+    """`desc` rebuilt from its stored model reply with the current parser.
+    A reply cached without its context is re-read against the meeting as
+    it stands now. A desc with no reply is returned as it is."""
+    raw = desc.get("raw")
+    if not raw:
+        return desc
+    ctx = desc.get("ctx") or summarize.context_for(
+        base, old_title=dates.title_of(base), engine=desc.get("engine"),
+        parts=desc.get("parts") or 1, elapsed_sec=desc.get("elapsed_sec") or 0.0)
+    return summarize.build_description(raw, ctx)
+
+
+def words_sig(d: dict) -> str:
+    """The transcript's own text and timing, without speaker labels: a
+    naming or relabel leaves it alone, a Redo or a text edit changes it."""
+    rows = [(w.get("start"), w.get("end"), w.get("word")) for w in d.get("words") or []]
+    if not rows:
+        rows = [(x.get("start"), x.get("end"), x.get("text")) for x in d.get("segments") or []]
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def diar_sig(base: str) -> str:
+    p = config.meeting_file(base, ".diar.npz")
+    try:
+        return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
 
 
 def tsv(proposals: list) -> str:
@@ -361,6 +399,29 @@ def journal_state() -> dict:
     return st
 
 
+def progress() -> dict:
+    """{meeting_id: {begin, renamed, applied}} since the last undo of each
+    meeting. `renamed` is the folder name a landed rename gave it (journaled
+    as its own event, so a description that failed afterwards is still
+    known to have moved the folder). `applied` is True once the description
+    is written as well."""
+    st = {}
+    for e in journal_entries():
+        mid, ev = e.get("meeting_id"), e.get("event")
+        if not mid:
+            continue
+        if ev == "undo":
+            st.pop(mid, None)
+        elif ev == "begin":
+            st[mid] = {"begin": e, "renamed": None, "applied": False}
+        elif ev == "renamed" and mid in st:
+            st[mid]["renamed"] = e.get("new_base")
+        elif ev == "apply" and mid in st:
+            st[mid]["applied"] = True
+            st[mid]["renamed"] = e.get("new_base") or st[mid]["renamed"]
+    return st
+
+
 _BEFORE_KEYS = ("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS + ("ai_stale",)
 _MISSING = {"$missing": True}
 
@@ -379,7 +440,13 @@ def _current_base(mid: str, old_base: str):
 
 # ------------------------------------------------------------------ apply ---
 def apply(log=print, stop_on_batch=True) -> dict:
-    """Apply proposals.json. Resumable: the journal says what is done."""
+    """Apply proposals.json. Resumable: the journal says what is done.
+
+    Per meeting: a `begin` line with the fields as they were, the rename,
+    a `renamed` line, the description, an `apply` line. A rerun finishes a
+    meeting whose rename landed but whose description did not. Nothing is
+    written to a meeting whose transcript or diarization changed since the
+    dry run, or that a Redo made out of date since then."""
     why = busy_reason()
     if why:
         return {"ok": False, "error": why}
@@ -387,7 +454,7 @@ def apply(log=print, stop_on_batch=True) -> dict:
         doc = json.loads(proposals_path().read_text())
     except (OSError, ValueError):
         return {"ok": False, "error": f"no proposal file at {proposals_path()}: run the dry run first"}
-    state = journal_state()
+    prog = progress()
     counts = Counter()
     for p in doc.get("proposals", []):
         mid, old = p.get("meeting_id"), p.get("old_base")
@@ -398,8 +465,8 @@ def apply(log=print, stop_on_batch=True) -> dict:
             log("the batch started: stopping here. Run --apply again when it is idle.")
             counts["stopped for the batch"] += 1
             break
-        last = state.get(mid) if mid else None
-        if last and last.get("event") == "apply":
+        st = prog.get(mid) if mid else None
+        if st and st["applied"]:
             counts["already done"] += 1
             continue
         cur = _current_base(mid, old)
@@ -407,19 +474,32 @@ def apply(log=print, stop_on_batch=True) -> dict:
             log(f"  skip {old}: the meeting is gone")
             counts["gone"] += 1
             continue
-        resumed = bool(last and last.get("event") == "begin")
-        if cur != old and not resumed:
+        landed = st["renamed"] if st else None
+        if st and not landed and cur != old:
+            # the rename landed and the run stopped before it was journaled
+            landed = cur
+            _journal_append({"event": "renamed", "meeting_id": mid, "old_base": old,
+                             "new_base": cur, "recovered": True})
+        if landed and cur != landed:
+            log(f"  skip {old}: renamed by someone else after the retitle (now {cur})")
+            counts["renamed since the dry run"] += 1
+            continue
+        if not landed and cur != old:
             log(f"  skip {old}: renamed since the dry run (now {cur})")
             counts["renamed since the dry run"] += 1
             continue
-        jf = config.meeting_file(cur, ".json")
         try:
-            d = json.loads(jf.read_text())
+            d = json.loads(config.meeting_file(cur, ".json").read_text())
         except (OSError, ValueError):
             counts["unreadable"] += 1
             continue
+        changed = _changed_since(p, d, cur)
+        if changed:
+            log(f"  skip {old}: {changed}. Run the dry run again for it.")
+            counts["changed since the dry run"] += 1
+            continue
         title = p["new_title"]
-        if cur == old:
+        if not landed:
             _journal_append({"event": "begin", "meeting_id": mid, "old_base": old,
                              "planned_base": p.get("new_base"),
                              "before": _before_fields(d)})
@@ -430,50 +510,60 @@ def apply(log=print, stop_on_batch=True) -> dict:
                 log(f"  FAILED {old}: {r.get('error')}")
                 counts["failed"] += 1
                 continue
-            new_base = r["base"]
-        else:
-            new_base = cur      # a resumed meeting: the rename already landed
+            landed = r["base"]
+            _journal_append({"event": "renamed", "meeting_id": mid, "old_base": old,
+                             "new_base": landed})
         try:
-            summarize.store_description(new_base, p["desc"], title=title)
+            summarize.store_description(landed, p["desc"], title=title)
         except Exception as e:
             _journal_append({"event": "fail", "meeting_id": mid, "old_base": old,
-                             "error": f"description: {e}"})
-            log(f"  FAILED description for {new_base}: {e}")
+                             "new_base": landed, "error": f"description: {e}"})
+            log(f"  FAILED description for {landed}: {e} (the rename stays; "
+                "a rerun finishes it)")
             counts["failed"] += 1
             continue
         _journal_append({"event": "apply", "meeting_id": mid, "old_base": old,
-                         "new_base": new_base})
+                         "new_base": landed})
         counts["applied"] += 1
-        log(f"  {old}  ->  {new_base}")
+        log(f"  {old}  ->  {landed}")
     return {"ok": True, "counts": dict(counts)}
 
 
+def _changed_since(p: dict, d: dict, base: str):
+    """Why the meeting no longer matches its proposal, else None."""
+    if not p.get("words_sig"):
+        return "the proposal has no transcript signature (an older dry run)"
+    if words_sig(d) != p["words_sig"]:
+        return "its transcript changed since the dry run"
+    if diar_sig(base) != (p.get("diar_sig") or ""):
+        return "its speaker diarization changed since the dry run"
+    if d.get("ai_stale") and not p.get("stale_at_dry_run"):
+        return "a Redo made its description out of date after the dry run"
+    return None
+
+
 def undo(dry: bool = True, log=print) -> dict:
-    """Reverse every applied rename in the journal: the old name and the
-    fields as they were. A dry run prints the plan only."""
+    """Reverse every rename in the journal that landed, described or not:
+    the old name and the fields as they were. A dry run prints the plan."""
     if not dry:
         why = busy_reason()
         if why:
             return {"ok": False, "error": why}
-    begins = {}
-    for e in journal_entries():
-        if e.get("event") == "begin":
-            begins[e["meeting_id"]] = e
     counts = Counter()
-    for mid, last in journal_state().items():
-        if last.get("event") != "apply":
+    for mid, st in progress().items():
+        if not st["renamed"] and not st["applied"]:
             continue
-        b = begins.get(mid) or {}
-        cur = _current_base(mid, last.get("new_base"))
+        b = st["begin"]
+        old = b["old_base"]
+        cur = _current_base(mid, st["renamed"])
         if cur is None:
             counts["gone"] += 1
             continue
-        old = last["old_base"]
         log(f"  {cur}  ->  {old}")
         if dry:
             counts["would undo"] += 1
             continue
-        if not dry and batch_running():
+        if batch_running():
             log("the batch started: stopping here.")
             break
         r = summarize.apply_meeting_edits(cur, title=old, retitle=True)
@@ -494,6 +584,9 @@ def undo(dry: bool = True, log=print) -> dict:
                 else:
                     d[k] = v
             summarize._write_json(j, d)
+        if d.get("ai_stale"):
+            # back out of date, as it was: the batch's index lists it again
+            summarize.stale_mark(mid, r["base"])
         _journal_append({"event": "undo", "meeting_id": mid, "old_base": old,
                          "new_base": cur, "restored_base": r["base"]})
         counts["undone"] += 1

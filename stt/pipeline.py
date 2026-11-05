@@ -560,6 +560,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         try:
             if Path(dest_dir).resolve() == config.meetings_dir().resolve():
                 config.index_set(meta["meeting_id"], base)
+                if meta.get("ai_stale"):
+                    # the batch finds out-of-date descriptions from this
+                    # small index, never by reading every meeting's json
+                    from . import summarize as _summ
+                    _summ.stale_mark(meta["meeting_id"], base)
         except OSError:
             pass
         if verify_regions is not None:

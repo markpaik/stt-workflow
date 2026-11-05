@@ -192,16 +192,23 @@ def exact_series(old_title: str):
 
 
 def normalize_series(raw: str) -> str:
-    """A series id from the model's SERIES line: an exact id, a catalog
-    name, else ONE_OFF."""
-    s = re.sub(r"[`'\"*]", "", str(raw or "")).strip().lower()
-    s = s.split()[0] if s else ""
-    s = s.rstrip(".,;:")
-    if s in BY_ID:
-        return s
-    if s.replace("-", "_") in BY_ID:
-        return s.replace("-", "_")
-    return ONE_OFF
+    """A series id from the model's SERIES line: an id ('lt_weekly',
+    'weekly-checkin'), or a catalog name, with or without its person
+    ('LT Weekly Meeting', 'Weekly Check-in', 'Robin Weekly Check-in').
+    Anything else is ONE_OFF."""
+    s = re.sub(r"[`'\"*]", "", str(raw or "")).strip().rstrip(".,;:")
+    if not s:
+        return ONE_OFF
+    tok = s.split()[0].lower().rstrip(".,;:")
+    for k in (tok, tok.replace("-", "_")):
+        if k in BY_ID:
+            return k
+    low = re.sub(r"\s+", " ", s).lower()
+    for sr in SERIES:
+        if low == sr.template.replace("{person}", "").strip().lower():
+            return sr.id
+    sid, _ = exact_series(s)
+    return sid or ONE_OFF
 
 
 def normalize_tags(raw) -> list:

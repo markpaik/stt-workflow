@@ -228,7 +228,9 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
                 return _generate_ollama(prompt, max_tokens, think)
         except OllamaDown:
             if backend == "ollama" or not LLM_PY.exists():
-                raise RuntimeError("the local model (Ollama) is not reachable")
+                # still an OllamaDown: describe() catches it, re-sizes the
+                # prompt for the 8B model and falls back to MLX
+                raise OllamaDown("the local model (Ollama) is not reachable")
             _ollama_seen.update(at=time.monotonic(), up=False)
             # the fallback: Qwen3-8B, under the same lock semantics below
 
@@ -517,11 +519,25 @@ SUMMARY_CLOUD_WHOLE_CHARS = 400_000   # ~100k tokens, inside every cloud model
 # Qwen 3.8 on Ollama, sized from a measured run (2026-11-05): with num_ctx
 # 65536 the server loads a 65536-token context (api/ps), and a 230,000-char
 # transcript (61,762 prompt tokens, ~3.7 characters a token) kept a note
-# placed at its start AND one at its end. The whole-transcript limit leaves
-# room for the ~2,000-token fixed prompt and the 3,000-token answer:
-# (65,536 - 5,500) tokens x 3.5 characters, rounded down. Only the two
-# longest meetings in the library go through part notes.
-SUMMARY_OLLAMA_WHOLE_CHARS = 210_000
+# placed at its start AND one at its end. The whole-transcript limit is
+# what is left of the window after the answer budget (num_predict, which
+# with think on also holds the reasoning trace) and the fixed prompt, at a
+# careful 3.5 characters a token: ollama_whole_chars(think).
+OLLAMA_FIXED_PROMPT_TOKENS = 2500
+OLLAMA_CHARS_PER_TOKEN = 3.5
+DESCRIPTION_MAX_TOKENS = 3000
+
+
+def ollama_whole_chars(think: bool, max_tokens: int = None) -> int:
+    """The longest transcript one Ollama prompt holds whole, rounded down
+    to 5,000 characters: 210,000 with think off, 195,000 with it on."""
+    answer = (DESCRIPTION_MAX_TOKENS if max_tokens is None else max_tokens) + (
+        OLLAMA_THINK_TOKENS if think else 0)
+    room = OLLAMA_NUM_CTX - answer - OLLAMA_FIXED_PROMPT_TOKENS
+    return int(room * OLLAMA_CHARS_PER_TOKEN) // 5000 * 5000
+
+
+SUMMARY_OLLAMA_WHOLE_CHARS = 210_000   # think off; see ollama_whole_chars
 SUMMARY_OLLAMA_PART_CHARS = 150_000
 SUMMARY_MAX_LEVELS = 3
 
@@ -565,7 +581,7 @@ def _part_prompt(i: int, n: int, text: str, notes: bool) -> str:
     )
 
 
-def _summary_source(base: str, backend: str) -> tuple:
+def _summary_source(base: str, backend: str, think: bool = False) -> tuple:
     """(heading, body, parts) for the final summary prompt: the whole
     transcript when it fits, else the notes on every part. `parts` is 1 for
     a whole transcript and the number of transcript parts otherwise. The
@@ -573,7 +589,8 @@ def _summary_source(base: str, backend: str) -> tuple:
     its words into the title."""
     txt = _model_text(base)
     if backend == "ollama":
-        whole, part_size = SUMMARY_OLLAMA_WHOLE_CHARS, SUMMARY_OLLAMA_PART_CHARS
+        whole = ollama_whole_chars(think)
+        part_size = min(SUMMARY_OLLAMA_PART_CHARS, ollama_whole_chars(False))
     elif backend in ("local", "mlx"):
         whole, part_size = SUMMARY_WHOLE_CHARS, SUMMARY_PART_CHARS
     else:
@@ -702,52 +719,66 @@ def description_prompt(heading: str, source: str, old_title: str = "",
     return fixed + meeting + source
 
 
+_HEADS = {"SERIES": "series", "PERSON": "person", "TOPIC": "topic",
+          "GIST": "gist", "TAGS": "tags", "TITLE": "title", "SUMMARY": "summary",
+          "DECISIONS": "decisions", "OPEN QUESTIONS": "open_questions",
+          "NEXT STEPS": "next_steps"}
+_LIST_FIELDS = ("decisions", "open_questions", "next_steps")
+# a header line as the model may dress it: "## 1. **DECISIONS:**", "SERIES:",
+# "6) Open questions:", "**Next steps**". The header word must end the line
+# or meet a colon, so a sentence that starts with "Decisions were..." is text.
+_HEAD_RX = re.compile(
+    r"^(?:[#>]+\s*)?(?:\d+[.)]\s*)?[*_`]*\s*(" + "|".join(_HEADS) + r")\s*[*_`]*\s*"
+    r"(?::|$)\s*[*_`]*\s*(.*)$", re.I)
+_ITEM_RX = re.compile(r"^(?:[-•*]|\d+[.)])\s*")
+
+
+def _clean_value(v: str) -> str:
+    """A header's value without markdown emphasis around it."""
+    return re.sub(r"^[*_`\s]+|[*_`\s]+$", "", str(v or ""))
+
+
 def parse_description(out: str) -> dict:
     """The model's reply as fields. Tolerates a missing section, bullets
-    of any kind, and an older reply in the TITLE/SUMMARY format (its
+    of any kind, numbered or markdown headers ("1. SERIES: ...",
+    "**DECISIONS:**"), and an older reply in the TITLE/SUMMARY format (its
     summary becomes the gist source)."""
     f = {"series": "", "person": "", "topic": "", "gist": "", "tags": "",
          "decisions": [], "open_questions": [], "next_steps": [],
          "title": "", "summary": []}
-    heads = {"SERIES": "series", "PERSON": "person", "TOPIC": "topic",
-             "GIST": "gist", "TAGS": "tags", "TITLE": "title"}
-    lists = {"DECISIONS": "decisions", "OPEN QUESTIONS": "open_questions",
-             "NEXT STEPS": "next_steps"}
     mode = None
+
+    def add(field, text):
+        item = _clean_value(_ITEM_RX.sub("", _clean_value(text)))
+        if item and item != "-" and item.lower() not in _NONE_ITEMS:
+            f[field].append(item)
+
     for line in (out or "").splitlines():
         raw = line.strip()
-        u = re.sub(r"^[#*\s]+|[*]+", "", raw).upper()
-        hit = False
-        for h, k in lists.items():
-            if u.startswith(h):
-                mode, hit = k, True
-                rest = raw.split(":", 1)[1].strip() if ":" in raw else ""
-                if rest and rest.lower() not in _NONE_ITEMS and rest != "-":
-                    f[k].append(rest.lstrip("-•* ").strip())
-                break
-        if hit:
-            continue
-        for h, k in heads.items():
-            if u.startswith(h + ":"):
-                f[k] = raw.split(":", 1)[1].strip().strip("*").strip()
-                mode, hit = (k if k == "gist" else None), True
-                break
-        if hit:
-            continue
-        if u.startswith("SUMMARY:"):
-            f["summary"].append(raw.split(":", 1)[1].strip())
-            mode = "summary"
-            continue
         if not raw:
             continue
-        if mode in lists.values() and re.match(r"^([-•*]|\d+[.)])\s*", raw):
-            item = re.sub(r"^([-•*]|\d+[.)])\s*", "", raw).strip()
-            if item and item.lower() not in _NONE_ITEMS:
-                f[mode].append(item)
+        m = _HEAD_RX.match(raw)
+        if m:
+            k = _HEADS[re.sub(r"\s+", " ", m.group(1).upper())]
+            rest = _clean_value(m.group(2))
+            if k in _LIST_FIELDS:
+                mode = k
+                if rest:
+                    add(k, rest)
+            elif k == "summary":
+                mode = "summary"
+                if rest:
+                    f["summary"].append(rest)
+            else:
+                f[k] = rest
+                mode = k if k == "gist" else None
+            continue
+        if mode in _LIST_FIELDS and _ITEM_RX.match(raw):
+            add(mode, raw)
         elif mode == "summary":
             f["summary"].append(raw)
         elif mode == "gist" and not f["gist"]:
-            f["gist"] = raw
+            f["gist"] = _clean_value(raw)
     f["summary"] = " ".join(x for x in f["summary"] if x)
     return f
 
@@ -789,7 +820,9 @@ def gist_problems(gist: str, people=(), series_name: str = "") -> list:
         out.append("opens with the meeting")
     if _GIST_DATE.match(g):
         out.append("opens with a date")
-    first = g.split()[0].strip(",.'’s")
+    # the first word without punctuation or a possessive ("Robin's"). The
+    # old strip took every trailing "s", so "James" never matched.
+    first = re.sub(r"['\u2019]s$", "", g.split()[0]).strip(",.;:!?\"'")
     if any(first and first == (p.split() or [""])[0] for p in people):
         out.append("opens with a person")
     if series_name and g.lower().startswith(series_name.lower()[:12]):
@@ -804,29 +837,82 @@ def gist_problems(gist: str, people=(), series_name: str = "") -> list:
 DESCRIPTION_THINK = True
 
 
+def _roster_snapshot(d: dict) -> dict:
+    """The parts of a meeting json a description is templated against: the
+    roster and each line's speaker and times. Small enough to cache."""
+    return {"speakers": [dict(x) for x in d.get("speakers") or []],
+            "segments": [{"start": x.get("start"), "end": x.get("end"),
+                          "speaker": x.get("speaker")} for x in d.get("segments") or []]}
+
+
 def describe(base: str, old_title: str = None, backend: str = None,
              think: bool = None) -> dict:
     """Run the model over one meeting and return its description, title
     parts and speaker template. Writes nothing (the retitle dry run uses
     this). Raises on a model failure. `backend` defaults to the meeting's
-    allowed backend, so a strict meeting never reaches a cloud LLM."""
-    from . import dates, series, speaker_text
+    allowed backend, so a strict meeting never reaches a cloud LLM.
+
+    One model call per meeting, unless the transcript is longer than one
+    prompt holds (_summary_source). When Ollama stops answering after the
+    probe, the meeting is re-sized for Qwen3-8B and runs on MLX, as the
+    README promises. The reply (`raw`) and the context it was read in
+    (`ctx`) are part of the result, so build_description() can re-parse a
+    cached reply with no model call."""
+    from . import dates, series
     backend = backend or _backend_for(base)
     engine = local_engine() if backend == "local" else backend
+    think = DESCRIPTION_THINK if think is None else bool(think)
     j = config.meeting_file(base, ".json")
     snap = json.loads(j.read_text())         # the roster the model will read
-    raw_turns = speaker_text.load_raw_turns(base)
-    heading, source, parts = _summary_source(base, engine)
     owner = _owner()
     people = _named_roster(snap)
     old_title = dates.title_of(base) if old_title is None else old_title
     # a title that IS a catalog series name: code makes the series choice
-    exact_sid, exact_person = series.exact_series(old_title)
-    prompt = description_prompt(heading, source, old_title, people, owner,
-                                known_series=exact_sid)
+    exact_sid, _ = series.exact_series(old_title)
     t0 = time.monotonic()
-    think = DESCRIPTION_THINK if think is None else bool(think)
-    out = _generate(prompt, max_tokens=3000, backend=engine, think=think)
+
+    def run(eng):
+        heading, source, parts = _summary_source(base, eng, think=think)
+        prompt = description_prompt(heading, source, old_title, people, owner,
+                                    known_series=exact_sid)
+        return _generate(prompt, max_tokens=DESCRIPTION_MAX_TOKENS, backend=eng,
+                         think=think), parts
+    try:
+        out, parts = run(engine)
+    except OllamaDown:
+        if backend != "local" or not LLM_PY.exists():
+            raise
+        _ollama_seen.update(at=time.monotonic(), up=False)
+        engine = "mlx"
+        out, parts = run(engine)
+    ctx = {"v": 1, "base": base, "old_title": old_title, "owner": owner,
+           "people": people, "snap": _roster_snapshot(snap), "parts": parts,
+           "engine": engine, "elapsed_sec": round(time.monotonic() - t0, 1)}
+    return build_description(out, ctx)
+
+
+def context_for(base: str, old_title: str = None, engine: str = None, parts: int = 1,
+                elapsed_sec: float = 0.0) -> dict:
+    """A description context from the meeting as it stands now: for a
+    cached reply that was stored without its own context."""
+    from . import dates
+    d = json.loads(config.meeting_file(base, ".json").read_text())
+    return {"v": 1, "base": base,
+            "old_title": dates.title_of(base) if old_title is None else old_title,
+            "owner": _owner(), "people": _named_roster(d), "snap": _roster_snapshot(d),
+            "parts": parts, "engine": engine or local_engine(),
+            "elapsed_sec": elapsed_sec}
+
+
+def build_description(out: str, ctx: dict) -> dict:
+    """The description from a model reply `out` read in context `ctx`
+    (describe). Pure apart from reading the diar cache and the enrolled
+    names: no model call, so a cached reply re-parses with a fixed parser."""
+    from . import series, speaker_text
+    base, snap = ctx["base"], ctx["snap"]
+    owner, people = ctx.get("owner") or "", list(ctx.get("people") or [])
+    raw_turns = speaker_text.load_raw_turns(base)
+    exact_sid, exact_person = series.exact_series(ctx.get("old_title") or "")
     f = parse_description(out)
     # a reply in the older TITLE/SUMMARY shape (a cloud model that kept to
     # it) keeps its prose summary and free title: there is no series to
@@ -842,13 +928,17 @@ def describe(base: str, old_title: str = None, backend: str = None,
                                             known=known, me=owner)
     person = series.label_people(person_full, known + people) if person_full else ""
     topic_src = f["topic"] or f["title"]
+    series_name = (series.BY_ID[sid].name(person) if sid in series.BY_ID else "")
     if legacy:
         title = re.sub(r'[<>:"/\\|?*]', "", f["title"]).strip() or "Untitled Meeting"
-        gist = ""
+        gist, problems = "", []
         fields = {"summary": f["summary"], "next_steps": f["next_steps"]}
     else:
         title = series.build_title(sid, topic_src, person)
-        gist = clip_gist(f["gist"] or f["summary"].split(". ")[0])
+        raw_gist = f["gist"] or f["summary"].split(". ")[0]
+        # checked BEFORE clipping, or "long" could never fire
+        problems = gist_problems(raw_gist, people + ([owner] if owner else []), series_name)
+        gist = clip_gist(raw_gist)
         fields = {"gist": gist, "decisions": f["decisions"],
                   "open_questions": f["open_questions"], "next_steps": f["next_steps"]}
     if fields.get("next_steps"):
@@ -856,23 +946,22 @@ def describe(base: str, old_title: str = None, backend: str = None,
     tags = series.normalize_tags(f["tags"])
     tmpl = speaker_text.make(fields, snap, raw_turns)
     rendered = speaker_text.render(tmpl, snap)
-    series_name = (series.BY_ID[sid].name(person) if sid in series.BY_ID else "")
+    engine = ctx.get("engine")
     return {
         "series": sid, "series_raw": f["series"], "series_by_code": bool(exact_sid),
         "person": person,
         "person_raw": f["person"], "person_full": person_full,
         "topic": series.split_title(title)[1] if sid in series.BY_ID else title,
         "topic_raw": topic_src, "title": title,
-        "gist": rendered.get("ai_gist", gist), "gist_problems": [] if legacy else
-            gist_problems(gist, people + ([owner] if owner else []), series_name),
+        "gist": rendered.get("ai_gist", gist), "gist_problems": problems,
         "tags": tags, "tags_raw": f["tags"],
         "decisions": rendered.get("ai_decisions", []),
         "open_questions": rendered.get("ai_open_questions", []),
         "next_steps": rendered.get("ai_next_steps", []),
         "summary": rendered.get("ai_summary", gist or f["summary"]),
-        "tmpl": tmpl, "parts": parts, "engine": engine,
+        "tmpl": tmpl, "parts": ctx.get("parts", 1), "engine": engine,
         "model": local_model_name(engine) if engine in ("ollama", "mlx") else engine,
-        "elapsed_sec": round(time.monotonic() - t0, 1), "raw": out,
+        "elapsed_sec": ctx.get("elapsed_sec", 0.0), "raw": out, "ctx": ctx,
     }
 
 
@@ -893,6 +982,7 @@ def store_description(base: str, desc: dict, title: str = None) -> dict:
             labels.setdefault(k, v)
         rendered = speaker_text.render(tmpl, d, labels)
         d.pop("ai_stale", None)
+        stale_clear(d.get("meeting_id") or f"base:{base}")
         if "gist" not in (tmpl.get("fields") or {}):
             # an older-shaped reply: no gist or sections, so none may linger
             for k in ("ai_gist", "ai_decisions", "ai_open_questions"):
@@ -929,13 +1019,15 @@ def suggest_title(base: str) -> dict:
     if not has_speech(base):
         return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
     desc = describe(base)
-    rendered = {}
+    rendered, stored = {}, False
     try:
         rendered = store_description(base, desc)
-    except Exception:
-        pass
+        stored = True
+    except Exception as e:
+        # the reply still goes back to the panel; `stored` says it did not land
+        print(f"   description not stored for {base}: {e}", file=sys.stderr, flush=True)
     title = desc["title"]
-    return {"title": title,
+    return {"title": title, "stored": stored,
             "summary": rendered.get("ai_summary", desc["summary"]),
             "gist": rendered.get("ai_gist", desc["gist"]),
             "decisions": rendered.get("ai_decisions", desc["decisions"]),
@@ -947,41 +1039,125 @@ def suggest_title(base: str) -> dict:
             "parts": desc["parts"]}
 
 
-def mark_stale(d: dict) -> bool:
-    """Mark a meeting json's description out of date (a Redo re-clustered
-    the voices). The text stays readable. The speaker template goes: its
-    cluster ids name voices the Redo replaced. Returns True if marked."""
-    if not (d.get("ai_summary") or d.get("ai_gist")):
-        return False
-    d["ai_stale"] = True
-    d.pop("ai_tmpl", None)
-    return True
+# --- the out-of-date index -------------------------------------------------
+# A Redo marks a description out of date (ai_stale in the json) AND lists the
+# meeting here, keyed by meeting_id. The batch reads only this small file
+# when it is idle, never every meeting's json. A failed regeneration backs
+# the meeting off: STALE_BACKOFF_SEC doubled per failure, capped at a day.
+STALE_INDEX_NAME = "stale_descriptions.json"
+STALE_BACKOFF_SEC = 900
+STALE_BACKOFF_MAX_SEC = 86400
 
 
-def stale_bases() -> list:
-    """Live meetings whose description a Redo left out of date, shortest
-    transcript first (the batch regenerates them when idle)."""
-    out = []
-    for b in config.meeting_bases():
-        j = config.meeting_file(b, ".json")
+def _stale_path() -> Path:
+    return config.PROJECT_DIR / STALE_INDEX_NAME
+
+
+@contextlib.contextmanager
+def _stale_index():
+    """The index under its own flock: pipeline workers, the batch and the
+    panel all write it."""
+    p = _stale_path()
+    with open(p.with_suffix(".lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
         try:
-            # a bounded read, as config.id_of does: the pipeline writes the
-            # flag among the metadata, ahead of the multi-megabyte segments
-            # and words, so a library scan never parses whole transcripts
-            with open(j, "rb") as fh:
-                head = fh.read(STALE_HEAD_BYTES)
-            if not re.search(rb'"ai_stale":\s*true', head):
-                continue
-            if not json.loads(j.read_text()).get("ai_stale"):
-                continue
-            size = config.meeting_file(b, ".txt").stat().st_size
+            try:
+                idx = json.loads(p.read_text())
+                if not isinstance(idx, dict):
+                    idx = {}
+            except (OSError, ValueError):
+                idx = {}
+            before = json.dumps(idx, sort_keys=True)
+            yield idx
+            if json.dumps(idx, sort_keys=True) != before:
+                tmp = p.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(idx, indent=1, ensure_ascii=False))
+                os.replace(tmp, p)
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
+
+
+def _stale_key(base: str) -> str:
+    return config.id_of(base) or f"base:{base}"
+
+
+def stale_mark(key: str, base: str):
+    with _stale_index() as idx:
+        idx[key] = {"base": base, "fails": 0, "next_after": 0}
+
+
+def stale_clear(key: str):
+    try:
+        with _stale_index() as idx:
+            idx.pop(key, None)
+    except OSError:
+        pass
+
+
+def clear_stale(base: str) -> bool:
+    """Drop a meeting's out-of-date flag without regenerating (a meeting
+    with no speech has nothing to describe)."""
+    from . import review
+    j = config.meeting_file(base, ".json")
+    with review.lock_meeting(base):
+        try:
+            d = json.loads(j.read_text())
         except (OSError, ValueError):
+            return False
+        had = d.pop("ai_stale", None) is not None
+        if had:
+            _write_json(j, d)
+    stale_clear(_stale_key(base))
+    return had
+
+
+def stale_failed(base: str, error: str = "") -> int:
+    """Count one failed regeneration and back the meeting off. Returns the
+    failure count."""
+    key = _stale_key(base)
+    with _stale_index() as idx:
+        e = idx.setdefault(key, {"base": base, "fails": 0, "next_after": 0})
+        e["fails"] = int(e.get("fails") or 0) + 1
+        e["next_after"] = time.time() + min(STALE_BACKOFF_MAX_SEC,
+                                            STALE_BACKOFF_SEC * 2 ** (e["fails"] - 1))
+        e["error"] = str(error)[:200]
+        return e["fails"]
+
+
+def stale_bases(now: float = None) -> list:
+    """Live meetings whose description a Redo left out of date and that are
+    due (not backed off), shortest transcript first. Reads the index, and
+    the json of the listed meetings only. An entry whose meeting is gone or
+    no longer stale is dropped."""
+    now = time.time() if now is None else now
+    try:
+        with _stale_index() as idx:
+            items = list(idx.items())
+    except OSError:
+        return []
+    out, drop = [], []
+    for key, e in items:
+        base = (config.base_of(key) if not key.startswith("base:") else None) \
+            or e.get("base") or key[5:]
+        try:
+            d = json.loads(config.meeting_file(base, ".json").read_text())
+        except (OSError, ValueError):
+            drop.append(key)
             continue
-        out.append((size, b))
+        if not d.get("ai_stale"):
+            drop.append(key)
+            continue
+        if float(e.get("next_after") or 0) > now:
+            continue
+        try:
+            size = config.meeting_file(base, ".txt").stat().st_size
+        except OSError:
+            size = 0
+        out.append((size, base))
+    for key in drop:
+        stale_clear(key)
     return [b for _, b in sorted(out)]
 
-
-STALE_HEAD_BYTES = 262_144
 
 
 def _unique_base(candidate: str, current: str) -> str:

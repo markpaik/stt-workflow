@@ -241,32 +241,46 @@ def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
     set by a Redo), shortest transcript first. Runs only when the batch is
     idle: the caller calls it after the queue is done, and it stops early
     when a "stop after this file" is asked or a panel job is queued. The
-    meeting's title is never touched. A failure is printed and never breaks
-    the run. Returns how many were regenerated."""
+    meeting's title is never touched. Only a description that was really
+    stored counts. A meeting with no speech has its flag cleared. A failure
+    backs the meeting off (summarize.stale_failed), so one bad meeting is
+    not retried on every run. Returns how many were regenerated."""
     from stt import status as st, summarize
     if limit <= 0 or not summarize.available():
         return 0
+    todo = summarize.stale_bases()
     n = 0
-    for base in summarize.stale_bases():
+    for i, base in enumerate(todo):
         if n >= limit or control.finish_requested() or jobs.items():
             break
+        if not summarize.has_speech(base):
+            summarize.clear_stale(base)
+            print(f"   no speech in {base}: out-of-date flag cleared", flush=True)
+            continue
         print(f"   refreshing the out-of-date description of {base}", flush=True)
         t0 = time.monotonic()
+        ok, why = False, ""
         try:
             st.set_stage(base, "summarizing", base=base)
             r = summarize.suggest_title(base)
-            if isinstance(r, dict) and r.get("ok") is False:
-                print(f"   description not refreshed for {base}: {r.get('error')}",
-                      file=sys.stderr, flush=True)
+            if isinstance(r, dict) and r.get("stored"):
+                ok = True
             else:
-                n += 1
+                why = (r or {}).get("error") or "the description was not stored"
         except Exception as e:
-            print(f"   description refresh failed for {base}: {e}",
-                  file=sys.stderr, flush=True)
+            why = str(e)
         finally:
             st.clear_stage(base)
-        # the duty cycle (stt/config.py): rest after each one
-        config.llm_rest(time.monotonic() - t0, log=print)
+        if ok:
+            n += 1
+        else:
+            fails = summarize.stale_failed(base, why)
+            print(f"   description refresh failed for {base} ({fails} so far, "
+                  f"backing off): {why}", file=sys.stderr, flush=True)
+        # the duty cycle (stt/config.py): rest after each one, except the
+        # last this run will do
+        if n < limit and i + 1 < len(todo):
+            config.llm_rest(time.monotonic() - t0, log=print)
     return n
 
 
@@ -316,13 +330,15 @@ def auto_summarize(keys) -> int:
         print("  (auto-summary skipped: local LLM not installed)")
         return 0
     n = 0
-    for item in keys:  # (key, resolved_base) pairs; bare keys tolerated
+    keys = list(keys)
+    for i, item in enumerate(keys):  # (key, resolved_base) pairs; bare keys tolerated
         key, base = item if isinstance(item, tuple) else (item, None)
         t0 = time.monotonic()
         did = bool(summarize_one(key, base))
         n += did
-        if did:
-            # the duty cycle: rest after each summary the model wrote
+        if did and i + 1 < len(keys):
+            # the duty cycle: rest after each summary the model wrote,
+            # never after the last one
             config.llm_rest(time.monotonic() - t0, log=print)
     return n
 
