@@ -214,7 +214,7 @@ def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert summarize._generate("hi") == "mlx"
-    assert seen[0][:3] == ["nice", "-n", "10"]
+    assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", "10"]
 
 
 def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
@@ -232,17 +232,34 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
     renice = [c for c in calls if c[0] == "renice"]
     assert {c[-1] for c in renice} == {"101", "202", "303"}
     assert all(c[1:3] == ["-n", "10"] for c in renice)
+    # background QoS too: it lowers the GPU priority that nice cannot
+    qos = [c for c in calls if c[0] == "taskpolicy"]
+    assert {c[-1] for c in qos} == {"101", "202", "303"}
+    assert all(c[1:3] == ["-b", "-p"] for c in qos)
 
 
 def test_hardware_settings_come_from_stt_env(sandbox, monkeypatch):
     monkeypatch.delenv("STT_LLM_REST_MIN_SEC", raising=False)
     monkeypatch.delenv("STT_LLM_REST_RATIO", raising=False)
+    from datetime import datetime
+    day, night = datetime(2026, 11, 5, 14, 0), datetime(2026, 11, 5, 23, 30)
     assert config.llm_nice() == 10
-    assert config.llm_rest_seconds(10) == 20          # the floor
-    assert config.llm_rest_seconds(100) == 50         # half the work time
-    (sandbox / "stt.env").write_text("STT_LLM_REST_RATIO=1\nSTT_LLM_REST_MIN_SEC=5\nSTT_LLM_NICE=15\n")
-    assert config.llm_rest_seconds(2) == 5 and config.llm_rest_seconds(30) == 30
+    assert config.llm_rest_seconds(10, now=day) == 20         # the floor
+    assert config.llm_rest_seconds(100, now=day) == 100       # 1.0 x the work
+    assert config.llm_rest_seconds(100, now=night) == 0       # night ratio 0
+    assert config.llm_quiet_now(datetime(2026, 11, 5, 7, 0))
+    assert not config.llm_quiet_now(datetime(2026, 11, 5, 22, 0))
+    (sandbox / "stt.env").write_text(
+        "STT_LLM_REST_RATIO=0.5\nSTT_LLM_REST_MIN_SEC=5\nSTT_LLM_NICE=15\n"
+        "STT_LLM_QUIET_HOURS=22:00-06:00\nSTT_LLM_REST_RATIO_NIGHT=0.25\n")
+    assert config.llm_quiet_now(night) and not config.llm_quiet_now(day)
+    assert config.llm_rest_seconds(2, now=night) == 5
+    assert config.llm_rest_seconds(40, now=night) == 20
+    assert config.llm_rest_seconds(40, now=day) == 10
     assert config.llm_nice() == 15
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=garbage\n")
+    assert config.llm_quiet_now(day)                          # the default window
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=00:00-00:00\nSTT_LLM_REST_RATIO=1\n")
     slept, logs = [], []
     assert config.llm_rest(30, log=logs.append, sleep=slept.append) == 30
     assert slept == [30] and "resting 30s" in logs[0]
@@ -335,3 +352,32 @@ def test_search_indexes_tag_labels(sandbox):
     from stt import search
     txt = search._summary_text({"ai_title": "T", "ai_summary": "S", "ai_tags": ["math", "nope"]})
     assert "Math" in txt and "nope" in txt
+
+
+def test_a_title_that_is_a_series_name_fixes_the_series_in_code(owner, monkeypatch):
+    base = _meeting("Robin Weekly Check-in 10012026")
+    prompts = []
+    # the model names another series: code keeps the exact match
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: prompts.append(p) or
+                        REPLY.replace("SERIES: weekly_checkin", "SERIES: lt_weekly")
+                        .replace("PERSON: Robin Cole", "PERSON: none"))
+    desc = summarize.describe(base)
+    assert desc["series"] == "weekly_checkin" and desc["series_by_code"] is True
+    assert desc["person"] == "Robin"
+    assert "The series is known: weekly_checkin" in prompts[0]
+    assert series.exact_series("Sam and Robin C. Weekly Check-in") == (
+        "weekly_checkin", "Sam and Robin C.")
+    assert series.exact_series("Weekly Check-in Robin") == (None, "")
+
+
+def test_the_fixed_prompt_comes_first_and_the_transcript_last(owner, monkeypatch):
+    a, b = _meeting("Mtg A 10012026"), _meeting("Other B 10022026")
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: prompts.append(p) or REPLY)
+    summarize.describe(a)
+    summarize.describe(b)
+    pa, pb = prompts
+    cut = pa.index("THE MEETING")
+    assert pa[:cut] == pb[:cut]                    # one cached prefix
+    assert "Mtg A" not in pa[:cut] and series.catalog_text() in pa[:cut]
+    assert pa.rstrip().endswith("[00:04] Robin Cole: Agreed.")

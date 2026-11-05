@@ -312,16 +312,19 @@ this Mac either way. Settings in `stt.env`:
 | `STT_LOCAL_LLM` | `auto` | `auto` (Ollama when it answers, else MLX), `ollama`, or `mlx` |
 | `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A non-loopback host is refused. |
 | `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | the Ollama model |
-| `STT_OLLAMA_KEEP_ALIVE` | `10m` | how long Ollama keeps the model loaded after a call |
+| `STT_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a call |
 
 **Hardware limits for local LLM runs** (kept quiet on purpose, `stt/config.py`):
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are reniced to this; the MLX fallback starts under `nice -n` this value. A renice failure never stops a run. |
-| `STT_LLM_REST_RATIO` | `0.5` | a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
-| `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds. Each rest is logged. |
+| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are reniced to this and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts under `taskpolicy -b nice -n` this value. A failure here never stops a run. |
+| `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below |
+| `STT_LLM_REST_RATIO` | `1.0` | inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
+| `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds inside the quiet hours |
+| `STT_LLM_REST_RATIO_NIGHT` | `0` | outside the quiet hours, the rest is this times the wall time |
 
+Each rest is logged. The renice and background QoS apply at all hours.
 One panel request (Regenerate, Ask) never rests. Requests go one at a time
 through `llm.lock`, never in parallel, and Ollama's `num_thread` and
 `num_gpu` are left at the server's defaults.

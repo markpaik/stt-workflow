@@ -238,8 +238,10 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
         raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
-        # the MLX fallback runs at lowered priority too (config.LLM_NICE)
-        r = subprocess.run(["nice", "-n", str(config.llm_nice()), str(LLM_PY), "-c", _RUNNER],
+        # the MLX fallback runs at lowered priority too: background QoS
+        # (taskpolicy -b) and nice (config.llm_nice)
+        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(config.llm_nice()),
+                            str(LLM_PY), "-c", _RUNNER],
                            input=json.dumps({"model": MODEL, "prompt": prompt,
                                              "max_tokens": max_tokens, "think": think}),
                            capture_output=True, text=True, timeout=600)
@@ -262,7 +264,7 @@ OLLAMA_THINK_TOKENS = 4000
 
 def renice_ollama() -> int:
     """Lower the Ollama server and runner processes to nice
-    config.LLM_NICE before a call, so local LLM work yields the CPU and
+    config.llm_nice() and background QoS before a call, so local LLM work yields the CPU and
     keeps the fan quiet. Best effort: a failure never stops the run.
     Returns how many processes were reniced."""
     import subprocess
@@ -275,12 +277,17 @@ def renice_ollama() -> int:
             pass
     n = 0
     for pid in sorted(pids):
-        try:
-            r = subprocess.run(["renice", "-n", str(config.llm_nice()), "-p", str(pid)],
-                               capture_output=True, text=True, timeout=5)
-            n += r.returncode == 0
-        except Exception:
-            pass
+        ok = False
+        # renice lowers the CPU priority; taskpolicy -b puts the process on
+        # background QoS, which also lowers its GPU priority (the fan)
+        for cmd in (["renice", "-n", str(config.llm_nice()), "-p", str(pid)],
+                    ["taskpolicy", "-b", "-p", str(pid)]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                ok = ok or r.returncode == 0
+            except Exception:
+                pass
+        n += ok
     return n
 
 
@@ -298,7 +305,9 @@ def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
     renice_ollama()
     body = {"model": ollama_model(), "stream": False, "think": bool(think),
             "messages": [{"role": "user", "content": prompt}],
-            "keep_alive": _setting("STT_OLLAMA_KEEP_ALIVE", "10m"),
+            # long enough that a run over many meetings never reloads the
+            # 18 GB model between them
+            "keep_alive": _setting("STT_OLLAMA_KEEP_ALIVE", "30m"),
             # extraction wants a steady hand: low temperature, Qwen's
             # non-thinking top_p
             # the reasoning trace counts against num_predict: give it its own
@@ -636,19 +645,22 @@ def _named_roster(d: dict) -> list:
 
 
 def description_prompt(heading: str, source: str, old_title: str = "",
-                       people=(), owner: str = "") -> str:
+                       people=(), owner: str = "", known_series: str = None) -> str:
+    """The one prompt per meeting. Everything that is the same for every
+    meeting comes first (the rules, the series catalog, the tags, the
+    format), and the transcript comes last, so Ollama reuses the cached
+    prefix from one meeting to the next. Only the short block before the
+    transcript and the transcript itself differ."""
     from . import series
     who = ", ".join(people) if people else "none named"
-    return (
-        f"{heading}\n"
-        f"The recording's current title (it may be a default name, messy, or "
-        f"wrong): {old_title or 'none'}\n"
-        f"The owner of these recordings: {owner or 'unknown'}\n"
-        f"Named speakers: {who}\n\n"
+    fixed = (
+        "You describe one recorded meeting. "
+        f"The owner of these recordings is {owner or 'unknown'}.\n"
         "Produce:\n"
         "1. SERIES: which meeting series this recording belongs to, as one id "
         "from this catalog. Use the current title and the content. Use "
-        f"{series.ONE_OFF} when none fits.\n"
+        f"{series.ONE_OFF} when none fits. When the meeting block below says "
+        "the series is known, write that id.\n"
         f"{series.catalog_text()}\n"
         "2. PERSON: for a series whose name has <Person>, the full name of the "
         "other participant as labeled in the transcript (never the owner). "
@@ -676,9 +688,15 @@ def description_prompt(heading: str, source: str, old_title: str = "",
         "Do not invent anything. Answer in exactly this format:\n"
         "SERIES: <id>\nPERSON: <name or none>\nTOPIC: <topic>\nGIST: <gist>\n"
         "TAGS: <tag>, <tag>, <tag>\nDECISIONS:\n- ...\nOPEN QUESTIONS:\n- ...\n"
-        "NEXT STEPS:\n- ...\n\n"
-        f"{source}"
-    )
+        "NEXT STEPS:\n- ...\n\n")
+    meeting = (
+        "THE MEETING\n"
+        "The recording's current title (it may be a default name, messy, or "
+        f"wrong): {old_title or 'none'}\n"
+        + (f"The series is known: {known_series}\n" if known_series else "")
+        + f"Named speakers: {who}\n"
+        f"{heading}\n\n")
+    return fixed + meeting + source
 
 
 def parse_description(out: str) -> dict:
@@ -773,7 +791,13 @@ def gist_problems(gist: str, people=(), series_name: str = "") -> list:
     return out
 
 
-def describe(base: str, old_title: str = None, backend: str = None) -> dict:
+# think on or off for the description call. Chosen by the A/B of
+# 2026-11-05 (see the retitle report): set from its result, not by taste.
+DESCRIPTION_THINK = False
+
+
+def describe(base: str, old_title: str = None, backend: str = None,
+             think: bool = None) -> dict:
     """Run the model over one meeting and return its description, title
     parts and speaker template. Writes nothing (the retitle dry run uses
     this). Raises on a model failure. `backend` defaults to the meeting's
@@ -788,15 +812,21 @@ def describe(base: str, old_title: str = None, backend: str = None) -> dict:
     owner = _owner()
     people = _named_roster(snap)
     old_title = dates.title_of(base) if old_title is None else old_title
-    prompt = description_prompt(heading, source, old_title, people, owner)
+    # a title that IS a catalog series name: code makes the series choice
+    exact_sid, exact_person = series.exact_series(old_title)
+    prompt = description_prompt(heading, source, old_title, people, owner,
+                                known_series=exact_sid)
     t0 = time.monotonic()
-    out = _generate(prompt, max_tokens=3000, backend=engine, think=False)
+    think = DESCRIPTION_THINK if think is None else bool(think)
+    out = _generate(prompt, max_tokens=3000, backend=engine, think=think)
     f = parse_description(out)
     # a reply in the older TITLE/SUMMARY shape (a cloud model that kept to
     # it) keeps its prose summary and free title: there is no series to
     # build from, and cutting the prose to a gist would lose most of it
     legacy = not f["series"] and not f["gist"] and bool(f["summary"] or f["title"])
-    sid = None if legacy else series.normalize_series(f["series"])
+    sid = None if legacy else (exact_sid or series.normalize_series(f["series"]))
+    if exact_sid and exact_person and (not f["person"] or f["person"].lower() == "none"):
+        f["person"] = exact_person
     known = _known_people()
     person_full = ""
     if sid in series.BY_ID and series.BY_ID[sid].has_person:
@@ -820,7 +850,8 @@ def describe(base: str, old_title: str = None, backend: str = None) -> dict:
     rendered = speaker_text.render(tmpl, snap)
     series_name = (series.BY_ID[sid].name(person) if sid in series.BY_ID else "")
     return {
-        "series": sid, "series_raw": f["series"], "person": person,
+        "series": sid, "series_raw": f["series"], "series_by_code": bool(exact_sid),
+        "person": person,
         "person_raw": f["person"], "person_full": person_full,
         "topic": series.split_title(title)[1] if sid in series.BY_ID else title,
         "topic_raw": topic_src, "title": title,

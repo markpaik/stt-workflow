@@ -365,15 +365,21 @@ def mic_speaker() -> str | None:
 
 # --- Local LLM hardware limits (the owner's rule: keep the fan quiet) ---
 # Every local LLM run (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback) runs at
-# lowered priority: the Ollama processes are reniced to STT_LLM_NICE before
-# each call, and the MLX subprocess starts under `nice -n STT_LLM_NICE`.
-# A loop over many meetings (tools/retitle_all.py, the batch's summaries)
-# rests after each meeting for STT_LLM_REST_RATIO times the wall time it
-# took, and at least STT_LLM_REST_MIN_SEC. One panel request (Regenerate,
-# Ask) never rests. Read fresh from stt.env, so a change needs no restart.
+# lowered priority: before each call the Ollama processes are reniced to
+# STT_LLM_NICE and put on background QoS (`taskpolicy -b`, which also lowers
+# their GPU priority), and the MLX subprocess starts under
+# `taskpolicy -b nice -n STT_LLM_NICE`. A loop over many meetings
+# (tools/retitle_all.py, the batch's summary sweeps) rests after each
+# meeting. Inside STT_LLM_QUIET_HOURS (default 07:00-22:00) it rests
+# STT_LLM_REST_RATIO (default 1.0) times the wall time the meeting took,
+# and at least STT_LLM_REST_MIN_SEC (default 20). Outside them it rests
+# STT_LLM_REST_RATIO_NIGHT (default 0) times that time. One panel request
+# (Regenerate, Ask) never rests. Read fresh from stt.env: no restart.
 LLM_NICE_DEFAULT = 10
-LLM_REST_RATIO_DEFAULT = 0.5
+LLM_REST_RATIO_DEFAULT = 1.0
+LLM_REST_RATIO_NIGHT_DEFAULT = 0.0
 LLM_REST_MIN_SEC_DEFAULT = 20.0
+LLM_QUIET_HOURS_DEFAULT = "07:00-22:00"
 
 
 def _num_setting(name, default, cast=float, lo=0):
@@ -393,14 +399,47 @@ def llm_rest_ratio() -> float:
     return _num_setting("STT_LLM_REST_RATIO", LLM_REST_RATIO_DEFAULT)
 
 
+def llm_rest_ratio_night() -> float:
+    return _num_setting("STT_LLM_REST_RATIO_NIGHT", LLM_REST_RATIO_NIGHT_DEFAULT)
+
+
 def llm_rest_min_sec() -> float:
     return _num_setting("STT_LLM_REST_MIN_SEC", LLM_REST_MIN_SEC_DEFAULT)
 
 
-def llm_rest_seconds(work_sec: float) -> float:
+def _hm(s: str) -> int:
+    h, m = s.strip().split(":")
+    h, m = int(h), int(m)
+    if not (0 <= h <= 24 and 0 <= m < 60):
+        raise ValueError(s)
+    return h * 60 + m
+
+
+def llm_quiet_now(now=None) -> bool:
+    """True inside STT_LLM_QUIET_HOURS ("HH:MM-HH:MM", may wrap midnight).
+    An unreadable value falls back to the default window."""
+    from datetime import datetime as _dt
+    now = now or _dt.now()
+    raw = _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
+    try:
+        a, b = (raw or LLM_QUIET_HOURS_DEFAULT).split("-")
+        start, end = _hm(a), _hm(b)
+    except ValueError:
+        a, b = LLM_QUIET_HOURS_DEFAULT.split("-")
+        start, end = _hm(a), _hm(b)
+    t = now.hour * 60 + now.minute
+    if start == end:
+        return True
+    return start <= t < end if start < end else (t >= start or t < end)
+
+
+def llm_rest_seconds(work_sec: float, now=None) -> float:
     """How long a multi-meeting LLM loop rests after one meeting that took
     `work_sec` of wall time."""
-    return max(llm_rest_min_sec(), llm_rest_ratio() * max(0.0, float(work_sec or 0)))
+    work = max(0.0, float(work_sec or 0))
+    if llm_quiet_now(now):
+        return max(llm_rest_min_sec(), llm_rest_ratio() * work)
+    return llm_rest_ratio_night() * work
 
 
 def llm_rest(work_sec: float, log=None, sleep=None) -> float:
@@ -410,7 +449,7 @@ def llm_rest(work_sec: float, log=None, sleep=None) -> float:
     if sec > 0:
         if log:
             log(f"   resting {sec:.0f}s after {float(work_sec or 0):.0f}s of model work "
-                "(STT_LLM_REST_RATIO / STT_LLM_REST_MIN_SEC)")
+                "(STT_LLM_REST_RATIO / STT_LLM_REST_MIN_SEC / STT_LLM_QUIET_HOURS)")
         (sleep or _t.sleep)(sec)
     return sec
 

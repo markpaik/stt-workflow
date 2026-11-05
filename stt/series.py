@@ -170,6 +170,27 @@ def guess_series(old_title: str):
     return None
 
 
+def exact_series(old_title: str):
+    """(series id, person text) when an old title IS a catalog series name,
+    word for word apart from case: 'LT Weekly Meeting', 'Robin Weekly
+    Check-in'. A person slot takes one to four words. Else (None, "").
+    Code then makes the series choice and the model is not asked."""
+    t = re.sub(r"\s+", " ", str(old_title or "")).strip()
+    for sr in SERIES:
+        if not sr.has_person:
+            if t.lower() == sr.template.lower():
+                return sr.id, ""
+            continue
+        pre, post = sr.template.split("{person}")
+        rx = (re.escape(pre.strip()) + r"\s*" if pre.strip() else "") + \
+            r"(\S+(?:\s+\S+){0,3}?)" + (r"\s+" + re.escape(post.strip()) if post.strip() else "")
+        m = re.fullmatch(rx, t, flags=re.I)
+        if m and not re.search(r"\b(thrive|weekly|check-?in|dialogue|icd)\b",
+                               m.group(1), flags=re.I):
+            return sr.id, m.group(1)
+    return None, ""
+
+
 def normalize_series(raw: str) -> str:
     """A series id from the model's SERIES line: an exact id, a catalog
     name, else ONE_OFF."""
