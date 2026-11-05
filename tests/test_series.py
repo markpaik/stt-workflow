@@ -96,3 +96,10 @@ def test_the_catalog_and_tags_cover_every_entry_once():
 def test_split_title():
     assert series.split_title(f"LT Weekly Meeting {DASH} Budget") == ("LT Weekly Meeting", "Budget")
     assert series.split_title("Budget Review") == (None, "Budget Review")
+
+
+def test_title_case_keeps_program_names_with_small_words():
+    from stt import series
+    assert series.title_case("early on workflow UAT review") == "Early On Workflow UAT Review"
+    assert series.title_case("transfer in workflow discovery") == "Transfer In Workflow Discovery"
+    assert series.title_case("decisions made on the budget") == "Decisions Made on the Budget"

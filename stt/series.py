@@ -265,7 +265,16 @@ def title_case(t: str) -> str:
             out.append(w.lower())
         else:
             out.append(w[:1].upper() + w[1:])
-    return " ".join(out)
+    s = " ".join(out)
+    # program names whose second word is a small word ('Early On' is the
+    # Part C program, 'Transfer In' a workflow): the small-word rule above
+    # must not lower-case them
+    for name in _PROPER:
+        s = re.sub(rf"\b{re.escape(name)}\b", name, s, flags=re.IGNORECASE)
+    return s
+
+
+_PROPER = ("Early On", "Transfer In")
 
 
 def _first(name: str) -> str:
