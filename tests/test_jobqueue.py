@@ -114,12 +114,12 @@ def test_a_queued_job_follows_a_meeting_renamed_before_the_worker_ran(
 
     queue.submit(["Alpha Mtg 05012026"], "named Dana")   # the worker is not started
     r = summarize.rename_meeting("Alpha Mtg 05012026", "Focus Group")
-    assert r["ok"] and r["base"] == "Focus Group 05012026"
-    assert config.base_of(mid) == "Focus Group 05012026"
+    assert r["ok"] and r["base"] == "2026-05-01 Focus Group"
+    assert config.base_of(mid) == "2026-05-01 Focus Group"
 
     queue.start()
     snap = _drain(queue)
-    assert seen == ["Focus Group 05012026"], \
+    assert seen == ["2026-05-01 Focus Group"], \
         "relabelled under the new name, exactly once"
     assert snap["last"]["done"] == 1 and snap["last"]["failed"] == []
 

@@ -86,7 +86,7 @@ def test_named_speakers_plus_topic_come_next(sandbox):
     r = summarize.apply_auto_title("Voice Memo 10292026")
     assert r["ok"]
     new = r["base"]
-    assert new == "Spring Budget Planning with Blake Example and Avery Sample 10292026"
+    assert new == "2026-10-29 Spring Budget Planning with Blake Example and Avery Sample"
     d = _json(new)
     assert (d["title_state"], d["title_source"]) == ("provisional", "model")
     assert d["reviewed"] is False                       # never a human check
@@ -102,7 +102,7 @@ def test_the_owner_is_left_out_of_the_speakers(sandbox, monkeypatch):
 def test_the_model_draft_is_last(sandbox):
     _model_meeting("Voice Memo 10292026", [SPK[2]], SEGS[2:])
     r = summarize.apply_auto_title("Voice Memo 10292026")
-    assert r["base"] == "Spring Budget Planning 10292026"
+    assert r["base"] == "2026-10-29 Spring Budget Planning"
     assert _json(r["base"])["title_state"] == "provisional"
 
 
@@ -145,7 +145,7 @@ def test_the_batch_titles_after_the_summary(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(summarize, "suggest_title", fake_suggest)
     assert run_batch.summarize_one("Voice Memo 10292026.m4a", "Voice Memo 10292026")
-    assert "Spring Budget Planning with Blake Example and Avery Sample 10292026" in \
+    assert "2026-10-29 Spring Budget Planning with Blake Example and Avery Sample" in \
         config.meeting_bases()
 
 
@@ -158,5 +158,5 @@ def test_an_already_summarized_meeting_still_gets_its_automatic_title(sandbox, m
     monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
     assert run_batch.summarize_one("Voice Memo 10292026.m4a", "Voice Memo 10292026") is False
     assert calls == []                                   # no second summary
-    assert "Spring Budget Planning with Blake Example and Avery Sample 10292026" in \
+    assert "2026-10-29 Spring Budget Planning with Blake Example and Avery Sample" in \
         config.meeting_bases()

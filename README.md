@@ -375,7 +375,7 @@ CLI equivalents:
 ./run.sh batch --dry-run                          # show what would process
 ./run.sh batch --strict --files "Interview.m4a"   # strict: flag, never guess
 ./run.sh relabel --all                            # re-apply names everywhere
-./run.sh enroll --from-meeting "Team Sync 05212026"
+./run.sh enroll --from-meeting "2026-05-21 Team Sync"
 ./run.sh test                                     # 500+ tests
 ```
 

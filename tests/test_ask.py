@@ -242,7 +242,7 @@ def test_threads_save_private_and_survive_a_rename(sandbox):
     assert summarize.rename_meeting("Roof Budget 10012026", "Roof Money")["ok"]
     got = ask.get_thread(t["id"])
     c = got["messages"][0]["citations"][0]
-    assert c["base"] == "Roof Money 10012026" and c["gone"] is False
+    assert c["base"] == "2026-10-01 Roof Money" and c["gone"] is False
     assert ask.history_of(t["id"])[0]["q"] == "How big?"
     assert ask.get_thread("../../etc") is None
     assert ask.delete_thread(t["id"]) and ask.list_threads() == []

@@ -255,7 +255,7 @@ def test_a_redo_deliberately_forgets_dismissals(sandbox, monkeypatch, tmp_path):
                     str(src)], check=True, capture_output=True)
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
                           do_verify=False)
-    base = "Redo Voice 05012026"
+    base = "2026-05-01 Redo Voice"
     # a diarize-free run has no clusters, so plant one to dismiss (the Redo is
     # what is under test, not the mutator)
     j = config.meeting_file(base, ".json")

@@ -65,14 +65,14 @@ def test_diarized_run_writes_a_loadable_embeddings_cache(sandbox, monkeypatch):
     res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                 do_diarize=True, do_verify=False, track_unknowns=False)
 
-    emb_path = config.meeting_file("Diarized Meeting 05012026", ".emb.npz")
+    emb_path = config.meeting_file("2026-05-01 Diarized Meeting", ".emb.npz")
     assert res["emb"] == emb_path and emb_path.exists()
     with np.load(emb_path) as z:  # a truncated/mis-suffixed write would not load
         assert sorted(z.files) == ["SPEAKER_00", "SPEAKER_01"]
     # the diar cache landed too, and no temp artifact was left behind
-    assert config.meeting_file("Diarized Meeting 05012026", ".diar.npz").exists()
-    strays = (list(config.meeting_dir("Diarized Meeting 05012026").glob("*.tmp"))
-              + list(config.meeting_dir("Diarized Meeting 05012026").glob("*.tmp.npz")))
+    assert config.meeting_file("2026-05-01 Diarized Meeting", ".diar.npz").exists()
+    strays = (list(config.meeting_dir("2026-05-01 Diarized Meeting").glob("*.tmp"))
+              + list(config.meeting_dir("2026-05-01 Diarized Meeting").glob("*.tmp.npz")))
     assert strays == [], f"atomic-write temp left behind: {strays}"
 
 
@@ -159,7 +159,7 @@ def test_channel_aware_overlays_the_mic_speaker(sandbox, monkeypatch):
     assert mark_segs and "mine" in " ".join(s["text"] for s in mark_segs)
     # the mark spans + mode round-trip into the diar cache for relabel
     from stt import diarcache
-    ch = diarcache.load_channel(config.meeting_file("Team Call 05012026", ".diar.npz"))
+    ch = diarcache.load_channel(config.meeting_file("2026-05-01 Team Call", ".diar.npz"))
     assert ch["mode"] == "stereo_channel_aware" and ch["mic_speaker"] == "Mark Paik"
     assert len(ch["spans"]) == 1
 
@@ -209,7 +209,7 @@ def test_no_enroll_caches_mic_spans_for_later_relabel(sandbox, monkeypatch):
     from stt import channels
     assert not any(s["id"] == channels.MIC_ID for s in data["speakers"])  # mono this pass
     # but the mic spans + embeddings survived into the cache for a future relabel
-    ch = diarcache.load_channel(config.meeting_file("Early Call 05052026", ".diar.npz"))
+    ch = diarcache.load_channel(config.meeting_file("2026-05-05 Early Call", ".diar.npz"))
     assert ch["mic_speaker"] == "Mark Paik" and len(ch["spans"]) == 1
 
 

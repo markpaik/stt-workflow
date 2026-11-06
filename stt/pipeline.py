@@ -184,11 +184,21 @@ def _owns_meeting(base: str, src: Path, dest_dir) -> bool:
         return False
 
 
+def _legacy_stamp(name: str, iso: str):
+    """The older folder name for a plain name, '<name> MMDDYYYY', or None."""
+    from datetime import date as _d
+    try:
+        return f"{name} {_d.fromisoformat(iso).strftime('%m%d%Y')}"
+    except (TypeError, ValueError):
+        return None
+
+
 def resolve_base(src: Path, dest_dir=None) -> str:
     """The meeting folder name for this source file.
 
-    A NEW recording whose FILENAME carries no date gets the meeting's date stamped
-    into the folder: 'LT Weekly Meeting' -> 'LT Weekly Meeting 06042026'. That is
+    A NEW recording gets the meeting's date in front of its folder name:
+    'LT Weekly Meeting' -> '2026-06-04 LT Weekly Meeting', and an older-form
+    'LT Weekly Meeting 06042026' -> '2026-06-04 LT Weekly Meeting'. That is
     what stops two recordings of the SAME recurring meeting — which naturally share
     a filename — from resolving to the same folder and silently overwriting each
     other's transcript.
@@ -216,9 +226,26 @@ def resolve_base(src: Path, dest_dir=None) -> str:
     if (config.meeting_file(base, ".json", dest_dir).exists()
             and _owns_meeting(base, src, dest_dir)):
         return base
-    target = base
-    if dates.meeting_date(base) is None:  # plain name: stamp the meeting's date
-        target = dates.stamp(base, _meeting_date(src, None))
+    # the folder takes the ISO-first form, "YYYY-MM-DD <name>": a plain name
+    # gets the meeting's date in front, and a name that carries a date in the
+    # older form ('Weekly 07102026', the old recorder's 'Recording 07112026
+    # 1814') has it moved to the front. The date is the one the meeting will
+    # store, so the folder name and the stored date agree.
+    on = _meeting_date(src, None)
+    target = dates.canonical(base, on)
+    # a folder named before the ISO rule ('Sync 05012026 (2)') that THIS
+    # recording owns: a reprocess lands back in it rather than minting a
+    # duplicate under the new name (tools/iso_rename.py moves it later)
+    legacy = base if dates.meeting_date(base) else _legacy_stamp(base, on)
+    if legacy and legacy != target:
+        i = 1
+        while i < 100:
+            cand = legacy if i == 1 else f"{legacy} ({i})"
+            i += 1
+            if not config.meeting_dir(cand, dest_dir).exists():
+                break
+            if _owns_meeting(cand, src, dest_dir):
+                return cand
     archive = config.archive_dir(dest_dir)
     i = 1
     while True:
@@ -461,7 +488,6 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # edit — this one is set only here and preserved by relabel and by edits, so
     # it answers "when was this last transcribed". Shared by the txt header.
     processed_at = _dt.datetime.now().isoformat(timespec="seconds")
-    header = output.txt_header(src.name, dur, speakers, strict, processed_at)
 
     # Hold this meeting's per-base lock for the WHOLE write phase: the date
     # resolution (which reads the stored json to preserve a human's correction),
@@ -506,7 +532,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # that shares the filename" (copy2 preserves mtime, so a Redo from
             # the stored audio still matches; a same-named re-export does not)
             "source_mtime": _src_mtime(src),
-            # resolved ONCE, here: filename convention (MMDDYYYY) is the honest
+            # resolved ONCE, here: filename convention (a date stamp) is the honest
             # signal — file mtime/creation_time reflect the Voice Memos EXPORT,
             # often weeks after the meeting. Grouping and sorting read this
             # stored field; a human can correct it in the panel. Read under the
@@ -550,6 +576,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         if verify_regions is None:
             verify.sidecar_path(base, dest_dir).unlink(missing_ok=True)
 
+        # the header names the meeting as it is now: its date and title
+        header = output.txt_header(output.header_name(base, meta), dur, speakers,
+                                   strict, processed_at)
         output.write_txt(txt_path, segments, header=header)
         output.write_json(json_path, meta, speakers, segments, labeled_words)
         # the id index follows the write, under the same lock: from here on a

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Backfill the folder-name convention onto meetings that predate it.
 
-Every meeting folder should be named "<title> MMDDYYYY". The date lives in the
+Every meeting folder should be named "YYYY-MM-DD <title>". The date lives in the
 NAME so a recurring meeting ('LT Weekly Meeting') stays unique on disk and two of
 them can never resolve to the same folder and overwrite each other. Meetings
 processed before the pipeline stamped the date carry a plain name — and a plain
@@ -16,8 +16,10 @@ the manifest (or a kept original re-transcribes into a duplicate). A meeting the
 batch is writing right now is skipped rather than forced.
 
 It fixes the same folders `doctor check` reports as `name_mismatch`: a name with
-no stamp, and a name whose date is written another way (a YYYYMMDD run is
-rewritten in place as MMDDYYYY). A twin's ' (N)' suffix is kept. The stored date
+no stamp, and a name whose date is written another way (an older
+"<title> MMDDYYYY" name moves its date to the front). A twin's ' (N)' suffix
+is kept. For the whole-library move to the ISO form, use tools/iso_rename.py:
+it journals each rename and has --undo. The stored date
 does not change, so `date_source` stays as it was.
 """
 import argparse

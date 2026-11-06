@@ -101,7 +101,8 @@ _WORD = re.compile(r"[a-z0-9]+")
 def _tokens(name: str) -> set:
     s = os.path.splitext(str(name or ""))[0]
     s = dates._UNIQ_SUFFIX.sub("", s)
-    s = re.sub(r"(?<!\d)\d{8}(?!\d)", " ", s)          # date stamps
+    s = re.sub(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)", " ", s)   # ISO date stamps
+    s = re.sub(r"(?<!\d)\d{8}(?!\d)", " ", s)          # older 8-digit stamps
     s = re.sub(r"\d{1,2}[.\-:/]\d{1,2}([.\-:/]\d{2,4})?", " ", s)   # short dates
     return {w for w in _WORD.findall(s.lower()) if len(w) > 1}
 
@@ -290,10 +291,12 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         if missing:
             out.append(Finding("missing_keys", b, "lacks " + ", ".join(missing), False))
         title = d.get("title") or dates.title_of(b)
-        want = (dates.restamp(title, d["date"]) if d.get("date") else title) + dates.twin_suffix(b)
+        want = (dates.stamp(title, d["date"]) if d.get("date") else title) + dates.twin_suffix(b)
         if want != b:
-            out.append(Finding("name_mismatch", b,
-                               "folder name differs from its title and date", False))
+            why = "folder name differs from its title and date"
+            if not dates.is_iso_form(b) and dates.meeting_date(b):
+                why += " (older MMDDYYYY form: tools/iso_rename.py moves it)"
+            out.append(Finding("name_mismatch", b, why, False))
         if deep:
             a = config.meeting_audio(b, store)
             if a is not None and d.get("duration_sec"):

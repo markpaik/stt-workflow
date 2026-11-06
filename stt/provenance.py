@@ -34,7 +34,10 @@ UNCERTAIN = ("mtime", "short_typed")
 TAG_TOLERANCE_SEC = 60.0
 KEYS = ("title", "source_name", "audio_fp", "date_source", "recorded_at")
 
-_NATIVE = re.compile(r"^recording\s+(\d{8})\s+(\d{2})(\d{2})(?:\s+\(\d+\))?$", re.I)
+# the recorder's default name: 'YYYY-MM-DD Recording HHMM', or the older
+# 'Recording MMDDYYYY HHMM'. The time is the last two groups either way.
+_NATIVE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}\s+recording|recording\s+\d{8})"
+                     r"\s+(\d{2})(\d{2})(?:\s+\(\d+\))?$", re.I)
 
 
 # ---------- probing ----------
@@ -169,7 +172,7 @@ def candidates(base: str, d: dict, raw_name, mtime, probe=None, today=None) -> d
         if m and typed:
             iso = typed
             try:
-                t = datetime.fromisoformat(f"{iso}T{m.group(2)}:{m.group(3)}:00").astimezone()
+                t = datetime.fromisoformat(f"{iso}T{m.group(1)}:{m.group(2)}:00").astimezone()
                 out["recorder"] = (iso, t.isoformat(timespec="seconds"))
             except ValueError:
                 pass
@@ -213,7 +216,7 @@ def explain(stored_iso, cands: dict, raw_known=True, mtime_known=True,
     The evidence is thinner on older meetings, and the label then stays on
     the cautious side:
     - raw name unknown (a rename overwrote it), no automatic source
-      matches, and the folder's trailing stamp (`folder_iso`) carries the
+      matches, and the folder's date stamp (`folder_iso`) carries the
       stored date: the date was typed, in the original name or in a rename
       (`typed`).
     - source file time unknown and no other source matches: the date came
@@ -237,8 +240,7 @@ def explain(stored_iso, cands: dict, raw_known=True, mtime_known=True,
 
 def explain_meeting(base: str, d: dict, raw, mtime, cands: dict):
     """explain() with this meeting's own evidence flags filled in."""
-    folder = dates._UNIQ_SUFFIX.sub("", base)
-    folder_iso = dates.meeting_date(folder[-8:]) if dates.strip_stamp(folder) != folder else None
+    folder_iso = dates.stamp_date(dates._UNIQ_SUFFIX.sub("", base))
     return explain(d.get("date"), cands, raw_known=raw is not None,
                    mtime_known=d.get("source_mtime") is not None,
                    folder_iso=folder_iso)

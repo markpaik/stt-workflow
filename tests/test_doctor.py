@@ -95,7 +95,11 @@ def test_check_finds_every_kind_and_writes_nothing(lib):
     assert {"manifest_stale", "manifest_flat", "manifest_unlinked", "stale_hold",
             "stale_dismissal", "stale_stop_flag", "name_mismatch",
             "missing_keys"} <= kinds
-    assert [f.subject for f in fs if f.kind == "name_mismatch"] == ["Odd Folder"]
+    mm = [f for f in fs if f.kind == "name_mismatch"]
+    # a folder with no date at all, and the older-form folders the ISO move
+    # (tools/iso_rename.py) has not reached yet, each with its own note
+    assert [f.subject for f in mm if "older MMDDYYYY form" not in f.detail] == ["Odd Folder"]
+    assert {f.subject for f in mm} == set(config.meeting_bases())
     assert _tree(config.PROJECT_DIR) == before
     assert not (lib / "migration").exists()
 

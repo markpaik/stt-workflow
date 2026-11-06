@@ -181,9 +181,9 @@ def test_base_of_follows_a_rename(sandbox):
     mid = config.id_of("Team Sync 05012026")
 
     r = summarize.rename_meeting("Team Sync 05012026", "Focus Group")
-    assert r["ok"] and r["base"] == "Focus Group 05012026"
-    assert config.base_of(mid) == "Focus Group 05012026"
-    assert config.id_of("Focus Group 05012026") == mid, "the id itself never moves"
+    assert r["ok"] and r["base"] == "2026-05-01 Focus Group"
+    assert config.base_of(mid) == "2026-05-01 Focus Group"
+    assert config.id_of("2026-05-01 Focus Group") == mid, "the id itself never moves"
 
 
 def test_archive_drops_the_id_and_restore_brings_it_back(sandbox):
@@ -240,14 +240,14 @@ def test_registry_refs_resolve_after_two_renames_with_the_chase_broken(
     monkeypatch.setattr(unknowns, "rename_meeting_refs", boom)
 
     assert summarize.rename_meeting("Team Sync 05012026", "Focus Group")["ok"]
-    r = summarize.set_meeting_date("Focus Group 05012026", "2026-06-15")
-    assert r["ok"] and r["base"] == "Focus Group 06152026"
+    r = summarize.set_meeting_date("2026-05-01 Focus Group", "2026-06-15")
+    assert r["ok"] and r["base"] == "2026-06-15 Focus Group"
 
     person = identify.load_registry()["Dana"]
     assert person["sources"] == ["Team Sync 05012026"], "the stored name IS stale"
-    assert identify.resolved_sources(person) == ["Focus Group 06152026"]
+    assert identify.resolved_sources(person) == ["2026-06-15 Focus Group"]
     voice = unknowns.load()["speakers"]["U001"]
-    assert unknowns.resolved_meetings(voice) == ["Focus Group 06152026"]
+    assert unknowns.resolved_meetings(voice) == ["2026-06-15 Focus Group"]
 
 
 def test_a_legacy_registry_entry_with_no_ids_still_reads(sandbox):
@@ -292,7 +292,7 @@ def test_naming_an_unknown_carries_each_samples_meeting_id_into_the_profile(
     assert person["sources"] == ["Team Sync 05012026", "Staff Mtg 05022026"]
     assert person["source_ids"] == [mid_a, mid_b], \
         "the profile re-derived the id from a stale base and lost it"
-    assert identify.resolved_sources(person) == ["Focus Group 05012026",
+    assert identify.resolved_sources(person) == ["2026-05-01 Focus Group",
                                                  "Staff Mtg 05022026"]
 
 
@@ -347,19 +347,19 @@ def test_a_held_lock_survives_a_rename_and_a_second_holder_waits(sandbox):
     def holder():
         with review.lock_meeting("Team Sync 05012026"):
             # exactly what summarize's rename path does inside this lock
-            summarize._move_folder("Team Sync 05012026", "Focus Group 06152026")
+            summarize._move_folder("Team Sync 05012026", "2026-06-15 Focus Group")
             renamed.set()
             release.wait(10)
 
     t = threading.Thread(target=holder, daemon=True)
     t.start()
     assert renamed.wait(10), "the rename never happened"
-    assert config.base_of(mid) == "Focus Group 06152026"
+    assert config.base_of(mid) == "2026-06-15 Focus Group"
     assert [p.name for p in _locks().iterdir()] == [f"{mid}.lock"], \
         "one lock file, named for the id — the rename left no orphan"
 
     def second():
-        with review.lock_meeting("Focus Group 06152026"):
+        with review.lock_meeting("2026-06-15 Focus Group"):
             got.set()
 
     t2 = threading.Thread(target=second, daemon=True)

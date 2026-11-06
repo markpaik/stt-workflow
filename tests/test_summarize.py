@@ -568,15 +568,15 @@ def test_a_restamp_holds_the_destination_name_it_moves_onto(sandbox):
     def edit():
         done.append(summarize.set_meeting_date("Team Sync 05012026", "2026-06-15"))
 
-    with review.lock_meeting("Team Sync 06152026"):     # the destination name
+    with review.lock_meeting("2026-06-15 Team Sync"):   # the destination name
         t = threading.Thread(target=edit)
         t.start()
         t.join(timeout=1.0)
         assert not done, "the move started without holding the destination's lock"
     t.join(timeout=5.0)
 
-    assert done and done[0]["ok"] and done[0]["base"] == "Team Sync 06152026"
-    assert config.meeting_file("Team Sync 06152026", ".json").exists()
+    assert done and done[0]["ok"] and done[0]["base"] == "2026-06-15 Team Sync"
+    assert config.meeting_file("2026-06-15 Team Sync", ".json").exists()
     assert not config.meeting_dir("Team Sync 05012026").exists()
 
 
@@ -591,7 +591,7 @@ def test_a_destination_taken_after_the_plan_is_re_planned(sandbox):
     def racing_unique_base(candidate, current):
         want = real(candidate, current)
         # a rival edit lands the instant our name is chosen, before we lock it
-        if want == "Team Sync 06152026" and not calls:
+        if want == "2026-06-15 Team Sync" and not calls:
             calls.append(want)
             config.meeting_dir(want).mkdir(parents=True)
             (config.meeting_dir(want) / f"{want}.json").write_text("{}")
@@ -603,8 +603,8 @@ def test_a_destination_taken_after_the_plan_is_re_planned(sandbox):
     finally:
         summarize._unique_base = real
 
-    assert r["ok"] and r["base"] == "Team Sync 06152026 (2)"
-    assert config.meeting_file("Team Sync 06152026 (2)", ".json").exists()
+    assert r["ok"] and r["base"] == "2026-06-15 Team Sync (2)"
+    assert config.meeting_file("2026-06-15 Team Sync (2)", ".json").exists()
 
 
 # ---------- whole-transcript summaries (unified plan Phase 4G) ----------

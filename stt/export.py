@@ -28,7 +28,7 @@ def _fmt_ts(sec: float) -> str:
 
 def _meta_line(base: str, d: dict) -> str:
     parts = []
-    iso = dates.meeting_date(base)
+    iso = d.get("date") or dates.meeting_date(base)
     if iso:
         parts.append(datetime.fromisoformat(iso).strftime("%B %-d, %Y"))
     parts.append(f"{round(d.get('duration_sec', 0) / 60)} min")

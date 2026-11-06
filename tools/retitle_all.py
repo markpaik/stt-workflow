@@ -6,7 +6,7 @@ It names a series from stt/series.py (or one_off), the other person for a
 1:1 series, and a short topic, and it writes the new description: a gist,
 Decisions, Open questions, and 3 to 5 topic tags. Code builds
 the title from the catalog ("LT Weekly Meeting – Budget Reallocation"); the
-folder keeps its MMDDYYYY date stamp.
+folder keeps its date stamp.
 
   ./run.sh py tools/retitle_all.py                  # dry run: proposals only
   ./run.sh py tools/retitle_all.py --only "Check-in" --limit 5

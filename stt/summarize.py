@@ -470,16 +470,22 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
             "elapsed_sec": round(time.monotonic() - t0, 1)}
 
 
-def _date_suffix(base: str) -> str:
-    m = re.search(r"(\d{8})\s*$", base)
-    if m:
-        return m.group(1)
+def _meeting_iso(base: str) -> str:
+    """The meeting's date as ISO: the stored date, else the folder's stamp
+    (either form), else the json's save time, else today."""
+    from . import dates
     j = config.meeting_file(base, ".json")
     try:
-        ts = json.loads(j.read_text()).get("generated_at", "")
-        return datetime.fromisoformat(ts).strftime("%m%d%Y")
+        d = json.loads(j.read_text())
     except Exception:
-        return datetime.now().strftime("%m%d%Y")
+        d = {}
+    iso = d.get("date") or dates.stamp_date(dates._UNIQ_SUFFIX.sub("", base))
+    if iso:
+        return iso
+    try:
+        return datetime.fromisoformat(d.get("generated_at", "")).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
 
 
 NO_SPEECH_TEXT = "No speech found in this recording."
@@ -1013,7 +1019,7 @@ def suggest_title(base: str) -> dict:
             "decisions": rendered.get("ai_decisions", desc["decisions"]),
             "open_questions": rendered.get("ai_open_questions", desc["open_questions"]),
             "tags": desc["tags"], "series": desc["series"],
-            "suggested_name": f"{title} {_date_suffix(base)}"
+            "suggested_name": dates.stamp(title, _meeting_iso(base))
                               if dates.strip_stamp(title) == title else title,
             "parts": desc["parts"]}
 
@@ -1222,7 +1228,14 @@ def _move_folder(base: str, new_base: str) -> list:
             d["renamed_from"] = base
             _write_json(j, d)
         except (OSError, ValueError):
-            pass
+            d = {}
+        # the .txt header line names the meeting: follow the new title and date
+        try:
+            from . import output
+            output.refresh_txt_header(config.meeting_file(new_base, ".txt"),
+                                      output.header_name(new_base, d))
+        except Exception as e:
+            print(f"   rename: .txt header not updated ({e})", file=sys.stderr)
     # the one reference that is NOT best-effort chasing: the id index. The
     # chase above follows the NAME into each store; this records where the
     # meeting actually went, so anything holding the id (a queued relabel, a
@@ -1244,7 +1257,8 @@ DROP = "$drop"
 
 def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                         reviewed=None, title_state=None, date_source=None,
-                        recorded_at=_UNSET, auto_title=False, retitle=False) -> dict:
+                        recorded_at=_UNSET, auto_title=False, retitle=False,
+                        to_base=None) -> dict:
     """The ONE place a meeting's human-owned fields change: title, date,
     Work/Personal category, whether it still needs review, and the title's
     state.
@@ -1270,11 +1284,19 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     becomes provisional. Any other state is kept as it was, and a meeting
     from before the title rule keeps no state at all.
 
-    The invariant it enforces: the folder is named "<title> MMDDYYYY". That is
+    The invariant it enforces: the folder is named "YYYY-MM-DD <title>", and a
+    same-name same-date twin "YYYY-MM-DD <title> (2)". A folder still in the
+    older "<title> MMDDYYYY" form moves to the ISO form on its next title or
+    date edit (tools/iso_rename.py moves the whole library at once). That is
     what keeps recurring meetings ('LT Weekly Meeting') unique on disk, and it is
     the whole reason the date lives in the name. So correcting a date RE-STAMPS
     the folder instead of letting the name and the stored date drift apart — they
     used to, because set_meeting_date only ever rewrote the json.
+
+    `to_base` moves the folder to exactly that name and skips the naming rule
+    and the twin suffix. It exists for one caller: an undo journal putting a
+    folder back under the name it had before (tools/iso_rename.py --undo). A
+    `to_base` that another meeting holds is refused.
 
     Only a title or date edit moves the folder. Tagging a category (or accepting
     from the inbox without renaming) must not silently rename anything.
@@ -1322,6 +1344,15 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         if not new_title:
             return {"ok": False, "error": "empty name"}
 
+    if to_base is not None:
+        to_base = _sanitize_name(to_base)
+        if not to_base:
+            return {"ok": False, "error": "empty name"}
+        if to_base.lower() != base.lower() and (
+                config.meeting_dir(to_base).exists()
+                or (config.archive_dir() / to_base).exists()):
+            return {"ok": False, "error": f"'{to_base}' is taken"}
+
     j = config.meeting_file(base, ".json")
 
     def _apply(d) -> str:
@@ -1352,28 +1383,33 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             d["title_state"] = title_state
 
         want = base
-        if title is not None or date is not None:
-            # a typed date counts only as a TRAILING stamp ('Review 06152026').
-            # meeting_date() over the whole title also matched mid-name digit
-            # runs — accepting the recorder default 'Recording 07112026 1032'
-            # with a corrected date silently threw the correction away.
-            trailing = (new_title is not None
-                        and dates.strip_stamp(new_title) != new_title)
-            if trailing:
-                # the name is taken exactly as typed. It also becomes the stored
-                # date — UNLESS the date picker was set too (an explicit date
-                # always wins), and never a FUTURE date (a name like 'Planning
-                # Retreat 12312026' describes an event, not when it was recorded)
-                typed = dates.meeting_date(new_title)
+        if to_base is not None:
+            want = to_base
+            d["title"] = dates.title_of(want)
+        elif title is not None or date is not None:
+            # a typed date counts only as a STAMP: a leading ISO date
+            # ('2026-06-15 Review') or a trailing 8-digit run ('Review
+            # 06152026'). meeting_date() over the whole title also matched
+            # mid-name digit runs — accepting the recorder default
+            # 'Recording 07112026 1032' with a corrected date silently threw
+            # the correction away.
+            typed = (dates.stamp_date(new_title) if new_title is not None else None)
+            if typed:
+                # the typed stamp becomes the stored date — UNLESS the date
+                # picker was set too (an explicit date always wins), and never
+                # a FUTURE date (a name like 'Planning Retreat 12312026'
+                # describes an event, not when it was recorded; canonical()
+                # keeps those digits in the title)
                 from datetime import date as _today
-                if iso is None and typed and typed <= _today.today().isoformat():
+                if iso is None and typed <= _today.today().isoformat():
                     d["date"] = typed
-                want = new_title
+                want = dates.canonical(new_title, d.get("date"))
             else:
                 stem = new_title if new_title is not None else base
                 on = d.get("date") or ""
-                # restamp: replaces an existing stamp (peeling any ' (N)' twin
-                # suffix first) rather than appending a second date
+                # restamp: puts the date in front ("YYYY-MM-DD <title>"),
+                # replacing an existing stamp in either form (peeling any
+                # ' (N)' twin suffix first) rather than adding a second date
                 want = dates.restamp(stem, on) if on else stem
             want = _unique_base(want, base)
             d["title"] = dates.title_of(want)
@@ -1453,11 +1489,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
 
 
 def rename_meeting(base: str, new_base: str) -> dict:
-    """Retitle a meeting. The meeting's date is appended (MMDDYYYY) when the
-    typed name carries none, so 'Weekly Check-in' lands as
-    'Weekly Check-in 07102026' on disk while the panel still shows the clean
-    name. A name that already has a date is taken as typed (and becomes the
-    stored date). Returns {ok, renamed, base}."""
+    """Retitle a meeting. The meeting's date goes in front, ISO first, so
+    'Weekly Check-in' lands as '2026-07-10 Weekly Check-in' on disk while
+    the panel still shows the clean name. A name typed with a date stamp
+    ('Weekly Check-in 07102026' or '2026-07-10 Weekly Check-in') gives the
+    stored date (apply_meeting_edits), and the folder takes the ISO form.
+    Returns {ok, renamed, base}."""
     r = apply_meeting_edits(base, title=new_base)
     if not r["ok"]:
         return r

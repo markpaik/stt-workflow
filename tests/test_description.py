@@ -81,7 +81,7 @@ def test_the_automatic_title_uses_the_catalog_title_whole(owner, monkeypatch):
     monkeypatch.setattr(summarize, "_generate", lambda *a, **k: REPLY)
     summarize.suggest_title(base)
     r = summarize.apply_auto_title(base)
-    assert r["ok"] and r["base"] == f"Robin Weekly Check-in {DASH} Hiring Plan and Budget 10012026"
+    assert r["ok"] and r["base"] == f"2026-10-01 Robin Weekly Check-in {DASH} Hiring Plan and Budget"
     assert titles.auto_title({"ai_title": "X Y", "ai_series": "one_off",
                               "speakers": [{"id": 1, "name": "Kim"}]}) == "X Y"
 

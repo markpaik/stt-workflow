@@ -74,15 +74,15 @@ def test_the_dry_run_writes_proposals_and_changes_nothing(lib):
     assert not rt.journal_path().exists()
     props = {p["old_base"]: p for p in doc["proposals"]}
     a = props["Robin Check-in 10-5 10012026"]
-    assert a["new_base"] == f"Robin Weekly Check-in {DASH} Hiring Plan 10012026"
+    assert a["new_base"] == f"2026-10-01 Robin Weekly Check-in {DASH} Hiring Plan"
     assert a["series"] == "weekly_checkin" and a["person"] == "Robin"
     assert a["gist"] == "Hiring plan approved for spring."
     assert a["tags"] == ["hiring-staffing", "budget-finance", "goals-okrs"]
     assert "old title carries a date: 10-5" in a["flags"]
     # two meetings land on one name: the second gets the twin suffix
     b, c = props["LT Weekly Meeting 10022026"], props["LT Weekly Meeting 10022026 (2)"]
-    assert b["new_base"] == f"LT Weekly Meeting {DASH} Budget 10022026"
-    assert c["new_base"] == f"LT Weekly Meeting {DASH} Budget 10022026 (2)"
+    assert b["new_base"] == f"2026-10-02 LT Weekly Meeting {DASH} Budget"
+    assert c["new_base"] == f"2026-10-02 LT Weekly Meeting {DASH} Budget (2)"
     assert props["Silent 10042026"]["skip"] == "no speech"
     assert rt.proposals_path().exists() and rt.proposals_path().with_suffix(".tsv").exists()
     counts = rt.series_counts(doc["proposals"])
@@ -101,7 +101,7 @@ def test_apply_renames_journals_resumes_and_keeps_registries_in_step(lib):
     lib.clear()
     r = rt.apply(log=lambda *_: None)
     assert r["ok"] and r["counts"]["applied"] == 4 and not lib     # no model call
-    new_a = f"Robin Weekly Check-in {DASH} Hiring Plan 10012026"
+    new_a = f"2026-10-01 Robin Weekly Check-in {DASH} Hiring Plan"
     assert config.base_of("mid-a") == new_a
     d = json.loads(config.meeting_file(new_a, ".json").read_text())
     assert d["renamed_from"] == "Robin Check-in 10-5 10012026"
@@ -230,7 +230,7 @@ def test_apply_skips_a_meeting_a_person_renamed_since_the_dry_run(lib):
     assert summarize.rename_meeting("Robin Check-in 10-5 10012026", "Robin Chat")["ok"]
     r = rt.apply(log=lambda *_: None)
     assert r["counts"]["renamed since the dry run"] == 1
-    assert config.base_of("mid-a") == "Robin Chat 10012026"
+    assert config.base_of("mid-a") == "2026-10-01 Robin Chat"
 
 
 def test_apply_needs_a_proposal_file(lib):
@@ -246,10 +246,12 @@ def test_undo_reverses_the_names_and_fields(lib):
     assert config.base_of("mid-a") != "Robin Check-in 10-5 10012026"
     r = rt.undo(dry=False, log=lambda *_: None)
     assert r["counts"]["undone"] == 4
-    assert config.base_of("mid-a") == "Robin Check-in 10-5 10012026"
-    d = json.loads(config.meeting_file("Robin Check-in 10-5 10012026", ".json").read_text())
+    # the old title comes back, in the ISO-first folder form
+    assert config.base_of("mid-a") == "2026-10-01 Robin Check-in 10-5"
+    d = json.loads(config.meeting_file("2026-10-01 Robin Check-in 10-5", ".json").read_text())
     assert d["title_source"] == "label" and "ai_gist" not in d
-    assert config.base_of("mid-b") == "LT Weekly Meeting 10022026"
+    assert d["title"] == "Robin Check-in 10-5"
+    assert config.base_of("mid-b") == "2026-10-02 LT Weekly Meeting"
 
 
 def test_the_dry_run_rests_between_model_calls(lib, monkeypatch):

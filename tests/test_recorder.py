@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from stt import audio, config, recorder, status
+from stt import audio, config, dates, recorder, status
 
 
 def _stereo_caf(path, seconds=1.0):
@@ -25,18 +25,20 @@ FIXED = datetime(2026, 7, 9, 14, 30, 0)
 
 
 def test_final_name_defaults_and_date_suffix(sandbox):
-    assert recorder.final_name("", now=FIXED) == "Recording 07092026 1430"
-    # a name without an 8-digit run gets a parseable date appended
-    assert recorder.final_name("Budget Sync", now=FIXED) == "Budget Sync 07092026"
-    # a name that already carries a date is left alone
+    assert recorder.final_name("", now=FIXED) == "2026-07-09 Recording 1430"
+    # a name without a date gets a parseable date in front
+    assert recorder.final_name("Budget Sync", now=FIXED) == "2026-07-09 Budget Sync"
+    # a name that already carries a date is left alone (the pipeline moves an
+    # older-form stamp to the front)
     assert recorder.final_name("LT Meeting 05212026", now=FIXED) == "LT Meeting 05212026"
+    assert recorder.final_name("2026-05-21 LT Meeting", now=FIXED) == "2026-05-21 LT Meeting"
 
 
 def test_final_name_sanitizes_and_uniquifies(sandbox):
     assert "/" not in recorder.final_name("a/b:c", now=FIXED)
     (config.recordings_dir()).mkdir(parents=True, exist_ok=True)
-    (config.recordings_dir() / "Budget Sync 07092026.m4a").write_bytes(b"x")
-    assert recorder.final_name("Budget Sync", now=FIXED) == "Budget Sync 07092026 (2)"
+    (config.recordings_dir() / "2026-07-09 Budget Sync.m4a").write_bytes(b"x")
+    assert recorder.final_name("Budget Sync", now=FIXED) == "2026-07-09 Budget Sync (2)"
 
 
 def test_finalize_transcodes_stereo_and_clears_state(sandbox):
@@ -86,7 +88,7 @@ def test_recover_orphans_finalizes_dead_capture(sandbox):
     caf = _stereo_caf(config.recordings_dir() / ".rec-orphan1.caf")
     status.set_recording({"pid": 999999, "caf": str(caf)})  # dead pid
     names = recorder.recover_orphans()
-    assert len(names) == 1 and names[0].startswith("Recording ")
+    assert len(names) == 1 and " Recording " in names[0] and dates.is_iso_form(names[0])
     assert status.recording() is None and not caf.exists()
     assert (config.recordings_dir() / f"{names[0]}.m4a").exists()
 
