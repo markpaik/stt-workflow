@@ -475,6 +475,10 @@ def main(argv=None):
         r = undo(dry=not a.apply)
     elif a.apply:
         r = apply()
+    if a.apply:
+        # every rename leaves the old name's lock file behind: sweep the
+        # ones nobody holds, so the registry hygiene check stays clean
+        print(f"pruned {config.prune_lock_files()} stale lock file(s)")
     else:
         doc = plan()
         rows = doc["rows"]
