@@ -123,8 +123,10 @@ def _linkable(a, b) -> float:
 _row_cache = {}   # json path -> (mtime, row)
 
 
-# an HHMM (or HHMMSS) stamp right after an eight-digit date
+# an HHMM (or HHMMSS) stamp right after an eight-digit date ('Recording
+# 07112026 1814'), or the recorder's ISO-first name ('2026-07-11 Recording 1814')
 _STAMP = re.compile(r"(?<!\d)\d{8}[ _-](\d{2})(\d{2})(?:\d{2})?(?!\d)")
+_ISO_REC = re.compile(r"^\d{4}-\d{2}-\d{2}\s+recording\s+(\d{2})(\d{2})(?:\d{2})?(?!\d)", re.I)
 
 
 def _hour(ra):
@@ -137,7 +139,7 @@ def _hour(ra):
 
 
 def _stamp_hour(name):
-    m = _STAMP.search(str(name or ""))
+    m = _STAMP.search(str(name or "")) or _ISO_REC.search(str(name or ""))
     if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
         return int(m.group(1))
     return None

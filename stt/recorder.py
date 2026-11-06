@@ -123,8 +123,9 @@ def _free_bytes(path: Path) -> int:
 
 
 def _stamp(now=None):
+    """(ISO date, HHMM) for a capture that starts at `now`."""
     now = now or datetime.now()
-    return now.strftime("%m%d%Y"), now.strftime("%H%M")
+    return now.date().isoformat(), now.strftime("%H%M")
 
 
 def _silence_wav() -> Path:
@@ -419,21 +420,23 @@ def finalize(caf: Path, name=None) -> dict:
 
 
 def final_name(raw=None, now=None) -> str:
-    """A safe, unique meeting name. Empty/None -> 'Recording MMDDYYYY HHMM'.
-    A user name with no 8-digit run gets an MMDDYYYY suffix so dates.py can
-    parse the meeting date and month-grouping works. Uniquified against files
-    already in staging and in the meetings store."""
+    """A safe, unique meeting name. Empty/None -> 'YYYY-MM-DD Recording HHMM'.
+    A user name with no date gets today's date in front ('YYYY-MM-DD <name>')
+    so dates.py can parse the meeting date and month-grouping works. A name
+    typed with a date is kept as typed: the pipeline moves its stamp to the
+    front (dates.canonical). Uniquified against files already in staging and
+    in the meetings store."""
     import re
 
     from . import dates
-    mmdd, hhmm = _stamp(now)
+    iso, hhmm = _stamp(now)
     raw = (raw or "").strip()
     raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", raw).strip().lstrip(".")
     raw = re.sub(r"\s+", " ", raw)[:120].strip()
     if not raw:
-        base = f"Recording {mmdd} {hhmm}"
+        base = f"{iso} Recording {hhmm}"
     elif dates.meeting_date(raw) is None:
-        base = f"{raw} {mmdd}"
+        base = dates.stamp(raw, iso)
     else:
         base = raw
     return _uniquify(base)

@@ -124,13 +124,13 @@ def test_meetings_load_through_config(seeded):
         months.add(d["date"][:7])
         years.add(d["date"][:4])
     assert len(months) >= 3 and len(years) >= 2
-    assert config.archived_bases() == ["Old Sync Meeting 03042025"]
+    assert config.archived_bases() == ["2025-03-04 Old Sync Meeting"]
 
 
 def test_inbox_meeting_flagged_unreviewed(seeded):
     inbox = [b for b in config.meeting_bases()
              if json.loads(config.meeting_file(b, ".json").read_text()).get("reviewed") is False]
-    assert inbox == ["Recording 07102026 0915"]
+    assert inbox == ["2026-07-10 Recording 0915"]
     # and processed meetings must NOT read as needing review
     others = [b for b in config.meeting_bases() if b not in inbox]
     assert all(json.loads(config.meeting_file(b, ".json").read_text()).get("reviewed") is not False
@@ -138,13 +138,13 @@ def test_inbox_meeting_flagged_unreviewed(seeded):
 
 
 def test_review_flags_load_with_alt_and_minor(seeded):
-    out = review.list_flagged("Leadership Team Weekly 04082026")
+    out = review.list_flagged("2026-04-08 Leadership Team Weekly")
     assert out["items"], "review meeting should have flagged segments"
     assert out["n_minor"] >= 1
     assert any(not it["minor"] for it in out["items"])          # substantial ones too
     alts = [it["alt"] for it in out["items"] if it.get("alt")]
     assert alts and alts[0][0]["theirs"], "second-engine alternative text present"
-    assert review.count_decisions("Leadership Team Weekly 04082026") >= 1
+    assert review.count_decisions("2026-04-08 Leadership Team Weekly") >= 1
 
 
 def test_speaker_store_loads(seeded):

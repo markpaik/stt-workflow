@@ -150,7 +150,8 @@ def is_public_download(source_file: str) -> bool:
 
 
 # --- routes ------------------------------------------------------------------
-_NATIVE = re.compile(r"^recording\s+\d{8}\s+\d{3,4}(\s+\(\d+\))?$", re.I)
+_NATIVE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}\s+recording|recording\s+\d{8})"
+                     r"\s+\d{3,4}(\s+\(\d+\))?$", re.I)
 _CONFERENCE = re.compile(r"^(gmt\d{8}-\d{6}|zoom[_\s]?\d+)", re.I)
 
 

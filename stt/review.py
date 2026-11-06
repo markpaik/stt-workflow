@@ -173,7 +173,7 @@ def _rewrite(jpath, data):
     meta = {k: v for k, v in data.items()
             if k not in ("speakers", "segments", "words", "generated_at")}
     output.write_json(jpath, meta, speakers, segments, words)
-    header = output.txt_header(data.get("source_file", jpath.stem),
+    header = output.txt_header(output.header_name(jpath.stem, data),
                                data.get("duration_sec", 0), speakers,
                                data.get("strict", False), data.get("processed_at"))
     output.write_txt(jpath.with_suffix(".txt"), segments, header=header)

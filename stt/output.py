@@ -7,6 +7,7 @@ half-written transcript as complete. Confidence in the outputs is REAL evidence
 """
 import json
 import os
+import re
 from datetime import datetime
 
 
@@ -56,10 +57,44 @@ def line_label(seg, roster) -> str:
             or (speaker_display(sid) if sid else "?"))
 
 
+def header_name(base: str, data: dict = None) -> str:
+    """What the .txt header line opens with: the meeting's current date and
+    title, "YYYY-MM-DD <title>". It used to be the source file name, which
+    went stale on the first rename and kept the recording's old name. The
+    stored date and title win, else the folder name's own."""
+    from . import dates
+    data = data or {}
+    title = data.get("title") or dates.title_of(base)
+    iso = data.get("date") or dates.stamp_date(dates._UNIQ_SUFFIX.sub("", str(base or "")))
+    return dates.stamp(title, iso) if iso else title
+
+
+# the header line's shape (txt_header): '<name>  |  N min  |  N speaker(s)...'
+_HEADER_LINE = re.compile(r"^([^\n]*?)(  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*)$")
+
+
+def refresh_txt_header(path, name: str) -> bool:
+    """Point an existing .txt header line at `name` (header_name), keeping
+    the rest of the line and the transcript as they are. A rename calls it,
+    so the header follows the title and the date. True when the file
+    changed. A file with no header line is left alone."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    first, sep, rest = text.partition("\n")
+    m = _HEADER_LINE.match(first)
+    if not m or m.group(1) == name:
+        return False
+    _atomic_write(path, name + m.group(2) + sep + rest)
+    return True
+
+
 def txt_header(source_file, duration_sec, speakers, strict=False,
                processed_at=None) -> str:
     """The one canonical .txt header line (pipeline, relabel, and review all
-    regenerate the .txt and must agree)."""
+    regenerate the .txt and must agree). `source_file` is what the line
+    opens with: callers pass header_name(), the meeting's date and title."""
     named = [s["name"] for s in speakers if s.get("name")]
     h = (f"{source_file}  |  {round((duration_sec or 0) / 60, 1)} min  |  "
          f"{len(speakers)} speaker(s)")

@@ -140,7 +140,7 @@ TAG_MIN, TAG_MAX = 3, 5
 
 _TOPIC_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f–—]')
 _DATEISH = re.compile(
-    r"\b(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{8}|\d{1,2}:\d{2})\b")
+    r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?|\d{8}|\d{1,2}:\d{2})\b")
 
 
 def catalog_text() -> str:

@@ -484,8 +484,9 @@ def _upload_target(dest: Path, name: str) -> Path:
 
 
 def _display_title(base: str) -> str:
-    """The folder name minus its trailing date stamp, so 'Weekly Check-in 07102026'
-    shows as 'Weekly Check-in' (the date is shown separately). The date lives in
+    """The folder name minus its date stamp, so '2026-07-10 Weekly Check-in'
+    (or the older 'Weekly Check-in 07102026') shows as 'Weekly Check-in' (the
+    date is shown separately). The date lives in
     the FILENAME to keep recurring meetings unique on disk; the panel shows the
     clean name. dates.strip_stamp is the single definition of that rule — the
     pipeline, rename, the date editor, and the recorder all stamp through the same

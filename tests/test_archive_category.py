@@ -68,10 +68,10 @@ def test_category_survives_a_redo(sandbox, monkeypatch, tmp_path):
                     str(src)], check=True, capture_output=True)
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
                           do_verify=False)
-    summarize.set_meeting_category("Redo Cat 05012026", "personal")
+    summarize.set_meeting_category("2026-05-01 Redo Cat", "personal")
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
                           do_verify=False)  # the Redo
-    assert json.loads(config.meeting_file("Redo Cat 05012026", ".json").read_text()
+    assert json.loads(config.meeting_file("2026-05-01 Redo Cat", ".json").read_text()
                       )["category"] == "personal"
 
 
@@ -127,11 +127,11 @@ def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
 def test_a_new_name_can_never_collide_with_an_archived_one(sandbox):
     """Rename uniquifies against the archive too, so the ambiguity the test above
     has to clean up can't be created in the first place."""
-    _meeting("Standup 05012026")
-    archive.archive_meeting("Standup 05012026")
+    _meeting("2026-05-01 Standup")
+    archive.archive_meeting("2026-05-01 Standup")
     _meeting("Other 05012026")
     r = summarize.rename_meeting("Other 05012026", "Standup 05012026")
-    assert r["ok"] and r["base"] == "Standup 05012026 (2)"
+    assert r["ok"] and r["base"] == "2026-05-01 Standup (2)"
 
 
 def test_archive_refused_while_the_meeting_is_being_processed(sandbox):

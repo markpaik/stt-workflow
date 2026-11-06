@@ -61,14 +61,15 @@ def test_rename_renames_folder_and_every_file(sandbox):
     r = summarize.rename_meeting("Old Name 05212026", "LT Meeting 05212026")
     assert r["ok"] and len(r["renamed"]) == 5
     assert not config.meeting_dir("Old Name 05212026").exists()
-    new_dir = config.meeting_dir("LT Meeting 05212026")
+    new_dir = config.meeting_dir("2026-05-21 LT Meeting")
     assert new_dir.is_dir()
     names = sorted(p.name for p in new_dir.iterdir())
-    assert names == ["LT Meeting 05212026.diar.npz", "LT Meeting 05212026.json",
-                     "LT Meeting 05212026.m4a", "LT Meeting 05212026.reviews.json",
-                     "LT Meeting 05212026.txt"]
-    d = json.loads(config.meeting_file("LT Meeting 05212026", ".json").read_text())
-    assert d["source_file"] == "LT Meeting 05212026.m4a"
+    assert names == ["2026-05-21 LT Meeting.diar.npz", "2026-05-21 LT Meeting.json",
+                     "2026-05-21 LT Meeting.m4a", "2026-05-21 LT Meeting.reviews.json",
+                     "2026-05-21 LT Meeting.txt"]
+    d = json.loads(config.meeting_file("2026-05-21 LT Meeting", ".json").read_text())
+    assert d["source_file"] == "2026-05-21 LT Meeting.m4a"
+    assert d["title"] == "LT Meeting" and d["date"] == "2026-05-21"
     assert d["renamed_from"] == "Old Name 05212026"
 
 
@@ -88,30 +89,31 @@ def test_rename_collision_uniquifies_instead_of_refusing(sandbox):
 
 def test_rename_appends_meeting_date_for_recurring_names(sandbox):
     """Typing just 'Weekly Check-in' must not collide across weeks: the
-    meeting's own date is appended to the FILES (MMDDYYYY, so dates.py parses
+    meeting's own date goes in front of the FILES (ISO, so dates.py parses
     it), while the panel shows the clean name via its title field."""
     mfile("Voice Memo 042", ".json").write_text(json.dumps(
         {"source_file": "Voice Memo 042.m4a", "date": "2026-07-03",
          "segments": [], "speakers": [], "words": []}))
     r = summarize.rename_meeting("Voice Memo 042", "Weekly Check-in")
-    assert r["ok"] and r["base"] == "Weekly Check-in 07032026"
-    assert config.meeting_dir("Weekly Check-in 07032026").is_dir()
-    # a name the user dated explicitly is left exactly as typed
+    assert r["ok"] and r["base"] == "2026-07-03 Weekly Check-in"
+    assert config.meeting_dir("2026-07-03 Weekly Check-in").is_dir()
+    # a name the user dated explicitly gives the date, and takes the ISO form
     mfile("Voice Memo 043", ".json").write_text(json.dumps(
         {"source_file": "Voice Memo 043.m4a", "date": "2026-07-10",
          "segments": [], "speakers": [], "words": []}))
     r2 = summarize.rename_meeting("Voice Memo 043", "Special Review 06152026")
-    assert r2["ok"] and r2["base"] == "Special Review 06152026"
+    assert r2["ok"] and r2["base"] == "2026-06-15 Special Review"
     # same clean name, SAME date (recorded twice that day) -> ' (2)'
     mfile("Voice Memo 044", ".json").write_text(json.dumps(
         {"source_file": "Voice Memo 044.m4a", "date": "2026-07-03",
          "segments": [], "speakers": [], "words": []}))
     r3 = summarize.rename_meeting("Voice Memo 044", "Weekly Check-in")
-    assert r3["ok"] and r3["base"] == "Weekly Check-in 07032026 (2)"
+    assert r3["ok"] and r3["base"] == "2026-07-03 Weekly Check-in (2)"
 
 
 def test_display_title_strips_only_a_trailing_date_stamp(sandbox):
     from gui import server as srv
+    assert srv._display_title("2026-07-03 Weekly Check-in") == "Weekly Check-in"
     assert srv._display_title("Weekly Check-in 07032026") == "Weekly Check-in"
     assert srv._display_title("LT Meeting 05212026") == "LT Meeting"
     # an 8-digit run that is NOT a valid date is part of the name
@@ -130,17 +132,17 @@ def test_set_meeting_date_restamps_the_folder(sandbox):
         {"source_file": "Mtg.m4a", "date": "2026-05-30",
          "segments": [], "speakers": [], "words": []}))
     r = summarize.set_meeting_date("Mtg", "2026-04-21")
-    assert r["ok"] and r["date"] == "2026-04-21" and r["base"] == "Mtg 04212026"
-    assert config.meeting_dir("Mtg 04212026").is_dir()
+    assert r["ok"] and r["date"] == "2026-04-21" and r["base"] == "2026-04-21 Mtg"
+    assert config.meeting_dir("2026-04-21 Mtg").is_dir()
     assert not config.meeting_dir("Mtg").exists()
-    d = json.loads(config.meeting_file("Mtg 04212026", ".json").read_text())
+    d = json.loads(config.meeting_file("2026-04-21 Mtg", ".json").read_text())
     assert d["date"] == "2026-04-21"
-    assert d["source_file"] == "Mtg 04212026.m4a"
+    assert d["source_file"] == "2026-04-21 Mtg.m4a"
     # correcting it AGAIN replaces the stamp, never appends a second one
-    r2 = summarize.set_meeting_date("Mtg 04212026", "2026-04-22")
-    assert r2["ok"] and r2["base"] == "Mtg 04222026"
-    assert not config.meeting_dir("Mtg 04212026").exists()
-    assert not summarize.set_meeting_date("Mtg 04222026", "yesterday")["ok"]
+    r2 = summarize.set_meeting_date("2026-04-21 Mtg", "2026-04-22")
+    assert r2["ok"] and r2["base"] == "2026-04-22 Mtg"
+    assert not config.meeting_dir("2026-04-21 Mtg").exists()
+    assert not summarize.set_meeting_date("2026-04-22 Mtg", "yesterday")["ok"]
     assert not summarize.set_meeting_date("Nope", "2026-04-21")["ok"]
 
 
@@ -176,7 +178,7 @@ def test_processed_at_stamped_by_a_run_and_preserved_across_edits(sandbox, monke
     proc = d0["processed_at"]
 
     # a review save (any edit) must preserve processed_at while re-stamping generated_at
-    _, data = review._load("Sync 05012026")
+    _, data = review._load("2026-05-01 Sync")
     review._rewrite(res["json"], data)
     d1 = json.loads(res["json"].read_text())
     assert d1["processed_at"] == proc                 # transcription time preserved
@@ -209,19 +211,19 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     manifest.mark(m, src.name, src.stat().st_mtime, [str(res["json"])])
     manifest.save(m)
     import shutil
-    shutil.copy2(src, config.meeting_file("Team Sync 05012026", ".m4a"))
-    d0 = json.loads(config.meeting_file("Team Sync 05012026", ".json").read_text())
+    shutil.copy2(src, config.meeting_file("2026-05-01 Team Sync", ".m4a"))
+    d0 = json.loads(config.meeting_file("2026-05-01 Team Sync", ".json").read_text())
     assert d0["date"] == "2026-05-01"  # stamped from the filename convention
     meeting_id = d0["meeting_id"]      # minted once, by this first run
-    assert meeting_id and config.base_of(meeting_id) == "Team Sync 05012026"
+    assert meeting_id and config.base_of(meeting_id) == "2026-05-01 Team Sync"
 
     # 2. rename + human date correction, exactly as the panel does. Correcting
     #    the date RE-STAMPS the folder, so the meeting ends up under the date the
     #    human actually chose — the name and the stored date stay in lockstep.
-    r = summarize.rename_meeting("Team Sync 05012026", "Focus Group 06012026")
-    assert r["ok"] and r["base"] == "Focus Group 06012026"
-    r = summarize.set_meeting_date("Focus Group 06012026", "2026-06-15")
-    assert r["ok"] and r["base"] == "Focus Group 06152026"
+    r = summarize.rename_meeting("2026-05-01 Team Sync", "Focus Group 06012026")
+    assert r["ok"] and r["base"] == "2026-06-01 Focus Group"
+    r = summarize.set_meeting_date("2026-06-01 Focus Group", "2026-06-15")
+    assert r["ok"] and r["base"] == "2026-06-15 Focus Group"
     final = r["base"]
 
     # 3. Redo: the panel passes the STORED (renamed) audio path
@@ -234,8 +236,8 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     # the original name or the pre-correction one
     assert res2["json"] == config.meeting_file(final, ".json")
     assert config.meeting_bases() == [final]
-    assert not config.meeting_dir("Team Sync 05012026").exists()
-    assert not config.meeting_dir("Focus Group 06012026").exists()
+    assert not config.meeting_dir("2026-05-01 Team Sync").exists()
+    assert not config.meeting_dir("2026-06-01 Focus Group").exists()
 
     d = json.loads(res2["json"].read_text())
     assert d["source_file"] == f"{final}.m4a"
@@ -278,13 +280,13 @@ def test_rename_sanitizes_leading_dots_and_control_chars(sandbox):
     r = summarize.rename_meeting("Src 05012026", "..")
     assert not r["ok"] and r["error"] == "empty name"
     assert config.meeting_dir("Src 05012026").is_dir()  # not moved
-    # a leading dot on a real name is dropped; the date is still appended
+    # a leading dot on a real name is dropped; the date still goes in front
     mfile("Src2 05012026", ".json").write_text(json.dumps(
         {"source_file": "Src2 05012026.m4a", "date": "2026-05-01",
          "segments": [], "speakers": [], "words": []}))
     r2 = summarize.rename_meeting("Src2 05012026", ".Hidden\x07 Meeting")
-    assert r2["ok"] and r2["base"] == "Hidden Meeting 05012026"
-    assert config.meeting_dir("Hidden Meeting 05012026").is_dir()
+    assert r2["ok"] and r2["base"] == "2026-05-01 Hidden Meeting"
+    assert config.meeting_dir("2026-05-01 Hidden Meeting").is_dir()
 
 
 def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_path):
@@ -315,7 +317,7 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
                     "-c:a", "aac", str(src)], check=True, capture_output=True)
     pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                           do_diarize=False, do_verify=False)
-    assert "Locked 05012026" in entered
+    assert "2026-05-01 Locked" in entered
 
 
 def _sine(path, secs=2):
@@ -420,9 +422,9 @@ def test_two_first_runs_of_one_new_meeting_queue_on_one_lock(sandbox, monkeypatc
         t.join(timeout=30)
     assert not errs, f"the two writes collided: {errs!r}"
     assert len(out) == 2
-    assert {o["base"] for o in out} == {"Twice Mtg 05012026"}
+    assert {o["base"] for o in out} == {"2026-05-01 Twice Mtg"}
     assert peak[0] == 1, "the two writes of one meeting never overlap"
-    mid = config.id_of("Twice Mtg 05012026")
+    mid = config.id_of("2026-05-01 Twice Mtg")
     locks = config.meetings_dir() / ".locks"
     assert sorted(p.name for p in locks.iterdir()) == [f"{mid}.lock"], \
         "both runs queued on the one lock named for the id the json carries"

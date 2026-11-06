@@ -78,7 +78,7 @@ def test_the_allow_list_copies_only_finished_long_new_memos(sandbox):
     ])
     r = voicememos.sync(now=NOW)
     assert r["status"] == "ok"
-    assert _staged() == ["Budget Review 11032026.m4a"]
+    assert _staged() == ["2026-11-03 Budget Review.m4a"]
     c = r["counts"]
     assert (c["copied"], c["before_go_live"], c["short"], c["in_progress"],
             c["not_local"]) == (1, 1, 1, 1, 1)
@@ -87,9 +87,9 @@ def test_the_allow_list_copies_only_finished_long_new_memos(sandbox):
 def test_no_marker_is_required_and_a_default_title_is_no_label(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "New Recording 4"}])
     voicememos.sync(now=NOW)
-    assert _staged() == ["Voice Memo 11032026.m4a"]
+    assert _staged() == ["2026-11-03 Voice Memo.m4a"]
     side = json.loads((voicememos.staging_dir()
-                       / "Voice Memo 11032026.vm.json").read_text())
+                       / "2026-11-03 Voice Memo.vm.json").read_text())
     assert side["title_typed"] is False and side["location_note"] is None
     assert side["recorded_at"].startswith("2026-11-03T09:00:00")
 
@@ -101,7 +101,7 @@ def test_a_default_address_title_becomes_a_location_note(sandbox):
     sides = sorted(voicememos.staging_dir().glob("*.vm.json"))
     notes = [json.loads(p.read_text())["location_note"] for p in sides]
     assert notes == ["1200 Example Ave", "1200 Example Ave"]
-    assert all(n.startswith("Voice Memo") for n in _staged())
+    assert all(n.startswith("2026-11-0") and " Voice Memo" in n for n in _staged())
 
 
 def test_a_listed_place_name_is_a_default(sandbox, monkeypatch):
@@ -176,10 +176,10 @@ def test_a_duplicated_memo_takes_its_stored_date_as_uncertain(sandbox):
            "path": "Budget Review copy.m4a"}])
     voicememos.sync(now=NOW)
     side = json.loads((voicememos.staging_dir()
-                       / "Budget Review 11032026.vm.json").read_text())
+                       / "2026-11-03 Budget Review.vm.json").read_text())
     assert "recorded_at" not in side
     assert (side["date"], side["date_source"]) == ("2026-11-03", "mtime")
-    src = voicememos.staging_dir() / "Budget Review 11032026.m4a"
+    src = voicememos.staging_dir() / "2026-11-03 Budget Review.m4a"
     assert provenance.fresh(src, probe=False) == ("mtime", "2026-11-03", None)
 
 
@@ -187,7 +187,7 @@ def test_the_batch_sweeps_the_staging_folder(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"}])
     voicememos.sync(now=NOW)
     names = [p.name for p in run_batch.iter_sources(config.source_dir())]
-    assert "Budget Review 11032026.m4a" in names
+    assert "2026-11-03 Budget Review.m4a" in names
     # the library itself is never a source
     assert not any("-0000" in n for n in names)
 
@@ -216,8 +216,8 @@ def test_a_typed_date_in_the_title_is_not_doubled(sandbox):
           {"start": "2026-11-03 10:00:00", "title": "Board 10152026"},
           {"start": "2026-11-03 11:00:00", "title": "Board 10152026 Notes"}])
     voicememos.sync(now=NOW)
-    assert _staged() == ["Board 11032026 Notes.m4a", "Board 11032026.m4a",
-                         "Study Session 11032026.m4a"]
+    assert _staged() == ["2026-11-03 Board Notes.m4a", "2026-11-03 Board.m4a",
+                         "2026-11-03 Study Session.m4a"]
     from stt import dates
     for n in _staged():
         assert dates.meeting_date(n) == "2026-11-03"

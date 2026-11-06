@@ -164,7 +164,7 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         meta["ai_generated_at"] = f"{iso}T20:15:30"
 
     jpath = mdir / f"{base}.json"
-    header = output.txt_header(meta["source_file"], total_dur, speakers, strict,
+    header = output.txt_header(output.header_name(base, meta), total_dur, speakers, strict,
                                meta["processed_at"])
     output.write_json(jpath, meta, speakers, segments, words)
     output.write_txt(mdir / f"{base}.txt", segments, header=header)
@@ -445,9 +445,9 @@ def meeting_specs():
     # --- un-named inbox meeting (reviewed=False, recorder's raw name) ---
     S.append({
         "title": "Recording", "date": "2026-07-10",
-        "base": "Recording 07102026 0915",     # recorder default name; date in the middle
+        "base": "2026-07-10 Recording 0915",     # recorder default name
         "reviewed": False,
-        "source_file": "Recording 07102026 0915.m4a",
+        "source_file": "2026-07-10 Recording 0915.m4a",
         "speakers": [("SPEAKER_00", None, "Speaker 1", None, None),
                      ("SPEAKER_01", None, "Speaker 2", None, None)],
         "turns": [
@@ -470,10 +470,10 @@ def build(home: Path) -> dict:
     # unknown speakers: U007 active ("Who is this?"), U012 hidden (archived)
     unknown_meetings = {
         "U007": {"meetings": [b["base"] for b in built
-                              if b["base"].startswith("Vendor Demo")],
+                              if dates.title_of(b["base"]).startswith("Vendor Demo")],
                  "created": "2026-01-15T20:14:07"},
         "U012": {"meetings": [b["base"] for b in built
-                              if b["base"].startswith("Board Prep Session 09")],
+                              if b["base"].startswith("2025-09-10 Board Prep Session")],
                  "created": "2025-09-10T20:14:07", "archived": True},
     }
     registry, unknowns = write_voiceprints(home, sources_seen, unknown_meetings)
@@ -489,7 +489,7 @@ def build(home: Path) -> dict:
     (home / "recordings").mkdir(parents=True, exist_ok=True)
 
     # history: successes for the live meetings + ONE real-looking failure
-    live = [b for b in built if not b["archived"] and b["base"] != "Recording 07102026 0915"]
+    live = [b for b in built if not b["archived"] and b["base"] != "2026-07-10 Recording 0915"]
     history = []
     for b in sorted(live, key=lambda x: x["iso"], reverse=True):
         who = (" · " + ", ".join(b["identified"][:3])) if b["identified"] else ""
@@ -602,7 +602,7 @@ def main(argv=None):
     result = build(target)
 
     live = [b for b in result["built"] if not b["archived"]]
-    inbox = [b for b in live if b["base"] == "Recording 07102026 0915"]
+    inbox = [b for b in live if b["base"] == "2026-07-10 Recording 0915"]
     processed = [b for b in live if b not in inbox]
     months = sorted({b["iso"][:7] for b in result["built"]})
     hidden = [u for u, m in result["unknowns"].items() if m.get("archived")]
@@ -612,7 +612,7 @@ def main(argv=None):
     print(f"  processed meetings : {len(processed)}  across months {', '.join(months)}")
     print(f"  archived meetings  : {sum(1 for b in result['built'] if b['archived'])}")
     print(f"  inbox (Needs naming, reviewed=false): {len(inbox)}")
-    print( "  review-flag meeting: 1  (Leadership Team Weekly 04082026 — "
+    print( "  review-flag meeting: 1  (2026-04-08 Leadership Team Weekly — "
            "overlap + id_mismatch + engine-disagreement alt + minor crumbs)")
     cats = {}
     for b in processed:

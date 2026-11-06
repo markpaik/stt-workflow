@@ -102,11 +102,18 @@ def test_what_is_not_a_short_date(name, ref):
 
 
 def test_title_of_peels_the_stamp_and_the_twin_suffix():
+    assert dates.title_of("2026-10-30 Weekly Sync (2)") == "Weekly Sync"
+    assert dates.title_of("2026-10-01 Budget Review") == "Budget Review"
+    assert dates.title_of("2026-07-11 Recording 1814") == "Recording 1814"
+    # the older form still reads
     assert dates.title_of("Weekly Sync 10302026 (2)") == "Weekly Sync"
     assert dates.title_of("Budget Review 10012026") == "Budget Review"
     assert dates.title_of("Recording 07112026 1814") == "Recording 07112026 1814"
-    base = "Recording 07112026 1814"
-    assert dates.restamp(dates.title_of(base), "2026-07-11") == base
+    for base in ("2026-07-11 Recording 1814", "2026-11-01 Retreat 12312026",
+                 "2026-10-30 Weekly Sync (2)"):
+        iso = dates.meeting_date(base)
+        assert dates.stamp(dates.title_of(base), iso) + dates.twin_suffix(base) == base
+        assert dates.restamp(base, iso) + dates.twin_suffix(base) == base
 
 
 # ---------- the tag check ----------
@@ -342,16 +349,16 @@ def test_the_date_fix_dry_run_counts_and_writes_nothing(dated, capsys):
 def test_the_date_fix_restamps_the_folder_and_records_the_source(dated):
     r = fix_dates.apply()
     now = {x["base"]: x["now"] for x in r["applied"]}
-    assert now == {"Weekly Sync 9.14 09292026": "Weekly Sync 9.14 09142026",
-                   "Site Visit 9.17 09292026": "Site Visit 9.17 09172026",
-                   "Planning Talk 10292026": "Planning Talk 10232026"}
+    assert now == {"Weekly Sync 9.14 09292026": "2026-09-14 Weekly Sync 9.14",
+                   "Site Visit 9.17 09292026": "2026-09-17 Site Visit 9.17",
+                   "Planning Talk 10292026": "2026-10-23 Planning Talk"}
     for base in now.values():
         d = _load(base)
-        assert dates.restamp(d["title"], d["date"]) == base
-        assert d["date"] == dates.meeting_date(base[-8:])
-    w = _load("Weekly Sync 9.14 09142026")
+        assert dates.stamp(d["title"], d["date"]) == base
+        assert d["date"] == dates.meeting_date(base)
+    w = _load("2026-09-14 Weekly Sync 9.14")
     assert (w["date"], w["date_source"], w["recorded_at"]) == ("2026-09-14", "short_typed", None)
-    p = _load("Planning Talk 10232026")
+    p = _load("2026-10-23 Planning Talk")
     assert p["date_source"] == "recorder" and p["recorded_at"].startswith("2026-10-23T10:00:00")
     # the typed date, the hand-set date, and the export-time tag stay put
     assert _load("Typed Day 9.14 09292026")["date"] == "2026-09-29"
@@ -364,22 +371,26 @@ def test_the_date_fix_undo_puts_the_old_date_and_folder_back(dated):
     before = {b: _load(b) for b in config.meeting_bases()}
     r = fix_dates.apply()
     assert fix_dates.undo(r["run"])["restored"]          # dry run
-    assert "Weekly Sync 9.14 09142026" in config.meeting_bases()
+    assert "2026-09-14 Weekly Sync 9.14" in config.meeting_bases()
     u = fix_dates.undo(r["run"], dry_run=False)
     assert len(u["restored"]) == 3
-    assert set(config.meeting_bases()) == set(before)
+    # the undo puts the old DATE back, and a moved folder lands in the ISO form
+    moved = {x["base"] for x in r["applied"]}
+    where = {b: (dates.restamp(b, old["date"]) if b in moved else b)
+             for b, old in before.items()}
+    assert set(config.meeting_bases()) == set(where.values())
     for b, old in before.items():
-        new = _load(b)
+        new = _load(where[b])
         assert new["date"] == old["date"], b
         assert new.get("date_source") == old.get("date_source"), b
 
 
 def test_a_date_changed_after_the_fix_survives_undo(dated):
     r = fix_dates.apply()
-    summarize.set_meeting_date("Site Visit 9.17 09172026", "2026-09-16")
+    summarize.set_meeting_date("2026-09-17 Site Visit 9.17", "2026-09-16")
     u = fix_dates.undo(r["run"], dry_run=False)
-    assert {"base": "Site Visit 9.17 09162026"} in u["kept"]
-    d = _load("Site Visit 9.17 09162026")
+    assert {"base": "2026-09-16 Site Visit 9.17"} in u["kept"]
+    d = _load("2026-09-16 Site Visit 9.17")
     assert (d["date"], d["date_source"]) == ("2026-09-16", "manual")
 
 
@@ -390,7 +401,7 @@ def test_a_panel_date_edit_is_manual_and_keeps_the_title_key(sandbox):
        recorded_at="2026-09-29T09:00:00-04:00")
     r = summarize.set_meeting_date("Budget Review 09292026", "2026-09-28")
     d = _load(r["base"])
-    assert r["base"] == "Budget Review 09282026"
+    assert r["base"] == "2026-09-28 Budget Review"
     assert (d["date_source"], d["title"], d["recorded_at"]) == ("manual", "Budget Review", None)
 
 
@@ -433,7 +444,7 @@ def test_the_pipeline_writes_the_title_key_on_arrival_and_on_a_redo(sandbox, mon
     src2.write_bytes(b"xy")
     os.utime(src2, (1_700_000_000, 1_700_000_000))
     twin = _process(monkeypatch, src2)["base"]
-    assert twin == "Team Huddle 10012026 (2)"
+    assert twin == "2026-10-01 Team Huddle (2)"
     assert _load(twin)["title"] == "Team Huddle"
     # a Redo after a rename follows the folder, not a stale stored title
     j = config.meeting_file(base, ".json")
@@ -525,10 +536,11 @@ def test_an_accept_with_the_stored_date_keeps_the_date_source(sandbox):
     d = _load(r["base"])
     assert (d["date_source"], d["recorded_at"]) == ("recorder", "2026-10-05T09:30:00-04:00")
     _m("Guess Day 10052026", date="2026-10-05", date_source="mtime")
-    summarize.apply_meeting_edits("Guess Day 10052026", date="2026-10-05", reviewed=True)
-    assert _load("Guess Day 10052026")["date_source"] == "mtime"
+    r = summarize.apply_meeting_edits("Guess Day 10052026", date="2026-10-05", reviewed=True)
+    assert r["base"] == "2026-10-05 Guess Day"     # the older name moves to the ISO form
+    assert _load("2026-10-05 Guess Day")["date_source"] == "mtime"
     # a real change is still a person's choice
-    r = summarize.apply_meeting_edits("Guess Day 10052026", date="2026-10-04")
+    r = summarize.apply_meeting_edits("2026-10-05 Guess Day", date="2026-10-04")
     assert _load(r["base"])["date_source"] == "manual"
 
 
@@ -543,7 +555,7 @@ def test_a_restore_keeps_the_date_source(sandbox):
     _m("Legacy Name", date="2026-10-05", date_source="typed", title="Legacy Name")
     assert archive.archive_meeting("Legacy Name")["ok"]
     r = archive.restore_meeting("Legacy Name")
-    assert r["ok"] and r["base"] == "Legacy Name 10052026"
+    assert r["ok"] and r["base"] == "2026-10-05 Legacy Name"
     d = _load(r["base"])
     assert (d["date_source"], d["title"]) == ("typed", "Legacy Name")
 
@@ -554,11 +566,14 @@ def test_restamp_folders_keeps_the_date_source_and_leaves_twins_alone(sandbox, m
     _m("Team Sync 10052026", date="2026-10-05", date_source="typed")
     _m("Team Sync 10052026 (2)", date="2026-10-05", date_source="typed")
     plan = {b: w for b, w, _ in restamp_folders.plan()}
-    assert plan == {"Legacy Name": "Legacy Name 10052026",
-                    "Scan 20260715-160418": "Scan 07152026-160418"}
+    assert plan == {"Legacy Name": "2026-10-05 Legacy Name",
+                    "Scan 20260715-160418": "2026-07-15 Scan 20260715-160418",
+                    "Team Sync 10052026": "2026-10-05 Team Sync",
+                    "Team Sync 10052026 (2)": "2026-10-05 Team Sync (2)"}
     monkeypatch.setattr(sys, "argv", ["restamp_folders.py", "--apply"])
     assert restamp_folders.main() == 0
-    assert _load("Legacy Name 10052026")["date_source"] == "typed"
-    assert _load("Scan 07152026-160418")["date_source"] == "mtime"
+    assert _load("2026-10-05 Legacy Name")["date_source"] == "typed"
+    assert _load("2026-07-15 Scan 20260715-160418")["date_source"] == "mtime"
+    assert _load("2026-10-05 Team Sync (2)")["date_source"] == "typed"
     from stt import doctor
     assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]

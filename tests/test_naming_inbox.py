@@ -37,21 +37,22 @@ def _meeting(base, date="2026-05-01", **extra):
 # ---------- the shared date-stamp rule ----------
 
 def test_restamp_replaces_a_mid_name_date_instead_of_appending():
-    """The recorder's own default name puts the date in the MIDDLE
+    """The recorder's old default name puts the date in the MIDDLE
     ('Recording 07112026 1814'). Stripping only a TRAILING stamp missed it, so
     re-stamping appended a second date and produced real folders on disk called
-    'Recording 07112026 1814 07112026'."""
-    assert dates.restamp("Recording 07112026 1814", "2026-07-11") == "Recording 07112026 1814"
-    assert dates.restamp("Recording 07112026 1814", "2026-07-15") == "Recording 07152026 1814"
-    # the trailing convention still works, and a twin suffix is peeled first
-    assert dates.restamp("Weekly 07032026", "2026-07-10") == "Weekly 07102026"
-    assert dates.restamp("Weekly 07032026 (2)", "2026-07-10") == "Weekly 07102026"
-    assert dates.restamp("No Date Here", "2026-07-10") == "No Date Here 07102026"
+    'Recording 07112026 1814 07112026'. The date now moves to the front, once."""
+    assert dates.restamp("Recording 07112026 1814", "2026-07-11") == "2026-07-11 Recording 1814"
+    assert dates.restamp("Recording 07112026 1814", "2026-07-15") == "2026-07-15 Recording 1814"
+    # the older trailing convention converts, and a twin suffix is peeled first
+    assert dates.restamp("Weekly 07032026", "2026-07-10") == "2026-07-10 Weekly"
+    assert dates.restamp("Weekly 07032026 (2)", "2026-07-10") == "2026-07-10 Weekly"
+    assert dates.restamp("2026-07-03 Weekly (2)", "2026-07-10") == "2026-07-10 Weekly"
+    assert dates.restamp("No Date Here", "2026-07-10") == "2026-07-10 No Date Here"
     # idempotent: one date in, one date out, no matter how many times
     n = "Recording 07112026 1814"
     for _ in range(3):
         n = dates.restamp(n, "2026-07-11")
-    assert n == "Recording 07112026 1814"
+    assert n == "2026-07-11 Recording 1814"
 
 
 def test_a_failed_run_leaves_no_duplicate_behind(sandbox, tmp_path):
@@ -60,20 +61,22 @@ def test_a_failed_run_leaves_no_duplicate_behind(sandbox, tmp_path):
     the next suffix — one file failing four times left (2)(3)(4)(5) behind it."""
     from stt import pipeline
     src = _audio(tmp_path / "Sync 05012026.m4a")
-    config.meeting_dir("Sync 05012026").mkdir(parents=True)   # the shell
-    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026"
+    config.meeting_dir("2026-05-01 Sync").mkdir(parents=True)   # the shell
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "2026-05-01 Sync"
     # and a REAL meeting owned by someone else still gets stepped over
-    _meeting("Sync 05012026", source_file="Someone Else.m4a")
-    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+    _meeting("2026-05-01 Sync", source_file="Someone Else.m4a")
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "2026-05-01 Sync (2)"
 
 
 def test_stamp_helpers_round_trip():
-    assert dates.strip_stamp("Weekly Check-in 07102026") == "Weekly Check-in"
+    assert dates.strip_stamp("2026-07-10 Weekly Check-in") == "Weekly Check-in"
+    assert dates.strip_stamp("Weekly Check-in 07102026") == "Weekly Check-in"   # older form
     assert dates.strip_stamp("Case 99999999") == "Case 99999999"   # not a date
     assert dates.strip_stamp("07102026") == "07102026"             # never empties
-    assert dates.stamp("Weekly", "2026-07-10") == "Weekly 07102026"
-    # restamp REPLACES an existing stamp rather than appending a second one
-    assert dates.restamp("Weekly 07102026", "2026-07-03") == "Weekly 07032026"
+    assert dates.strip_stamp("2026-07-10") == "2026-07-10"
+    assert dates.stamp("Weekly", "2026-07-10") == "2026-07-10 Weekly"
+    # restamp REPLACES an existing stamp rather than adding a second one
+    assert dates.restamp("2026-07-10 Weekly", "2026-07-03") == "2026-07-03 Weekly"
     assert dates.meeting_date(dates.stamp("X", "2026-07-10")) == "2026-07-10"
 
 
@@ -91,18 +94,22 @@ def test_dateless_source_gets_the_date_stamped_into_its_folder(sandbox, monkeypa
                                 do_diarize=False, do_verify=False)
     base = res["base"]
     assert dates.meeting_date(base) is not None          # the folder carries a date
-    assert base.startswith("LT Weekly Meeting ")
+    assert base.endswith(" LT Weekly Meeting") and dates.is_iso_form(base)
     assert config.meeting_dir(base).is_dir()
 
 
-def test_a_source_that_already_has_a_date_is_left_alone(sandbox, monkeypatch, tmp_path):
+def test_a_source_that_already_has_a_date_moves_it_to_the_front(sandbox, monkeypatch, tmp_path):
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
     monkeypatch.setattr(config, "PUNCTUATE", False)
     src = _audio(tmp_path / "LT Weekly Meeting 05212026.m4a")
     res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                 do_diarize=False, do_verify=False)
-    assert res["base"] == "LT Weekly Meeting 05212026"   # no second stamp
+    assert res["base"] == "2026-05-21 LT Weekly Meeting"   # one stamp, in front
+    src2 = _audio(tmp_path / "2026-05-28 LT Weekly Meeting.m4a")
+    res2 = pipeline.process_file(src2, dest_dir=config.MEETINGS_DIR,
+                                 do_diarize=False, do_verify=False)
+    assert res2["base"] == "2026-05-28 LT Weekly Meeting"   # ISO form left alone
 
 
 def test_a_redo_never_renames_an_existing_meetings_folder(sandbox, monkeypatch, tmp_path):
@@ -151,7 +158,7 @@ def test_rename_retargets_the_manifest(sandbox):
     assert manifest.is_processed(manifest.load(), src.name, src.stat().st_mtime)
 
     r = summarize.rename_meeting("Old Name 05012026", "New Name")
-    assert r["ok"] and r["base"] == "New Name 05012026"
+    assert r["ok"] and r["base"] == "2026-05-01 New Name"
     # STILL processed: the manifest followed the folder
     assert manifest.is_processed(manifest.load(), src.name, src.stat().st_mtime)
 
@@ -176,7 +183,7 @@ def test_new_meetings_land_unreviewed_and_a_redo_keeps_the_state(sandbox, monkey
                                 do_diarize=False, do_verify=False)
     assert json.loads(res["json"].read_text())["reviewed"] is False   # -> inbox
 
-    summarize.apply_meeting_edits("Fresh 05012026", reviewed=True)
+    summarize.apply_meeting_edits("2026-05-01 Fresh", reviewed=True)
     res2 = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                  do_diarize=False, do_verify=False)   # a Redo
     assert json.loads(res2["json"].read_text())["reviewed"] is True   # stays put
@@ -198,8 +205,8 @@ def test_accept_names_dates_tags_and_releases_in_one_step(sandbox):
                                       date="2026-07-09", category="work",
                                       reviewed=True)
     assert r["ok"]
-    assert r["base"] == "Board Prep 07092026"   # renamed AND re-stamped to the date
-    d = json.loads(config.meeting_file("Board Prep 07092026", ".json").read_text())
+    assert r["base"] == "2026-07-09 Board Prep"   # renamed AND re-stamped to the date
+    d = json.loads(config.meeting_file("2026-07-09 Board Prep", ".json").read_text())
     assert d["date"] == "2026-07-09" and d["category"] == "work" and d["reviewed"] is True
 
 
@@ -223,7 +230,7 @@ def test_plain_named_source_processes_end_to_end_into_the_stamped_folder(sandbox
     res = run_batch.process_one(str(src), str(config.MEETINGS_DIR), opts)
     assert res["ok"]
     base = res["base"]
-    assert base.startswith("LT Weekly Meeting ") and dates.meeting_date(base)
+    assert base.endswith(" LT Weekly Meeting") and dates.meeting_date(base)
     assert config.meeting_audio(base) is not None   # audio landed in the STAMPED folder
     assert not src.exists()                          # move-after-success consumed it
 
@@ -236,17 +243,17 @@ def test_resolve_base_same_named_different_recording_never_clobbers(sandbox, tmp
 
     from stt import pipeline
     src = _audio(tmp_path / "Sync 05012026.m4a")
-    d = _meeting("Sync 05012026", date="2026-05-01",
+    d = _meeting("2026-05-01 Sync", date="2026-05-01", source_file="Sync 05012026.m4a",
                  source_mtime=round(src.stat().st_mtime, 3))
     # the same recording, reprocessed -> its own folder
-    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026"
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "2026-05-01 Sync"
     # a DIFFERENT file under the same name (same-day second session, re-export)
     src2 = tmp_path / "other" / "Sync 05012026.m4a"
     src2.parent.mkdir()
     shutil.copy(src, src2)                       # copy (not copy2): new mtime
     import os as _os
     _os.utime(src2, (src.stat().st_atime, src.stat().st_mtime + 3600))
-    assert pipeline.resolve_base(src2, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+    assert pipeline.resolve_base(src2, config.MEETINGS_DIR) == "2026-05-01 Sync (2)"
 
 
 def test_resolve_base_reuses_its_own_suffixed_slot(sandbox, tmp_path):
@@ -254,22 +261,41 @@ def test_resolve_base_reuses_its_own_suffixed_slot(sandbox, tmp_path):
     resolve back to that folder on reprocess, not mint '(3)'."""
     from stt import pipeline
     src = _audio(tmp_path / "Sync 05012026.m4a")
-    _meeting("Sync 05012026",                        # someone else's meeting
+    _meeting("2026-05-01 Sync",                      # someone else's meeting
              source_file="A Different Recording.m4a")
-    _meeting("Sync 05012026 (2)",                    # THIS source's meeting: it
+    _meeting("2026-05-01 Sync (2)",                  # THIS source's meeting: it
              source_file="Sync 05012026.m4a",        # records the SOURCE name,
              source_mtime=round(src.stat().st_mtime, 3))  # not the folder name
-    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "2026-05-01 Sync (2)"
+
+
+def test_resolve_base_reuses_its_own_slot_under_an_older_name(sandbox, tmp_path):
+    """A folder from before the ISO rule that THIS recording owns ('Sync
+    05012026 (2)') takes the reprocess, so a library not yet moved by
+    tools/iso_rename.py never gets a duplicate under the new name."""
+    from stt import pipeline
+    src = _audio(tmp_path / "Sync.m4a")
+    iso = pipeline._meeting_date(src, None)
+    old = pipeline._legacy_stamp("Sync", iso)
+    _meeting(old, source_file="A Different Recording.m4a")
+    _meeting(f"{old} (2)", source_file="Sync.m4a",
+             source_mtime=round(src.stat().st_mtime, 3))
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == f"{old} (2)"
+    # a recording that owns no older folder takes the ISO form
+    src2 = _audio(tmp_path / "other" / "Sync.m4a")
+    import os as _os
+    _os.utime(src2, (src.stat().st_atime, src.stat().st_mtime + 3600))
+    assert pipeline.resolve_base(src2, config.MEETINGS_DIR) == dates.stamp("Sync", iso)
 
 
 def test_resolve_base_never_reuses_an_archived_name(sandbox, tmp_path):
     """Finding 7: registries key meetings by name — a live meeting squatting on
     an archived name would corrupt that meeting's restore."""
     from stt import pipeline
-    _meeting("Sync 05012026")
-    archive.archive_meeting("Sync 05012026")
+    _meeting("2026-05-01 Sync")
+    archive.archive_meeting("2026-05-01 Sync")
     src = _audio(tmp_path / "Sync 05012026.m4a")
-    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "Sync 05012026 (2)"
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == "2026-05-01 Sync (2)"
 
 
 def test_active_guard_recognizes_the_stamped_base(sandbox):
@@ -303,9 +329,14 @@ def test_a_future_trailing_date_is_kept_in_the_name_but_not_stored(sandbox):
     meeting date would sort the meeting above every real one for months."""
     _meeting("Mtg 05012026", date="2026-05-01")
     r = summarize.rename_meeting("Mtg 05012026", "Planning Retreat 12312026")
-    assert r["ok"] and r["base"] == "Planning Retreat 12312026"  # name as typed
+    # the typed digits stay in the title, and the stored date goes in front
+    assert r["ok"] and r["base"] == "2026-05-01 Planning Retreat 12312026"
     d = json.loads(config.meeting_file(r["base"], ".json").read_text())
     assert d["date"] == "2026-05-01"          # stored date untouched
+    assert d["title"] == "Planning Retreat 12312026"
+    # a later date edit replaces only the leading stamp
+    r = summarize.set_meeting_date(r["base"], "2026-05-02")
+    assert r["ok"] and r["base"] == "2026-05-02 Planning Retreat 12312026"
 
 
 def test_date_restamp_replaces_not_appends_on_a_twin(sandbox):
@@ -313,15 +344,20 @@ def test_date_restamp_replaces_not_appends_on_a_twin(sandbox):
     'Weekly 07032026 (2) 07102026'."""
     _meeting("Weekly 07032026 (2)", date="2026-07-03")
     r = summarize.set_meeting_date("Weekly 07032026 (2)", "2026-07-10")
-    assert r["ok"] and r["base"] == "Weekly 07102026"
+    assert r["ok"] and r["base"] == "2026-07-10 Weekly"
+    _meeting("2026-07-03 Weekly (2)", date="2026-07-03")
+    r = summarize.set_meeting_date("2026-07-03 Weekly (2)", "2026-07-17")
+    assert r["ok"] and r["base"] == "2026-07-17 Weekly"
 
 
 def test_case_only_retitle_does_not_mint_a_twin(sandbox):
     """Finding 10: on case-insensitive APFS, a capitalization fix saw its own
     folder as taken and appended ' (2)'."""
-    _meeting("board prep 07092026", date="2026-07-09")
-    r = summarize.rename_meeting("board prep 07092026", "Board Prep 07092026")
-    assert r["ok"] and r["base"] == "Board Prep 07092026"
+    _meeting("2026-07-09 board prep", date="2026-07-09")
+    r = summarize.rename_meeting("2026-07-09 board prep", "Board Prep 07092026")
+    assert r["ok"] and r["base"] == "2026-07-09 Board Prep"
+    r = summarize.rename_meeting("2026-07-09 Board Prep", "2026-07-09 board prep")
+    assert r["ok"] and r["base"] == "2026-07-09 board prep"
 
 
 def test_restore_stamps_a_legacy_plain_name(sandbox):
@@ -330,8 +366,8 @@ def test_restore_stamps_a_legacy_plain_name(sandbox):
     _meeting("LT Weekly Meeting", date="2026-06-04")
     archive.archive_meeting("LT Weekly Meeting")
     r = archive.restore_meeting("LT Weekly Meeting")
-    assert r["ok"] and r["base"] == "LT Weekly Meeting 06042026"
-    assert config.meeting_bases() == ["LT Weekly Meeting 06042026"]
+    assert r["ok"] and r["base"] == "2026-06-04 LT Weekly Meeting"
+    assert config.meeting_bases() == ["2026-06-04 LT Weekly Meeting"]
 
 
 def test_stale_recorder_refuses_start_and_pause(sandbox, monkeypatch, tmp_path):

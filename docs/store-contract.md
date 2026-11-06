@@ -8,7 +8,10 @@ This is what the meeting store promises to the programs that read it: the panel,
 - A meeting is the folder `<store>/<base>/` that holds `<base>/<base>.json`. The store is one level deep. There are no year folders.
 - Readers skip every folder whose name starts with a dot. `.archive/` holds archived meetings, and `.locks/` holds lock files.
 - Every file of a meeting carries the folder's name: `<base>.json` (the record of truth), `<base>.txt` (the readable transcript), the audio (`.m4a`, or another type from `config.AUDIO_SUFFIXES`), and optional caches and sidecars (`.diar.npz`, `.emb.npz`, `.reviews.json`, `.verify.json`).
-- The folder name is `<title> MMDDYYYY`, plus ` (2)`, ` (3)`, and so on for a same-name twin. A date already inside the title, such as the recorder's `Recording 07112026 1814`, is replaced in place, so no name carries two dates.
+- The folder name is `YYYY-MM-DD <title>`, plus ` (2)`, ` (3)`, and so on for a same-name twin on the same date: `2026-08-03 Weekly Check-in (2)`. The date is the stored `date`.
+- Folders named before that rule read `<title> MMDDYYYY`. Every reader takes both forms (`stt/dates.py`), so an old folder, a typed name, or a dropped file still parses. Only the ISO form is written: the next title or date edit moves an old folder to it, and `tools/iso_rename.py` moves the whole store.
+- A stamp typed in a title, in either form (`Review 06152026` or `2026-06-15 Review`), becomes the stored date and moves to the front. A future typed stamp names an event, so it stays in the title and is not stored. The older recorder name `Recording 07112026 1814` loses its mid-name date: `2026-07-11 Recording 1814`.
+- The `.txt` header line opens with the meeting's date and title (`output.header_name`), and every rename refreshes it.
 
 ## Stable keys
 
@@ -60,7 +63,8 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
   - `tools/backfill_keys.py` adds `title`, `source_name`, `audio_fp`, `date_source`, and `recorded_at` where they are missing.
   - `tools/fix_dates.py` corrects a file-time date that a recorder tag or a short typed date contradicts.
   - `tools/doctor.py fix` repairs the registries, the manifest, holds, dismissals, and a stale stop flag. `tools/doctor.py check` never writes.
-  - `tools/restamp_folders.py` renames a folder whose name breaks the `<title> MMDDYYYY` rule. It keeps the stored date and its `date_source`. It has a dry run but no journal: undo a rename with a date edit in the panel.
+  - `tools/iso_rename.py` moves every folder from `<title> MMDDYYYY` to `YYYY-MM-DD <title>` and points each `.txt` header at the date and title. It refuses while the batch or a relabel runs, resumes from its journal, and has `--undo`.
+  - `tools/restamp_folders.py` renames a folder whose name breaks the `YYYY-MM-DD <title>` rule. It keeps the stored date and its `date_source`. It has a dry run but no journal: undo a rename with a date edit in the panel.
 - A date passed to `apply_meeting_edits` that equals the stored date changes no `date_source`, unless the caller passes one.
 
 ## Run order for the store repairs

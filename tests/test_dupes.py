@@ -449,7 +449,7 @@ def test_a_kept_pair_follows_a_date_correction(sandbox):
     assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
 
     r = summarize.set_meeting_date("Budget Review Copy 05012026", "2026-06-15")
-    assert r["ok"] and r["base"] == "Budget Review Copy 06152026"
+    assert r["ok"] and r["base"] == "2026-06-15 Budget Review Copy"
     assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == [], \
         "the 'keep both' decision must follow the meeting's new name"
 

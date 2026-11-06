@@ -57,7 +57,7 @@ def test_a_short_typed_date_beats_the_transfer_day(sandbox, monkeypatch):
     d = _json(res["base"])
     assert (d["date"], d["date_source"]) == ("2026-09-14", "short_typed")
     # the folder stamp follows the same rule
-    assert res["base"] == "Budget Review 9.14 09142026"
+    assert res["base"] == "2026-09-14 Budget Review 9.14"
 
 
 def test_a_short_date_at_a_year_boundary_resolves_to_the_past(sandbox, monkeypatch):

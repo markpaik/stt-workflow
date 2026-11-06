@@ -192,7 +192,7 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         data["punctuated"] = bool(config.PUNCTUATE)
         data["overlap_spans"] = [[s, e] for s, e in overlaps]
 
-        header = output.txt_header(data.get("source_file", base),
+        header = output.txt_header(output.header_name(base, data),
                                    data.get("duration_sec", 0), data["speakers"],
                                    strict, data.get("processed_at"))
 
