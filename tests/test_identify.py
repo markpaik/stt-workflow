@@ -513,3 +513,49 @@ def test_score_against_survives_one_mismatched_sample_among_many():
     bad = np.zeros(10)
     score = identify.score_against(good, [bad, good])
     assert score > 0.99  # the good sample still matches; bad one is just ignored
+
+
+def test_voiceprints_are_private_whatever_the_umask(sandbox):
+    """Voiceprints are biometric data. Under a default umask of 022 the
+    folder and every file in it were world-readable to other local accounts."""
+    import os
+    import stat
+    from stt import config
+    old = os.umask(0o022)
+    try:
+        vp = config.VOICEPRINTS_DIR
+        vp.chmod(0o755)  # as an older install left it
+        path = identify.enroll("Person A", _vec(1), source="Mtg")
+        identify.enroll("Person A", _vec(2), source="Mtg 2")
+        identify.enroll("Person B", _vec(3), source="Mtg")
+        assert identify.merge_people("Person B", "Person A")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(vp.stat().st_mode) == 0o700
+    for f in [path, vp / "registry.json"] + list(vp.glob("*.npy")):
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f.name
+
+
+def test_private_umask_makes_new_files_owner_only(tmp_path):
+    import os
+    import stat
+    from stt import config
+    old = os.umask(0o022)
+    try:
+        config.private_umask()
+        (tmp_path / "f").write_text("x")
+        (tmp_path / "d").mkdir()
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "f").stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "d").stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("entry", ["run_batch.py", "enroll.py", "relabel.py",
+                                   "gui/menubar.py", "gui/server.py"])
+def test_every_entry_point_sets_the_private_umask(entry):
+    """Every process that writes meetings, state or voiceprints starts by
+    making new files owner-only (config.private_umask)."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / entry).read_text()
+    assert "config.private_umask()" in src

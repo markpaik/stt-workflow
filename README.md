@@ -447,6 +447,10 @@ record while an exported copy reads clean.
 This tool stores voiceprints (**biometric data**) and verbatim records of
 what people said. Treat both with care:
 
+- Files the pipeline writes are owner-only: the batch, panel, enroll and
+  relabel start with umask 077, and the voiceprints folder is kept 0700.
+  Files from before this change keep their old mode until rewritten; run
+  `chmod -R go-rwx` on the data folders once to tighten them.
 - The `.gitignore` keeps voiceprints, transcripts, audio, tokens, and all
   runtime state out of git. Review it before changing output paths.
 - Know your local laws on recording consent (one-party vs all-party) and any

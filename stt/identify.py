@@ -51,7 +51,7 @@ def lock_registry():
         finally:
             _lock_depth.n = depth
         return
-    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    _private_dir()
     with open(config.VOICEPRINTS_DIR / ".registry.lock", "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         _lock_depth.n = 1
@@ -62,9 +62,27 @@ def lock_registry():
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def _private_dir():
+    """The voiceprints folder, created owner-only. A folder an older install
+    left 0755 is tightened too: voiceprints are biometric data."""
+    d = config.VOICEPRINTS_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        os.chmod(d, 0o700)
+    return d
+
+
+def _save_npy(path, arr):
+    np.save(path, arr)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+
+
 def _atomic_write(path, text: str):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text)
+    with contextlib.suppress(OSError):
+        os.chmod(tmp, 0o600)
     os.replace(tmp, path)
 
 
@@ -88,7 +106,7 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict):
-    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    _private_dir()
     p = _registry_path()
     # rolling backup: before overwriting a registry that HAS people, keep the
     # previous version as .bak — one accidental wipe of this file is the
@@ -393,7 +411,7 @@ def merge_people(src: str, dst: str) -> bool:
                    + src_sources[len(src_sources) - keep_s:])
         source_ids = (dst_ids[len(dst_ids) - keep_d:]
                       + src_ids[len(src_ids) - keep_s:])
-        np.save(df, arr)
+        _save_npy(df, arr)
         sf.unlink(missing_ok=True)
         del reg[src]
         reg[dst]["n_samples"] = int(arr.shape[0])
@@ -420,7 +438,7 @@ def remove_sample(name: str, index: int) -> bool:
         sources = reg[name].get("sources", ["?"] * arr.shape[0])
         ids = aligned_source_ids(reg[name]) or [None] * arr.shape[0]
         keep = [i for i in range(arr.shape[0]) if i != index]
-        np.save(f, arr[keep])
+        _save_npy(f, arr[keep])
         reg[name]["n_samples"] = len(keep)
         reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
         reg[name]["source_ids"] = [m for i, m in enumerate(ids) if i != index]
@@ -458,7 +476,7 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
         src_id = ids[index] if index < len(ids) else None
         keep = [i for i in range(arr.shape[0]) if i != index]
         if keep:
-            np.save(f, arr[keep])
+            _save_npy(f, arr[keep])
             reg[name]["n_samples"] = len(keep)
             reg[name]["sources"] = [s for i, s in enumerate(sources) if i != index]
             reg[name]["source_ids"] = [m for i, m in enumerate(ids) if i != index]
@@ -525,7 +543,7 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
     it, and a shape change would have to be migrated everywhere at once. A
     parallel list is additive — an entry without one reads exactly as it did.
     """
-    config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+    _private_dir()
     with lock_registry():
         reg = load_registry()
         # reuse this person's OWN file if already enrolled — their filename may
@@ -561,6 +579,6 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
         reg[name] = {"file": fname, "dim": int(vector.shape[0]),
                      "n_samples": int(arr.shape[0]), "sources": sources,
                      "source_ids": source_ids}
-        np.save(fpath, arr)
+        _save_npy(fpath, arr)
         save_registry(reg)
         return fpath

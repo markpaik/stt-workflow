@@ -444,4 +444,5 @@ def _fmt12(hour, minute):
 
 
 if __name__ == "__main__":
+    config.private_umask()
     STTMenuBar().run()

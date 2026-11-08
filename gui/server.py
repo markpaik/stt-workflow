@@ -3320,6 +3320,7 @@ if __name__ == "__main__":
     # the panel against a synthetic data home for demos/screenshots — nothing
     # here touches real recordings. Only runs on direct execution; importing the
     # module for the menu bar or the tests is unaffected.
+    config.private_umask()
     PORT = int(os.environ.get("STT_PANEL_PORT", str(PORT)))
     start_server()
     print(f"STT control panel: http://127.0.0.1:{PORT}/   "

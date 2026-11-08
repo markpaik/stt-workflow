@@ -25,6 +25,14 @@ STT_HOME = os.environ.get("STT_HOME")
 _HOME = Path(STT_HOME).expanduser() if STT_HOME else None
 
 
+def private_umask() -> None:
+    """New files owner-only (0600, folders 0700). Meetings, transcripts,
+    state and voiceprints (biometric data) must never be readable by other
+    local accounts. Every entry point calls this first; ffmpeg and other
+    children inherit it."""
+    os.umask(0o077)
+
+
 def _home_default(sub: str, hard_default) -> str:
     """Default for a state path: rooted under STT_HOME when that is set, else the
     real on-disk location. A specific STT_<X>_DIR env var overrides either."""

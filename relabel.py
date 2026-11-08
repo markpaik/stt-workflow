@@ -352,4 +352,5 @@ def main():
 
 
 if __name__ == "__main__":
+    config.private_umask()
     sys.exit(main())
