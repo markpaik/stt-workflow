@@ -559,3 +559,54 @@ def test_every_entry_point_sets_the_private_umask(entry):
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / entry).read_text()
     assert "config.private_umask()" in src
+
+
+def test_a_case_variant_name_joins_the_existing_person(sandbox):
+    """APFS is case-insensitive by default. 'alex rivera.npy' and
+    'Alex Rivera.npy' are one file there, so a second registry entry that
+    differs only in case overwrote the first person's samples while the
+    registry still claimed three of them. A case variant is the same person."""
+    for i in range(3):
+        identify.enroll("Alex Rivera", _near(0, i))
+    identify.enroll("alex rivera", _near(0, 3))
+
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert reg["Alex Rivera"]["n_samples"] == 4
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 4
+
+
+def test_a_filename_that_differs_only_in_case_is_a_collision(sandbox):
+    """Two distinct names whose sanitized stems differ only in case still
+    share one file on a case-insensitive disk."""
+    reg = {"X": {"file": "Alex Rivera.npy"}}
+    assert identify._unique_filename("alex rivera", reg) == "alex rivera_2.npy"
+
+
+def test_a_case_only_rename_keeps_the_samples(sandbox):
+    """Renaming 'alex rivera' to 'Alex Rivera' is a spelling fix. On a
+    case-insensitive disk the copy-then-unlink rename would delete the only
+    file."""
+    identify.enroll("alex rivera", _near(0, 0))
+    identify.enroll("alex rivera", _near(0, 1))
+    assert identify.rename_person("alex rivera", "Alex Rivera") is True
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 2
+
+
+def test_naming_with_a_case_variant_promotes_into_the_existing_person(sandbox):
+    import json
+    from stt import config, unknowns
+    for i in range(2):
+        identify.enroll("Alex Rivera", _near(0, i))
+    assert identify.canonical_name("  ALEX RIVERA ") == "Alex Rivera"
+    assert identify.canonical_name("Someone New") == "Someone New"
+    v = _near(0, 5)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 2, "speakers": {"U001": {"file": "U001.npy", "meetings": ["m"]}}}))
+    assert unknowns.promote("U001", "alex RIVERA") is True
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 3

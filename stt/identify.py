@@ -137,13 +137,36 @@ def _unique_filename(stem: str, reg: dict) -> str:
     for what's in use — not just an on-disk exists() check, since callers
     already remove/never-added the current person's own entry before calling
     this, so a legitimate re-enrollment is never blocked by itself)."""
-    claimed = {meta["file"] for meta in reg.values()}
+    # casefolded: the default macOS disk is case-insensitive, so
+    # "alex rivera.npy" IS "Alex Rivera.npy" there
+    claimed = {meta["file"].casefold() for meta in reg.values()}
     fname = f"{stem}.npy"
     n = 2
-    while fname in claimed:
+    while fname.casefold() in claimed:
         fname = f"{stem}_{n}.npy"
         n += 1
     return fname
+
+
+def _name_key(name: str) -> str:
+    return " ".join(str(name).split()).casefold()
+
+
+def canonical_name(name: str, reg: dict = None) -> str:
+    """The enrolled spelling of `name` when one differs only in case or
+    spacing, else `name` stripped. "alex rivera" typed for an enrolled
+    "Alex Rivera" is the same person: a second entry would point at the same
+    file on a case-insensitive disk and overwrite her samples."""
+    name = str(name or "").strip()
+    if reg is None:
+        reg = load_registry()
+    if name in reg:
+        return name
+    key = _name_key(name)
+    for existing in reg:
+        if _name_key(existing) == key:
+            return existing
+    return name
 
 
 def _l2(v):
@@ -287,12 +310,21 @@ def rename_person(old: str, new: str) -> bool:
     """Rename an enrolled person. If the new name already exists, this becomes a
     merge (their voice samples are combined)."""
     with lock_registry():
-        new = new.strip()
         reg = load_registry()
-        if old not in reg or not new:
+        if old not in reg:
+            return False
+        new = canonical_name(new, {k: v for k, v in reg.items() if k != old})
+        if not new or new == old:
             return False
         if new in reg:
             return merge_people(old, new)
+        if _name_key(new) == _name_key(old):
+            # a spelling fix that changes only case or spacing: the file stays.
+            # Copy-then-unlink onto a name that is the SAME file on a
+            # case-insensitive disk would delete the only copy.
+            reg[new] = reg.pop(old)
+            save_registry(reg)
+            return True
         meta = reg.pop(old)
         oldf = config.VOICEPRINTS_DIR / meta["file"]
         if not oldf.exists():
@@ -458,6 +490,7 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
         return {"ok": False, "error": "a destination name is required"}
     with lock_registry():
         reg = load_registry()
+        to_name = canonical_name(to_name, reg)
         if name not in reg:
             return {"ok": False, "error": f"no profile for {name}"}
         if to_name == name:
@@ -546,6 +579,7 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
     _private_dir()
     with lock_registry():
         reg = load_registry()
+        name = canonical_name(name, reg)
         # reuse this person's OWN file if already enrolled — their filename may
         # have been disambiguated at first enrollment, so recomputing it fresh
         # here could drift from what the registry actually points at. A

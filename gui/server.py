@@ -2454,6 +2454,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not name and not (b.get("local") and not b.get("uid")):
                     self._json({"ok": False, "error": "Type a name first."})
                     return
+                if name and not b.get("local"):
+                    # the enrolled spelling, so a case variant names the
+                    # existing person and relabels under the name she has
+                    name = identify.canonical_name(name)
                 confirm = bool(b.get("confirm"))
 
                 def _warn_payload(w):
@@ -2647,6 +2651,11 @@ class Handler(BaseHTTPRequestHandler):
                       else summarize.dismiss_voice)
                 self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
+                # the spelling rename_person will store: an enrolled case
+                # variant of the new name is a merge into that person
+                b["new"] = identify.canonical_name(
+                    b.get("new"), {k: v for k, v in identify.load_registry().items()
+                                   if k != b.get("name")})
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:
                     self._json({"ok": ok})
@@ -2669,6 +2678,8 @@ class Handler(BaseHTTPRequestHandler):
                 # src/dst are "uid:U003" or "name:Jordan"
                 st_, sv = b["src"].split(":", 1)
                 dt_, dv = b["dst"].split(":", 1)
+                if dt_ == "name":
+                    dv = identify.canonical_name(dv)
                 heard = []
                 if st_ == "uid" and dt_ == "name":
                     # read BEFORE promote() retires the uid (see /api/name):
