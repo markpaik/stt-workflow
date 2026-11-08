@@ -1586,10 +1586,16 @@ def pick_files():
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
-def set_folder(which: str, path: str):
+def set_folder(which: str, path: str, confirm: bool = False):
     p = Path(path).expanduser()
     if not p.is_dir():
         return {"ok": False, "error": f"not a folder: {p}"}
+    if which != "source" and not confirm:
+        # a transcripts folder that holds other files, or flat meetings the
+        # migration would move, is adopted only after the owner confirms
+        warn = config.adopt_folder_warning(p)
+        if warn:
+            return {"need_confirm": True, "which": which, "path": str(p), "warn": warn}
     key = "STT_ICLOUD_DIR" if which == "source" else "STT_MEETINGS_DIR"
     _env_file_set({key: str(p)})
     import os
@@ -2363,7 +2369,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(set_folder(b["which"], p))
             elif u.path == "/api/set_folder":
-                self._json(set_folder(b["which"], b["path"]))
+                self._json(set_folder(b["which"], b["path"], bool(b.get("confirm"))))
             elif u.path == "/api/pick_files":
                 fs = pick_files()
                 self._json({"cancelled": True} if fs is None else {"ok": True, "paths": fs})

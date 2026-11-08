@@ -5187,6 +5187,9 @@ function dSettingsHTML(s){
     'drow-source');
   h+=_drow('Transcripts folder',home(s.paths&&s.paths.dest),
     `<button class="btn mini" type="button" onclick="dPickFolder('dest',this)">Change&#8230;</button>`);
+  const fa=DRAWER.folderAsk;
+  if(fa)h+=_drow('Use '+home(fa.path)+'?',esc(fa.warn),
+    `<button class="btn mini" type="button" onclick="dFolderGo(true)">Use this folder</button> <button class="btn mini" type="button" onclick="dFolderGo(false)">Cancel</button>`);
   return h;
 }
 function dTogMaster(btn){if(!S)return;btn.disabled=true;
@@ -5233,7 +5236,16 @@ async function dPickFolder(which,btn){
   btn.disabled=true;
   const prompt=which==='source'?'Choose the folder to watch for new recordings'
     :'Choose where transcripts are stored';
-  await api('/api/pick_folder',{which,prompt});
+  const r=await api('/api/pick_folder',{which,prompt});
+  // a folder with other files, or flat meetings that would move: the same
+  // two-step confirm as a merge, never a browser dialog
+  DRAWER.folderAsk=r&&r.need_confirm?{which:r.which,path:r.path,warn:r.warn}:null;
+  await refresh();
+  dSettingsForce();
+}
+async function dFolderGo(ok){
+  const a=DRAWER.folderAsk;DRAWER.folderAsk=null;
+  if(ok&&a)await api('/api/set_folder',{which:a.which,path:a.path,confirm:true});
   await refresh();
   dSettingsForce();
 }

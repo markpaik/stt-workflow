@@ -2013,3 +2013,47 @@ def test_a_loopback_host_header_is_allowed(running_server, host):
     status, _ = _get(running_server, "/api/state",
                      {"Host": host.format(port=running_server)})
     assert status == 200
+
+
+def test_a_transcripts_folder_with_other_files_needs_a_confirm(
+        running_server, sandbox, monkeypatch, tmp_path):
+    """Adopting a folder runs the flat-layout migration on it. A folder
+    that holds other files, or flat meetings that would move, is adopted
+    only after the owner confirms. Nothing is saved or moved before that."""
+    monkeypatch.setattr(config, "MEETINGS_DIR", config.MEETINGS_DIR)
+    monkeypatch.setenv("STT_MEETINGS_DIR", str(config.MEETINGS_DIR))
+    pick = tmp_path / "Picked"
+    pick.mkdir()
+    (pick / "package.json").write_text("{}")
+    real = {"source_file": "Board Prep.m4a", "speakers": [], "segments": []}
+    (pick / "Board Prep.json").write_text(json.dumps(real))
+    (pick / "Board Prep.txt").write_text("stub")
+    before = config.MEETINGS_DIR
+    st, r = _post(running_server, "/api/set_folder", {"which": "dest", "path": str(pick)})
+    assert st == 200 and r.get("need_confirm") and "ok" not in r
+    assert "1 item(s) that are not meetings" in r["warn"]
+    assert "1 older flat-layout meeting(s) will move" in r["warn"]
+    assert config.MEETINGS_DIR == before
+    assert (pick / "Board Prep.json").is_file()
+    env = config.PROJECT_DIR / "stt.env"
+    assert not env.exists() or str(pick) not in env.read_text()
+
+    st, r = _post(running_server, "/api/set_folder",
+                  {"which": "dest", "path": str(pick), "confirm": True})
+    assert r.get("ok") is True
+    assert config.MEETINGS_DIR == pick
+    assert (pick / "Board Prep" / "Board Prep.json").is_file()
+    assert (pick / "package.json").is_file()
+
+    empty = tmp_path / "Empty"
+    empty.mkdir()
+    st, r = _post(running_server, "/api/set_folder", {"which": "dest", "path": str(empty)})
+    assert r.get("ok") is True          # nothing in it: no question to ask
+
+
+def test_both_shells_offer_the_folder_confirm():
+    root = Path(__file__).resolve().parent.parent / "gui" / "static"
+    nxt = (root / "next.js").read_text()
+    assert "'folder-confirm'" in nxt and "confirm:true" in nxt
+    app = (root / "app.js").read_text()
+    assert "dFolderGo" in app and "DRAWER.folderAsk" in app

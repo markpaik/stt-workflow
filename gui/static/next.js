@@ -409,6 +409,7 @@ function settingsView(){
   <section><div class="eyebrow">Storage</div><div>
    ${kv('Watched folder',esc((S.paths||{}).source||''),'<button class="btn" type="button" data-act="pick-folder" data-which="source">Change…</button>')}
    ${kv('Transcripts folder',esc((S.paths||{}).dest||''),'<button class="btn" type="button" data-act="pick-folder" data-which="dest">Change…</button>')}
+   ${UI.folderAsk?`<div class="ask-card"><div class="row-title">Use ${esc(UI.folderAsk.path)}?</div><div class="meta attn-t">${esc(UI.folderAsk.warn)}</div><div class="tools"><button class="btn primary" type="button" data-act="folder-confirm">Use this folder</button><button class="btn quiet" type="button" data-act="folder-cancel">Cancel</button></div></div>`:''}
   </div>${errLine('folder')}</section>
   <section><div class="eyebrow">Appearance</div><div>${kv('Theme','Auto follows macOS.',`<select id="set-theme" aria-label="Theme">${['auto','light','dark'].map(t=>`<option value="${t}" ${t===th?'selected':''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}</select>`)}</div></section>
  </div>`;
@@ -658,7 +659,9 @@ const A={
  async adel(el){const b=el.dataset.base;if(UI.confirm!=='adel:'+b){UI.confirm='adel:'+b;render(true);return;}UI.confirm=null;await act('/api/delete_meeting',{base:b,confirm:true},'archive');UI.archived=null;render(true);toast('Deleted.');},
  async 'check-updates'(){UI.updates={busy:true};render(true);const r=await api('/api/check_updates').catch(()=>({models:[]}));UI.updates=r;render(true);},
  async 'rec-fix'(){const r=await api('/api/fix_recorder_permissions',{}).catch(()=>({error:'Could not reach the panel.'}));UI.err['recfix']=r.message||r.error||'';render(true);},
- async 'pick-folder'(el){const w=el.dataset.which;await act('/api/pick_folder',{which:w,prompt:w==='source'?'Choose the watched folder':'Choose the transcripts folder'},'folder');},
+ async 'pick-folder'(el){const w=el.dataset.which;UI.folderAsk=null;const r=await act('/api/pick_folder',{which:w,prompt:w==='source'?'Choose the watched folder':'Choose the transcripts folder'},'folder');if(r&&r.need_confirm){UI.folderAsk={which:r.which,path:r.path,warn:r.warn};render(true);}},
+ async 'folder-confirm'(){const a=UI.folderAsk;UI.folderAsk=null;if(a)await act('/api/set_folder',{which:a.which,path:a.path,confirm:true},'folder');},
+ 'folder-cancel'(){UI.folderAsk=null;render(true);},
  async 'ck-save'(){const body={};['scribe','openai','voxtral','anthropic'].forEach(p=>{const i=$('#ck-'+p);if(i&&i.value.trim())body[p]=i.value.trim();});
   if(!Object.keys(body).length){UI.err.keys='Paste a key first.';render(true);return;}
   await act('/api/cloud_keys',body,'keys');toast('Keys saved.');},
