@@ -611,3 +611,17 @@ def test_the_date_fix_undo_keeps_each_twin_on_its_own_name(sandbox, monkeypatch,
     fix_dates.undo(r["run"], dry_run=False)
     assert _load("2026-09-29 Twin 9.14")["meeting_id"] == a["meeting_id"]
     assert _load("2026-09-29 Twin 9.14 (2)")["meeting_id"] == b["meeting_id"]
+
+
+def test_the_date_fix_undo_works_on_meetings_with_no_stored_id(dated):
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    before = {b: _load(b)["date"] for b in config.meeting_bases()}
+    r = fix_dates.apply()
+    assert len(r["applied"]) == 3
+    u = fix_dates.undo(r["run"], dry_run=False)
+    assert len(u["restored"]) == 3 and not u["missing"]
+    assert sorted(_load(b)["date"] for b in config.meeting_bases()) == sorted(before.values())

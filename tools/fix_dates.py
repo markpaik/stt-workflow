@@ -101,6 +101,9 @@ def _ra_arg(v):
 def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> dict:
     run_id = run_id or datetime.now().strftime("fixdates-%Y%m%dT%H%M%S")
     jpath = fj.journal_path(run_id, journal_dir)
+    # undo finds each meeting by its id: a meeting journaled with none could
+    # not be found again once its folder moved
+    config.backfill_meeting_ids(store)
     applied, skipped = [], []
     with fj.Journal(jpath) as journal:
         for r in plan(store, probe=probe, today=today):

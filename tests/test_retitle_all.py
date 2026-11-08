@@ -290,3 +290,26 @@ def test_undo_takes_off_the_renamed_from_the_run_added(lib):
     for mid in ("mid-a", "mid-b", "mid-c", "mid-d"):
         d = json.loads(config.meeting_file(config.base_of(mid), ".json").read_text())
         assert "renamed_from" not in d, mid
+
+
+def test_apply_and_undo_work_on_meetings_with_no_stored_id(lib):
+    """A library the panel and the batch never stamped: the proposals and
+    the journal carried meeting_id null, so a second --apply said 'gone'
+    and --undo renamed nothing."""
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    config.MEETINGS_INDEX_PATH.unlink(missing_ok=True)
+    old = set(config.meeting_bases())
+
+    rt.dry_run(log=lambda *_: None)
+    first = rt.apply(log=lambda *_: None)["counts"]
+    assert first.get("applied") == 4
+    again = rt.apply(log=lambda *_: None)["counts"]
+    assert again.get("already done") == 4 and not again.get("gone")
+    assert rt.undo(dry=False, log=lambda *_: None)["counts"].get("undone") == 4
+    # undo lands in the ISO form, so compare the dates and the count
+    assert len(config.meeting_bases()) == len(old)
+    assert "2026-10-01 Robin Check-in 10-5" in config.meeting_bases()
