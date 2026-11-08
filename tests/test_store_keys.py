@@ -595,3 +595,19 @@ def test_the_date_fix_undo_restores_renamed_from(dated):
 
 def _load_any_date(base):
     return dates.meeting_date(base)
+
+
+def test_the_date_fix_undo_keeps_each_twin_on_its_own_name(sandbox, monkeypatch, tmp_path):
+    """Two same-name same-date meetings both move to 9.14. Undo walks the
+    journal in reverse, so the twin rule gave the plain name to the meeting
+    that had been ' (2)'."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setenv("STT_PUBLIC_STATE", str(tmp_path / "no-public.json"))
+    monkeypatch.setattr(provenance, "probe_tags", lambda a: {"tags": {}, "duration": None})
+    a = _m("2026-09-29 Twin 9.14", source_file="Twin 9.14.m4a")
+    b = _m("2026-09-29 Twin 9.14 (2)", source_file="Twin 9.14 (2).m4a")
+    r = fix_dates.apply()
+    assert len(r["applied"]) == 2
+    fix_dates.undo(r["run"], dry_run=False)
+    assert _load("2026-09-29 Twin 9.14")["meeting_id"] == a["meeting_id"]
+    assert _load("2026-09-29 Twin 9.14 (2)")["meeting_id"] == b["meeting_id"]

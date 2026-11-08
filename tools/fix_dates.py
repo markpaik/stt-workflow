@@ -121,6 +121,15 @@ def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> 
             "skipped": skipped}
 
 
+def _old_name(base: str, iso):
+    """`base` re-stamped with its old date, keeping any ' (N)' twin suffix."""
+    from stt import dates
+    if not iso:
+        return None
+    m = dates._UNIQ_SUFFIX.search(base)
+    return dates.restamp(base, iso) + (m.group(0) if m else "")
+
+
 def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
     by_id = fj.bases_by_id(store)
     live = set(config.meeting_bases(store))
@@ -140,9 +149,16 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
             continue
         old = e["old"]
         src = None if fj.is_missing(old["date_source"]) else old["date_source"]
-        res = summarize.apply_meeting_edits(
-            base, date=old["date"], date_source=src or "manual",
-            recorded_at=_ra_arg(old["recorded_at"]))
+        kw = {"date": old["date"], "date_source": src or "manual",
+              "recorded_at": _ra_arg(old["recorded_at"])}
+        # the journaled name, in the ISO form, twin suffix and all. The twin
+        # rule alone swapped two same-name twins: undo walks the journal in
+        # reverse, so the meeting that was ' (2)' came back first and took
+        # the plain name. A name someone else holds now falls back to it.
+        want = _old_name(e["base"], old["date"])
+        res = summarize.apply_meeting_edits(base, to_base=want, **kw) if want else None
+        if res is None or not res.get("ok"):
+            res = summarize.apply_meeting_edits(base, **kw)
         if not res.get("ok"):
             skipped.append({"base": base, "why": res.get("error")})
             continue
