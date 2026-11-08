@@ -244,14 +244,16 @@ def delete_meeting(base: str) -> dict:
     except OSError:
         pass
 
+    lock_stems = {config.lock_key(base), base}
     with review.lock_meeting(base):
         # lock_meeting -> lock_registry is the established order (summarize's
         # rename path nests the same way), so the scrub inside is deadlock-free
         purge_meeting_dir(target)
-    # the meeting's own lock file outlives it: sweep the lock files nobody
-    # can request again (it is released now), as the doctor's fix does
+    # the meeting's own lock files outlive it. Remove only those (it is
+    # released now). The whole-library sweep stays with the doctor: its
+    # residual race must not run on every Delete while a batch works.
     try:
-        config.prune_lock_files()
+        config.drop_meeting_locks(lock_stems)
     except Exception:
         pass
 

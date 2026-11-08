@@ -304,3 +304,44 @@ def test_delete_drops_its_override_its_kept_pairs_and_its_lock(sandbox):
     assert dupes.ignored_pairs() == {("2026-05-01 Other", "2026-05-01 Third")}
     assert not (locks / "aaaa1111bbbb2222.lock").exists()
     assert config.orphan_lock_files() == []
+
+
+def test_delete_removes_only_its_own_lock_files(sandbox):
+    """A Delete swept every dead lock in the library, and that sweep has a
+    documented race. It now removes the deleted meeting's own locks (its id
+    and its base) and leaves every other lock file to the doctor."""
+    from stt import review
+    _meeting("2026-05-01 Gone", meeting_id="aaaa1111bbbb2222")
+    _meeting("2026-05-01 Other", meeting_id="cccc3333dddd4444")
+    config.index_set("aaaa1111bbbb2222", "2026-05-01 Gone")
+    config.index_set("cccc3333dddd4444", "2026-05-01 Other")
+    with review.lock_meeting("2026-05-01 Gone"):
+        pass
+    locks = config.meetings_dir() / ".locks"
+    (locks / "2026-05-01 Gone.lock").write_text("")      # an older base-named lock
+    (locks / "ffff0000ffff0000.lock").write_text("")     # someone else's orphan
+    (locks / "2026-05-01 Other.lock").write_text("")     # a dead base lock of a live id
+
+    assert archive.delete_meeting("2026-05-01 Gone")["ok"]
+
+    assert not (locks / "aaaa1111bbbb2222.lock").exists()
+    assert not (locks / "2026-05-01 Gone.lock").exists()
+    assert (locks / "ffff0000ffff0000.lock").exists()
+    assert (locks / "2026-05-01 Other.lock").exists()
+    assert config.prune_lock_files() == 2                # the doctor still can
+
+
+def test_drop_meeting_locks_leaves_a_held_or_requestable_lock(sandbox):
+    from stt import review
+    _meeting("2026-05-01 Live", meeting_id="aaaa1111bbbb2222")
+    config.index_set("aaaa1111bbbb2222", "2026-05-01 Live")
+    locks = config.meetings_dir() / ".locks"
+    with review.lock_meeting("2026-05-01 Live"):
+        pass
+    assert config.drop_meeting_locks({"aaaa1111bbbb2222"}) == 0   # requestable
+    (locks / "deadbeefdeadbeef.lock").write_text("")
+    import fcntl
+    with open(locks / "deadbeefdeadbeef.lock", "r+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        assert config.drop_meeting_locks({"deadbeefdeadbeef"}) == 0  # held
+    assert config.drop_meeting_locks({"deadbeefdeadbeef", "../x"}) == 1

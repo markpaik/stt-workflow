@@ -836,7 +836,7 @@ def _dead_lock_files(dest_dir=None) -> list:
 _PRUNE_CHUNK = 64
 
 
-def _sweep_lock_files(dest_dir=None, unlink=False) -> list:
+def _sweep_lock_files(dest_dir=None, unlink=False, cands=None) -> list:
     """The dead lock files nobody holds, re-checked UNDER the flock.
 
     Each candidate is taken non-blocking first (a held one is left alone).
@@ -845,8 +845,9 @@ def _sweep_lock_files(dest_dir=None, unlink=False) -> list:
     with unlink, removed before its flock is released. The re-read catches a
     stem that came back to life between the first scan and the flock: a
     legacy meeting that arrived under that name, or a meeting restored from
-    outside the store carrying that id."""
-    cands = _dead_lock_files(dest_dir)
+    outside the store carrying that id. `cands` limits the sweep to those
+    lock files (drop_meeting_locks)."""
+    cands = _dead_lock_files(dest_dir) if cands is None else cands
     out = []
     for i in range(0, len(cands), _PRUNE_CHUNK):
         with contextlib.ExitStack() as stack:
@@ -908,6 +909,18 @@ def prune_lock_files(dest_dir=None, dry_run=False) -> int:
     Returns how many were removed — or, with dry_run, how many WOULD be
     removed, nothing unlinked."""
     return len(_sweep_lock_files(dest_dir, unlink=not dry_run))
+
+
+def drop_meeting_locks(stems, dest_dir=None) -> int:
+    """Remove the lock files of one deleted meeting: its id and its base.
+    The same held test and re-check as prune_lock_files, but over these
+    stems only. A panel Delete calls this instead of the whole-library
+    sweep, so the sweep's residual race (see prune_lock_files) never runs
+    against other meetings while a batch is working. Returns how many went."""
+    d = Path(dest_dir or meetings_dir()) / ".locks"
+    cands = sorted({d / f"{s}.lock" for s in stems if s and "/" not in s})
+    cands = [f for f in cands if f.is_file()]
+    return len(_sweep_lock_files(dest_dir, unlink=True, cands=cands)) if cands else 0
 
 
 def backfill_meeting_ids(dest_dir=None) -> int:
