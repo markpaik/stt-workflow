@@ -69,9 +69,16 @@ def _host_allowed(headers) -> bool:
     panel, and its same-origin GET (with no-referrer) carries no Origin or
     Referer, so _origin_allowed lets it through. The browser still sends
     the attacker's name as Host. A request with no Host (HTTP/1.0) is not
-    a browser and is allowed."""
-    v = headers.get("Host")
-    return v is None or bool(_LOOPBACK_HOST.match(v.strip()))
+    a browser and is allowed. Every Host header must pass, and more than
+    one is refused: a proxy or server that reads the last copy must never
+    see a name this check did not read."""
+    vs = headers.get_all("Host") if hasattr(headers, "get_all") else None
+    if vs is None:
+        v = headers.get("Host")
+        vs = [] if v is None else [v]
+    if len(vs) > 1:
+        return False
+    return all(_LOOPBACK_HOST.match(v.strip()) for v in vs)
 
 
 def _known_base(base) -> bool:

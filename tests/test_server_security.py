@@ -2057,3 +2057,25 @@ def test_both_shells_offer_the_folder_confirm():
     assert "'folder-confirm'" in nxt and "confirm:true" in nxt
     app = (root / "app.js").read_text()
     assert "dFolderGo" in app and "DRAWER.folderAsk" in app
+
+
+@pytest.mark.parametrize("hosts", [("127.0.0.1", "evil.com"), ("evil.com", "127.0.0.1"),
+                                   ("127.0.0.1", "localhost")])
+def test_a_request_with_two_host_headers_is_refused(running_server, hosts):
+    """Only the first Host header was checked. A request with a loopback
+    Host and then a foreign one passed, while another server or proxy may
+    read the last copy. Two Host headers are refused outright."""
+    import socket
+    s = socket.create_connection(("127.0.0.1", running_server), timeout=5)
+    req = ("GET /api/state HTTP/1.1\r\n"
+           + "".join(f"Host: {h}\r\n" for h in hosts)
+           + "Connection: close\r\n\r\n")
+    s.sendall(req.encode())
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    assert data.split(b"\r\n", 1)[0].split()[1] == b"403"
