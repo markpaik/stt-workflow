@@ -38,7 +38,8 @@ def test_root_state_files_are_ignored(path):
     "stt.env.bak", "stt.env.old", ".env", "local.env", ".hf_token", "hf_token.txt",
     "exports/x.docx", "Meeting.docx", "Meeting.pdf", "recorder.log", "gui/x.log",
     "tuning/out.json", "status.json.bak", "manifest.json.bak", "meetings/x/x.txt",
-    "transcripts/x.txt",
+    "transcripts/x.txt", ".venv", ".env.local", "secrets.txt", "id_rsa", "key.pem",
+    "x.npy", "work2/Person A.npy", "credentials.json",
 ])
 def test_secret_backup_export_and_log_names_are_ignored(path):
     """A copy of stt.env, a saved token, an export into the checkout or a
@@ -49,7 +50,8 @@ def test_secret_backup_export_and_log_names_are_ignored(path):
 @pytest.mark.parametrize("path", ["tests/fixture.json", "gui/static/data.json",
                                   "tools/token_contrast.py", "docs/guide.pdf",
                                   "tuning/eval.py",
-                                  "stt/notes.flag", "stt.env.example"])
+                                  "stt/notes.flag", "stt.env.example",
+                                  "tests/test_secrets.py", "stt/credentials.py"])
 def test_root_rules_stay_at_the_root(path):
     assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 1
 

@@ -120,3 +120,26 @@ stale_descriptions.lock
 /*.pdf
 *.log
 tuning/*.json
+
+# the worktree's link to the main checkout's venv (a symlink, so the .venv/
+# rule above does not match it)
+.venv
+
+# more secret shapes: dotenv variants, keys and certificates, and the
+# common secrets and credentials file names (named files only, so a code
+# file such as test_secrets.py is never hidden)
+.env.*
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+secrets.txt
+secrets.json
+secrets.env
+credentials.json
+credentials.env
+*.secret
+
+# a voiceprint array outside voiceprints/ is still biometric data
+*.npy
