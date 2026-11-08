@@ -17,7 +17,12 @@ Point the panel at the result with config.py's STT_HOME override:
     # then, from the repo:
     STT_HOME=$PWD/qa/demo_home STT_PANEL_PORT=8747 .venv/bin/python -m gui.server
 
-All person names are synthetic (Mark Paik + five invented colleagues). The tool
+All person names are synthetic (an invented owner, Morgan Ellis, and five
+invented colleagues), and so is every title, number, and line. Titles follow
+the series catalog (stt/series.py), and each described meeting carries the
+current description fields: a gist, Decisions, Open questions, and topic
+tags. Three meetings are dated relative to the day the home is built, so Home
+shows a title to set, draft titles, and a voice to name. The tool
 REFUSES to run without --dir, and REFUSES any --dir that overlaps a real,
 configured data folder — it can only ever write inside its own target.
 """
@@ -37,10 +42,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np  # a core repo dependency (identify.py); the real loaders need it
 
-from stt import config, dates, output  # real writers/helpers — never invent a schema
+from stt import config, dates, output, speaker_text  # real writers/helpers — never invent a schema
 
 # --- synthetic cast (the ONLY person names that may appear) ---
-OWNER = "Mark Paik"
+OWNER = "Morgan Ellis"
 COLLEAGUES = ["Alex Rivera", "Jordan Lee", "Priya Shah", "Sam Chen", "Dana Fox"]
 ENROLLED = [OWNER] + COLLEAGUES
 
@@ -115,6 +120,10 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         wc = len(text.split())
         minor = bool(flags) and wc <= 3
         dur = 0.6 if minor else max(1.3, round(wc * 0.34, 2))
+        # turns run at a talking pace (meetings show a minute or more), and a
+        # long-talk turn lets a voice cross the panel's one-minute ask floor
+        if not minor:   # a sub-second crumb stays sub-second (review.is_minor)
+            dur = round(dur * float(spec.get("stretch", 5.0)), 2)
         start, end = round(cursor, 2), round(cursor + dur, 2)
         sp = disp_of[sid]
         seg = {"start": start, "end": end, "speaker": sid,
@@ -140,7 +149,7 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "source_file": spec.get("source_file", f"{title}.m4a"),
         "source_mtime": src_mtime,
         "date": iso,
-        "processed_at": f"{iso}T20:14:07",
+        "processed_at": spec.get("arrived_at") or f"{iso}T20:14:07",
         "duration_sec": total_dur,
         "asr_engine": "parakeet",
         "diarizer": config.DIARIZATION_MODEL,
@@ -155,12 +164,26 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
     if spec.get("category"):
         meta["category"] = spec["category"]
     meta["reviewed"] = bool(reviewed)
+    for k in ("title_state", "title_source", "arrived_at", "date_source"):
+        if spec.get(k):
+            meta[k] = spec[k]
     for k in ("ai_title", "ai_summary"):
         if spec.get(k):
             meta[k] = spec[k]
-    if spec.get("next_steps"):
-        meta["ai_next_steps"] = spec["next_steps"]
-    if spec.get("ai_summary") or spec.get("next_steps"):
+    if spec.get("gist"):
+        # the current description shape (stt/summarize.py DESCRIPTION_KEYS):
+        # gist, Decisions, Open questions, topic tags, and the series id.
+        # ai_summary is their plain-text join, as store_description writes it.
+        meta["ai_gist"] = spec["gist"]
+        meta["ai_decisions"] = list(spec.get("decisions_list") or [])
+        meta["ai_open_questions"] = list(spec.get("open_questions") or [])
+        meta["ai_tags"] = list(spec.get("tags") or [])
+        if spec.get("series"):
+            meta["ai_series"] = spec["series"]
+        meta["ai_summary"] = speaker_text.compose_summary(
+            spec["gist"], meta["ai_decisions"], meta["ai_open_questions"])
+        meta["ai_model"] = "qwen3.8:27b-mlx"
+    if meta.get("ai_summary"):
         meta["ai_generated_at"] = f"{iso}T20:15:30"
 
     jpath = mdir / f"{base}.json"
@@ -274,9 +297,21 @@ def write_state(home: Path, built: list, queue_files: list, held: list,
 
 # ------------------------------------------------------------- the content -
 
-def meeting_specs():
-    """Nine live meetings across five months over 2025-2026, plus one archived
-    and one un-named inbox meeting. Speaker ids are per-meeting SPEAKER_0N."""
+def meeting_specs(today=None):
+    """Nine live meetings across five months over 2025-2026, three recent
+    meetings dated from `today` (the build day), one archived meeting, and
+    one un-named inbox meeting. Speaker ids are per-meeting SPEAKER_0N.
+
+    Titles follow the series rule: "<series name> – <short topic>" for a
+    recurring meeting, the topic alone for a one-off."""
+    today = today or date.today()
+
+    def ago(days):
+        return (today - timedelta(days=days)).isoformat()
+
+    def stamp_ago(days, hhmm="14:30:00"):
+        return f"{ago(days)}T{hhmm}"
+
     def named(*names):
         # -> speaker defs for enrolled people, ids SPEAKER_00..
         out = []
@@ -288,50 +323,53 @@ def meeting_specs():
 
     # --- May 2025 ---
     S.append({
-        "title": "Leadership Team Weekly", "date": "2025-05-21", "category": "work",
+        "title": "LT Weekly Meeting – Attendance Trends", "date": "2025-05-21",
+        "category": "work", "series": "lt_weekly",
         "speakers": named(OWNER, "Alex Rivera", "Jordan Lee", "Priya Shah"),
         "turns": [
             ("SPEAKER_00", "Let's start with attendance trends for the quarter.", []),
-            ("SPEAKER_01", "Chronic absence is down two points district wide.", []),
-            ("SPEAKER_02", "The middle schools are still the soft spot though.", []),
+            ("SPEAKER_01", "Absence is down a little across the sample schools.", []),
+            ("SPEAKER_02", "The middle grades are still the soft spot though.", []),
             ("SPEAKER_03", "I can pull the by-school breakdown before Thursday.", []),
-            ("SPEAKER_00", "Good. Let's make that the headline for the board.", []),
+            ("SPEAKER_00", "Good. Let's make that the headline for the report.", []),
         ],
-        "ai_title": "Leadership Team Weekly Attendance",
-        "ai_summary": "The team reviewed quarterly attendance, noting chronic "
-                      "absence fell two points district wide while middle schools "
-                      "lagged. Priya will produce a by-school breakdown for the board.",
-        "next_steps": ["[Priya Shah] will pull the by-school absence breakdown by Thursday",
-                       "[Jordan Lee] will flag the three lowest middle schools by next week"],
+        "gist": "Absence fell slightly across the sample schools, and the middle "
+                "grades remain the weak spot.",
+        "decisions_list": ["The by-school breakdown leads the next report."],
+        "open_questions": ["Which middle-grade schools need a closer look first?"],
+        "tags": ["attendance", "school-performance", "reporting-dashboards"],
     })
     S.append({
-        "title": "Enrollment Data Review", "date": "2025-05-28", "category": "work",
+        "title": "Enrollment Data Review – Kindergarten Projections", "date": "2025-05-28",
+        "category": "work", "series": "enrollment_review",
         "speakers": named(OWNER, "Priya Shah", "Sam Chen"),
         "turns": [
             ("SPEAKER_00", "Where did we land on kindergarten projections?", []),
-            ("SPEAKER_01", "Slightly ahead of last year, about one percent up.", []),
-            ("SPEAKER_02", "The choice application data supports that read.", []),
-            ("SPEAKER_01", "I'll reconcile it against the count-day file this week.", []),
+            ("SPEAKER_01", "Slightly ahead of last year in the model.", []),
+            ("SPEAKER_02", "The application data supports that read.", []),
+            ("SPEAKER_01", "I'll reconcile it against the count file this week.", []),
         ],
-        "ai_summary": "Kindergarten projections came in about one percent ahead of "
-                      "last year, corroborated by choice-application data; Priya will "
-                      "reconcile against the count-day file.",
-        "next_steps": ["[Priya Shah] will reconcile projections against the count-day file this week"],
+        "gist": "Kindergarten projections run slightly ahead of last year, and the "
+                "application data agrees.",
+        "decisions_list": ["Priya reconciles the projection against the count file."],
+        "open_questions": [],
+        "tags": ["enrollment", "data-systems", "reporting-dashboards"],
     })
 
-    # --- Sep 2025 ---  (Board Prep carries a hidden one-time voice, U012)
+    # --- Sep 2025 ---  (the study session carries a hidden one-time voice, U012)
     S.append({
-        "title": "Board Prep Session", "date": "2025-09-10", "category": "work",
+        "title": "Board Study Session – Graduation Story", "date": "2025-09-10",
+        "category": "work",
         "speakers": named(OWNER, "Dana Fox", "Jordan Lee")
         + [("SPEAKER_03", None, "Speaker 12", "U012", None)],
         "turns": [
-            ("SPEAKER_00", "We need the deck to open on the graduation gain.", []),
-            ("SPEAKER_01", "Ninety-one percent, the highest in a decade.", []),
+            ("SPEAKER_00", "We need the deck to open on the graduation trend.", []),
+            ("SPEAKER_01", "The trend line is the story, not any one year.", []),
             ("SPEAKER_03", "I sat in from the facilities vendor for this part.", []),
             ("SPEAKER_02", "Let's keep the finance slide to a single number.", []),
             ("SPEAKER_00", "Agreed. One number, one takeaway.", []),
         ],
-        # deliberately NO ai_summary / next_steps: exercises the "no summary" state
+        # deliberately NO description: exercises the "no summary yet" state
     })
     S.append({
         "title": "Weekend Trip Planning", "date": "2025-09-27", "category": "personal",
@@ -341,42 +379,52 @@ def meeting_specs():
             ("SPEAKER_01", "I'll book the cabin for two nights then.", []),
             ("SPEAKER_00", "Perfect, I'll sort out the food.", []),
         ],
-        "ai_summary": "A personal call settling a weekend trip: leave Friday night, "
-                      "Sam books the cabin for two nights, Mark handles food.",
+        "gist": "Leave Friday night; Sam books the cabin for two nights and "
+                "Morgan handles food.",
+        "decisions_list": ["Leave Friday night.", "Book the cabin for two nights."],
+        "open_questions": [],
+        "tags": ["personal"],
     })
 
-    # --- Jan 2026 --- (Vendor Demo carries an active unknown, U007)
+    # --- Jan 2026 --- (the vendor demo carries an active unknown, U007)
     S.append({
-        "title": "Vendor Demo: Assessment Platform", "date": "2026-01-15",
+        "title": "Assessment Platform Demo", "date": "2026-01-15",
         "speakers": named(OWNER, "Alex Rivera")
         + [("SPEAKER_02", None, "Speaker 7", "U007", None)],
         "turns": [
             ("SPEAKER_02", "Thanks for having us. I'll walk through the item bank first.", []),
-            ("SPEAKER_00", "How does the platform handle our standards alignment?", []),
+            ("SPEAKER_00", "How does the platform handle standards alignment?", []),
             ("SPEAKER_02", "Every item is tagged to the state framework out of the box.", []),
             ("SPEAKER_01", "Can we export the results into our warehouse nightly?", []),
             ("SPEAKER_02", "Yes, there's a nightly CSV drop and an API.", []),
         ],
         # untagged category on purpose (some meetings stay uncategorized)
-        "ai_summary": "A vendor walked through an assessment platform: items tagged to "
-                      "the state framework, with a nightly CSV export and an API into "
-                      "the warehouse. No decision reached.",
+        "gist": "A vendor showed an assessment platform with standards tagging and "
+                "a nightly export.",
+        "decisions_list": [],
+        "open_questions": ["Does the nightly export fit the warehouse load window?"],
+        "tags": ["assessment", "partnerships", "data-systems"],
     })
     S.append({
-        "title": "Priya Shah 1:1", "date": "2026-01-22", "category": "work",
+        "title": "Priya Weekly Check-in – Caseload Dashboard", "date": "2026-01-22",
+        "category": "work", "series": "weekly_checkin",
         "speakers": named(OWNER, "Priya Shah"),
         "turns": [
-            ("SPEAKER_00", "How is the special-education dashboard coming along?", []),
-            ("SPEAKER_01", "The caseload view is done, compliance is next.", []),
+            ("SPEAKER_00", "How is the caseload dashboard coming along?", []),
+            ("SPEAKER_01", "The caseload view is done, the compliance view is next.", []),
             ("SPEAKER_00", "Let's demo it at the next leadership meeting.", []),
         ],
-        "next_steps": ["[Priya Shah] will demo the caseload view at the next leadership meeting"],
+        "gist": "The caseload view is done and the compliance view is next.",
+        "decisions_list": ["Demo the caseload view at the next leadership meeting."],
+        "open_questions": [],
+        "tags": ["reporting-dashboards", "special-education", "team-operations"],
     })
 
     # --- Apr 2026 --- (THE review-queue meeting: flags, alt, minor crumbs) ---
     S.append({
-        "title": "Leadership Team Weekly", "date": "2026-04-08", "category": "work",
-        "source_file": "Leadership Team Weekly 04082026.m4a",
+        "title": "LT Weekly Meeting – Reserve Target", "date": "2026-04-08",
+        "category": "work", "series": "lt_weekly",
+        "source_file": "LT Weekly Meeting 04082026.m4a",
         "verify_engine": "mlxwhisper:turbo",
         "speakers": named(OWNER, "Alex Rivera", "Jordan Lee"),
         "decisions": [
@@ -395,14 +443,16 @@ def meeting_specs():
             ("SPEAKER_02", "so yeah", ["overlap"]),
             ("SPEAKER_00", "Let's move the facilities update to next week and close out.", []),
         ],
-        "ai_title": "Leadership Team Weekly Budget",
-        "ai_summary": "The weekly opened on budget: a dispute over whether the reserve "
-                      "target is three percent or three million was left for review, and "
-                      "the facilities update slipped to next week.",
-        "next_steps": ["[Alex Rivera] will confirm the reserve target figure before the next meeting"],
+        "gist": "The reserve target is in dispute, and the facilities update moves "
+                "to next week.",
+        "decisions_list": ["The facilities update moves to next week."],
+        "open_questions": ["Is the reserve target three percent or three million?",
+                           "Does the figure come from the prior fiscal year?"],
+        "tags": ["budget-finance", "team-operations", "goals-okrs"],
     })
     S.append({
-        "title": "Enrollment Data Review", "date": "2026-04-15",
+        "title": "Enrollment Data Review – Count Day Readiness", "date": "2026-04-15",
+        "series": "enrollment_review",
         "speakers": named(OWNER, "Sam Chen", "Priya Shah"),
         "turns": [
             ("SPEAKER_00", "Count day is three weeks out. Are we ready?", []),
@@ -410,23 +460,29 @@ def meeting_specs():
             ("SPEAKER_02", "I'll dry-run them against the live extract Monday.", []),
             ("SPEAKER_00", "Let's not repeat last year's late reconciliation.", []),
         ],
-        # untagged; has next steps but no prose summary
-        "next_steps": ["[Sam Chen] will dry-run the validation scripts on the live extract Monday"],
+        # untagged category
+        "gist": "The validation scripts pass on last year's file, with a dry run "
+                "on the live extract next.",
+        "decisions_list": ["Dry-run the validation scripts on the live extract Monday."],
+        "open_questions": [],
+        "tags": ["enrollment", "data-systems", "policy-compliance"],
     })
 
-    # --- Jul 2026 (recent) ---
+    # --- Jul 2026 ---
     S.append({
-        "title": "Board Prep Session", "date": "2026-07-02", "category": "work",
+        "title": "Board Study Session – Capital Plan", "date": "2026-07-02",
+        "category": "work", "series": "board_study",
         "speakers": named(OWNER, "Dana Fox", "Jordan Lee"),
         "turns": [
-            ("SPEAKER_00", "Final board prep before the summer meeting.", []),
+            ("SPEAKER_00", "Final prep before the summer session.", []),
             ("SPEAKER_01", "The capital plan slide is the one they'll push on.", []),
             ("SPEAKER_02", "I'll have the updated cost figures by end of day.", []),
             ("SPEAKER_00", "Great. Let's rehearse the open once more.", []),
         ],
-        "ai_summary": "Final prep for the summer board meeting focused on the capital "
-                      "plan slide; Jordan will supply updated cost figures by end of day.",
-        "next_steps": ["[Jordan Lee] will send updated capital cost figures by end of day"],
+        "gist": "Prep for the summer session centers on the capital plan slide.",
+        "decisions_list": ["Rehearse the opening once more."],
+        "open_questions": ["Will the updated cost figures change the capital plan slide?"],
+        "tags": ["board-governance", "budget-finance"],
     })
 
     # --- archived ---
@@ -456,8 +512,76 @@ def meeting_specs():
             ("SPEAKER_00", "Let's pilot monthly for a term and see.", []),
         ],
         "ai_title": "Budget Planning Cadence",
-        "ai_summary": "Two speakers weigh moving budget planning from quarterly to "
-                      "monthly to catch swings sooner, agreeing to pilot monthly for a term.",
+        "gist": "Budget planning moves from quarterly to monthly for a one-term pilot.",
+        "decisions_list": ["Pilot monthly budget planning for one term."],
+        "open_questions": [],
+        "tags": ["budget-finance", "team-operations"],
+    })
+
+    # --- recent: dated from the build day, so Home has work in it ---
+    # a new recording with only the model's draft title: a Needs you card
+    S.append({
+        "title": "Recording", "date": ago(0),
+        "base": f"{ago(0)} Recording 1430",
+        "title_state": "needs_title", "title_source": "model",
+        "arrived_at": stamp_ago(0, "15:05:00"), "date_source": "recorder",
+        "source_file": f"{ago(0)} Recording 1430.m4a",
+        "speakers": named(OWNER, "Sam Chen"),
+        "turns": [
+            ("SPEAKER_00", "Can we settle the spring schedule before the break?", []),
+            ("SPEAKER_01", "Two sessions a week, with the lab on Thursdays.", []),
+            ("SPEAKER_00", "That works. I'll send it to the group tonight.", []),
+        ],
+        "ai_title": "Spring Schedule Planning",
+        "gist": "The spring schedule is two sessions a week, with the lab on Thursdays.",
+        "decisions_list": ["Two sessions a week, with the lab on Thursdays."],
+        "open_questions": ["Does the group need the schedule before the break?"],
+        "tags": ["professional-learning", "team-operations"],
+    })
+    # a kept series title the model drafted: a Draft titles row
+    S.append({
+        "title": "Jordan Weekly Check-in – Hiring Plan", "date": ago(1),
+        "category": "work", "series": "weekly_checkin",
+        "title_state": "provisional", "title_source": "model",
+        "arrived_at": stamp_ago(1, "11:40:00"), "date_source": "recorder",
+        "speakers": named(OWNER, "Jordan Lee"),
+        "turns": [
+            ("SPEAKER_00", "Where are we on the two analyst roles?", []),
+            ("SPEAKER_01", "Six applicants passed the screen, interviews start Monday.", []),
+            ("SPEAKER_00", "Let's use the same work sample for both roles.", []),
+            ("SPEAKER_01", "Agreed. I still need a second panelist for Tuesday.", []),
+        ],
+        "gist": "Six applicants passed the screen for two analyst roles, and "
+                "interviews start Monday.",
+        "decisions_list": ["Both roles use the same work sample."],
+        "open_questions": ["Who joins the Tuesday interview panel?"],
+        "tags": ["hiring-staffing", "team-operations"],
+    })
+    # a one-off with a new voice that talks over a minute: the voice card
+    S.append({
+        "title": "Reading Partner Kickoff", "date": ago(3),
+        "category": "work",
+        "title_state": "provisional", "title_source": "model",
+        "arrived_at": stamp_ago(3, "10:15:00"), "date_source": "recorder",
+        "stretch": 7.0,
+        "speakers": named(OWNER, "Dana Fox")
+        + [("SPEAKER_02", None, "Speaker 9", "U009", None)],
+        "turns": [
+            ("SPEAKER_02", "Thanks for the time. Our tutors work in small groups of three.", []),
+            ("SPEAKER_00", "How do you match tutors to students in the first month?", []),
+            ("SPEAKER_02", "We start from the screening scores and regroup every six weeks.", []),
+            ("SPEAKER_01", "Can your team share session logs with us each week?", []),
+            ("SPEAKER_02", "Yes, we send a weekly file with attendance and minutes.", []),
+            ("SPEAKER_00", "Let's start with two pilot schools in January.", []),
+            ("SPEAKER_02", "That works for us. I'll send the draft agreement Friday.", []),
+        ],
+        "gist": "A reading partner will pilot small-group tutoring in two schools "
+                "starting in January.",
+        "decisions_list": ["Pilot in two schools starting in January.",
+                           "The partner sends weekly session logs."],
+        "open_questions": ["Which two schools join the pilot?",
+                           "Does the draft agreement cover data sharing?"],
+        "tags": ["literacy", "partnerships", "research-evaluation"],
     })
     return S
 
@@ -470,11 +594,15 @@ def build(home: Path) -> dict:
     # unknown speakers: U007 active ("Who is this?"), U012 hidden (archived)
     unknown_meetings = {
         "U007": {"meetings": [b["base"] for b in built
-                              if dates.title_of(b["base"]).startswith("Vendor Demo")],
+                              if dates.title_of(b["base"]).startswith("Assessment Platform")],
                  "created": "2026-01-15T20:14:07"},
         "U012": {"meetings": [b["base"] for b in built
-                              if b["base"].startswith("2025-09-10 Board Prep Session")],
+                              if b["base"].startswith("2025-09-10 Board Study Session")],
                  "created": "2025-09-10T20:14:07", "archived": True},
+        # U009 talks over a minute in a meeting from this week: Home's voice card
+        "U009": {"meetings": [b["base"] for b in built
+                              if dates.title_of(b["base"]) == "Reading Partner Kickoff"],
+                 "created": datetime.now().isoformat(timespec="seconds")},
     }
     registry, unknowns = write_voiceprints(home, sources_seen, unknown_meetings)
 
@@ -612,7 +740,7 @@ def main(argv=None):
     print(f"  processed meetings : {len(processed)}  across months {', '.join(months)}")
     print(f"  archived meetings  : {sum(1 for b in result['built'] if b['archived'])}")
     print(f"  inbox (Needs naming, reviewed=false): {len(inbox)}")
-    print( "  review-flag meeting: 1  (2026-04-08 Leadership Team Weekly — "
+    print( "  review-flag meeting: 1  (2026-04-08 LT Weekly Meeting – Reserve Target: "
            "overlap + id_mismatch + engine-disagreement alt + minor crumbs)")
     cats = {}
     for b in processed:
