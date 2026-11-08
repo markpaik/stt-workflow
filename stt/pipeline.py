@@ -381,13 +381,15 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     emb_path = config.meeting_file(base, ".emb.npz", dest_dir)
     diar_path = config.meeting_file(base, ".diar.npz", dest_dir)
     # strict is sticky across a Redo: the panel queues a Redo without --strict,
-    # and a meeting stored strict must never reach a cloud engine on rerun
+    # and a meeting stored strict must never reach a cloud engine on rerun.
+    # A json that exists but cannot be read fails PRIVATE, like
+    # summarize._strict_meeting: a truncated strict meeting must not upload.
     if not strict and json_path.exists():
         try:
             import json as _json
             strict = bool(_json.loads(json_path.read_text()).get("strict"))
         except (OSError, ValueError, AttributeError):
-            pass
+            strict = True
 
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
     wav = config.WORK_DIR / f"{base}.16k.wav"

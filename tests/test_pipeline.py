@@ -323,3 +323,29 @@ def test_redo_of_a_strict_meeting_stays_strict(sandbox, monkeypatch):
     with pytest.raises(_Stop):
         pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
     assert seen["strict"] is True
+
+
+@pytest.mark.parametrize("stored", ['{"strict": tr', ""])
+def test_redo_of_an_unreadable_meeting_json_fails_private(sandbox, monkeypatch, stored):
+    """A truncated or corrupt json cannot say whether the meeting was
+    strict. The Redo treats it as strict, so the audio stays local."""
+    monkeypatch.setattr(config, "STRICT", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _asr(strict=False):
+        seen["strict"] = strict
+        raise _Stop()
+    monkeypatch.setattr(pipeline, "_load_asr", _asr)
+    base = "2026-01-05 Mtg"
+    config.meeting_dir(base, config.MEETINGS_DIR).mkdir(parents=True, exist_ok=True)
+    src = config.meeting_file(base, ".m4a", config.MEETINGS_DIR)
+    src.write_bytes(b"x")
+    config.meeting_file(base, ".json", config.MEETINGS_DIR).write_text(stored)
+    with pytest.raises(_Stop):
+        pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert seen["strict"] is True
