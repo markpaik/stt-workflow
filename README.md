@@ -342,6 +342,9 @@ description stays and the retry backs off. `tools/retitle_all.py` retitles the l
 **Folders.** The watched folder defaults to iCloud Drive's `Voice
 Recordings`; transcripts land where you point them. Change either in the
 drawer's Settings or via `STT_ICLOUD_DIR` / `STT_MEETINGS_DIR` in `stt.env`.
+A newly picked transcripts folder has its old flat-layout meetings moved
+into per-meeting folders. Only a transcript json with its `.txt` moves, so
+other files in the folder stay where they are.
 
 **Automation:**
 

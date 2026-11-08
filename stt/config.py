@@ -888,6 +888,20 @@ def backfill_meeting_ids(dest_dir=None) -> int:
     return n
 
 
+def _is_flat_meeting(j: Path) -> bool:
+    """A flat-layout meeting: a transcript json (an object with segments)
+    next to its .txt. A folder the owner picks may hold other work, and a
+    stray package.json or notes file must never be moved into a folder."""
+    import json as _json
+    if not j.with_suffix(".txt").is_file():
+        return False
+    try:
+        data = _json.loads(j.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("segments"), list)
+
+
 def migrate_flat_meetings(dest_dir=None) -> int:
     """One-time layout migration: move flat  <dir>/<base>.*  files into
     per-meeting folders  <dir>/<base>/<base>.* . Idempotent and additive —
@@ -900,7 +914,7 @@ def migrate_flat_meetings(dest_dir=None) -> int:
         return 0
     moved = 0
     bases = [j.stem for j in d.glob("*.json")
-             if not j.name.endswith(_SIDECAR_JSON)]
+             if not j.name.endswith(_SIDECAR_JSON) and _is_flat_meeting(j)]
     for base in bases:
         folder = d / base
         folder.mkdir(exist_ok=True)
