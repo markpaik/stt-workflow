@@ -120,7 +120,8 @@ Four per-run options, from the Process popover:
 - **two at a time**: parallel workers, about 1.7x throughput for a backlog
 - **strict**, for confidential conversations: never guess an uncertain
   speaker (flag it for review instead), and never send audio to any cloud
-  engine whatever the global settings say
+  engine whatever the global settings say. Strict sticks to the meeting:
+  a Redo or a speaker re-identify keeps it on
 - **verify**: a second, architecturally different engine transcribes too;
   every disagreement is flagged with both candidates (where the engines
   agree, ~95% of words on our benchmark, they matched an independent

@@ -712,3 +712,34 @@ def test_bases_from_still_queues_a_follow_up_when_another_pass_holds_the_lock(
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         holder.close()
+
+
+def test_relabel_keeps_a_strict_meeting_strict(sandbox, monkeypatch):
+    """A meeting processed in strict mode stays strict after a relabel. The
+    panel calls relabel_one(base) with no strict argument when a voice is
+    named, and the stored flag is what keeps cloud backends away from it."""
+    import relabel
+
+    monkeypatch.setattr(config, "STRICT", False)
+    _seed_meeting("Mtg")
+    p = mfile("Mtg", ".json")
+    d = json.loads(p.read_text())
+    d["strict"] = True
+    p.write_text(json.dumps(d))
+
+    assert relabel.relabel_one("Mtg") is True
+    assert json.loads(p.read_text())["strict"] is True
+    # an explicit strict=False request cannot clear it either
+    assert relabel.relabel_one("Mtg", strict=False) is True
+    assert json.loads(p.read_text())["strict"] is True
+
+
+def test_relabel_strict_request_marks_a_plain_meeting_strict(sandbox, monkeypatch):
+    import relabel
+
+    monkeypatch.setattr(config, "STRICT", False)
+    _seed_meeting("Mtg")
+    assert relabel.relabel_one("Mtg", strict=True) is True
+    assert json.loads(mfile("Mtg", ".json").read_text())["strict"] is True
+    assert relabel.relabel_one("Mtg") is True
+    assert json.loads(mfile("Mtg", ".json").read_text())["strict"] is True
