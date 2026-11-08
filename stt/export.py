@@ -43,10 +43,15 @@ def _meta_line(base: str, d: dict) -> str:
 
 def export_dir() -> Path:
     """Where exported copies go: STT_EXPORT_DIR, else $STT_HOME/exports
-    under a sandbox home, else ~/Downloads. Read at call time."""
-    v = os.environ.get("STT_EXPORT_DIR")
+    under a sandbox home, else ~/Downloads. Read at call time. Like the
+    other settings, STT_EXPORT_DIR is read from stt.env first, then from
+    the environment. A relative value is under the home folder, never under
+    whatever folder the panel happened to start in."""
+    v = (config._env_file().get("STT_EXPORT_DIR")
+         or os.environ.get("STT_EXPORT_DIR") or "").strip()
     if v:
-        return Path(v).expanduser()
+        p = Path(v).expanduser()
+        return p if p.is_absolute() else Path.home() / p
     if config.STT_HOME:
         return Path(config._HOME) / "exports"
     return Path.home() / "Downloads"

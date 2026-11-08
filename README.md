@@ -240,7 +240,8 @@ Each meeting exports to Word (.docx) or print-ready PDF, copies to the
 clipboard as plain text, or reveals in Finder, from the row menu or the
 meeting page. Word and PDF copies land in `~/Downloads` and open in
 Finder. They leave the data home, so treat them as shared copies. Set
-`STT_EXPORT_DIR` to send them elsewhere. Under `STT_HOME` they land in
+`STT_EXPORT_DIR` (in `stt.env` or the environment) to send them elsewhere.
+A relative value is under your home folder. Under `STT_HOME` they land in
 `$STT_HOME/exports`. On disk, every meeting is a self-contained folder (audio,
 readable `.txt`, structured `.json` with segment- and word-level timestamps,
 speakers, flags, and real confidence scores, caches, and edit history

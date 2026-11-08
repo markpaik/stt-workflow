@@ -143,3 +143,21 @@ def test_export_lands_under_stt_home_not_the_real_downloads(sandbox, tmp_path, m
     # STT_EXPORT_DIR wins over both
     monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "chosen"))
     assert export.to_docx("Mtg 05212026").parent == tmp_path / "chosen"
+
+
+def test_export_dir_reads_stt_env_and_anchors_a_relative_value(sandbox, monkeypatch, tmp_path):
+    """STT_EXPORT_DIR in stt.env was ignored, and a relative value landed
+    under whatever folder the panel started in."""
+    fake_user = tmp_path / "user"
+    fake_user.mkdir()
+    monkeypatch.setattr(export.Path, "home", staticmethod(lambda: fake_user))
+    monkeypatch.delenv("STT_EXPORT_DIR", raising=False)
+    env = config.PROJECT_DIR / "stt.env"
+    env.write_text(f"STT_EXPORT_DIR={tmp_path / 'from_env'}\n")
+    assert export.export_dir() == tmp_path / "from_env"
+    env.write_text("STT_EXPORT_DIR=rel/dir\n")
+    monkeypatch.chdir(tmp_path)
+    assert export.export_dir() == fake_user / "rel" / "dir"
+    env.write_text("")
+    monkeypatch.setenv("STT_EXPORT_DIR", "other")
+    assert export.export_dir() == fake_user / "other"
