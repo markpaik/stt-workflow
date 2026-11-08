@@ -34,7 +34,21 @@ def test_root_state_files_are_ignored(path):
     assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 0
 
 
+@pytest.mark.parametrize("path", [
+    "stt.env.bak", "stt.env.old", ".env", "local.env", ".hf_token", "hf_token.txt",
+    "exports/x.docx", "Meeting.docx", "Meeting.pdf", "recorder.log", "gui/x.log",
+    "tuning/out.json", "status.json.bak", "manifest.json.bak", "meetings/x/x.txt",
+    "transcripts/x.txt",
+])
+def test_secret_backup_export_and_log_names_are_ignored(path):
+    """A copy of stt.env, a saved token, an export into the checkout or a
+    log must not be staged by 'git add -A'."""
+    assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 0
+
+
 @pytest.mark.parametrize("path", ["tests/fixture.json", "gui/static/data.json",
+                                  "tools/token_contrast.py", "docs/guide.pdf",
+                                  "tuning/eval.py",
                                   "stt/notes.flag", "stt.env.example"])
 def test_root_rules_stay_at_the_root(path):
     assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 1

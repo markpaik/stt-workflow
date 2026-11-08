@@ -3,8 +3,16 @@
 # Everything derived from audio stays out of the repository.
 # ============================================================
 
-# Secrets — HuggingFace token and local settings
+# Secrets — HuggingFace token and local settings, and any copy of them
 stt.env
+stt.env.*
+!stt.env.example
+.env
+*.env
+.hf_token
+hf_token*
+*.token
+*.bak
 
 # Voiceprints are BIOMETRIC data — never commit any of it
 voiceprints/
@@ -102,3 +110,13 @@ native/speakrs/target/
 # out-of-date description index (meeting names)
 stale_descriptions.json
 stale_descriptions.lock
+
+# exports and transcript copies dropped into the checkout, and any log.
+# Root-anchored: docs/ may carry a tracked PDF.
+/exports/
+/meetings/
+/transcripts/
+/*.docx
+/*.pdf
+*.log
+tuning/*.json
