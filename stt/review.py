@@ -601,9 +601,11 @@ def archive_decisions(base: str, dest_dir=None) -> bool:
         current = None
     if not isinstance(current, list):
         # an unreadable live sidecar cannot be merged: keep it whole beside
-        # the archive rather than lose either one
+        # the archive rather than lose either one. The name does not end in
+        # .json, like the .corrupt copy below, so no *.json scan (the flat
+        # layout migration, a meeting json glob) can take it for a meeting
         p.replace(sup.with_name(sup.name.replace(
-            ".json", f".{int(time.time())}.json")))
+            ".json", f".unmerged-{int(time.time())}")))
         return True
     try:
         old = json.loads(sup.read_text())

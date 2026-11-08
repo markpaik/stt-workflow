@@ -885,3 +885,21 @@ def test_a_corrupt_superseded_file_is_set_aside_not_lost(sandbox):
     assert [d["text"] for d in kept] == ["NEW ROUND"]
     aside = list(mfile("Mtg", ".json").parent.glob("*.reviews.superseded.corrupt-*"))
     assert len(aside) == 1 and aside[0].read_text() == "{not json"
+
+
+def test_an_unreadable_live_sidecar_is_set_aside_under_a_non_json_name(sandbox):
+    """The set-aside copy was named .reviews.superseded.<ts>.json. That name
+    is a *.json that is not in config._SIDECAR_JSON, so a *.json scan could
+    take it for a meeting. It now ends in .unmerged-<ts>."""
+    from stt import config
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="FIRST ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+    mfile("Mtg", ".reviews.json").write_text("{not json")
+    assert review.archive_decisions("Mtg") is True
+    folder = mfile("Mtg", ".json").parent
+    aside = list(folder.glob("*.reviews.superseded.unmerged-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+    strays = [p.name for p in folder.glob("*.json")
+              if p.name != "Mtg.json" and not p.name.endswith(config._SIDECAR_JSON)]
+    assert strays == []
