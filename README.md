@@ -454,10 +454,12 @@ record while an exported copy reads clean.
 This tool stores voiceprints (**biometric data**) and verbatim records of
 what people said. Treat both with care:
 
-- Files the pipeline writes are owner-only: the batch, panel, enroll and
-  relabel start with umask 077, and the voiceprints folder is kept 0700.
-  Files from before this change keep their old mode until rewritten; run
-  `chmod -R go-rwx` on the data folders once to tighten them.
+- Files the pipeline writes are owner-only: every process that imports
+  `stt.config` (the batch, panel, enroll, relabel and every tool script)
+  runs with umask 077, and the voiceprints folder is kept 0700. Files from
+  before this change keep their old mode until rewritten. The doctor reports
+  them as `loose_mode`, and `tools/doctor.py fix --apply` makes them
+  owner-only.
 - The `.gitignore` keeps voiceprints, transcripts, audio, tokens, and all
   runtime state out of git. Review it before changing output paths.
 - Know your local laws on recording consent (one-party vs all-party) and any

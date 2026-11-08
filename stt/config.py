@@ -29,8 +29,13 @@ def private_umask() -> None:
     """New files owner-only (0600, folders 0700). Meetings, transcripts,
     state and voiceprints (biometric data) must never be readable by other
     local accounts. Every entry point calls this first; ffmpeg and other
-    children inherit it."""
+    children inherit it. It also runs when this module is imported, so a
+    tool script that writes meeting json or state (retitle_all, fix_dates,
+    purge and the rest) never writes a world-readable file."""
     os.umask(0o077)
+
+
+private_umask()
 
 
 def _home_default(sub: str, hard_default) -> str:
@@ -61,6 +66,64 @@ VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"
 WORK_DIR = PROJECT_DIR / "work"  # scratch space for normalized wavs
 LOG_DIR = PROJECT_DIR / "logs"
+
+# state files at the root of PROJECT_DIR (the checkout, outside STT_HOME):
+# the manifest, status, indexes, search.db, stt.env and their backups
+_ROOT_STATE_GLOBS = ("*.json", "*.jsonl", "*.gz", "*.npz", "*.db", "*.db-*",
+                     "*.bak", "stt.env", "stt.env.*")
+_ROOT_STATE_KEEP = {"stt.env.example"}
+
+
+def private_roots() -> list:
+    """The folders whose whole tree is private data."""
+    return [MEETINGS_DIR, VOICEPRINTS_DIR, RECORDINGS_DIR, WORK_DIR, LOG_DIR]
+
+
+def loose_private_paths() -> list:
+    """Every private folder or file that a group or other account can read,
+    write or enter. Files written before the owner-only umask keep their old
+    mode until something rewrites them. Symlinks are skipped. Reads only."""
+    import stat as _stat
+    out, seen = [], set()
+
+    def look(p: Path):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return
+        if _stat.S_ISLNK(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+            return
+        seen.add((st.st_dev, st.st_ino))
+        if st.st_mode & 0o077:
+            out.append(p)
+
+    for root in private_roots():
+        if not root.is_dir():
+            continue
+        look(root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            for n in dirnames + filenames:
+                look(Path(dirpath) / n)
+    if PROJECT_DIR.is_dir():
+        for g in _ROOT_STATE_GLOBS:
+            for p in sorted(PROJECT_DIR.glob(g)):
+                if p.name not in _ROOT_STATE_KEEP and p.is_file():
+                    look(p)
+    return out
+
+
+def tighten_private_paths(paths=None) -> int:
+    """Remove the group and other bits from `paths` (default: every loose
+    private path). Returns how many changed."""
+    n = 0
+    for p in (loose_private_paths() if paths is None else paths):
+        try:
+            mode = os.lstat(p).st_mode
+            os.chmod(p, mode & 0o7700)
+            n += 1
+        except OSError:
+            pass
+    return n
 
 
 def migration_dir() -> Path:

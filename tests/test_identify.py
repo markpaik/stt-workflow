@@ -645,3 +645,79 @@ def test_a_new_file_never_reuses_an_unknowns_file_or_an_orphan(sandbox):
     (config.VOICEPRINTS_DIR / "Orphan.npy").write_bytes(b"x")
     assert identify._unique_filename("U007", {}) == "U007_2.npy"
     assert identify._unique_filename("Orphan", {}) == "Orphan_2.npy"
+
+
+def test_importing_config_makes_new_files_owner_only(tmp_path):
+    """A tool script (retitle_all, fix_dates, purge and the rest) never
+    calls private_umask itself. Importing config sets it, so its atomic
+    rewrites of meeting json and state are never world-readable."""
+    import stat
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    out = tmp_path / "w.json"
+    code = ("import os; os.umask(0o022); import stt.config; "
+            f"open({str(out)!r}, 'w').write('x')")
+    subprocess.run([sys.executable, "-c", code], cwd=repo, check=True,
+                   env={"PATH": "/usr/bin:/bin", "STT_HOME": str(tmp_path / "h")})
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+# dev tools that write no meeting data, state or voiceprints
+_NO_PRIVATE_DATA = {"tools/next_screens.py", "tools/token_contrast.py"}
+
+
+def test_every_script_imports_config_and_so_the_umask():
+    """Every script with a __main__ block reaches stt.config (directly or
+    through another stt module), so the owner-only umask applies to it."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    files = [p for d in ("tools", "stt", "gui") for p in (repo / d).glob("*.py")]
+    files += list(repo.glob("*.py"))
+    missing = []
+    for p in files:
+        src = p.read_text()
+        if "__main__" not in src:
+            continue
+        rel = str(p.relative_to(repo))
+        if rel in _NO_PRIVATE_DATA:
+            continue
+        if not ("from stt" in src or "from . import" in src or "import stt" in src
+                or "from .config" in src):
+            missing.append(rel)
+    assert missing == []
+
+
+def test_doctor_finds_and_tightens_files_from_before_the_umask(sandbox):
+    """Files written before umask 077 keep 0644 until rewritten. The doctor
+    reports them and its fix makes them owner-only."""
+    import os
+    import stat
+    from stt import config, doctor
+    m = config.MEETINGS_DIR / "2025-01-02 Old"
+    m.mkdir()
+    f = m / "2025-01-02 Old.json"
+    f.write_text("{}")
+    npy = config.VOICEPRINTS_DIR / "Person A.npy"
+    npy.write_bytes(b"x")
+    root_state = config.PROJECT_DIR / "status.json"
+    root_state.write_text("{}")
+    example = config.PROJECT_DIR / "stt.env.example"
+    example.write_text("x")
+    for p in (m, f, npy, root_state, example, config.VOICEPRINTS_DIR):
+        os.chmod(p, 0o755 if p.is_dir() else 0o644)
+    loose = set(config.loose_private_paths())
+    assert {m, f, npy, root_state, config.VOICEPRINTS_DIR} <= loose
+    assert example not in loose
+    fs = [x for x in doctor.check(registry=False) if x.kind == "loose_mode"]
+    assert len(fs) == 1 and fs[0].fixable
+    assert doctor.fix(fs, dry_run=True)["plan"]["permissions"] == 1
+    assert stat.S_IMODE(f.stat().st_mode) == 0o644
+    r = doctor.fix(fs, dry_run=False, registry=False)
+    assert any("owner-only" in x for x in r["done"])
+    assert stat.S_IMODE(m.stat().st_mode) == 0o700
+    for p in (f, npy, root_state):
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600, p.name
+    assert stat.S_IMODE(example.stat().st_mode) == 0o644
+    assert config.loose_private_paths() == []
