@@ -611,7 +611,9 @@ def main(argv=None):
         # every rename leaves the old name's lock file behind: sweep the
         # ones nobody holds, so the registry hygiene check stays clean
         print(f"pruned {config.prune_lock_files()} stale lock file(s)")
-    else:
+    elif not a.undo:
+        # "--undo" alone is the dry run of the REVERSAL: it prints the undo
+        # plan below and never starts the model or rewrites proposals.json
         doc = dry_run(only=a.only, limit=a.limit, refresh=a.refresh)
         props = doc["proposals"]
         print(f"\nproposals: {proposals_path()}")

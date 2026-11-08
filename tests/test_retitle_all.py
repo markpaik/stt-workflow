@@ -263,3 +263,19 @@ def test_the_dry_run_rests_between_model_calls(lib, monkeypatch):
     rests.clear()
     rt.dry_run(log=lambda *_: None)       # all cached: no model work, no rest
     assert rests == []
+
+
+def test_undo_without_apply_prints_the_plan_and_never_runs_the_model(lib, monkeypatch, capsys):
+    """'--undo' alone is documented as a dry run of the reversal. It fell
+    through into the full model dry run, which rewrote proposals.json."""
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    before = rt.proposals_path().read_bytes()
+
+    def boom(**k):
+        raise AssertionError("--undo must never start the model dry run")
+    monkeypatch.setattr(rt, "dry_run", boom)
+    assert rt.main(["--undo"]) == 0
+    out = capsys.readouterr().out
+    assert "would undo" in out
+    assert rt.proposals_path().read_bytes() == before
