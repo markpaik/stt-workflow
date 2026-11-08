@@ -123,3 +123,23 @@ def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     a = export.to_docx("Mtg 05212026")
     b = export.to_docx("Mtg 05212026")
     assert a != b and b.exists()  # second export gets " (1)" suffix
+
+
+def test_export_lands_under_stt_home_not_the_real_downloads(sandbox, tmp_path, monkeypatch):
+    """A sandboxed panel (STT_HOME set) must never write a transcript copy to
+    the real ~/Downloads, which is often cloud-synced."""
+    _mk_full(sandbox)
+    home = tmp_path / "home"
+    fake_user = tmp_path / "user"
+    (fake_user / "Downloads").mkdir(parents=True)
+    monkeypatch.setattr(export.Path, "home", staticmethod(lambda: fake_user))
+    monkeypatch.delenv("STT_EXPORT_DIR", raising=False)
+    monkeypatch.setattr(config, "STT_HOME", str(home))
+    monkeypatch.setattr(config, "_HOME", home)
+    out = export.to_docx("Mtg 05212026")
+    assert out.parent == home / "exports" and out.exists()
+    assert list((fake_user / "Downloads").iterdir()) == []
+
+    # STT_EXPORT_DIR wins over both
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "chosen"))
+    assert export.to_docx("Mtg 05212026").parent == tmp_path / "chosen"

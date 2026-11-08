@@ -1,11 +1,14 @@
 """Export a meeting transcript for sharing: Word (.docx), PDF, or plain text.
 
 Files land in ~/Downloads (the natural hand-off spot) and are revealed in
-Finder. PDF renders a styled HTML through the locally-installed Chrome in
+Finder. STT_EXPORT_DIR moves them. Under STT_HOME (a demo or test home)
+they land in $STT_HOME/exports, so a sandbox never writes a transcript
+copy to the real Downloads folder. PDF renders a styled HTML through the locally-installed Chrome in
 headless mode — no extra Python dependencies. Everything stays on-device.
 """
 import html
 import json
+import os
 import subprocess
 import tempfile
 from datetime import datetime
@@ -38,11 +41,24 @@ def _meta_line(base: str, d: dict) -> str:
     return "  ·  ".join(parts)
 
 
+def export_dir() -> Path:
+    """Where exported copies go: STT_EXPORT_DIR, else $STT_HOME/exports
+    under a sandbox home, else ~/Downloads. Read at call time."""
+    v = os.environ.get("STT_EXPORT_DIR")
+    if v:
+        return Path(v).expanduser()
+    if config.STT_HOME:
+        return Path(config._HOME) / "exports"
+    return Path.home() / "Downloads"
+
+
 def _out_path(base: str, ext: str) -> Path:
-    out = Path.home() / "Downloads" / f"{base}.{ext}"
+    d = export_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"{base}.{ext}"
     n = 1
     while out.exists():
-        out = Path.home() / "Downloads" / f"{base} ({n}).{ext}"
+        out = d / f"{base} ({n}).{ext}"
         n += 1
     return out
 
