@@ -422,9 +422,11 @@ def progress() -> dict:
     return st
 
 
-# renamed_from too: the rename writes it, and undo must take it off again
+# renamed_from too: the rename writes it, and undo must take it off again.
+# ai_next_steps too: store_description drops it (next steps were removed),
+# and undo returns the json to what it held before the run
 _BEFORE_KEYS = (("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS
-                + ("ai_stale", "renamed_from"))
+                + ("ai_stale", "renamed_from", "ai_next_steps"))
 _MISSING = {"$missing": True}
 
 

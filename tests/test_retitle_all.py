@@ -313,3 +313,28 @@ def test_apply_and_undo_work_on_meetings_with_no_stored_id(lib):
     # undo lands in the ISO form, so compare the dates and the count
     assert len(config.meeting_bases()) == len(old)
     assert "2026-10-01 Robin Check-in 10-5" in config.meeting_bases()
+
+
+def test_undo_returns_an_iso_named_meeting_json_to_its_content(sandbox, monkeypatch, tmp_path):
+    """Undo dropped the ai_next_steps that store_description takes off.
+    For a meeting already in the ISO folder form, undo now restores the
+    json key for key. Two fields follow the folder instead: title (a
+    provenance key the rename writes from the folder name) and source_file
+    (it names the audio file the rename moved)."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("2026-10-02 LT Weekly Meeting", "mid-b", date="2026-10-02",
+       ai_next_steps=["Send the notes."])
+    monkeypatch.setattr(summarize, "_generate", lambda prompt, **k: _reply("lt_weekly", "Budget"))
+    before = json.loads(mfile("2026-10-02 LT Weekly Meeting", ".json").read_text())
+    assert "title" not in before
+    rt.dry_run(log=lambda *_: None)
+    assert rt.apply(log=lambda *_: None)["counts"]["applied"] == 1
+    assert config.base_of("mid-b") != "2026-10-02 LT Weekly Meeting"
+    assert rt.undo(dry=False, log=lambda *_: None)["counts"]["undone"] == 1
+    assert config.base_of("mid-b") == "2026-10-02 LT Weekly Meeting"
+    after = json.loads(mfile("2026-10-02 LT Weekly Meeting", ".json").read_text())
+    assert after["title"] == "LT Weekly Meeting"
+    assert after["ai_next_steps"] == ["Send the notes."]
+    follows_audio = {"source_file", "title"}
+    assert ({k: v for k, v in after.items() if k not in follows_audio}
+            == {k: v for k, v in before.items() if k not in follows_audio})
