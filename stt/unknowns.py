@@ -616,6 +616,9 @@ def promote(uid: str, name: str) -> bool:
         s = _samples(reg, uid)
         if s is None:
             return False
+        # the enrolled spelling: enroll() folds a case variant into it, so
+        # the snapshot used for a rollback must be of that same profile
+        name = identify.canonical_name(name)
         # the destination profile as it stands BEFORE any row is added
         before = identify.load_registry().get(name)
         rows_before = None

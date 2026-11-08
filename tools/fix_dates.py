@@ -66,7 +66,8 @@ def plan(store=None, probe=True, today=None) -> list:
             "base": base, "meeting_id": d.get("meeting_id"),
             "old": {"date": d.get("date"),
                     "date_source": fj.get(d, "date_source"),
-                    "recorded_at": fj.get(d, "recorded_at")},
+                    "recorded_at": fj.get(d, "recorded_at"),
+                    "renamed_from": fj.get(d, "renamed_from")},
             "new": {"date": iso, "date_source": src, "recorded_at": rec},
             "days": _days(d.get("date"), iso),
             "skip": "being processed" if status.meeting_active(base) else None})
@@ -100,6 +101,9 @@ def _ra_arg(v):
 def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> dict:
     run_id = run_id or datetime.now().strftime("fixdates-%Y%m%dT%H%M%S")
     jpath = fj.journal_path(run_id, journal_dir)
+    # undo finds each meeting by its id: a meeting journaled with none could
+    # not be found again once its folder moved
+    config.backfill_meeting_ids(store)
     applied, skipped = [], []
     with fj.Journal(jpath) as journal:
         for r in plan(store, probe=probe, today=today):
@@ -118,6 +122,15 @@ def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> 
                 skipped.append({"base": r["base"], "why": res.get("error")})
     return {"run": run_id, "journal": str(jpath), "applied": applied,
             "skipped": skipped}
+
+
+def _old_name(base: str, iso):
+    """`base` re-stamped with its old date, keeping any ' (N)' twin suffix."""
+    from stt import dates
+    if not iso:
+        return None
+    m = dates._UNIQ_SUFFIX.search(base)
+    return dates.restamp(base, iso) + (m.group(0) if m else "")
 
 
 def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
@@ -139,21 +152,33 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
             continue
         old = e["old"]
         src = None if fj.is_missing(old["date_source"]) else old["date_source"]
-        res = summarize.apply_meeting_edits(
-            base, date=old["date"], date_source=src or "manual",
-            recorded_at=_ra_arg(old["recorded_at"]))
+        kw = {"date": old["date"], "date_source": src or "manual",
+              "recorded_at": _ra_arg(old["recorded_at"])}
+        # the journaled name, in the ISO form, twin suffix and all. The twin
+        # rule alone swapped two same-name twins: undo walks the journal in
+        # reverse, so the meeting that was ' (2)' came back first and took
+        # the plain name. A name someone else holds now falls back to it.
+        want = _old_name(e["base"], old["date"])
+        res = summarize.apply_meeting_edits(base, to_base=want, **kw) if want else None
+        if res is None or not res.get("ok"):
+            res = summarize.apply_meeting_edits(base, **kw)
         if not res.get("ok"):
             skipped.append({"base": base, "why": res.get("error")})
             continue
-        if src is None:
-            # the meeting had no date_source before the run: take it off again
+        # the meeting had no date_source before the run: take it off again.
+        # The re-stamp also wrote renamed_from: put the journaled value back
+        # (a journal from before it was recorded carries none, so it stays).
+        if src is None or "renamed_from" in old:
             from stt import review
             nb = res["base"]
             with review.lock_meeting(nb):
                 j = config.meeting_file(nb, ".json", store)
                 dd = fj.read_json(j)
-                if dd is not None and dd.get("date_source") == "manual":
-                    dd.pop("date_source", None)
+                if dd is not None:
+                    if src is None and dd.get("date_source") == "manual":
+                        dd.pop("date_source", None)
+                    if "renamed_from" in old:
+                        fj.put(dd, "renamed_from", old["renamed_from"])
                     fj.atomic_json(j, dd)
         restored.append({"base": res["base"]})
     return {"run": run_id, "restored": restored, "kept": kept,

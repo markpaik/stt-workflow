@@ -425,12 +425,13 @@ def test_np_keys_step_flags_and_guard_typing():
 def test_review_posts_carry_the_original_segment_index():
     # /api/transcript segments carry the ORIGINAL json index, not the array
     # position -- every review/edit POST sends that index plus the segment's
-    # start as the server's cross-check. The stepper plumbs it.index from GET
-    # /api/review; the editor plumbs g.index from the segment itself.
-    assert "{base:MP.base,index:it.index,start:it.start,action}" in NEW_JS
-    assert "index:g.index,start:g.start,action:'edit'" in NEW_JS
-    assert "action:'delete',index:g.index,start:g.start" in NEW_JS
-    assert "action:'split',index:g.index,start:g.start" in NEW_JS
+    # start (and end) as the server's cross-check. The stepper plumbs it.index
+    # from GET /api/review; the editor plumbs g.index from the segment itself.
+    # The end lets the server refuse a stale edit of a line that merged away.
+    assert "{base:MP.base,index:it.index,start:it.start,end:it.end,action}" in NEW_JS
+    assert "index:g.index,start:g.start,end:g.end,action:'edit'" in NEW_JS
+    assert "action:'delete',index:g.index,start:g.start,end:g.end" in NEW_JS
+    assert "action:'split',index:g.index,start:g.start,end:g.end" in NEW_JS
     assert "action:'insert',start,end:start+3" in NEW_JS
     assert "action:'accept_minor'" in NEW_JS
     # the array position appears only in DOM ids (mseg<i>), never in a POST body

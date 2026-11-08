@@ -422,7 +422,11 @@ def progress() -> dict:
     return st
 
 
-_BEFORE_KEYS = ("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS + ("ai_stale",)
+# renamed_from too: the rename writes it, and undo must take it off again.
+# ai_next_steps too: store_description drops it (next steps were removed),
+# and undo returns the json to what it held before the run
+_BEFORE_KEYS = (("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS
+                + ("ai_stale", "renamed_from", "ai_next_steps"))
 _MISSING = {"$missing": True}
 
 
@@ -454,10 +458,20 @@ def apply(log=print, stop_on_batch=True) -> dict:
         doc = json.loads(proposals_path().read_text())
     except (OSError, ValueError):
         return {"ok": False, "error": f"no proposal file at {proposals_path()}: run the dry run first"}
+    # the journal is keyed by meeting id. A library the panel and the batch
+    # never stamped has none, and a null id made every journaled rename
+    # invisible: a rerun said 'gone' and undo found nothing to reverse
+    config.backfill_meeting_ids()
     prog = progress()
+    by_old = {st["begin"].get("old_base"): m for m, st in prog.items()}
     counts = Counter()
     for p in doc.get("proposals", []):
         mid, old = p.get("meeting_id"), p.get("old_base")
+        if not mid and old:
+            # a dry run from before the backfill: the journal knows a moved
+            # meeting's id, the live folder knows one that has not moved
+            mid = by_old.get(old) or (config.id_of(old)
+                                      if old in config.meeting_bases() else None)
         if p.get("skip") or not p.get("desc"):
             counts["skipped in the proposals"] += 1
             continue
@@ -611,7 +625,9 @@ def main(argv=None):
         # every rename leaves the old name's lock file behind: sweep the
         # ones nobody holds, so the registry hygiene check stays clean
         print(f"pruned {config.prune_lock_files()} stale lock file(s)")
-    else:
+    elif not a.undo:
+        # "--undo" alone is the dry run of the REVERSAL: it prints the undo
+        # plan below and never starts the model or rewrites proposals.json
         doc = dry_run(only=a.only, limit=a.limit, refresh=a.refresh)
         props = doc["proposals"]
         print(f"\nproposals: {proposals_path()}")

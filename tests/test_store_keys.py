@@ -577,3 +577,51 @@ def test_restamp_folders_keeps_the_date_source_and_leaves_twins_alone(sandbox, m
     assert _load("2026-10-05 Team Sync (2)")["date_source"] == "typed"
     from stt import doctor
     assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+
+
+def test_the_date_fix_undo_restores_renamed_from(dated):
+    j = config.meeting_file("Site Visit 9.17 09292026", ".json")
+    d0 = json.loads(j.read_text())
+    d0["renamed_from"] = "Site Visit 9.17 old name"
+    j.write_text(json.dumps(d0, indent=2))
+    before = {b: _load(b).get("renamed_from", "<none>") for b in config.meeting_bases()}
+    r = fix_dates.apply()
+    moved = {x["base"] for x in r["applied"]}
+    fix_dates.undo(r["run"], dry_run=False)
+    for b, rf in before.items():
+        now = dates.restamp(b, _load_any_date(b)) if b in moved else b
+        assert _load(now).get("renamed_from", "<none>") == rf, b
+
+
+def _load_any_date(base):
+    return dates.meeting_date(base)
+
+
+def test_the_date_fix_undo_keeps_each_twin_on_its_own_name(sandbox, monkeypatch, tmp_path):
+    """Two same-name same-date meetings both move to 9.14. Undo walks the
+    journal in reverse, so the twin rule gave the plain name to the meeting
+    that had been ' (2)'."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setenv("STT_PUBLIC_STATE", str(tmp_path / "no-public.json"))
+    monkeypatch.setattr(provenance, "probe_tags", lambda a: {"tags": {}, "duration": None})
+    a = _m("2026-09-29 Twin 9.14", source_file="Twin 9.14.m4a")
+    b = _m("2026-09-29 Twin 9.14 (2)", source_file="Twin 9.14 (2).m4a")
+    r = fix_dates.apply()
+    assert len(r["applied"]) == 2
+    fix_dates.undo(r["run"], dry_run=False)
+    assert _load("2026-09-29 Twin 9.14")["meeting_id"] == a["meeting_id"]
+    assert _load("2026-09-29 Twin 9.14 (2)")["meeting_id"] == b["meeting_id"]
+
+
+def test_the_date_fix_undo_works_on_meetings_with_no_stored_id(dated):
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    before = {b: _load(b)["date"] for b in config.meeting_bases()}
+    r = fix_dates.apply()
+    assert len(r["applied"]) == 3
+    u = fix_dates.undo(r["run"], dry_run=False)
+    assert len(u["restored"]) == 3 and not u["missing"]
+    assert sorted(_load(b)["date"] for b in config.meeting_bases()) == sorted(before.values())

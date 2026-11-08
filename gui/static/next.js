@@ -342,7 +342,7 @@ function speakersView(){
    <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(e.name)}" aria-label="Play ${esc(e.name)}">${ic(PLAYING===e.name?'pause':'play')}</button>
    <button class="btn quiet" type="button" data-act="samples" data-name="${esc(e.name)}">${open?'Hide samples':'Samples'}</button>
    <button class="icon-btn" type="button" data-act="spk-menu" data-name="${esc(e.name)}" aria-label="More actions for ${esc(e.name)}">${ic('more')}</button>
-   ${conf?`<button class="btn danger" type="button" data-act="rm-spk" data-name="${esc(e.name)}">Confirm remove</button>`:''}</div></div>`;};
+   ${conf?`<button class="btn danger" type="button" data-act="rm-spk" data-name="${esc(e.name)}">Confirm remove</button>`:''}${UI.confirm==='mg:'+e.name?`<button class="btn danger" type="button" data-act="merge-force" data-name="${esc(e.name)}">Confirm merge</button>`:''}</div></div>`;};
  return `<div class="head"><div><h1>Speakers</h1><p class="meta">Your voice library stays on this Mac and carries names across meetings. Public meetings never ask.</p></div></div>
   <div class="stack sections"><section><div class="eyebrow">Unknown voices <span class="n">${unk.length}</span></div><div class="stack">${unk.map(unkRow).join('')||'<div class="none-line sub">Every voice has a name.</div>'}</div></section>
   <section><div class="eyebrow">Named people <span class="n">${enr.length}</span></div><div class="stack">${enr.map(enrRow).join('')}</div></section>
@@ -409,6 +409,7 @@ function settingsView(){
   <section><div class="eyebrow">Storage</div><div>
    ${kv('Watched folder',esc((S.paths||{}).source||''),'<button class="btn" type="button" data-act="pick-folder" data-which="source">Change…</button>')}
    ${kv('Transcripts folder',esc((S.paths||{}).dest||''),'<button class="btn" type="button" data-act="pick-folder" data-which="dest">Change…</button>')}
+   ${UI.folderAsk?`<div class="ask-card"><div class="row-title">Use ${esc(UI.folderAsk.path)}?</div><div class="meta attn-t">${esc(UI.folderAsk.warn)}</div><div class="tools"><button class="btn primary" type="button" data-act="folder-confirm">Use this folder</button><button class="btn quiet" type="button" data-act="folder-cancel">Cancel</button></div></div>`:''}
   </div>${errLine('folder')}</section>
   <section><div class="eyebrow">Appearance</div><div>${kv('Theme','Auto follows macOS.',`<select id="set-theme" aria-label="Theme">${['auto','light','dark'].map(t=>`<option value="${t}" ${t===th?'selected':''}>${t[0].toUpperCase()+t.slice(1)}</option>`).join('')}</select>`)}</div></section>
  </div>`;
@@ -647,9 +648,12 @@ const A={
  'rn-open'(el){hidePop();UI.naming={rename:el.dataset.name,value:null};render(true);const i=$('#rn-in');if(i){i.focus();i.select();}},
  async 'rn-save'(){const N=UI.naming;const i=$('#rn-in');const v=(i?i.value:'').trim();if(!v||!N){return;}N.busy=true;
   const r=await api('/api/rename_speaker',{name:N.rename,new:v}).catch(()=>null);N.busy=false;
+  // onto an enrolled person whose voice does not match: the merge confirm
+  if(r&&r.need_confirm){UI.naming=null;UI.confirm='mg:'+N.rename;UI.mergeTo=r.dst;UI.err['spk:'+N.rename]=r.error;render(true);return;}
   if(!r||!r.ok){N.err=(r&&r.error)||'Could not rename. The new name may already exist; merge instead.';N.value=v;render(true);return;}
   UI.naming=null;toast('Renamed. The meetings update in the background.');await refresh();render(true);},
- async merge(el){const dst=($('#mg-sel')||{}).value;hidePop();if(!dst)return;await act('/api/merge_speakers',{src:'name:'+el.dataset.name,dst:'name:'+dst},'spk:'+el.dataset.name);toast(`Merged into ${dst}.`);},
+ async merge(el){const dst=($('#mg-sel')||{}).value;hidePop();if(!dst)return;const n=el.dataset.name,r=await act('/api/merge_speakers',{src:'name:'+n,dst:'name:'+dst},'spk:'+n);if(r.need_confirm){UI.confirm='mg:'+n;UI.mergeTo=dst;render(true);return;}if(r.ok!==false&&!r.error)toast(`Merged into ${dst}.`);},
+ async 'merge-force'(el){const n=el.dataset.name,dst=UI.mergeTo;UI.confirm=null;UI.mergeTo=null;if(!dst)return;const r=await act('/api/merge_speakers',{src:'name:'+n,dst:'name:'+dst,confirm:true},'spk:'+n);if(r.ok!==false&&!r.error)toast(`Merged into ${dst}.`);},
  'rm-ask'(el){hidePop();UI.confirm='rm:'+el.dataset.name;render(true);},
  async 'rm-spk'(el){UI.confirm=null;await act('/api/remove_speaker',{name:el.dataset.name},'spk:'+el.dataset.name);toast('Removed.');},
  async 'rm-sample'(el){await act('/api/remove_sample',{name:el.dataset.name,index:+el.dataset.i},'spk:'+el.dataset.name);},
@@ -657,7 +661,9 @@ const A={
  async adel(el){const b=el.dataset.base;if(UI.confirm!=='adel:'+b){UI.confirm='adel:'+b;render(true);return;}UI.confirm=null;await act('/api/delete_meeting',{base:b,confirm:true},'archive');UI.archived=null;render(true);toast('Deleted.');},
  async 'check-updates'(){UI.updates={busy:true};render(true);const r=await api('/api/check_updates').catch(()=>({models:[]}));UI.updates=r;render(true);},
  async 'rec-fix'(){const r=await api('/api/fix_recorder_permissions',{}).catch(()=>({error:'Could not reach the panel.'}));UI.err['recfix']=r.message||r.error||'';render(true);},
- async 'pick-folder'(el){const w=el.dataset.which;await act('/api/pick_folder',{which:w,prompt:w==='source'?'Choose the watched folder':'Choose the transcripts folder'},'folder');},
+ async 'pick-folder'(el){const w=el.dataset.which;UI.folderAsk=null;const r=await act('/api/pick_folder',{which:w,prompt:w==='source'?'Choose the watched folder':'Choose the transcripts folder'},'folder');if(r&&r.need_confirm){UI.folderAsk={which:r.which,path:r.path,warn:r.warn};render(true);}},
+ async 'folder-confirm'(){const a=UI.folderAsk;UI.folderAsk=null;if(a)await act('/api/set_folder',{which:a.which,path:a.path,confirm:true},'folder');},
+ 'folder-cancel'(){UI.folderAsk=null;render(true);},
  async 'ck-save'(){const body={};['scribe','openai','voxtral','anthropic'].forEach(p=>{const i=$('#ck-'+p);if(i&&i.value.trim())body[p]=i.value.trim();});
   if(!Object.keys(body).length){UI.err.keys='Paste a key first.';render(true);return;}
   await act('/api/cloud_keys',body,'keys');toast('Keys saved.');},

@@ -25,6 +25,19 @@ STT_HOME = os.environ.get("STT_HOME")
 _HOME = Path(STT_HOME).expanduser() if STT_HOME else None
 
 
+def private_umask() -> None:
+    """New files owner-only (0600, folders 0700). Meetings, transcripts,
+    state and voiceprints (biometric data) must never be readable by other
+    local accounts. Every entry point calls this first; ffmpeg and other
+    children inherit it. It also runs when this module is imported, so a
+    tool script that writes meeting json or state (retitle_all, fix_dates,
+    purge and the rest) never writes a world-readable file."""
+    os.umask(0o077)
+
+
+private_umask()
+
+
 def _home_default(sub: str, hard_default) -> str:
     """Default for a state path: rooted under STT_HOME when that is set, else the
     real on-disk location. A specific STT_<X>_DIR env var overrides either."""
@@ -53,6 +66,64 @@ VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"
 WORK_DIR = PROJECT_DIR / "work"  # scratch space for normalized wavs
 LOG_DIR = PROJECT_DIR / "logs"
+
+# state files at the root of PROJECT_DIR (the checkout, outside STT_HOME):
+# the manifest, status, indexes, search.db, stt.env and their backups
+_ROOT_STATE_GLOBS = ("*.json", "*.jsonl", "*.gz", "*.npz", "*.db", "*.db-*",
+                     "*.bak", "stt.env", "stt.env.*")
+_ROOT_STATE_KEEP = {"stt.env.example"}
+
+
+def private_roots() -> list:
+    """The folders whose whole tree is private data."""
+    return [MEETINGS_DIR, VOICEPRINTS_DIR, RECORDINGS_DIR, WORK_DIR, LOG_DIR]
+
+
+def loose_private_paths() -> list:
+    """Every private folder or file that a group or other account can read,
+    write or enter. Files written before the owner-only umask keep their old
+    mode until something rewrites them. Symlinks are skipped. Reads only."""
+    import stat as _stat
+    out, seen = [], set()
+
+    def look(p: Path):
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return
+        if _stat.S_ISLNK(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+            return
+        seen.add((st.st_dev, st.st_ino))
+        if st.st_mode & 0o077:
+            out.append(p)
+
+    for root in private_roots():
+        if not root.is_dir():
+            continue
+        look(root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            for n in dirnames + filenames:
+                look(Path(dirpath) / n)
+    if PROJECT_DIR.is_dir():
+        for g in _ROOT_STATE_GLOBS:
+            for p in sorted(PROJECT_DIR.glob(g)):
+                if p.name not in _ROOT_STATE_KEEP and p.is_file():
+                    look(p)
+    return out
+
+
+def tighten_private_paths(paths=None) -> int:
+    """Remove the group and other bits from `paths` (default: every loose
+    private path). Returns how many changed."""
+    n = 0
+    for p in (loose_private_paths() if paths is None else paths):
+        try:
+            mode = os.lstat(p).st_mode
+            os.chmod(p, mode & 0o7700)
+            n += 1
+        except OSError:
+            pass
+    return n
 
 
 def migration_dir() -> Path:
@@ -765,7 +836,7 @@ def _dead_lock_files(dest_dir=None) -> list:
 _PRUNE_CHUNK = 64
 
 
-def _sweep_lock_files(dest_dir=None, unlink=False) -> list:
+def _sweep_lock_files(dest_dir=None, unlink=False, cands=None) -> list:
     """The dead lock files nobody holds, re-checked UNDER the flock.
 
     Each candidate is taken non-blocking first (a held one is left alone).
@@ -774,8 +845,9 @@ def _sweep_lock_files(dest_dir=None, unlink=False) -> list:
     with unlink, removed before its flock is released. The re-read catches a
     stem that came back to life between the first scan and the flock: a
     legacy meeting that arrived under that name, or a meeting restored from
-    outside the store carrying that id."""
-    cands = _dead_lock_files(dest_dir)
+    outside the store carrying that id. `cands` limits the sweep to those
+    lock files (drop_meeting_locks)."""
+    cands = _dead_lock_files(dest_dir) if cands is None else cands
     out = []
     for i in range(0, len(cands), _PRUNE_CHUNK):
         with contextlib.ExitStack() as stack:
@@ -839,6 +911,18 @@ def prune_lock_files(dest_dir=None, dry_run=False) -> int:
     return len(_sweep_lock_files(dest_dir, unlink=not dry_run))
 
 
+def drop_meeting_locks(stems, dest_dir=None) -> int:
+    """Remove the lock files of one deleted meeting: its id and its base.
+    The same held test and re-check as prune_lock_files, but over these
+    stems only. A panel Delete calls this instead of the whole-library
+    sweep, so the sweep's residual race (see prune_lock_files) never runs
+    against other meetings while a batch is working. Returns how many went."""
+    d = Path(dest_dir or meetings_dir()) / ".locks"
+    cands = sorted({d / f"{s}.lock" for s in stems if s and "/" not in s})
+    cands = [f for f in cands if f.is_file()]
+    return len(_sweep_lock_files(dest_dir, unlink=True, cands=cands)) if cands else 0
+
+
 def backfill_meeting_ids(dest_dir=None) -> int:
     """Stamp a meeting_id into every meeting json in `dest_dir` that lacks one.
 
@@ -880,6 +964,65 @@ def backfill_meeting_ids(dest_dir=None) -> int:
     return n
 
 
+def _is_flat_meeting(j: Path) -> bool:
+    """A flat-layout meeting: a json the pipeline wrote, next to its .txt.
+    The pipeline has always written "segments" and "speakers" lists and a
+    "source_file" name. A folder the owner picks may hold
+    other work, and a stray package.json, notes file or another tool's
+    {"segments": [...]} export must never be moved into a folder."""
+    import json as _json
+    if not j.with_suffix(".txt").is_file():
+        return False
+    try:
+        data = _json.loads(j.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    segs = data.get("segments")
+    return (isinstance(segs, list) and all(isinstance(x, dict) for x in segs)
+            and isinstance(data.get("speakers"), list)
+            and isinstance(data.get("source_file"), str))
+
+
+def flat_meeting_bases(dest_dir=None) -> list:
+    """The flat-layout meetings migrate_flat_meetings would move."""
+    d = Path(dest_dir or meetings_dir())
+    if not d.is_dir():
+        return []
+    return sorted(j.stem for j in d.glob("*.json")
+                  if not j.name.endswith(_SIDECAR_JSON) and _is_flat_meeting(j))
+
+
+def adopt_folder_warning(dest_dir) -> str | None:
+    """What picking `dest_dir` as the transcripts folder would do to files
+    already in it, as one sentence. None when it holds only meeting folders
+    (or nothing). The panel asks the owner to confirm before it adopts a
+    folder with other files, or one whose flat meetings it would move."""
+    d = Path(dest_dir)
+    if not d.is_dir():
+        return None
+    flat = flat_meeting_bases(d)
+    live = set(meeting_bases(d))
+    other = 0
+    for e in d.iterdir():
+        if e.name.startswith(".") or e.name in live:
+            continue
+        if e.is_file() and any(e.name.startswith(b + ".") for b in flat):
+            continue
+        other += 1
+    if not flat and not other:
+        return None
+    parts = []
+    if other:
+        parts.append(f"This folder holds {other} item(s) that are not "
+                     "meetings. They stay where they are.")
+    if flat:
+        parts.append(f"{len(flat)} older flat-layout meeting(s) will move "
+                     "into their own folders.")
+    return " ".join(parts)
+
+
 def migrate_flat_meetings(dest_dir=None) -> int:
     """One-time layout migration: move flat  <dir>/<base>.*  files into
     per-meeting folders  <dir>/<base>/<base>.* . Idempotent and additive —
@@ -891,9 +1034,7 @@ def migrate_flat_meetings(dest_dir=None) -> int:
     if not d.exists():
         return 0
     moved = 0
-    bases = [j.stem for j in d.glob("*.json")
-             if not j.name.endswith(_SIDECAR_JSON)]
-    for base in bases:
+    for base in flat_meeting_bases(d):
         folder = d / base
         folder.mkdir(exist_ok=True)
         for f in list(d.iterdir()):

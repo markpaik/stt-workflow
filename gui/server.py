@@ -60,6 +60,27 @@ def _origin_allowed(headers) -> bool:
     return True
 
 
+_LOOPBACK_HOST = re.compile(r"^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$", re.I)
+
+
+def _host_allowed(headers) -> bool:
+    """The Host header must name this machine's loopback. A page on an
+    attacker domain whose DNS rebinds to 127.0.0.1 is same-origin to the
+    panel, and its same-origin GET (with no-referrer) carries no Origin or
+    Referer, so _origin_allowed lets it through. The browser still sends
+    the attacker's name as Host. A request with no Host (HTTP/1.0) is not
+    a browser and is allowed. Every Host header must pass, and more than
+    one is refused: a proxy or server that reads the last copy must never
+    see a name this check did not read."""
+    vs = headers.get_all("Host") if hasattr(headers, "get_all") else None
+    if vs is None:
+        v = headers.get("Host")
+        vs = [] if v is None else [v]
+    if len(vs) > 1:
+        return False
+    return all(_LOOPBACK_HOST.match(v.strip()) for v in vs)
+
+
 def _known_base(base) -> bool:
     """A meeting basename must name a real transcript on disk — the only
     defense against a path-traversal `base` like '../../../etc/passwd' reaching
@@ -1572,10 +1593,33 @@ def pick_files():
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
-def set_folder(which: str, path: str):
+def _merge_warning(dst: str, rows, prints: dict, exclude=()):
+    """The need_confirm reply when the voice rows being folded into `dst`
+    do not match its saved samples (identify.sample_check), else None.
+    `prints` is read once by the caller, not once per row."""
+    warns = [w for w in (identify.sample_check(dst, r, exclude=exclude, prints=prints)
+                         for r in (rows if rows is not None else [])) if w]
+    if not warns:
+        return None
+    w = min(warns, key=lambda x: x["own"])
+    msg = f"This voice matches {dst}'s saved samples at only {w['own']:.2f}"
+    if w["cross_name"] is not None and w["cross"] > w["own"]:
+        msg += f" — and matches {w['cross_name']} better ({w['cross']:.2f})"
+    msg += ". It may be the wrong person. Confirm to merge anyway."
+    return {"ok": False, "warn": "suspect_sample", "need_confirm": True,
+            "error": msg, **w}
+
+
+def set_folder(which: str, path: str, confirm: bool = False):
     p = Path(path).expanduser()
     if not p.is_dir():
         return {"ok": False, "error": f"not a folder: {p}"}
+    if which != "source" and not confirm:
+        # a transcripts folder that holds other files, or flat meetings the
+        # migration would move, is adopted only after the owner confirms
+        warn = config.adopt_folder_warning(p)
+        if warn:
+            return {"need_confirm": True, "which": which, "path": str(p), "warn": warn}
     key = "STT_ICLOUD_DIR" if which == "source" else "STT_MEETINGS_DIR"
     _env_file_set({key: str(p)})
     import os
@@ -2026,7 +2070,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
-        if not _origin_allowed(self.headers):
+        if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
         try:
@@ -2312,7 +2356,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
-        if not _origin_allowed(self.headers):
+        if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
         try:
@@ -2349,7 +2393,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(set_folder(b["which"], p))
             elif u.path == "/api/set_folder":
-                self._json(set_folder(b["which"], b["path"]))
+                self._json(set_folder(b["which"], b["path"], bool(b.get("confirm"))))
             elif u.path == "/api/pick_files":
                 fs = pick_files()
                 self._json({"cancelled": True} if fs is None else {"ok": True, "paths": fs})
@@ -2440,6 +2484,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not name and not (b.get("local") and not b.get("uid")):
                     self._json({"ok": False, "error": "Type a name first."})
                     return
+                if name and not b.get("local"):
+                    if identify.reserved_name(name):
+                        self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                        return
+                    # the enrolled spelling, so a case variant names the
+                    # existing person and relabels under the name she has
+                    name = identify.canonical_name(name)
                 confirm = bool(b.get("confirm"))
 
                 def _warn_payload(w):
@@ -2633,6 +2684,24 @@ class Handler(BaseHTTPRequestHandler):
                       else summarize.dismiss_voice)
                 self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
+                # the spelling rename_person will store: an enrolled case
+                # variant of the new name is a merge into that person
+                b["new"] = identify.canonical_name(
+                    b.get("new"), {k: v for k, v in identify.load_registry().items()
+                                   if k != b.get("name")})
+                if identify.reserved_name(b["new"]):
+                    self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                    return
+                # a rename onto an enrolled person is a merge: the same
+                # wrong-person check as /api/merge_speakers, before confirm
+                if (not b.get("confirm") and b["new"] != b.get("name")
+                        and b["new"] in identify.load_registry()):
+                    prints = identify.load_voiceprints()
+                    warn = _merge_warning(b["new"], prints.get(b.get("name")), prints,
+                                          exclude=(b.get("name"),))
+                    if warn:
+                        self._json({**warn, "dst": b["new"]})
+                        return
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:
                     self._json({"ok": ok})
@@ -2655,6 +2724,23 @@ class Handler(BaseHTTPRequestHandler):
                 # src/dst are "uid:U003" or "name:Jordan"
                 st_, sv = b["src"].split(":", 1)
                 dt_, dv = b["dst"].split(":", 1)
+                if dt_ == "name":
+                    if identify.reserved_name(dv):
+                        self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                        return
+                    dv = identify.canonical_name(dv)
+                    # the same quality bar as /api/name: folding a voice that
+                    # does not match into a person poisons the profile, so a
+                    # mismatch asks for confirm first
+                    if not b.get("confirm") and st_ in ("uid", "name"):
+                        prints = identify.load_voiceprints()
+                        rows = (unknowns.samples_of(sv) if st_ == "uid"
+                                else prints.get(sv))
+                        warn = _merge_warning(dv, rows, prints,
+                                              exclude=(sv,) if st_ == "name" else ())
+                        if warn:
+                            self._json(warn)
+                            return
                 heard = []
                 if st_ == "uid" and dt_ == "name":
                     # read BEFORE promote() retires the uid (see /api/name):
@@ -3106,17 +3192,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if b.get("action") == "delete":
                     self._json(review.delete_segment(b["base"], int(b["index"]),
-                                                     start=b.get("start")))
+                                                     start=b.get("start"),
+                                                     end=b.get("end")))
                     return
                 if b.get("action") == "split":
                     self._json(review.split_segment(
                         b["base"], int(b["index"]), start=b.get("start"),
                         text_a=b.get("text_a", ""), text_b=b.get("text_b", ""),
-                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b")))
+                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b"),
+                        end=b.get("end")))
                     return
                 self._json(review.apply(b["base"], int(b["index"]), b["action"],
                                         start=b.get("start"), text=b.get("text"),
-                                        speaker_id=b.get("speaker")))
+                                        speaker_id=b.get("speaker"),
+                                        end=b.get("end")))
             elif u.path == "/api/export":
                 if not self._require_base(b.get("base")):
                     return
@@ -3306,6 +3395,7 @@ if __name__ == "__main__":
     # the panel against a synthetic data home for demos/screenshots — nothing
     # here touches real recordings. Only runs on direct execution; importing the
     # module for the menu bar or the tests is unaffected.
+    config.private_umask()
     PORT = int(os.environ.get("STT_PANEL_PORT", str(PORT)))
     start_server()
     print(f"STT control panel: http://127.0.0.1:{PORT}/   "

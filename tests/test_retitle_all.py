@@ -263,3 +263,78 @@ def test_the_dry_run_rests_between_model_calls(lib, monkeypatch):
     rests.clear()
     rt.dry_run(log=lambda *_: None)       # all cached: no model work, no rest
     assert rests == []
+
+
+def test_undo_without_apply_prints_the_plan_and_never_runs_the_model(lib, monkeypatch, capsys):
+    """'--undo' alone is documented as a dry run of the reversal. It fell
+    through into the full model dry run, which rewrote proposals.json."""
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    before = rt.proposals_path().read_bytes()
+
+    def boom(**k):
+        raise AssertionError("--undo must never start the model dry run")
+    monkeypatch.setattr(rt, "dry_run", boom)
+    assert rt.main(["--undo"]) == 0
+    out = capsys.readouterr().out
+    assert "would undo" in out
+    assert rt.proposals_path().read_bytes() == before
+
+
+def test_undo_takes_off_the_renamed_from_the_run_added(lib):
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    assert "renamed_from" in json.loads(
+        config.meeting_file(config.base_of("mid-b"), ".json").read_text())
+    rt.undo(dry=False, log=lambda *_: None)
+    for mid in ("mid-a", "mid-b", "mid-c", "mid-d"):
+        d = json.loads(config.meeting_file(config.base_of(mid), ".json").read_text())
+        assert "renamed_from" not in d, mid
+
+
+def test_apply_and_undo_work_on_meetings_with_no_stored_id(lib):
+    """A library the panel and the batch never stamped: the proposals and
+    the journal carried meeting_id null, so a second --apply said 'gone'
+    and --undo renamed nothing."""
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    config.MEETINGS_INDEX_PATH.unlink(missing_ok=True)
+    old = set(config.meeting_bases())
+
+    rt.dry_run(log=lambda *_: None)
+    first = rt.apply(log=lambda *_: None)["counts"]
+    assert first.get("applied") == 4
+    again = rt.apply(log=lambda *_: None)["counts"]
+    assert again.get("already done") == 4 and not again.get("gone")
+    assert rt.undo(dry=False, log=lambda *_: None)["counts"].get("undone") == 4
+    # undo lands in the ISO form, so compare the dates and the count
+    assert len(config.meeting_bases()) == len(old)
+    assert "2026-10-01 Robin Check-in 10-5" in config.meeting_bases()
+
+
+def test_undo_returns_an_iso_named_meeting_json_to_its_content(sandbox, monkeypatch, tmp_path):
+    """Undo dropped the ai_next_steps that store_description takes off.
+    For a meeting already in the ISO folder form, undo now restores the
+    json key for key. Two fields follow the folder instead: title (a
+    provenance key the rename writes from the folder name) and source_file
+    (it names the audio file the rename moved)."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("2026-10-02 LT Weekly Meeting", "mid-b", date="2026-10-02",
+       ai_next_steps=["Send the notes."])
+    monkeypatch.setattr(summarize, "_generate", lambda prompt, **k: _reply("lt_weekly", "Budget"))
+    before = json.loads(mfile("2026-10-02 LT Weekly Meeting", ".json").read_text())
+    assert "title" not in before
+    rt.dry_run(log=lambda *_: None)
+    assert rt.apply(log=lambda *_: None)["counts"]["applied"] == 1
+    assert config.base_of("mid-b") != "2026-10-02 LT Weekly Meeting"
+    assert rt.undo(dry=False, log=lambda *_: None)["counts"]["undone"] == 1
+    assert config.base_of("mid-b") == "2026-10-02 LT Weekly Meeting"
+    after = json.loads(mfile("2026-10-02 LT Weekly Meeting", ".json").read_text())
+    assert after["title"] == "LT Weekly Meeting"
+    assert after["ai_next_steps"] == ["Send the notes."]
+    follows_audio = {"source_file", "title"}
+    assert ({k: v for k, v in after.items() if k not in follows_audio}
+            == {k: v for k, v in before.items() if k not in follows_audio})

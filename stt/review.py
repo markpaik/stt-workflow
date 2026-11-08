@@ -13,6 +13,8 @@ version and is marked "text_edited" — we never pretend edited text came from A
 import contextlib
 import fcntl
 import json
+import os
+import shutil
 import threading
 import uuid
 
@@ -265,15 +267,16 @@ def _merge_same_speaker_run(data, idx):
 
 
 def apply(base: str, index: int, action: str, start: float = None,
-          text: str = None, speaker_id: str = None) -> dict:
+          text: str = None, speaker_id: str = None, end: float = None) -> dict:
     """Apply one review decision. action: 'accept' | 'edit'.
-    Returns {"ok": bool, "remaining": int}. `start` sanity-checks the index
-    against the file in case it changed since the list was fetched."""
+    Returns {"ok": bool, "remaining": int}. `start` (and `end`, when the
+    client sends it) sanity-checks the index against the file in case it
+    changed since the list was fetched."""
     with lock_meeting(base):
-        return _apply_locked(base, index, action, start, text, speaker_id)
+        return _apply_locked(base, index, action, start, text, speaker_id, end)
 
 
-def _locate_segment(segs, index, start):
+def _locate_segment(segs, index, start, end=None):
     """Resolve the segment a review decision targets. `index` is a snapshot
     from when the client fetched its list; a relabel that ran since can shift
     every later index by inserting/merging/nudging segments, so trusting the
@@ -291,13 +294,28 @@ def _locate_segment(segs, index, start):
     the stale start can no longer say which line the human meant, and
     guessing risks editing (or deleting) the wrong one.
 
+    The fallback is for a boundary NUDGE, never a structural change. When
+    another tab deleted or reassigned a line, a neighbor can merge over it
+    and its start disappears, and the nearest surviving start then belongs
+    to some other line. Two checks refuse that case: the candidate's end
+    must sit within WIDE of the client's `end` when one is sent, and the
+    client's start must not now lie inside a DIFFERENT line (it merged into
+    that line).
+
+    The exact-index path checks `end` too, with END_EXACT. A same-speaker
+    neighbour that merges INTO the target keeps the target's start and
+    grows its end, and an edit sent for the old line would replace the
+    merged words (or a delete would remove both lines).
+
     Returns (index, seg) or (None, None)."""
-    STRICT, WIDE, TIE = 0.25, 2.0, 0.5
+    STRICT, WIDE, TIE, END_EXACT = 0.25, 2.0, 0.5, 1.0
     in_range = 0 <= index < len(segs)
     if start is None:
         return (index, segs[index]) if in_range else (None, None)
     start = float(start)
     if in_range and abs(segs[index]["start"] - start) <= STRICT:
+        if end is not None and abs(segs[index]["end"] - float(end)) >= END_EXACT:
+            return None, None
         return index, segs[index]
     dists = sorted((abs(s["start"] - start), i) for i, s in enumerate(segs))
     if not dists or dists[0][0] >= WIDE:
@@ -305,15 +323,20 @@ def _locate_segment(segs, index, start):
     best_d, best_i = dists[0]
     if len(dists) > 1 and (dists[1][0] - best_d) < TIE:
         return None, None
+    if end is not None and abs(segs[best_i]["end"] - float(end)) >= WIDE:
+        return None, None
+    if any(i != best_i and s["start"] + STRICT < start < s["end"] - STRICT
+           for i, s in enumerate(segs)):
+        return None, None
     return best_i, segs[best_i]
 
 
-def _apply_locked(base, index, action, start, text, speaker_id) -> dict:
+def _apply_locked(base, index, action, start, text, speaker_id, end=None) -> dict:
     jpath, data = _load(base)
     segs = data.get("segments", [])
     if not (0 <= index < len(segs)) and start is None:
         return {"ok": False, "error": "segment index out of range"}
-    index, seg = _locate_segment(segs, index, start)
+    index, seg = _locate_segment(segs, index, start, end)
     if seg is None:
         return {"ok": False, "error": "transcript changed since review opened — reopen it"}
 
@@ -391,7 +414,8 @@ def insert_segment(base: str, start: float, end: float, speaker_id: str,
         return {"ok": True, "index": pos}
 
 
-def delete_segment(base: str, index: int, start: float = None) -> dict:
+def delete_segment(base: str, index: int, start: float = None,
+                   end: float = None) -> dict:
     """Remove a line (echo, hallucination, misheard non-speech). Its words are
     detached from any speaker rather than deleted — the ASR record stays honest."""
     with lock_meeting(base):
@@ -399,7 +423,7 @@ def delete_segment(base: str, index: int, start: float = None) -> dict:
         segs = data.get("segments", [])
         if not (0 <= index < len(segs)) and start is None:
             return {"ok": False, "error": "segment index out of range"}
-        index, seg = _locate_segment(segs, index, start)
+        index, seg = _locate_segment(segs, index, start, end)
         if seg is None:
             return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
         segs.pop(index)
@@ -426,7 +450,8 @@ def delete_segment(base: str, index: int, start: float = None) -> dict:
 
 
 def split_segment(base: str, index: int, start: float, text_a: str, text_b: str,
-                  speaker_a: str = None, speaker_b: str = None) -> dict:
+                  speaker_a: str = None, speaker_b: str = None,
+                  end: float = None) -> dict:
     """Split one line in two — the tail (text_b) usually belongs to someone
     the diarizer glued onto this speaker. The cut time comes from the
     segment's own word timings (proportional fallback for edited text) and is
@@ -441,7 +466,7 @@ def split_segment(base: str, index: int, start: float, text_a: str, text_b: str,
         segs = data.get("segments", [])
         if not (0 <= index < len(segs)) and start is None:
             return {"ok": False, "error": "segment index out of range"}
-        index, seg = _locate_segment(segs, index, start)
+        index, seg = _locate_segment(segs, index, start, end)
         if seg is None:
             return {"ok": False, "error": "transcript changed since it was opened — reopen it"}
         if seg.get("inserted"):
@@ -557,11 +582,43 @@ def archive_decisions(base: str, dest_dir=None) -> bool:
     """A REDO rebuilds transcription AND diarization from scratch — the new
     speaker cluster ids have no relation to the old ones, so replaying old
     decisions could put words in the wrong mouths. Archive them instead
-    (nothing is deleted; the file is renamed .superseded)."""
+    (nothing is deleted: they are appended to .reviews.superseded.json).
+
+    APPENDED, not renamed over: a second Redo replaced the first round's
+    archive. A superseded file that does not parse as a list is copied aside
+    to a timestamped .corrupt name before a fresh one is written."""
+    import time
     p = config.meeting_file(base, ".reviews.json", dest_dir)
     if not p.exists():
         return False
-    p.replace(config.meeting_file(base, ".reviews.superseded.json", dest_dir))
+    sup = config.meeting_file(base, ".reviews.superseded.json", dest_dir)
+    if not sup.exists():
+        p.replace(sup)
+        return True
+    try:
+        current = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        current = None
+    if not isinstance(current, list):
+        # an unreadable live sidecar cannot be merged: keep it whole beside
+        # the archive rather than lose either one. The name does not end in
+        # .json, like the .corrupt copy below, so no *.json scan (the flat
+        # layout migration, a meeting json glob) can take it for a meeting
+        p.replace(sup.with_name(sup.name.replace(
+            ".json", f".unmerged-{int(time.time())}")))
+        return True
+    try:
+        old = json.loads(sup.read_text())
+    except (OSError, json.JSONDecodeError):
+        old = None
+    if not isinstance(old, list):
+        shutil.copy2(sup, sup.with_name(sup.name.replace(
+            ".json", f".corrupt-{int(time.time())}")))
+        old = []
+    tmp = sup.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(old + current, indent=2))
+    os.replace(tmp, sup)
+    p.unlink(missing_ok=True)
     return True
 
 

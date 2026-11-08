@@ -120,7 +120,8 @@ Four per-run options, from the Process popover:
 - **two at a time**: parallel workers, about 1.7x throughput for a backlog
 - **strict**, for confidential conversations: never guess an uncertain
   speaker (flag it for review instead), and never send audio to any cloud
-  engine whatever the global settings say
+  engine whatever the global settings say. Strict sticks to the meeting:
+  a Redo or a speaker re-identify keeps it on
 - **verify**: a second, architecturally different engine transcribes too;
   every disagreement is flagged with both candidates (where the engines
   agree, ~95% of words on our benchmark, they matched an independent
@@ -237,7 +238,11 @@ never displayed again; the panel shows only that a key exists.
 
 Each meeting exports to Word (.docx) or print-ready PDF, copies to the
 clipboard as plain text, or reveals in Finder, from the row menu or the
-meeting page. On disk, every meeting is a self-contained folder (audio,
+meeting page. Word and PDF copies land in `~/Downloads` and open in
+Finder. They leave the data home, so treat them as shared copies. Set
+`STT_EXPORT_DIR` (in `stt.env` or the environment) to send them elsewhere.
+A relative value is under your home folder. Under `STT_HOME` they land in
+`$STT_HOME/exports`. On disk, every meeting is a self-contained folder (audio,
 readable `.txt`, structured `.json` with segment- and word-level timestamps,
 speakers, flags, and real confidence scores, caches, and edit history
 together), and renaming in the panel renames the folder and every file in
@@ -334,12 +339,16 @@ row), Decisions and Open questions (the meeting page), and 3 to
 5 topic tags from the fixed vocabulary in `stt/series.py`. Renaming,
 naming, merging or relabeling a speaker re-renders the names in it with no
 model call. A Redo marks it out of date, and the batch regenerates it when
-idle. `tools/retitle_all.py` retitles the library by the series catalog
+idle. An empty or unusable model reply is never stored: the old
+description stays and the retry backs off. `tools/retitle_all.py` retitles the library by the series catalog
 (dry run first, then `--apply`, with an undo journal).
 
 **Folders.** The watched folder defaults to iCloud Drive's `Voice
 Recordings`; transcripts land where you point them. Change either in the
 drawer's Settings or via `STT_ICLOUD_DIR` / `STT_MEETINGS_DIR` in `stt.env`.
+A newly picked transcripts folder has its old flat-layout meetings moved
+into per-meeting folders. Only a transcript json with its `.txt` moves, so
+other files in the folder stay where they are.
 
 **Automation:**
 
@@ -383,7 +392,8 @@ For development and testing there is a fully sandboxed data home:
 `tools/demo_seed.py --dir qa/demo_home` builds a synthetic library
 (generated audio, fictional names) covering every panel state, and
 `STT_HOME` points a second server instance at it, scheduling included, so
-nothing you try there can touch your real meetings.
+nothing you try there can touch your real meetings. Under `STT_HOME` the
+batch and `run.sh` read `$STT_HOME/stt.env`, never the checkout's own.
 
 ## How it works
 
@@ -445,12 +455,20 @@ record while an exported copy reads clean.
 This tool stores voiceprints (**biometric data**) and verbatim records of
 what people said. Treat both with care:
 
+- Files the pipeline writes are owner-only: every process that imports
+  `stt.config` (the batch, panel, enroll, relabel and every tool script)
+  runs with umask 077, and the voiceprints folder is kept 0700. Files from
+  before this change keep their old mode until rewritten. The doctor reports
+  them as `loose_mode`, and `tools/doctor.py fix --apply` makes them
+  owner-only.
 - The `.gitignore` keeps voiceprints, transcripts, audio, tokens, and all
   runtime state out of git. Review it before changing output paths.
 - Know your local laws on recording consent (one-party vs all-party) and any
   workplace policies before making recording a routine practice.
 - Set `HF_HUB_OFFLINE=1` in `stt.env` after models are cached to enforce
-  fully-offline operation. The control panel binds to `127.0.0.1` only.
+  fully-offline operation. The control panel binds to `127.0.0.1` only,
+  and it refuses any request whose Host is not `127.0.0.1`, `localhost` or
+  `[::1]`, so open it by one of those names.
 - Cloud transcription is off unless you add a key, and strict-mode
   recordings never upload even then.
 - The summaries/Ask assistant is local by default; selecting a cloud

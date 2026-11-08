@@ -261,22 +261,24 @@ def test_lock_registry_serializes_concurrent_enroll(sandbox):
 
     identify.enroll("Existing", _vec(1))
 
-    def holder(release):
+    held, times = threading.Event(), {}
+
+    def holder():
         with identify.lock_registry():
-            release.wait(1.0)
+            held.set()
+            time.sleep(0.5)
+            times["released"] = time.monotonic()
 
-    release = threading.Event()
-    t = threading.Thread(target=holder, args=(release,))
+    t = threading.Thread(target=holder)
     t.start()
-    time.sleep(0.05)
-
-    start = time.monotonic()
+    # wait for the holder to own the lock, not a fixed start-up sleep: a
+    # fixed sleep fails under background priority with no lock problem
+    assert held.wait(10)
     identify.enroll("New Person", _vec(2))
-    elapsed = time.monotonic() - start
-    release.set()
+    done = time.monotonic()
     t.join()
 
-    assert elapsed >= 0.9, f"enroll() returned after {elapsed:.2f}s — did not wait for the lock"
+    assert done >= times["released"], "enroll() returned before the holder released the lock"
     assert "New Person" in identify.load_registry()
 
 
@@ -513,3 +515,211 @@ def test_score_against_survives_one_mismatched_sample_among_many():
     bad = np.zeros(10)
     score = identify.score_against(good, [bad, good])
     assert score > 0.99  # the good sample still matches; bad one is just ignored
+
+
+def test_voiceprints_are_private_whatever_the_umask(sandbox):
+    """Voiceprints are biometric data. Under a default umask of 022 the
+    folder and every file in it were world-readable to other local accounts."""
+    import os
+    import stat
+    from stt import config
+    old = os.umask(0o022)
+    try:
+        vp = config.VOICEPRINTS_DIR
+        vp.chmod(0o755)  # as an older install left it
+        path = identify.enroll("Person A", _vec(1), source="Mtg")
+        identify.enroll("Person A", _vec(2), source="Mtg 2")
+        identify.enroll("Person B", _vec(3), source="Mtg")
+        assert identify.merge_people("Person B", "Person A")
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(vp.stat().st_mode) == 0o700
+    for f in [path, vp / "registry.json"] + list(vp.glob("*.npy")):
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f.name
+
+
+def test_private_umask_makes_new_files_owner_only(tmp_path):
+    import os
+    import stat
+    from stt import config
+    old = os.umask(0o022)
+    try:
+        config.private_umask()
+        (tmp_path / "f").write_text("x")
+        (tmp_path / "d").mkdir()
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "f").stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "d").stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("entry", ["run_batch.py", "enroll.py", "relabel.py",
+                                   "gui/menubar.py", "gui/server.py"])
+def test_every_entry_point_sets_the_private_umask(entry):
+    """Every process that writes meetings, state or voiceprints starts by
+    making new files owner-only (config.private_umask)."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / entry).read_text()
+    assert "config.private_umask()" in src
+
+
+def test_a_case_variant_name_joins_the_existing_person(sandbox):
+    """APFS is case-insensitive by default. 'alex rivera.npy' and
+    'Alex Rivera.npy' are one file there, so a second registry entry that
+    differs only in case overwrote the first person's samples while the
+    registry still claimed three of them. A case variant is the same person."""
+    for i in range(3):
+        identify.enroll("Alex Rivera", _near(0, i))
+    identify.enroll("alex rivera", _near(0, 3))
+
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert reg["Alex Rivera"]["n_samples"] == 4
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 4
+
+
+def test_a_filename_that_differs_only_in_case_is_a_collision(sandbox):
+    """Two distinct names whose sanitized stems differ only in case still
+    share one file on a case-insensitive disk."""
+    reg = {"X": {"file": "Alex Rivera.npy"}}
+    assert identify._unique_filename("alex rivera", reg) == "alex rivera_2.npy"
+
+
+def test_a_case_only_rename_keeps_the_samples(sandbox):
+    """Renaming 'alex rivera' to 'Alex Rivera' is a spelling fix. On a
+    case-insensitive disk the copy-then-unlink rename would delete the only
+    file."""
+    identify.enroll("alex rivera", _near(0, 0))
+    identify.enroll("alex rivera", _near(0, 1))
+    assert identify.rename_person("alex rivera", "Alex Rivera") is True
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 2
+
+
+def test_naming_with_a_case_variant_promotes_into_the_existing_person(sandbox):
+    import json
+    from stt import config, unknowns
+    for i in range(2):
+        identify.enroll("Alex Rivera", _near(0, i))
+    assert identify.canonical_name("  ALEX RIVERA ") == "Alex Rivera"
+    assert identify.canonical_name("Someone New") == "Someone New"
+    v = _near(0, 5)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 2, "speakers": {"U001": {"file": "U001.npy", "meetings": ["m"]}}}))
+    assert unknowns.promote("U001", "alex RIVERA") is True
+    reg = identify.load_registry()
+    assert list(reg) == ["Alex Rivera"]
+    assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 3
+
+
+def _seed_unknown(uid, vec):
+    import json
+    from stt import config
+    np.save(config.VOICEPRINTS_DIR / f"{uid}.npy",
+            (vec / np.linalg.norm(vec)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 8, "speakers": {uid: {"file": f"{uid}.npy", "meetings": ["m"]}}}))
+
+
+@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 "])
+def test_an_unknown_id_is_never_a_person_name(sandbox, reserved):
+    """People and unknown voices share one folder. A person named 'U007'
+    took the unknown's U007.npy, and promoting the unknown later deleted it."""
+    from stt import config
+    _seed_unknown("U007", _near(1, 0))
+    before = np.load(config.VOICEPRINTS_DIR / "U007.npy").copy()
+    identify.enroll("Sam Chen", _near(0, 0))
+
+    assert identify.rename_person("Sam Chen", reserved) is False
+    with pytest.raises(ValueError):
+        identify.enroll(reserved, _near(2, 0))
+    assert identify.reassign_sample("Sam Chen", 0, reserved)["ok"] is False
+
+    assert list(identify.load_registry()) == ["Sam Chen"]
+    assert np.allclose(np.load(config.VOICEPRINTS_DIR / "U007.npy"), before)
+
+
+def test_a_new_file_never_reuses_an_unknowns_file_or_an_orphan(sandbox):
+    from stt import config
+    _seed_unknown("U007", _near(1, 0))
+    (config.VOICEPRINTS_DIR / "Orphan.npy").write_bytes(b"x")
+    assert identify._unique_filename("U007", {}) == "U007_2.npy"
+    assert identify._unique_filename("Orphan", {}) == "Orphan_2.npy"
+
+
+def test_importing_config_makes_new_files_owner_only(tmp_path):
+    """A tool script (retitle_all, fix_dates, purge and the rest) never
+    calls private_umask itself. Importing config sets it, so its atomic
+    rewrites of meeting json and state are never world-readable."""
+    import stat
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    out = tmp_path / "w.json"
+    code = ("import os; os.umask(0o022); import stt.config; "
+            f"open({str(out)!r}, 'w').write('x')")
+    subprocess.run([sys.executable, "-c", code], cwd=repo, check=True,
+                   env={"PATH": "/usr/bin:/bin", "STT_HOME": str(tmp_path / "h")})
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+# dev tools that write no meeting data, state or voiceprints
+_NO_PRIVATE_DATA = {"tools/next_screens.py", "tools/token_contrast.py"}
+
+
+def test_every_script_imports_config_and_so_the_umask():
+    """Every script with a __main__ block reaches stt.config (directly or
+    through another stt module), so the owner-only umask applies to it."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    files = [p for d in ("tools", "stt", "gui") for p in (repo / d).glob("*.py")]
+    files += list(repo.glob("*.py"))
+    missing = []
+    for p in files:
+        src = p.read_text()
+        if "__main__" not in src:
+            continue
+        rel = str(p.relative_to(repo))
+        if rel in _NO_PRIVATE_DATA:
+            continue
+        if not ("from stt" in src or "from . import" in src or "import stt" in src
+                or "from .config" in src):
+            missing.append(rel)
+    assert missing == []
+
+
+def test_doctor_finds_and_tightens_files_from_before_the_umask(sandbox):
+    """Files written before umask 077 keep 0644 until rewritten. The doctor
+    reports them and its fix makes them owner-only."""
+    import os
+    import stat
+    from stt import config, doctor
+    m = config.MEETINGS_DIR / "2025-01-02 Old"
+    m.mkdir()
+    f = m / "2025-01-02 Old.json"
+    f.write_text("{}")
+    npy = config.VOICEPRINTS_DIR / "Person A.npy"
+    npy.write_bytes(b"x")
+    root_state = config.PROJECT_DIR / "status.json"
+    root_state.write_text("{}")
+    example = config.PROJECT_DIR / "stt.env.example"
+    example.write_text("x")
+    for p in (m, f, npy, root_state, example, config.VOICEPRINTS_DIR):
+        os.chmod(p, 0o755 if p.is_dir() else 0o644)
+    loose = set(config.loose_private_paths())
+    assert {m, f, npy, root_state, config.VOICEPRINTS_DIR} <= loose
+    assert example not in loose
+    fs = [x for x in doctor.check(registry=False) if x.kind == "loose_mode"]
+    assert len(fs) == 1 and fs[0].fixable
+    assert doctor.fix(fs, dry_run=True)["plan"]["permissions"] == 1
+    assert stat.S_IMODE(f.stat().st_mode) == 0o644
+    r = doctor.fix(fs, dry_run=False, registry=False)
+    assert any("owner-only" in x for x in r["done"])
+    assert stat.S_IMODE(m.stat().st_mode) == 0o700
+    for p in (f, npy, root_state):
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600, p.name
+    assert stat.S_IMODE(example.stat().st_mode) == 0o644
+    assert config.loose_private_paths() == []

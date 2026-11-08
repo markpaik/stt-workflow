@@ -9,12 +9,15 @@ export PYTHONPATH="$BASE"
 # the same safe way run_batch.py does rather than sourcing the file as shell:
 # the default folder paths contain spaces, and dotting them under set -euo
 # pipefail runs the text after the first space as a command and aborts.
-if [ -f "$BASE/stt.env" ]; then
+# Under STT_HOME (a demo or test home) the settings file is $STT_HOME/stt.env,
+# as stt/config.py says: the checkout's file names the REAL library folders.
+ENVDIR="${STT_PROJECT_DIR:-${STT_HOME:-$BASE}}"
+if [ -f "$ENVDIR/stt.env" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
     [ "${line#*=}" = "$line" ] && continue  # no '=' -> not an assignment
     export "${line%%=*}=${line#*=}"
-  done < "$BASE/stt.env"
+  done < "$ENVDIR/stt.env"
 fi
 
 cmd="${1:-}"; shift || true

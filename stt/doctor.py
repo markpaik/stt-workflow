@@ -326,6 +326,11 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         out.append(Finding(kind, "voicememos", detail, False))
     for name in housekeeping.rotate_logs(dry_run=True):
         out.append(Finding("log_oversize", name, "over the log cap", True))
+    loose = config.loose_private_paths()
+    if loose:
+        out.append(Finding("loose_mode", "permissions",
+                           f"{len(loose)} private file(s) or folder(s) other "
+                           "accounts can read (written before umask 077)", True))
     if housekeeping.cap_calibration(dry_run=True):
         out.append(Finding("calibration_oversize", "calibration.jsonl",
                            "over its cap", True))
@@ -434,7 +439,8 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
             "manifest": dict(Counter(a["op"] for a in acts)),
             "holds": kinds["stale_hold"], "dismissals": kinds["stale_dismissal"],
             "stop_flag": kinds["stale_stop_flag"],
-            "logs": kinds["log_oversize"], "calibration": kinds["calibration_oversize"]}
+            "logs": kinds["log_oversize"], "calibration": kinds["calibration_oversize"],
+            "permissions": kinds["loose_mode"]}
     if dry_run:
         return {"dry_run": True, "plan": plan, "run": None, "done": []}
     if _batch_running():
@@ -513,6 +519,12 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
             done.append(f"rotated {len(hk['logs'])} log(s)")
         if hk["calibration"]:
             done.append("capped calibration.jsonl")
+        # a mode change is not journaled: it only takes away other accounts'
+        # access, and `chmod` puts it back if ever wanted
+        if kinds["loose_mode"]:
+            n = config.tighten_private_paths()
+            if n:
+                done.append(f"made {n} private file(s) or folder(s) owner-only")
     finally:
         run.close()
     return {"dry_run": False, "plan": plan, "run": run.id,

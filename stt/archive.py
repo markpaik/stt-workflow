@@ -47,6 +47,19 @@ def purge_meeting_dir(path: Path):
     except Exception as e:
         print(f"   delete: unknown-speaker references not scrubbed ({e})",
               file=sys.stderr)
+    # the stores keyed on this meeting: its group override (by id, or by
+    # name for a meeting without one) and its keep-both pairs. A name that a
+    # live or archived twin still carries keeps its entries.
+    try:
+        from . import dupes, groups
+        twin = (path.name in config.meeting_bases()
+                or path.name in config.archived_bases())
+        groups.forget_meeting([mid] + ([] if twin else [path.name]))
+        if not twin:
+            dupes.forget_base(path.name)
+    except Exception as e:
+        print(f"   delete: group and duplicate references not scrubbed ({e})",
+              file=sys.stderr)
 
 
 def _is_active(base: str) -> bool:
@@ -231,10 +244,18 @@ def delete_meeting(base: str) -> dict:
     except OSError:
         pass
 
+    lock_stems = {config.lock_key(base), base}
     with review.lock_meeting(base):
         # lock_meeting -> lock_registry is the established order (summarize's
         # rename path nests the same way), so the scrub inside is deadlock-free
         purge_meeting_dir(target)
+    # the meeting's own lock files outlive it. Remove only those (it is
+    # released now). The whole-library sweep stays with the doctor: its
+    # residual race must not run on every Delete while a batch works.
+    try:
+        config.drop_meeting_locks(lock_stems)
+    except Exception:
+        pass
 
     # the manifest record is this meeting's processing history; with the meeting
     # gone it must go too. is_processed would self-heal anyway (the outputs are

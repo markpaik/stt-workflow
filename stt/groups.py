@@ -289,6 +289,29 @@ def set_override(mkey: str, group_key: str, exclude: bool = True) -> dict:
     return {"ok": True, "not_in": ni}
 
 
+def forget_meeting(keys) -> int:
+    """Drop the overrides keyed on any of `keys` (a deleted meeting's id and
+    base). Returns how many entries went."""
+    keys = {str(k) for k in keys if k}
+    if not keys:
+        return 0
+    with _lock, _file_lock():
+        p = overrides_path()
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(d, dict):
+            return 0
+        gone = [k for k in d if k in keys]
+        if gone:
+            for k in gone:
+                d.pop(k, None)
+            _write_600(p, json.dumps(d, indent=2, ensure_ascii=False))
+    _memo["sig"] = None
+    return len(gone)
+
+
 # ---------------------------------------------------------------- compute ---
 
 def _key(kind: str, sig) -> str:

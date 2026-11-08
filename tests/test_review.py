@@ -776,3 +776,130 @@ def test_channel_aware_mic_speaker_replays_and_drops_on_unenroll(sandbox):
     assert relabel.relabel_one("Call")
     d2 = json.loads((mfile("Call", ".json")).read_text())
     assert not any(s["id"] == channels.MIC_ID for s in d2["speakers"])
+
+
+def _two_lines(segs):
+    out = []
+    for st, en, spk, txt in segs:
+        out.append({"start": st, "end": en, "speaker": spk, "name": None,
+                    "display": spk, "text": txt, "flags": [], "overlap": False})
+    return out
+
+
+def test_a_stale_edit_of_a_merged_away_line_is_refused(sandbox):
+    """Tab A deleted a line, so 'Right.' (5.0-5.6) merged into the turn
+    before it. Tab B still edits 'Right.' by its old index and start. The
+    nearest start is now a different person's line 0.9 s away, which the
+    wide fallback used to edit."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 5.6, "SPEAKER_00", "Turn. Right."),
+                                (5.9, 9.0, "SPEAKER_01", "Victim line.")])
+    jpath.write_text(json.dumps(d))
+
+    r = review.apply("Mtg", 1, "edit", start=5.0, text="STALE PAGE EDIT")
+    assert not r["ok"] and "changed" in r["error"]
+    r = review.delete_segment("Mtg", 1, start=5.0)
+    assert not r["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["Turn. Right.", "Victim line."]
+
+
+def test_a_stale_edit_whose_end_no_longer_matches_is_refused(sandbox):
+    """The line 5.0-5.5 was deleted outright, leaving no merge behind. The
+    client sends its end too, and the nearest line ends 3.5 s later."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 5.0, "SPEAKER_00", "Turn."),
+                                (5.9, 9.0, "SPEAKER_01", "Victim line.")])
+    jpath.write_text(json.dumps(d))
+
+    r = review.apply("Mtg", 1, "edit", start=5.0, end=5.5, text="STALE PAGE EDIT")
+    assert not r["ok"]
+    assert not review.delete_segment("Mtg", 1, start=5.0, end=5.5)["ok"]
+    assert not review.split_segment("Mtg", 1, start=5.0, end=5.5,
+                                    text_a="a", text_b="b")["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["Turn.", "Victim line."]
+
+
+def test_a_stale_edit_of_a_line_a_neighbour_merged_into_is_refused(sandbox):
+    """Tab A gave line 1 the same speaker as line 0, so line 1 merged INTO
+    line 0. Line 0 keeps its start (0.0) and its end grows from 10.0 to
+    20.0. Tab B still holds the old list and edits line 0 by its exact
+    index and start. The exact-index path must check the end too, or the
+    edit replaces the merged words and a delete removes both lines."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 20.0, "SPEAKER_00", "First words. Merged words."),
+                                (20.0, 30.0, "SPEAKER_01", "Other line.")])
+    jpath.write_text(json.dumps(d))
+
+    assert review._locate_segment(d["segments"], 0, 0.0, 10.0) == (None, None)
+    r = review.apply("Mtg", 0, "edit", start=0.0, end=10.0, text="STALE PAGE EDIT")
+    assert not r["ok"] and "changed" in r["error"]
+    assert not review.delete_segment("Mtg", 0, start=0.0, end=10.0)["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["First words. Merged words.", "Other line."]
+    # a small end nudge at the exact index is still the same line
+    r = review.apply("Mtg", 0, "edit", start=0.0, end=19.6, text="Fresh edit.")
+    assert r["ok"]
+
+
+def test_a_nudged_line_with_a_matching_end_is_still_found(sandbox):
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"][1]["start"] = 5.4
+    jpath.write_text(json.dumps(d))
+    r = review.apply("Mtg", 1, "edit", start=5.0, end=6.0, text="Recovered.")
+    assert r["ok"]
+    assert json.loads(jpath.read_text())["segments"][1]["text"] == "Recovered."
+
+
+def test_a_second_redo_keeps_the_first_rounds_archived_edits(sandbox):
+    """Edit, Redo, edit again, Redo again. Path.replace onto the existing
+    superseded file threw the first round away, against the promise that
+    nothing is deleted."""
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="FIRST ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="SECOND ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+
+    kept = json.loads(mfile("Mtg", ".reviews.superseded.json").read_text())
+    assert [d["text"] for d in kept] == ["FIRST ROUND EDIT", "SECOND ROUND EDIT"]
+    assert not mfile("Mtg", ".reviews.json").exists()
+
+
+def test_a_corrupt_superseded_file_is_set_aside_not_lost(sandbox):
+    _make_meeting(sandbox)
+    mfile("Mtg", ".reviews.superseded.json").write_text("{not json")
+    review.apply("Mtg", 1, "edit", start=5.0, text="NEW ROUND")
+    assert review.archive_decisions("Mtg") is True
+    kept = json.loads(mfile("Mtg", ".reviews.superseded.json").read_text())
+    assert [d["text"] for d in kept] == ["NEW ROUND"]
+    aside = list(mfile("Mtg", ".json").parent.glob("*.reviews.superseded.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+
+
+def test_an_unreadable_live_sidecar_is_set_aside_under_a_non_json_name(sandbox):
+    """The set-aside copy was named .reviews.superseded.<ts>.json. That name
+    is a *.json that is not in config._SIDECAR_JSON, so a *.json scan could
+    take it for a meeting. It now ends in .unmerged-<ts>."""
+    from stt import config
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="FIRST ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+    mfile("Mtg", ".reviews.json").write_text("{not json")
+    assert review.archive_decisions("Mtg") is True
+    folder = mfile("Mtg", ".json").parent
+    aside = list(folder.glob("*.reviews.superseded.unmerged-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
+    strays = [p.name for p in folder.glob("*.json")
+              if p.name != "Mtg.json" and not p.name.endswith(config._SIDECAR_JSON)]
+    assert strays == []

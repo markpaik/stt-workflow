@@ -54,6 +54,10 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                   f"({type(e).__name__}) -- it will pick up the new name on the "
                   "next pass")
             return False
+        # strict is sticky: a meeting stored strict stays strict whatever this
+        # pass asked for. The panel relabels with strict=None on every naming,
+        # and the stored flag is what keeps cloud backends off the transcript.
+        strict = bool(strict) or bool(data.get("strict"))
         # the roster and lines as they stand BEFORE this rebuild: what an
         # untemplated description was written against
         before = {"speakers": [dict(x) for x in data.get("speakers") or []],
@@ -348,4 +352,5 @@ def main():
 
 
 if __name__ == "__main__":
+    config.private_umask()
     sys.exit(main())

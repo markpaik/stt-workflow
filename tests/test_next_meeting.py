@@ -786,7 +786,7 @@ console.log(JSON.stringify({a,at:MP.rev.at,i:MP.rev.i,tab:MP.tab}));
 """)
     assert out["a"] == [3, 1, 7]
     # Check opens the walk at its own line
-    assert out["at"] == {"index": 7, "start": 10} and out["i"] == 2 and out["tab"] == "transcript"
+    assert out["at"] == {"index": 7, "start": 10, "end": 14} and out["i"] == 2 and out["tab"] == "transcript"
 
 
 @needs_node
@@ -799,9 +799,9 @@ __els['mc-text']={value:'edited words'};__els['mc-spk']={value:'S2'};
 await mEditSave(3);
 console.log(JSON.stringify(calls.filter(c=>c[0]==='/api/review').map(c=>c[1])));
 """)
-    assert out[0] == {"base": "R1", "index": 3, "start": 4, "action": "accept"}
+    assert out[0] == {"base": "R1", "index": 3, "start": 4, "end": 9, "action": "accept"}
     # array position 3 is the json index 7
-    assert out[1] == {"base": "R1", "index": 7, "start": 10, "action": "edit",
+    assert out[1] == {"base": "R1", "index": 7, "start": 10, "end": 14, "action": "edit",
                       "text": "edited words", "speaker": "S2"}
 
 
@@ -819,10 +819,10 @@ mRevGo(1);
 const afterGo={i:MP.rev.i,at:MP.rev.at,hold:MP.rev.hold};
 console.log(JSON.stringify({afterAccept,afterSave,afterGo,bar:mRevBarHTML()}));
 """)
-    assert out["afterAccept"] == {"i": 0, "at": {"index": 1, "start": 9}, "n": 2, "hold": False}
+    assert out["afterAccept"] == {"i": 0, "at": {"index": 1, "start": 9, "end": 9.5}, "n": 2, "hold": False}
     # Save resolves the flag but holds: the bar says Saved, the spot stays
-    assert out["afterSave"] == {"i": 0, "at": {"index": 1, "start": 9}, "n": 1, "hold": True}
-    assert out["afterGo"] == {"i": 0, "at": {"index": 7, "start": 10}, "hold": False}
+    assert out["afterSave"] == {"i": 0, "at": {"index": 1, "start": 9, "end": 9.5}, "n": 1, "hold": True}
+    assert out["afterGo"] == {"i": 0, "at": {"index": 7, "start": 10, "end": 14}, "hold": False}
 
 
 @needs_node
@@ -935,8 +935,8 @@ console.log(JSON.stringify({ask,posts:calls.filter(c=>c[0]==='/api/review').map(
     assert "Remove this line?" in out["ask"]["html"] and 'data-act="mc-delgo"' in out["ask"]["html"]
     assert out["ask"]["posted"] == 0
     assert out["posts"] == [
-        {"base": "R1", "action": "delete", "index": 0, "start": 0},
-        {"base": "R1", "action": "split", "index": 0, "start": 0, "text_a": "clean", "text_b": "line",
+        {"base": "R1", "action": "delete", "index": 0, "start": 0, "end": 4},
+        {"base": "R1", "action": "split", "index": 0, "start": 0, "end": 4, "text_a": "clean", "text_b": "line",
          "speaker_a": "S1", "speaker_b": "name:Cy Tran"},
         {"base": "R1", "action": "insert", "start": 65, "end": 68, "speaker": "S2", "text": "a missed line"}]
 

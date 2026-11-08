@@ -385,3 +385,23 @@ def test_undo_puts_names_fields_and_headers_back(lib):
     # undone meetings can be moved again
     ir.plan(log=lambda *_: None)
     assert ir.apply(log=lambda *_: None)["counts"]["renamed"] == 4
+
+
+def test_undo_takes_off_a_date_the_move_added(sandbox, monkeypatch, tmp_path):
+    """A legacy folder whose json has no 'date': apply stored the name's
+    date with date_source 'typed', and undo left both behind."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("Board Prep Session 09102025", mid="mid-z")
+    j = config.meeting_file("Board Prep Session 09102025", ".json")
+    d0 = json.loads(j.read_text())
+    d0.pop("date")
+    j.write_text(json.dumps(d0, indent=2))
+
+    ir.plan(log=lambda *_: None)
+    ir.apply(log=lambda *_: None)
+    moved = json.loads(config.meeting_file(config.base_of("mid-z"), ".json").read_text())
+    assert moved["date"] == "2025-09-10" and moved["date_source"] == "typed"
+    assert ir.undo(dry=False, log=lambda *_: None)["counts"]["undone"] == 1
+
+    d = json.loads(j.read_text())
+    assert "date" not in d and "date_source" not in d and "renamed_from" not in d

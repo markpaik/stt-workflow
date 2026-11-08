@@ -546,7 +546,7 @@ function mRevCard(){
  const R=MP.rev,it=R.items[R.i];const p=revPos(it);
  const el=p>=0?document.getElementById('ln-'+p):null;
  if(!el){mRevExit();return;}                      // the transcript changed underneath
- R.hold=false;R.at={index:it.index,start:it.start};
+ R.hold=false;R.at={index:it.index,start:it.start,end:it.end};
  const alts=(it.alt||[]).map((a,k)=>`<div class="meta">The second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}”. <button class="btn quiet" type="button" data-act="rev-usealt" data-k="${k}">Use it</button></div>`).join('');
  mCardEl(`<div class="mc-flag attn-t">${esc(mFlagWhy(it))}${it.minor?' Minor.':''}</div>${alts}
   <div class="mc-row">${mSpkSelect('mc-spk',it.speaker)}</div>
@@ -574,7 +574,7 @@ async function mRevApply(action){
  const R=MP&&MP.rev;if(!R||!R.active||R.busy)return;
  if(R.hold){mRevGo(1);return;}
  const it=R.items[R.i];if(!it)return;
- const body={base:MP.base,index:it.index,start:it.start,action};
+ const body={base:MP.base,index:it.index,start:it.start,end:it.end,action};
  if(action==='edit'){const v=mSpkValue('mc-spk');if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
   const ta=document.getElementById('mc-text');body.text=ta?ta.value:it.text;body.speaker=v;}
  R.busy=true;let r;try{r=await api('/api/review',body);}catch(e){r={error:'Save failed.'};}
@@ -594,7 +594,7 @@ async function mRevSave(){
  const R=MP&&MP.rev;if(!R||!R.active||R.busy||!R.at)return;
  const at=R.at,v=mSpkValue('mc-spk');if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
  const ta=document.getElementById('mc-text');
- const body={base:MP.base,index:at.index,start:at.start,action:'edit',text:ta?ta.value:'',speaker:v};
+ const body={base:MP.base,index:at.index,start:at.start,end:at.end,action:'edit',text:ta?ta.value:'',speaker:v};
  R.busy=true;let r;try{r=await api('/api/review',body);}catch(e){r={error:'Save failed.'};}
  R.busy=false;
  if(!MP||MP.rev!==R)return;
@@ -617,7 +617,7 @@ async function mRevAllGo(){
  const R=MP&&MP.rev;if(!R||!R.active||R.busy)return;
  R.busy=true;R.confirmAll=false;const base=MP.base;
  for(const it of R.items.slice()){
-  let r;try{r=await api('/api/review',{base,index:it.index,start:it.start,action:'accept'});}catch(e){r={error:'The panel did not answer.'};}
+  let r;try{r=await api('/api/review',{base,index:it.index,start:it.start,end:it.end,action:'accept'});}catch(e){r={error:'The panel did not answer.'};}
   if(!MP||MP.base!==base||MP.rev!==R)return;
   if(!r.ok){R.busy=false;mRevBarPaint();mCardErr((r.error||'A line failed to accept.')+' The rest stay flagged.');refresh();return;}
   const p=revPos(it);if(p>=0){MP.segs[p].flags=[];mRefreshLine(p);}
@@ -663,7 +663,7 @@ async function mEditSave(i){
  if(spk==='__new__'){mCardErr('Pick or name the speaker first.');return;}
  const ta=document.getElementById('mc-text');const text=ta?ta.value:g.text;
  // the ORIGINAL json index rides along, never the array position
- const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,action:'edit',text,speaker:spk}).catch(()=>({error:'Save failed.'}));
+ const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,end:g.end,action:'edit',text,speaker:spk}).catch(()=>({error:'Save failed.'}));
  if(!r.ok){mCardErr(r.error||'Save failed.');return;}
  if(r.merged){mReload(r.index);return;}
  if(spk&&spk.startsWith('name:')){mReload(g.index);return;}
@@ -676,7 +676,7 @@ function mDeleteAsk(i){
  e.innerHTML=`<span>Remove this line? Its audio stays. Only the text line goes.</span> <button class="btn plain" type="button" data-act="mc-errclear">Keep it</button><button class="btn danger" type="button" data-act="mc-delgo" data-i="${i}">Remove line</button>`;
 }
 async function mDeleteGo(i){
- const g=MP.segs[i];const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start}).catch(()=>({error:'Could not remove the line.'}));
+ const g=MP.segs[i];const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start,end:g.end}).catch(()=>({error:'Could not remove the line.'}));
  if(!r.ok){mCardErr(r.error||'Could not remove the line.');return;}
  mReload();
 }
@@ -694,7 +694,7 @@ function mSplitUI(i){
 async function mSplitSave(i){
  const g=MP.segs[i],sa=mSpkValue('mc-sa'),sb=mSpkValue('mc-sb');
  if(sa==='__new__'||sb==='__new__'){mCardErr('Pick or name both speakers first.');return;}
- const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,
+ const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,end:g.end,
   text_a:(document.getElementById('mc-ta1')||{}).value,text_b:(document.getElementById('mc-ta2')||{}).value,speaker_a:sa,speaker_b:sb}).catch(()=>({error:'Split failed.'}));
  if(!r.ok){mCardErr(r.error||'Split failed.');return;}
  mReload(r.index);

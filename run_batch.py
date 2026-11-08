@@ -37,10 +37,22 @@ import traceback
 from pathlib import Path
 
 
-def _load_env_file():
+def _env_file_dir(repo=None) -> Path:
+    """The folder whose stt.env holds the settings: config.PROJECT_DIR's rule,
+    worked out before config imports. STT_PROJECT_DIR, else STT_HOME, else
+    this checkout. A sandbox (STT_HOME) must never load the checkout's file,
+    which names the REAL library and iCloud folders."""
+    for k in ("STT_PROJECT_DIR", "STT_HOME"):
+        v = os.environ.get(k)
+        if v:
+            return Path(v).expanduser()
+    return Path(repo) if repo else Path(__file__).resolve().parent
+
+
+def _load_env_file(repo=None):
     """Load KEY=VALUE lines from stt.env BEFORE importing the package (config reads
     env at import). launchd does not read ~/.zshrc."""
-    p = Path(__file__).resolve().parent / "stt.env"
+    p = _env_file_dir(repo) / "stt.env"
     if not p.exists():
         return
     for line in p.read_text().splitlines():
@@ -1108,4 +1120,5 @@ def main():
 
 
 if __name__ == "__main__":
+    config.private_umask()
     sys.exit(main())

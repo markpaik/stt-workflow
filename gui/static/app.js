@@ -3380,7 +3380,7 @@ function renderReviewCard(){
   const el=p>=0?document.getElementById('mseg'+p):null;
   if(!el){reviewExit();return;}    // transcript changed underneath: bow out quietly
   MR.hold=false;
-  MR.at={index:it.index,start:it.start};
+  MR.at={index:it.index,start:it.start,end:it.end};
   const alts=(it.alt||[]).map((a,k)=>`<div class="mcalt">Second engine heard
       &#8220;<b>${esc(a.theirs||'(nothing)')}</b>&#8221; where this says
       &#8220;${esc(a.ours||'(nothing)')}&#8221;
@@ -3431,7 +3431,7 @@ async function reviewApply(action){
   if(!it)return;
   // the item carries the segment's ORIGINAL json index; start is the server's
   // cross-check in case the file changed since the list was fetched
-  const body={base:MP.base,index:it.index,start:it.start,action};
+  const body={base:MP.base,index:it.index,start:it.start,end:it.end,action};
   if(action==='edit'){
     const v=$('#mcspk').value;
     if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
@@ -3482,7 +3482,7 @@ async function reviewSave(){
   const at=MR.at;if(!at)return;
   const v=$('#mcspk')?$('#mcspk').value:null;
   if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
-  const body={base:MP.base,index:at.index,start:at.start,action:'edit',
+  const body={base:MP.base,index:at.index,start:at.start,end:at.end,action:'edit',
     text:$('#mctext')?$('#mctext').value:'',speaker:v};
   MR.busy=true;
   let r;
@@ -3552,7 +3552,7 @@ async function reviewAcceptAllGo(btn){
   const base=MP.base;
   for(const it of MR.items.slice()){
     let r;
-    try{r=await api('/api/review',{base,index:it.index,start:it.start,action:'accept'});}
+    try{r=await api('/api/review',{base,index:it.index,start:it.start,end:it.end,action:'accept'});}
     catch(e){r={error:'The server did not answer.'};}
     if(route.view!=='meeting'||route.base!==base||!MR||!MR.active)return;
     if(!r.ok){
@@ -3651,7 +3651,7 @@ async function mEditSave(i,ev){
   if(spk==='__new__'){mCardErr('Pick or name the speaker first.');return;}
   const text=$('#mctext')?$('#mctext').value:g.text;
   // the segment's ORIGINAL json index rides along, never the array position
-  const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,action:'edit',text,speaker:spk});
+  const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,end:g.end,action:'edit',text,speaker:spk});
   if(!r.ok){mCardErr(r.error||'Save failed');return;}
   if(r.merged){mReloadSegs(r.index);return;}     // neighbors folded into one turn
   if(spk&&spk.startsWith('name:')){mReloadSegs(g.index);return;}  // fresh legend/colors
@@ -3687,7 +3687,7 @@ function mDeleteAsk(i,ev){
 }
 async function mDeleteGo(i){
   const g=MP.segs[i];
-  const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start});
+  const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start,end:g.end});
   if(!r.ok){mCardErr(r.error||'Could not remove the line.');return;}
   mReloadSegs();
 }
@@ -3713,7 +3713,7 @@ function mSplitUI(i,ev){
 async function mSplitSave(i){
   const g=MP.segs[i],sa=$('#mcsa').value,sb=$('#mcsb').value;
   if(sa==='__new__'||sb==='__new__'){mCardErr('Pick or name both speakers first.');return;}
-  const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,
+  const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,end:g.end,
     text_a:$('#mcta1').value,text_b:$('#mcta2').value,speaker_a:sa,speaker_b:sb});
   if(!r.ok){mCardErr(r.error||'Split failed');return;}
   mReloadSegs(r.index);
@@ -5187,6 +5187,9 @@ function dSettingsHTML(s){
     'drow-source');
   h+=_drow('Transcripts folder',home(s.paths&&s.paths.dest),
     `<button class="btn mini" type="button" onclick="dPickFolder('dest',this)">Change&#8230;</button>`);
+  const fa=DRAWER.folderAsk;
+  if(fa)h+=_drow('Use '+home(fa.path)+'?',esc(fa.warn),
+    `<button class="btn mini" type="button" onclick="dFolderGo(true)">Use this folder</button> <button class="btn mini" type="button" onclick="dFolderGo(false)">Cancel</button>`);
   return h;
 }
 function dTogMaster(btn){if(!S)return;btn.disabled=true;
@@ -5233,7 +5236,16 @@ async function dPickFolder(which,btn){
   btn.disabled=true;
   const prompt=which==='source'?'Choose the folder to watch for new recordings'
     :'Choose where transcripts are stored';
-  await api('/api/pick_folder',{which,prompt});
+  const r=await api('/api/pick_folder',{which,prompt});
+  // a folder with other files, or flat meetings that would move: the same
+  // two-step confirm as a merge, never a browser dialog
+  DRAWER.folderAsk=r&&r.need_confirm?{which:r.which,path:r.path,warn:r.warn}:null;
+  await refresh();
+  dSettingsForce();
+}
+async function dFolderGo(ok){
+  const a=DRAWER.folderAsk;DRAWER.folderAsk=null;
+  if(ok&&a)await api('/api/set_folder',{which:a.which,path:a.path,confirm:true});
   await refresh();
   dSettingsForce();
 }
@@ -5521,6 +5533,7 @@ function dSpkPanel(s,e,cap){
   }).join('');
   const clashArm=DRAWER.dconfirm==='renmerge:'+e.name;
   const rmArm=DRAWER.dconfirm==='rmspk:'+e.name;
+  const mgArm=DRAWER.dconfirm==='mgwarn:'+e.name&&DRAWER.mergeWarn;
   return `<div class="dpanel">
     <div class="dsub dpanel-h">Voice samples (${n} of ${cap})</div>
     <div class="dsub dpanel-n">A profile keeps up to ${cap} samples. A varied set,
@@ -5544,6 +5557,9 @@ function dSpkPanel(s,e,cap){
       <button class="iact" type="button" ${others.length?'':'disabled'}
         onclick="dMergeSpeaker('${escJs(e.name)}',this)">Merge</button>
     </div>
+    ${mgArm?`<div class="dckconfirm">${esc(DRAWER.mergeWarn.text)}
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="dMergeGo('${escJs(e.name)}','${escJs(DRAWER.mergeWarn.dst)}',true)">Merge anyway</button></div>`:''}
     <div class="dsamp">
       <div class="grow dsub"><b>Remove</b>: un-enroll; their lines revert to Speaker N</div>
       <button class="btn danger mini" type="button" onclick="dRemoveAsk('${escJs(e.name)}')">Remove&#8230;</button>
@@ -5600,6 +5616,10 @@ async function dRenameGo(old,n){
   DRAWER.dconfirm=null;DRAWER.renameTo=null;
   if(!n)return;
   const r=await api('/api/rename_speaker',{name:old,new:n});
+  // onto an enrolled person whose voice does not match: the merge warning,
+  // whose confirm runs the same merge with confirm set
+  if(r.need_confirm){DRAWER.dconfirm='mgwarn:'+old;DRAWER.mergeWarn={dst:r.dst,text:r.error||''};
+    dSpeakersForce();return;}
   if(!r.ok){dSpkFail(r);return;}
   if(DRAWER.spkOpen===old)DRAWER.spkOpen=n;   // the panel follows the new name
   DRAWER.spkErr='';
@@ -5609,7 +5629,16 @@ function dMergeSpeaker(name,btn){
   const sel=btn.closest('.dsamp').querySelector('.dmg');
   const dst=sel?sel.value:'';
   if(!dst||dst===name)return;
-  api('/api/merge_speakers',{src:'name:'+name,dst:'name:'+dst}).then(r=>{
+  dMergeGo(name,dst,false);
+}
+function dMergeGo(name,dst,force){
+  DRAWER.dconfirm=null;DRAWER.mergeWarn=null;
+  api('/api/merge_speakers',{src:'name:'+name,dst:'name:'+dst,confirm:!!force}).then(r=>{
+    // the voices do not match: the same two-step confirm as naming
+    if(r.need_confirm&&!force){
+      DRAWER.dconfirm='mgwarn:'+name;DRAWER.mergeWarn={dst,text:r.error||''};
+      dSpeakersForce();return;
+    }
     if(!r.ok){dSpkFail(r);return;}
     DRAWER.spkOpen=dst;DRAWER.spkErr='';   // the samples moved: show the survivor
     dSpeakersForce();refresh();
