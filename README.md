@@ -335,7 +335,8 @@ row), Decisions and Open questions (the meeting page), and 3 to
 5 topic tags from the fixed vocabulary in `stt/series.py`. Renaming,
 naming, merging or relabeling a speaker re-renders the names in it with no
 model call. A Redo marks it out of date, and the batch regenerates it when
-idle. `tools/retitle_all.py` retitles the library by the series catalog
+idle. An empty or unusable model reply is never stored: the old
+description stays and the retry backs off. `tools/retitle_all.py` retitles the library by the series catalog
 (dry run first, then `--apply`, with an undo journal).
 
 **Folders.** The watched folder defaults to iCloud Drive's `Voice

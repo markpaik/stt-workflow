@@ -573,3 +573,34 @@ def test_a_redo_lists_the_meeting_in_the_stale_index(sandbox):
     assert meta["ai_stale"] is True
     src = (Path(__file__).resolve().parent.parent / "stt" / "pipeline.py").read_text()
     assert "_summ.stale_mark(meta[\"meeting_id\"], base)" in src
+
+
+# ------------------------------------------------- an empty or junk reply ---
+GOOD = {"ai_gist": "Hiring plan approved.", "ai_title": "Good Title",
+        "ai_decisions": ["Keep it."], "ai_stale": True}
+
+
+@pytest.mark.parametrize("junk", ["", "I am sorry, I cannot do that.", "\n\n"])
+def test_an_empty_reply_keeps_the_old_description_and_counts_as_a_failure(
+        owner, monkeypatch, junk):
+    """Ollama returns empty content when thinking uses the whole budget. A
+    reply with no gist and no summary must not overwrite a good description,
+    clear the out-of-date flag, or count as stored."""
+    base = _meeting()
+    p = config.meeting_file(base, ".json")
+    p.write_text(json.dumps({**json.loads(p.read_text()), **GOOD}))
+    summarize.stale_mark("mid-1", base)
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: junk)
+    r = summarize.suggest_title(base)
+    assert not r.get("stored") and r.get("ok") is False and r.get("error")
+    d = _load(base)
+    for k, v in GOOD.items():
+        assert d[k] == v
+    assert base in summarize.stale_bases()
+    with pytest.raises(summarize.EmptyDescription):
+        summarize.describe(base)
+    # a cached empty reply (the retitle tool stores those later) is refused too
+    cached = summarize.build_description(junk, summarize.context_for(base))
+    with pytest.raises(summarize.EmptyDescription):
+        summarize.store_description(base, cached)
+    assert _load(base)["ai_gist"] == GOOD["ai_gist"]

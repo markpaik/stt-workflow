@@ -254,6 +254,17 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
     return out.strip()
 
 
+class EmptyDescription(RuntimeError):
+    """The model replied with no gist and no summary: empty content (Ollama
+    when thinking spends the whole budget), a refusal, or junk. Nothing is
+    stored, so the old description stays and a stale retry backs off."""
+
+
+def _empty_description(desc: dict) -> bool:
+    return not (str(desc.get("gist") or "").strip()
+                or str(desc.get("summary") or "").strip())
+
+
 class OllamaDown(RuntimeError):
     """Ollama did not answer: the caller may fall back to MLX."""
 
@@ -875,7 +886,10 @@ def describe(base: str, old_title: str = None, backend: str = None,
     ctx = {"v": 1, "base": base, "old_title": old_title, "owner": owner,
            "people": people, "snap": _roster_snapshot(snap), "parts": parts,
            "engine": engine, "elapsed_sec": round(time.monotonic() - t0, 1)}
-    return build_description(out, ctx)
+    desc = build_description(out, ctx)
+    if _empty_description(desc):
+        raise EmptyDescription("the model gave no description")
+    return desc
 
 
 def context_for(base: str, old_title: str = None, engine: str = None, parts: int = 1,
@@ -965,6 +979,11 @@ def store_description(base: str, desc: dict, title: str = None) -> dict:
         for k, v in (tmpl.get("labels") or {}).items():
             labels.setdefault(k, v)
         rendered = speaker_text.render(tmpl, d, labels)
+        if not (str(rendered.get("ai_gist") or "").strip()
+                or str(rendered.get("ai_summary") or "").strip()):
+            # an empty reply (a cached one from retitle too) must never
+            # erase a good description or clear the out-of-date flag
+            raise EmptyDescription("the model gave no description")
         d.pop("ai_stale", None)
         # next steps are gone (owner, 2026-11-05): an old list never lingers
         d.pop("ai_next_steps", None)
@@ -1004,7 +1023,11 @@ def suggest_title(base: str) -> dict:
     from . import dates
     if not has_speech(base):
         return {"ok": False, "no_speech": True, "error": NO_SPEECH_TEXT}
-    desc = describe(base)
+    try:
+        desc = describe(base)
+    except EmptyDescription:
+        return {"ok": False, "stored": False,
+                "error": "The model gave no description. The old one is kept."}
     rendered, stored = {}, False
     try:
         rendered = store_description(base, desc)
