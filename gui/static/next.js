@@ -342,7 +342,7 @@ function speakersView(){
    <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(e.name)}" aria-label="Play ${esc(e.name)}">${ic(PLAYING===e.name?'pause':'play')}</button>
    <button class="btn quiet" type="button" data-act="samples" data-name="${esc(e.name)}">${open?'Hide samples':'Samples'}</button>
    <button class="icon-btn" type="button" data-act="spk-menu" data-name="${esc(e.name)}" aria-label="More actions for ${esc(e.name)}">${ic('more')}</button>
-   ${conf?`<button class="btn danger" type="button" data-act="rm-spk" data-name="${esc(e.name)}">Confirm remove</button>`:''}</div></div>`;};
+   ${conf?`<button class="btn danger" type="button" data-act="rm-spk" data-name="${esc(e.name)}">Confirm remove</button>`:''}${UI.confirm==='mg:'+e.name?`<button class="btn danger" type="button" data-act="merge-force" data-name="${esc(e.name)}">Confirm merge</button>`:''}</div></div>`;};
  return `<div class="head"><div><h1>Speakers</h1><p class="meta">Your voice library stays on this Mac and carries names across meetings. Public meetings never ask.</p></div></div>
   <div class="stack sections"><section><div class="eyebrow">Unknown voices <span class="n">${unk.length}</span></div><div class="stack">${unk.map(unkRow).join('')||'<div class="none-line sub">Every voice has a name.</div>'}</div></section>
   <section><div class="eyebrow">Named people <span class="n">${enr.length}</span></div><div class="stack">${enr.map(enrRow).join('')}</div></section>
@@ -649,7 +649,8 @@ const A={
   const r=await api('/api/rename_speaker',{name:N.rename,new:v}).catch(()=>null);N.busy=false;
   if(!r||!r.ok){N.err=(r&&r.error)||'Could not rename. The new name may already exist; merge instead.';N.value=v;render(true);return;}
   UI.naming=null;toast('Renamed. The meetings update in the background.');await refresh();render(true);},
- async merge(el){const dst=($('#mg-sel')||{}).value;hidePop();if(!dst)return;await act('/api/merge_speakers',{src:'name:'+el.dataset.name,dst:'name:'+dst},'spk:'+el.dataset.name);toast(`Merged into ${dst}.`);},
+ async merge(el){const dst=($('#mg-sel')||{}).value;hidePop();if(!dst)return;const n=el.dataset.name,r=await act('/api/merge_speakers',{src:'name:'+n,dst:'name:'+dst},'spk:'+n);if(r.need_confirm){UI.confirm='mg:'+n;UI.mergeTo=dst;render(true);return;}if(r.ok!==false&&!r.error)toast(`Merged into ${dst}.`);},
+ async 'merge-force'(el){const n=el.dataset.name,dst=UI.mergeTo;UI.confirm=null;UI.mergeTo=null;if(!dst)return;const r=await act('/api/merge_speakers',{src:'name:'+n,dst:'name:'+dst,confirm:true},'spk:'+n);if(r.ok!==false&&!r.error)toast(`Merged into ${dst}.`);},
  'rm-ask'(el){hidePop();UI.confirm='rm:'+el.dataset.name;render(true);},
  async 'rm-spk'(el){UI.confirm=null;await act('/api/remove_speaker',{name:el.dataset.name},'spk:'+el.dataset.name);toast('Removed.');},
  async 'rm-sample'(el){await act('/api/remove_sample',{name:el.dataset.name,index:+el.dataset.i},'spk:'+el.dataset.name);},

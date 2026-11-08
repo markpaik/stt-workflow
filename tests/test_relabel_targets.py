@@ -394,7 +394,8 @@ def test_merge_speakers_targets_both_sides(running_server, queued):
                           "Bravo Mtg")["SPEAKER_00"]
 
     status, body = _post(running_server, "/api/merge_speakers",
-                         {"src": f"uid:{uid}", "dst": "name:Dana Cole"})
+                         {"src": f"uid:{uid}", "dst": "name:Dana Cole",
+                          "confirm": True})
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg"]
     assert queued.submits == [(["Alpha Mtg", "Bravo Mtg"], "identity change")]
@@ -418,7 +419,8 @@ def test_merge_speakers_uid_into_name_reaches_a_meeting_its_samples_no_longer_ma
     _evict_early_sample(uid, "Charlie Mtg", late)
 
     status, body = _post(running_server, "/api/merge_speakers",
-                         {"src": f"uid:{uid}", "dst": "name:Dana Cole"})
+                         {"src": f"uid:{uid}", "dst": "name:Dana Cole",
+                          "confirm": True})
     assert status == 200 and body["ok"] is True
     assert body["targets"] == ["Alpha Mtg", "Bravo Mtg", "Charlie Mtg"]
     assert queued.submits == [
@@ -682,3 +684,48 @@ def test_looks_like_is_not_rescored_while_the_registries_stand_still(
     identify.enroll("Bo Nash", _at_cos(v, 0.70, 62), source="Alpha Mtg")
     srv.gather_state()
     assert len(calls) > first, "a changed registry must invalidate the cache"
+
+
+def _near_unit(v, seed, eps=0.05):
+    w = v + eps * _unit(seed)
+    return w / np.linalg.norm(w)
+
+
+def test_merge_speakers_warns_like_naming_when_the_voice_does_not_match(
+        running_server, queued):
+    """/api/name warns with suspect_sample when an unknown's voice does not
+    match the person. A merge of the same unknown into the same person, or
+    of one person into another, skipped that check and stacked foreign
+    voices into a profile."""
+    casey, stranger, dana = _unit(1), _unit(2), _unit(3)
+    identify.enroll("Casey Quinn", casey, source="Alpha Mtg")
+    identify.enroll("Dana Fox", dana, source="Alpha Mtg")
+    _meeting("Alpha Mtg", {"SPEAKER_00": casey})
+    _meeting("Bravo Mtg", {"SPEAKER_00": stranger})
+    uid = unknowns.assign({"SPEAKER_00": stranger}, {"SPEAKER_00": None},
+                          "Bravo Mtg")["SPEAKER_00"]
+
+    for src in (f"uid:{uid}", "name:Dana Fox"):
+        status, body = _post(running_server, "/api/merge_speakers",
+                             {"src": src, "dst": "name:Casey Quinn"})
+        assert status == 200 and body["ok"] is False, src
+        assert body["warn"] == "suspect_sample" and body["need_confirm"] is True
+    assert identify.load_voiceprints()["Casey Quinn"].shape[0] == 1
+    assert "Dana Fox" in identify.load_registry()
+    assert unknowns.samples_of(uid) is not None
+
+    status, body = _post(running_server, "/api/merge_speakers",
+                         {"src": "name:Dana Fox", "dst": "name:Casey Quinn",
+                          "confirm": True})
+    assert body["ok"] is True
+    assert "Dana Fox" not in identify.load_registry()
+
+
+def test_merge_speakers_of_the_same_voice_needs_no_confirm(running_server, queued):
+    v = _unit(1)
+    identify.enroll("Casey Quinn", v, source="Alpha Mtg")
+    identify.enroll("Casey Q", _near_unit(v, 5), source="Alpha Mtg")
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    status, body = _post(running_server, "/api/merge_speakers",
+                         {"src": "name:Casey Q", "dst": "name:Casey Quinn"})
+    assert body["ok"] is True, body

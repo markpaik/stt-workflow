@@ -5521,6 +5521,7 @@ function dSpkPanel(s,e,cap){
   }).join('');
   const clashArm=DRAWER.dconfirm==='renmerge:'+e.name;
   const rmArm=DRAWER.dconfirm==='rmspk:'+e.name;
+  const mgArm=DRAWER.dconfirm==='mgwarn:'+e.name&&DRAWER.mergeWarn;
   return `<div class="dpanel">
     <div class="dsub dpanel-h">Voice samples (${n} of ${cap})</div>
     <div class="dsub dpanel-n">A profile keeps up to ${cap} samples. A varied set,
@@ -5544,6 +5545,9 @@ function dSpkPanel(s,e,cap){
       <button class="iact" type="button" ${others.length?'':'disabled'}
         onclick="dMergeSpeaker('${escJs(e.name)}',this)">Merge</button>
     </div>
+    ${mgArm?`<div class="dckconfirm">${esc(DRAWER.mergeWarn.text)}
+      <button class="btn mini" type="button" onclick="dConfirmClear()">Cancel</button>
+      <button class="btn primary mini" type="button" onclick="dMergeGo('${escJs(e.name)}','${escJs(DRAWER.mergeWarn.dst)}',true)">Merge anyway</button></div>`:''}
     <div class="dsamp">
       <div class="grow dsub"><b>Remove</b>: un-enroll; their lines revert to Speaker N</div>
       <button class="btn danger mini" type="button" onclick="dRemoveAsk('${escJs(e.name)}')">Remove&#8230;</button>
@@ -5609,7 +5613,16 @@ function dMergeSpeaker(name,btn){
   const sel=btn.closest('.dsamp').querySelector('.dmg');
   const dst=sel?sel.value:'';
   if(!dst||dst===name)return;
-  api('/api/merge_speakers',{src:'name:'+name,dst:'name:'+dst}).then(r=>{
+  dMergeGo(name,dst,false);
+}
+function dMergeGo(name,dst,force){
+  DRAWER.dconfirm=null;DRAWER.mergeWarn=null;
+  api('/api/merge_speakers',{src:'name:'+name,dst:'name:'+dst,confirm:!!force}).then(r=>{
+    // the voices do not match: the same two-step confirm as naming
+    if(r.need_confirm&&!force){
+      DRAWER.dconfirm='mgwarn:'+name;DRAWER.mergeWarn={dst,text:r.error||''};
+      dSpeakersForce();return;
+    }
     if(!r.ok){dSpkFail(r);return;}
     DRAWER.spkOpen=dst;DRAWER.spkErr='';   // the samples moved: show the survivor
     dSpeakersForce();refresh();

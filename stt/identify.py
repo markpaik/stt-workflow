@@ -250,13 +250,17 @@ def loo_scores(samples) -> list:
     return out
 
 
-def sample_check(name, vector):
+def sample_check(name, vector, exclude=()):
     """Should this new sample join `name`'s EXISTING stack? None = clean (or
     the person is new, so there is no stack to disagree with). Otherwise
     {"own", "cross", "cross_name"}: the candidate scores below
     ENROLL_STACK_MIN against the person's own samples, or matches some OTHER
     profile better than its target — the classic wrong-cluster enrollment
-    that poisons a profile and misattributes every later meeting."""
+    that poisons a profile and misattributes every later meeting.
+
+    `exclude` leaves profiles out of the cross check: a merge of one person
+    into another checks the source's own rows, which always match the
+    source best."""
     prints = load_voiceprints()
     own = prints.get(name)
     if own is None:
@@ -265,7 +269,7 @@ def sample_check(name, vector):
     own_sc = score_against(v, own)
     cross_name, cross_sc = None, -1.0
     for nm, s in prints.items():
-        if nm == name:
+        if nm == name or nm in exclude:
             continue
         sc = score_against(v, s)
         if sc > cross_sc:

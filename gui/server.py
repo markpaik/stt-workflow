@@ -2689,6 +2689,26 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
                         return
                     dv = identify.canonical_name(dv)
+                    # the same quality bar as /api/name: folding a voice that
+                    # does not match into a person poisons the profile, so a
+                    # mismatch asks for confirm first
+                    if not b.get("confirm") and st_ in ("uid", "name"):
+                        rows = (unknowns.samples_of(sv) if st_ == "uid"
+                                else identify.load_voiceprints().get(sv))
+                        warns = [w for w in (identify.sample_check(
+                            dv, r, exclude=(sv,) if st_ == "name" else ())
+                            for r in (rows if rows is not None else [])) if w]
+                        if warns:
+                            w = min(warns, key=lambda x: x["own"])
+                            msg = (f"This voice matches {dv}'s saved samples at "
+                                   f"only {w['own']:.2f}")
+                            if w["cross_name"] is not None and w["cross"] > w["own"]:
+                                msg += (f" — and matches {w['cross_name']} better "
+                                        f"({w['cross']:.2f})")
+                            msg += ". It may be the wrong person. Confirm to merge anyway."
+                            self._json({"ok": False, "warn": "suspect_sample",
+                                        "need_confirm": True, "error": msg, **w})
+                            return
                 heard = []
                 if st_ == "uid" and dt_ == "name":
                     # read BEFORE promote() retires the uid (see /api/name):
