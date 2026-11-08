@@ -1992,3 +1992,24 @@ def test_a_sweep_names_the_meeting_that_vanished(running_server, monkeypatch):
     assert st == 200 and body["deleted"] == []
     assert body["skipped"] == [{"name": "board prep 2.m4a",
                                 "reason": "the meeting it copied is gone"}]
+
+
+# ---------------------------------------------- Host header (DNS rebinding) ---
+@pytest.mark.parametrize("host", ["evil.com", "attacker.example:8812",
+                                  "127.0.0.1.evil.com", "localhost.evil.com:80"])
+def test_a_foreign_host_header_is_refused(running_server, host):
+    """A page on an attacker domain that rebinds its name to 127.0.0.1 is
+    same-origin to the panel, and a same-origin GET with no-referrer carries
+    no Origin or Referer. The Host header still names the attacker domain."""
+    status, body = _get(running_server, "/api/state", {"Host": host})
+    assert status == 403 and body == {"error": "forbidden"}
+    status, _ = _post(running_server, "/api/unqueue", {"at": 0}, {"Host": host})
+    assert status == 403
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.1:{port}", "localhost",
+                                  "localhost:{port}", "[::1]:{port}", "LOCALHOST"])
+def test_a_loopback_host_header_is_allowed(running_server, host):
+    status, _ = _get(running_server, "/api/state",
+                     {"Host": host.format(port=running_server)})
+    assert status == 200

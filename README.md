@@ -452,7 +452,9 @@ what people said. Treat both with care:
 - Know your local laws on recording consent (one-party vs all-party) and any
   workplace policies before making recording a routine practice.
 - Set `HF_HUB_OFFLINE=1` in `stt.env` after models are cached to enforce
-  fully-offline operation. The control panel binds to `127.0.0.1` only.
+  fully-offline operation. The control panel binds to `127.0.0.1` only,
+  and it refuses any request whose Host is not `127.0.0.1`, `localhost` or
+  `[::1]`, so open it by one of those names.
 - Cloud transcription is off unless you add a key, and strict-mode
   recordings never upload even then.
 - The summaries/Ask assistant is local by default; selecting a cloud

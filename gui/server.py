@@ -60,6 +60,20 @@ def _origin_allowed(headers) -> bool:
     return True
 
 
+_LOOPBACK_HOST = re.compile(r"^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$", re.I)
+
+
+def _host_allowed(headers) -> bool:
+    """The Host header must name this machine's loopback. A page on an
+    attacker domain whose DNS rebinds to 127.0.0.1 is same-origin to the
+    panel, and its same-origin GET (with no-referrer) carries no Origin or
+    Referer, so _origin_allowed lets it through. The browser still sends
+    the attacker's name as Host. A request with no Host (HTTP/1.0) is not
+    a browser and is allowed."""
+    v = headers.get("Host")
+    return v is None or bool(_LOOPBACK_HOST.match(v.strip()))
+
+
 def _known_base(base) -> bool:
     """A meeting basename must name a real transcript on disk — the only
     defense against a path-traversal `base` like '../../../etc/passwd' reaching
@@ -2026,7 +2040,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = dict(urllib.parse.parse_qsl(u.query))
-        if not _origin_allowed(self.headers):
+        if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
         try:
@@ -2312,7 +2326,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
-        if not _origin_allowed(self.headers):
+        if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
         try:
