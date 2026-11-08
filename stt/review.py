@@ -13,6 +13,8 @@ version and is marked "text_edited" — we never pretend edited text came from A
 import contextlib
 import fcntl
 import json
+import os
+import shutil
 import threading
 import uuid
 
@@ -573,11 +575,41 @@ def archive_decisions(base: str, dest_dir=None) -> bool:
     """A REDO rebuilds transcription AND diarization from scratch — the new
     speaker cluster ids have no relation to the old ones, so replaying old
     decisions could put words in the wrong mouths. Archive them instead
-    (nothing is deleted; the file is renamed .superseded)."""
+    (nothing is deleted: they are appended to .reviews.superseded.json).
+
+    APPENDED, not renamed over: a second Redo replaced the first round's
+    archive. A superseded file that does not parse as a list is copied aside
+    to a timestamped .corrupt name before a fresh one is written."""
+    import time
     p = config.meeting_file(base, ".reviews.json", dest_dir)
     if not p.exists():
         return False
-    p.replace(config.meeting_file(base, ".reviews.superseded.json", dest_dir))
+    sup = config.meeting_file(base, ".reviews.superseded.json", dest_dir)
+    if not sup.exists():
+        p.replace(sup)
+        return True
+    try:
+        current = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        current = None
+    if not isinstance(current, list):
+        # an unreadable live sidecar cannot be merged: keep it whole beside
+        # the archive rather than lose either one
+        p.replace(sup.with_name(sup.name.replace(
+            ".json", f".{int(time.time())}.json")))
+        return True
+    try:
+        old = json.loads(sup.read_text())
+    except (OSError, json.JSONDecodeError):
+        old = None
+    if not isinstance(old, list):
+        shutil.copy2(sup, sup.with_name(sup.name.replace(
+            ".json", f".corrupt-{int(time.time())}")))
+        old = []
+    tmp = sup.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(old + current, indent=2))
+    os.replace(tmp, sup)
+    p.unlink(missing_ok=True)
     return True
 
 

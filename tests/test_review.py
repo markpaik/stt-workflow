@@ -835,3 +835,29 @@ def test_a_nudged_line_with_a_matching_end_is_still_found(sandbox):
     assert r["ok"]
     assert json.loads(jpath.read_text())["segments"][1]["text"] == "Recovered."
 
+
+def test_a_second_redo_keeps_the_first_rounds_archived_edits(sandbox):
+    """Edit, Redo, edit again, Redo again. Path.replace onto the existing
+    superseded file threw the first round away, against the promise that
+    nothing is deleted."""
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="FIRST ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+    _make_meeting(sandbox)
+    review.apply("Mtg", 1, "edit", start=5.0, text="SECOND ROUND EDIT")
+    assert review.archive_decisions("Mtg") is True
+
+    kept = json.loads(mfile("Mtg", ".reviews.superseded.json").read_text())
+    assert [d["text"] for d in kept] == ["FIRST ROUND EDIT", "SECOND ROUND EDIT"]
+    assert not mfile("Mtg", ".reviews.json").exists()
+
+
+def test_a_corrupt_superseded_file_is_set_aside_not_lost(sandbox):
+    _make_meeting(sandbox)
+    mfile("Mtg", ".reviews.superseded.json").write_text("{not json")
+    review.apply("Mtg", 1, "edit", start=5.0, text="NEW ROUND")
+    assert review.archive_decisions("Mtg") is True
+    kept = json.loads(mfile("Mtg", ".reviews.superseded.json").read_text())
+    assert [d["text"] for d in kept] == ["NEW ROUND"]
+    aside = list(mfile("Mtg", ".json").parent.glob("*.reviews.superseded.corrupt-*"))
+    assert len(aside) == 1 and aside[0].read_text() == "{not json"
