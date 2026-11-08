@@ -30,7 +30,8 @@ while the batch or a relabel runs, and stops cleanly if a batch starts
 mid-way. A meeting renamed by a person since the dry run is skipped.
 
 --undo puts each folder back under its old name and restores the fields the
-move changed (source_file, renamed_from) and the old header line.
+move changed (title, source_file, renamed_from, date, date_source) and the
+old header line.
 """
 import argparse
 import fcntl
@@ -49,7 +50,9 @@ VERSION = 1
 PLAN_NAME = "iso-rename-plan.json"
 JOURNAL_NAME = "iso-rename-journal.jsonl"
 _MISSING = {"$missing": True}
-_BEFORE_KEYS = ("title", "source_file", "renamed_from")
+# date and date_source too: a folder whose json had no date gets the
+# name's own date stored as 'typed' by the move, and undo takes it off again
+_BEFORE_KEYS = ("title", "source_file", "renamed_from", "date", "date_source")
 
 
 # ------------------------------------------------------------------ paths ---

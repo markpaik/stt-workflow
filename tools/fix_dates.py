@@ -66,7 +66,8 @@ def plan(store=None, probe=True, today=None) -> list:
             "base": base, "meeting_id": d.get("meeting_id"),
             "old": {"date": d.get("date"),
                     "date_source": fj.get(d, "date_source"),
-                    "recorded_at": fj.get(d, "recorded_at")},
+                    "recorded_at": fj.get(d, "recorded_at"),
+                    "renamed_from": fj.get(d, "renamed_from")},
             "new": {"date": iso, "date_source": src, "recorded_at": rec},
             "days": _days(d.get("date"), iso),
             "skip": "being processed" if status.meeting_active(base) else None})
@@ -145,15 +146,20 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
         if not res.get("ok"):
             skipped.append({"base": base, "why": res.get("error")})
             continue
-        if src is None:
-            # the meeting had no date_source before the run: take it off again
+        # the meeting had no date_source before the run: take it off again.
+        # The re-stamp also wrote renamed_from: put the journaled value back
+        # (a journal from before it was recorded carries none, so it stays).
+        if src is None or "renamed_from" in old:
             from stt import review
             nb = res["base"]
             with review.lock_meeting(nb):
                 j = config.meeting_file(nb, ".json", store)
                 dd = fj.read_json(j)
-                if dd is not None and dd.get("date_source") == "manual":
-                    dd.pop("date_source", None)
+                if dd is not None:
+                    if src is None and dd.get("date_source") == "manual":
+                        dd.pop("date_source", None)
+                    if "renamed_from" in old:
+                        fj.put(dd, "renamed_from", old["renamed_from"])
                     fj.atomic_json(j, dd)
         restored.append({"base": res["base"]})
     return {"run": run_id, "restored": restored, "kept": kept,

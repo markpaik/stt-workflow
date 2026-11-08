@@ -422,7 +422,9 @@ def progress() -> dict:
     return st
 
 
-_BEFORE_KEYS = ("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS + ("ai_stale",)
+# renamed_from too: the rename writes it, and undo must take it off again
+_BEFORE_KEYS = (("title", "title_state", "title_source") + summarize.DESCRIPTION_KEYS
+                + ("ai_stale", "renamed_from"))
 _MISSING = {"$missing": True}
 
 

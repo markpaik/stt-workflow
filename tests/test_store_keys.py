@@ -577,3 +577,21 @@ def test_restamp_folders_keeps_the_date_source_and_leaves_twins_alone(sandbox, m
     assert _load("2026-10-05 Team Sync (2)")["date_source"] == "typed"
     from stt import doctor
     assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+
+
+def test_the_date_fix_undo_restores_renamed_from(dated):
+    j = config.meeting_file("Site Visit 9.17 09292026", ".json")
+    d0 = json.loads(j.read_text())
+    d0["renamed_from"] = "Site Visit 9.17 old name"
+    j.write_text(json.dumps(d0, indent=2))
+    before = {b: _load(b).get("renamed_from", "<none>") for b in config.meeting_bases()}
+    r = fix_dates.apply()
+    moved = {x["base"] for x in r["applied"]}
+    fix_dates.undo(r["run"], dry_run=False)
+    for b, rf in before.items():
+        now = dates.restamp(b, _load_any_date(b)) if b in moved else b
+        assert _load(now).get("renamed_from", "<none>") == rf, b
+
+
+def _load_any_date(base):
+    return dates.meeting_date(base)

@@ -279,3 +279,14 @@ def test_undo_without_apply_prints_the_plan_and_never_runs_the_model(lib, monkey
     out = capsys.readouterr().out
     assert "would undo" in out
     assert rt.proposals_path().read_bytes() == before
+
+
+def test_undo_takes_off_the_renamed_from_the_run_added(lib):
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    assert "renamed_from" in json.loads(
+        config.meeting_file(config.base_of("mid-b"), ".json").read_text())
+    rt.undo(dry=False, log=lambda *_: None)
+    for mid in ("mid-a", "mid-b", "mid-c", "mid-d"):
+        d = json.loads(config.meeting_file(config.base_of(mid), ".json").read_text())
+        assert "renamed_from" not in d, mid
