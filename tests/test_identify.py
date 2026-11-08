@@ -261,22 +261,24 @@ def test_lock_registry_serializes_concurrent_enroll(sandbox):
 
     identify.enroll("Existing", _vec(1))
 
-    def holder(release):
+    held, times = threading.Event(), {}
+
+    def holder():
         with identify.lock_registry():
-            release.wait(1.0)
+            held.set()
+            time.sleep(0.5)
+            times["released"] = time.monotonic()
 
-    release = threading.Event()
-    t = threading.Thread(target=holder, args=(release,))
+    t = threading.Thread(target=holder)
     t.start()
-    time.sleep(0.05)
-
-    start = time.monotonic()
+    # wait for the holder to own the lock, not a fixed start-up sleep: a
+    # fixed sleep fails under background priority with no lock problem
+    assert held.wait(10)
     identify.enroll("New Person", _vec(2))
-    elapsed = time.monotonic() - start
-    release.set()
+    done = time.monotonic()
     t.join()
 
-    assert elapsed >= 0.9, f"enroll() returned after {elapsed:.2f}s — did not wait for the lock"
+    assert done >= times["released"], "enroll() returned before the holder released the lock"
     assert "New Person" in identify.load_registry()
 
 
