@@ -391,7 +391,8 @@ For development and testing there is a fully sandboxed data home:
 `tools/demo_seed.py --dir qa/demo_home` builds a synthetic library
 (generated audio, fictional names) covering every panel state, and
 `STT_HOME` points a second server instance at it, scheduling included, so
-nothing you try there can touch your real meetings.
+nothing you try there can touch your real meetings. Under `STT_HOME` the
+batch and `run.sh` read `$STT_HOME/stt.env`, never the checkout's own.
 
 ## How it works
 

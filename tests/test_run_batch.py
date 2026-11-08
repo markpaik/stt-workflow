@@ -1,5 +1,6 @@
 """run_batch.py: the queued-job spec used to re-queue an interrupted --job run
 (see _terminate() in main()) so a Stop mid-file can never lose a Redo."""
+import os
 import types
 
 import run_batch
@@ -1232,3 +1233,31 @@ def test_an_empty_run_skips_the_doctor_unless_its_report_is_a_day_old(sandbox, m
     os.utime(rep, (old, old))
     _drive(monkeypatch, [])
     assert len(calls) == 3            # a day-old report: the check runs
+
+
+def test_a_sandboxed_batch_reads_the_sandbox_stt_env_not_the_repo_one(tmp_path, monkeypatch):
+    """Under STT_HOME the settings file is $STT_HOME/stt.env, as config says.
+    The repo stt.env holds the REAL library and iCloud paths, and loading it
+    first made a sandboxed batch read, clean and sweep the real library."""
+    import run_batch
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    (repo / "stt.env").write_text("STT_MEETINGS_DIR=/real/meetings\n"
+                                  "STT_ICLOUD_DIR=/real/icloud\nSTT_ZZ_REPO=1\n")
+    (home / "stt.env").write_text("STT_ZZ_HOME=1\n")
+    for k in ("STT_MEETINGS_DIR", "STT_ICLOUD_DIR", "STT_ZZ_REPO", "STT_ZZ_HOME",
+              "STT_PROJECT_DIR"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("STT_HOME", str(home))
+    run_batch._load_env_file(repo)
+    for k in ("STT_MEETINGS_DIR", "STT_ICLOUD_DIR", "STT_ZZ_REPO"):
+        assert k not in os.environ, k
+    assert os.environ.get("STT_ZZ_HOME") == "1"
+
+    # with no STT_HOME the repo file is the settings file, as before
+    monkeypatch.delenv("STT_HOME")
+    monkeypatch.delenv("STT_ZZ_HOME")
+    run_batch._load_env_file(repo)
+    assert os.environ.get("STT_MEETINGS_DIR") == "/real/meetings"

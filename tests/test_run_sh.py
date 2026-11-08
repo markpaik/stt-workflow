@@ -32,3 +32,20 @@ def test_env_with_space_in_path_loads_and_dispatch_runs(run_sh):
         capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout == space_path
+
+
+def test_under_stt_home_the_sandbox_stt_env_is_loaded_not_the_repo_one(run_sh, tmp_path):
+    (run_sh / "stt.env").write_text("STT_ICLOUD_DIR=/real/icloud\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "stt.env").write_text("STT_ZZ_HOME=yes\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("STT_ICLOUD_DIR", "STT_PROJECT_DIR")}
+    env["STT_HOME"] = str(home)
+    r = subprocess.run(
+        [str(run_sh / "run.sh"), "py", "-c",
+         "import os,sys; sys.stdout.write(os.environ.get('STT_ICLOUD_DIR','-')"
+         " + '|' + os.environ.get('STT_ZZ_HOME','-'))"],
+        capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "-|yes"
