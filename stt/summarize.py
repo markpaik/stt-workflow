@@ -260,9 +260,17 @@ class EmptyDescription(RuntimeError):
     stored, so the old description stays and a stale retry backs off."""
 
 
+def _no_description(tmpl: dict, gist, summary) -> bool:
+    """True when a reply holds nothing to store. A gist-shaped reply needs
+    its gist: decisions or open questions alone would replace a good gist
+    with an empty one. An older-shaped reply needs its prose summary."""
+    if "gist" in ((tmpl or {}).get("fields") or {}):
+        return not str(gist or "").strip()
+    return not (str(gist or "").strip() or str(summary or "").strip())
+
+
 def _empty_description(desc: dict) -> bool:
-    return not (str(desc.get("gist") or "").strip()
-                or str(desc.get("summary") or "").strip())
+    return _no_description(desc.get("tmpl"), desc.get("gist"), desc.get("summary"))
 
 
 class OllamaDown(RuntimeError):
@@ -979,8 +987,7 @@ def store_description(base: str, desc: dict, title: str = None) -> dict:
         for k, v in (tmpl.get("labels") or {}).items():
             labels.setdefault(k, v)
         rendered = speaker_text.render(tmpl, d, labels)
-        if not (str(rendered.get("ai_gist") or "").strip()
-                or str(rendered.get("ai_summary") or "").strip()):
+        if _no_description(tmpl, rendered.get("ai_gist"), rendered.get("ai_summary")):
             # an empty reply (a cached one from retitle too) must never
             # erase a good description or clear the out-of-date flag
             raise EmptyDescription("the model gave no description")

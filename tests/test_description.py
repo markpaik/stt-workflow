@@ -580,7 +580,9 @@ GOOD = {"ai_gist": "Hiring plan approved.", "ai_title": "Good Title",
         "ai_decisions": ["Keep it."], "ai_stale": True}
 
 
-@pytest.mark.parametrize("junk", ["", "I am sorry, I cannot do that.", "\n\n"])
+@pytest.mark.parametrize("junk", ["", "I am sorry, I cannot do that.", "\n\n",
+                                  "DECISIONS:\n- Keep the budget.",
+                                  "SERIES: Weekly Check-in\nTOPIC: Hiring\nOPEN QUESTIONS:\n- Who?"])
 def test_an_empty_reply_keeps_the_old_description_and_counts_as_a_failure(
         owner, monkeypatch, junk):
     """Ollama returns empty content when thinking uses the whole budget. A
