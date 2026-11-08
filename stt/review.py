@@ -302,13 +302,20 @@ def _locate_segment(segs, index, start, end=None):
     client's start must not now lie inside a DIFFERENT line (it merged into
     that line).
 
+    The exact-index path checks `end` too, with END_EXACT. A same-speaker
+    neighbour that merges INTO the target keeps the target's start and
+    grows its end, and an edit sent for the old line would replace the
+    merged words (or a delete would remove both lines).
+
     Returns (index, seg) or (None, None)."""
-    STRICT, WIDE, TIE = 0.25, 2.0, 0.5
+    STRICT, WIDE, TIE, END_EXACT = 0.25, 2.0, 0.5, 1.0
     in_range = 0 <= index < len(segs)
     if start is None:
         return (index, segs[index]) if in_range else (None, None)
     start = float(start)
     if in_range and abs(segs[index]["start"] - start) <= STRICT:
+        if end is not None and abs(segs[index]["end"] - float(end)) >= END_EXACT:
+            return None, None
         return index, segs[index]
     dists = sorted((abs(s["start"] - start), i) for i, s in enumerate(segs))
     if not dists or dists[0][0] >= WIDE:

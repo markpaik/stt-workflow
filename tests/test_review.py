@@ -825,6 +825,30 @@ def test_a_stale_edit_whose_end_no_longer_matches_is_refused(sandbox):
     assert [s["text"] for s in after] == ["Turn.", "Victim line."]
 
 
+def test_a_stale_edit_of_a_line_a_neighbour_merged_into_is_refused(sandbox):
+    """Tab A gave line 1 the same speaker as line 0, so line 1 merged INTO
+    line 0. Line 0 keeps its start (0.0) and its end grows from 10.0 to
+    20.0. Tab B still holds the old list and edits line 0 by its exact
+    index and start. The exact-index path must check the end too, or the
+    edit replaces the merged words and a delete removes both lines."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 20.0, "SPEAKER_00", "First words. Merged words."),
+                                (20.0, 30.0, "SPEAKER_01", "Other line.")])
+    jpath.write_text(json.dumps(d))
+
+    assert review._locate_segment(d["segments"], 0, 0.0, 10.0) == (None, None)
+    r = review.apply("Mtg", 0, "edit", start=0.0, end=10.0, text="STALE PAGE EDIT")
+    assert not r["ok"] and "changed" in r["error"]
+    assert not review.delete_segment("Mtg", 0, start=0.0, end=10.0)["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["First words. Merged words.", "Other line."]
+    # a small end nudge at the exact index is still the same line
+    r = review.apply("Mtg", 0, "edit", start=0.0, end=19.6, text="Fresh edit.")
+    assert r["ok"]
+
+
 def test_a_nudged_line_with_a_matching_end_is_still_found(sandbox):
     _make_meeting(sandbox)
     jpath = mfile("Mtg", ".json")
