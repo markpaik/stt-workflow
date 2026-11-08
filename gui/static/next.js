@@ -648,6 +648,8 @@ const A={
  'rn-open'(el){hidePop();UI.naming={rename:el.dataset.name,value:null};render(true);const i=$('#rn-in');if(i){i.focus();i.select();}},
  async 'rn-save'(){const N=UI.naming;const i=$('#rn-in');const v=(i?i.value:'').trim();if(!v||!N){return;}N.busy=true;
   const r=await api('/api/rename_speaker',{name:N.rename,new:v}).catch(()=>null);N.busy=false;
+  // onto an enrolled person whose voice does not match: the merge confirm
+  if(r&&r.need_confirm){UI.naming=null;UI.confirm='mg:'+N.rename;UI.mergeTo=r.dst;UI.err['spk:'+N.rename]=r.error;render(true);return;}
   if(!r||!r.ok){N.err=(r&&r.error)||'Could not rename. The new name may already exist; merge instead.';N.value=v;render(true);return;}
   UI.naming=null;toast('Renamed. The meetings update in the background.');await refresh();render(true);},
  async merge(el){const dst=($('#mg-sel')||{}).value;hidePop();if(!dst)return;const n=el.dataset.name,r=await act('/api/merge_speakers',{src:'name:'+n,dst:'name:'+dst},'spk:'+n);if(r.need_confirm){UI.confirm='mg:'+n;UI.mergeTo=dst;render(true);return;}if(r.ok!==false&&!r.error)toast(`Merged into ${dst}.`);},

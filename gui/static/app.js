@@ -5616,6 +5616,10 @@ async function dRenameGo(old,n){
   DRAWER.dconfirm=null;DRAWER.renameTo=null;
   if(!n)return;
   const r=await api('/api/rename_speaker',{name:old,new:n});
+  // onto an enrolled person whose voice does not match: the merge warning,
+  // whose confirm runs the same merge with confirm set
+  if(r.need_confirm){DRAWER.dconfirm='mgwarn:'+old;DRAWER.mergeWarn={dst:r.dst,text:r.error||''};
+    dSpeakersForce();return;}
   if(!r.ok){dSpkFail(r);return;}
   if(DRAWER.spkOpen===old)DRAWER.spkOpen=n;   // the panel follows the new name
   DRAWER.spkErr='';

@@ -1586,6 +1586,23 @@ def pick_files():
     return [ln for ln in out.splitlines() if ln.strip()]
 
 
+def _merge_warning(dst: str, rows, prints: dict, exclude=()):
+    """The need_confirm reply when the voice rows being folded into `dst`
+    do not match its saved samples (identify.sample_check), else None.
+    `prints` is read once by the caller, not once per row."""
+    warns = [w for w in (identify.sample_check(dst, r, exclude=exclude, prints=prints)
+                         for r in (rows if rows is not None else [])) if w]
+    if not warns:
+        return None
+    w = min(warns, key=lambda x: x["own"])
+    msg = f"This voice matches {dst}'s saved samples at only {w['own']:.2f}"
+    if w["cross_name"] is not None and w["cross"] > w["own"]:
+        msg += f" — and matches {w['cross_name']} better ({w['cross']:.2f})"
+    msg += ". It may be the wrong person. Confirm to merge anyway."
+    return {"ok": False, "warn": "suspect_sample", "need_confirm": True,
+            "error": msg, **w}
+
+
 def set_folder(which: str, path: str, confirm: bool = False):
     p = Path(path).expanduser()
     if not p.is_dir():
@@ -2668,6 +2685,16 @@ class Handler(BaseHTTPRequestHandler):
                 if identify.reserved_name(b["new"]):
                     self._json({"ok": False, "error": identify.RESERVED_ERROR})
                     return
+                # a rename onto an enrolled person is a merge: the same
+                # wrong-person check as /api/merge_speakers, before confirm
+                if (not b.get("confirm") and b["new"] != b.get("name")
+                        and b["new"] in identify.load_registry()):
+                    prints = identify.load_voiceprints()
+                    warn = _merge_warning(b["new"], prints.get(b.get("name")), prints,
+                                          exclude=(b.get("name"),))
+                    if warn:
+                        self._json({**warn, "dst": b["new"]})
+                        return
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:
                     self._json({"ok": ok})
@@ -2699,21 +2726,13 @@ class Handler(BaseHTTPRequestHandler):
                     # does not match into a person poisons the profile, so a
                     # mismatch asks for confirm first
                     if not b.get("confirm") and st_ in ("uid", "name"):
+                        prints = identify.load_voiceprints()
                         rows = (unknowns.samples_of(sv) if st_ == "uid"
-                                else identify.load_voiceprints().get(sv))
-                        warns = [w for w in (identify.sample_check(
-                            dv, r, exclude=(sv,) if st_ == "name" else ())
-                            for r in (rows if rows is not None else [])) if w]
-                        if warns:
-                            w = min(warns, key=lambda x: x["own"])
-                            msg = (f"This voice matches {dv}'s saved samples at "
-                                   f"only {w['own']:.2f}")
-                            if w["cross_name"] is not None and w["cross"] > w["own"]:
-                                msg += (f" — and matches {w['cross_name']} better "
-                                        f"({w['cross']:.2f})")
-                            msg += ". It may be the wrong person. Confirm to merge anyway."
-                            self._json({"ok": False, "warn": "suspect_sample",
-                                        "need_confirm": True, "error": msg, **w})
+                                else prints.get(sv))
+                        warn = _merge_warning(dv, rows, prints,
+                                              exclude=(sv,) if st_ == "name" else ())
+                        if warn:
+                            self._json(warn)
                             return
                 heard = []
                 if st_ == "uid" and dt_ == "name":

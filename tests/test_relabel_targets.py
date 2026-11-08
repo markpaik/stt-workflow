@@ -729,3 +729,50 @@ def test_merge_speakers_of_the_same_voice_needs_no_confirm(running_server, queue
     status, body = _post(running_server, "/api/merge_speakers",
                          {"src": "name:Casey Q", "dst": "name:Casey Quinn"})
     assert body["ok"] is True, body
+
+
+def test_a_rename_onto_an_enrolled_person_warns_like_a_merge(running_server, queued):
+    """A rename onto a name that is already enrolled is a merge. It skipped
+    the wrong-person check that /api/merge_speakers runs, so a case variant
+    of an enrolled name stacked a foreign voice into that profile."""
+    casey, dana = _unit(1), _unit(3)
+    identify.enroll("Casey Quinn", casey, source="Alpha Mtg")
+    identify.enroll("Dana Fox", dana, source="Alpha Mtg")
+    _meeting("Alpha Mtg", {"SPEAKER_00": casey})
+    for new in ("Casey Quinn", "casey quinn"):
+        status, body = _post(running_server, "/api/rename_speaker",
+                             {"name": "Dana Fox", "new": new})
+        assert status == 200 and body["ok"] is False, new
+        assert body["warn"] == "suspect_sample" and body["need_confirm"] is True
+        assert body["dst"] == "Casey Quinn"
+    assert "Dana Fox" in identify.load_registry()
+    assert identify.load_voiceprints()["Casey Quinn"].shape[0] == 1
+
+    status, body = _post(running_server, "/api/rename_speaker",
+                         {"name": "Dana Fox", "new": "Casey Quinn", "confirm": True})
+    assert body["ok"] is True
+    assert "Dana Fox" not in identify.load_registry()
+
+
+def test_a_rename_to_a_new_name_or_onto_the_same_voice_needs_no_confirm(
+        running_server, queued):
+    v = _unit(1)
+    identify.enroll("Casey Quinn", v, source="Alpha Mtg")
+    identify.enroll("Casey Q", _near_unit(v, 5), source="Alpha Mtg")
+    identify.enroll("Dana Fox", _unit(3), source="Alpha Mtg")
+    _meeting("Alpha Mtg", {"SPEAKER_00": v})
+    status, body = _post(running_server, "/api/rename_speaker",
+                         {"name": "Dana Fox", "new": "Dana Fox-Reyes"})
+    assert body["ok"] is True, body
+    status, body = _post(running_server, "/api/rename_speaker",
+                         {"name": "Casey Q", "new": "Casey Quinn"})
+    assert body["ok"] is True, body
+
+
+def test_both_shells_route_a_rename_warning_to_the_merge_confirm():
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent / "gui" / "static"
+    nxt = (root / "next.js").read_text()
+    assert "if(r&&r.need_confirm){UI.naming=null;UI.confirm='mg:'+N.rename;UI.mergeTo=r.dst" in nxt
+    app = (root / "app.js").read_text()
+    assert "DRAWER.mergeWarn={dst:r.dst" in app

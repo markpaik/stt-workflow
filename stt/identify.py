@@ -250,7 +250,7 @@ def loo_scores(samples) -> list:
     return out
 
 
-def sample_check(name, vector, exclude=()):
+def sample_check(name, vector, exclude=(), prints=None):
     """Should this new sample join `name`'s EXISTING stack? None = clean (or
     the person is new, so there is no stack to disagree with). Otherwise
     {"own", "cross", "cross_name"}: the candidate scores below
@@ -260,8 +260,9 @@ def sample_check(name, vector, exclude=()):
 
     `exclude` leaves profiles out of the cross check: a merge of one person
     into another checks the source's own rows, which always match the
-    source best."""
-    prints = load_voiceprints()
+    source best. `prints` (load_voiceprints()) lets a caller that checks
+    many rows read the profiles from disk once."""
+    prints = load_voiceprints() if prints is None else prints
     own = prints.get(name)
     if own is None:
         return None
