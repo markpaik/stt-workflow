@@ -314,6 +314,23 @@ def ignore_pair(a: str, b: str) -> bool:
         return False
 
 
+def forget_base(base: str) -> int:
+    """Drop every kept pair that names `base` (a deleted meeting). A new
+    meeting under the same name must not inherit the old keep-both choice.
+    Returns how many pairs went."""
+    if not base:
+        return 0
+    try:
+        with _io_lock:
+            pairs = ignored_pairs()
+            keep = sorted(x for x in pairs if base not in x)
+            if len(keep) != len(pairs):
+                _atomic_write(ignored_path(), json.dumps([list(x) for x in keep]))
+            return len(pairs) - len(keep)
+    except OSError:
+        return 0
+
+
 def rename_pair_refs(old_base: str, new_base: str) -> int:
     """A meeting rename must follow into the "keep both" list.
 

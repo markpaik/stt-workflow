@@ -277,3 +277,30 @@ def test_delete_reports_zero_for_a_meeting_with_no_audio(sandbox):
     _meeting("Light Mtg 05012026")
     r = archive.delete_meeting("Light Mtg 05012026")
     assert r["ok"] is True and r["freed_mb"] < 1.0
+
+
+def test_delete_drops_its_override_its_kept_pairs_and_its_lock(sandbox):
+    """Only tools/purge.py cleaned these. A panel Delete left the group
+    override, the keep-both pair and the meeting's lock file behind, and the
+    doctor then reported an orphan lock."""
+    from stt import dupes, groups, review
+    _meeting("2026-05-01 Gone", meeting_id="aaaa1111bbbb2222")
+    _meeting("2026-05-01 Other", meeting_id="cccc3333dddd4444")
+    _meeting("2026-05-01 Third")
+    config.index_set("aaaa1111bbbb2222", "2026-05-01 Gone")
+    config.index_set("cccc3333dddd4444", "2026-05-01 Other")
+    assert groups.set_override("aaaa1111bbbb2222", "gX")["ok"]
+    assert groups.set_override("cccc3333dddd4444", "gX")["ok"]
+    assert dupes.ignore_pair("2026-05-01 Gone", "2026-05-01 Third")
+    assert dupes.ignore_pair("2026-05-01 Other", "2026-05-01 Third")
+    with review.lock_meeting("2026-05-01 Gone"):
+        pass
+    locks = config.meetings_dir() / ".locks"
+    assert (locks / "aaaa1111bbbb2222.lock").exists()
+
+    assert archive.delete_meeting("2026-05-01 Gone")["ok"]
+
+    assert set(groups.load_overrides()) == {"cccc3333dddd4444"}
+    assert dupes.ignored_pairs() == {("2026-05-01 Other", "2026-05-01 Third")}
+    assert not (locks / "aaaa1111bbbb2222.lock").exists()
+    assert config.orphan_lock_files() == []
