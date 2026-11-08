@@ -320,3 +320,27 @@ def test_memo_in_recently_deleted_is_never_eligible(tmp_path):
            "duration": 600.0, "title": "x", "deleted": True}
     ok, why, _, _ = vm.eligible(row, 2e9, "2000-01-01", tmp_path)
     assert not ok and why == "deleted"
+
+
+@pytest.mark.parametrize("kind", ["absolute", "traversal"])
+def test_a_path_outside_the_container_is_never_eligible(tmp_path, kind):
+    """ZPATH comes from the Voice Memos database. A tampered row with an
+    absolute or ../ path must not make the sync copy a file from outside
+    the container."""
+    from stt import voicememos as vm
+    container = tmp_path / "Recordings"
+    container.mkdir()
+    outside = tmp_path / "secret.m4a"
+    outside.write_bytes(b"\x01" * 4096)
+    os.utime(outside, (1e9, 1e9))
+    path = str(outside) if kind == "absolute" else "../secret.m4a"
+    row = {"uuid": "u1", "path": path, "zdate": 0, "duration": 600.0,
+           "title": "x", "deleted": False}
+    ok, why, _, _ = vm.eligible(row, 2e9, "2000-01-01", container)
+    assert not ok and why == "outside_library"
+    # the same file inside the container is fine
+    inside = container / "20261105 100000-ABCDEF12.m4a"
+    inside.write_bytes(b"\x01" * 4096)
+    os.utime(inside, (1e9, 1e9))
+    ok, why, _, _ = vm.eligible(dict(row, path=inside.name), 2e9, "2000-01-01", container)
+    assert ok, why

@@ -311,6 +311,13 @@ def eligible(row: dict, now: float, since: str, container: Path):
     if dur < MIN_SECONDS:
         return False, "short", start, from_path
     f = container / row["path"]
+    # ZPATH is a name relative to the container. An absolute or ../ value
+    # (a tampered database) must never make the sync copy an outside file.
+    try:
+        if not f.resolve().is_relative_to(Path(container).resolve()):
+            return False, "outside_library", start, from_path
+    except (OSError, RuntimeError, ValueError):
+        return False, "outside_library", start, from_path
     try:
         st = f.stat()
     except FileNotFoundError:
@@ -485,7 +492,7 @@ def doctor_findings() -> list:
     counts = last.get("counts") or {}
     skipped = {k: v for k, v in counts.items()
                if k in ("short", "in_progress", "not_local", "no_start", "no_file",
-                        "copy_failed")}
+                        "copy_failed", "outside_library")}
     if skipped and st == "ok":
         out.append(("voicememos_skipped",
                     ", ".join(f"{k} {v}" for k, v in sorted(skipped.items()))))
