@@ -14,6 +14,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -140,6 +141,14 @@ def _unique_filename(stem: str, reg: dict) -> str:
     # casefolded: the default macOS disk is case-insensitive, so
     # "alex rivera.npy" IS "Alex Rivera.npy" there
     claimed = {meta["file"].casefold() for meta in reg.values()}
+    # unknown voices keep their U###.npy stacks in the same folder, and a
+    # file nobody claims may still be someone's only copy: never reuse either
+    with contextlib.suppress(OSError, ValueError, AttributeError):
+        unk = json.loads((config.VOICEPRINTS_DIR / "unknowns.json").read_text())
+        claimed |= {str(m.get("file", "")).casefold()
+                    for m in (unk.get("speakers") or {}).values()}
+    with contextlib.suppress(OSError):
+        claimed |= {p.name.casefold() for p in config.VOICEPRINTS_DIR.glob("*.npy")}
     fname = f"{stem}.npy"
     n = 2
     while fname.casefold() in claimed:
@@ -150,6 +159,19 @@ def _unique_filename(stem: str, reg: dict) -> str:
 
 def _name_key(name: str) -> str:
     return " ".join(str(name).split()).casefold()
+
+
+_RESERVED = re.compile(r"U\d+", re.IGNORECASE)
+
+
+def reserved_name(name) -> bool:
+    """'U007' is an unknown voice's id, and its samples live in U007.npy in
+    this same folder. A person by that name would share the file."""
+    return bool(_RESERVED.fullmatch(str(name or "").strip()))
+
+
+RESERVED_ERROR = ("Names like U7 or U007 are reserved for unknown voices. "
+                  "Pick a different name.")
 
 
 def canonical_name(name: str, reg: dict = None) -> str:
@@ -314,7 +336,7 @@ def rename_person(old: str, new: str) -> bool:
         if old not in reg:
             return False
         new = canonical_name(new, {k: v for k, v in reg.items() if k != old})
-        if not new or new == old:
+        if not new or new == old or reserved_name(new):
             return False
         if new in reg:
             return merge_people(old, new)
@@ -488,6 +510,8 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
     to_name = (to_name or "").strip()
     if not to_name:
         return {"ok": False, "error": "a destination name is required"}
+    if reserved_name(to_name):
+        return {"ok": False, "error": RESERVED_ERROR}
     with lock_registry():
         reg = load_registry()
         to_name = canonical_name(to_name, reg)
@@ -576,6 +600,8 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
     it, and a shape change would have to be migrated everywhere at once. A
     parallel list is additive — an entry without one reads exactly as it did.
     """
+    if reserved_name(name):
+        raise ValueError(RESERVED_ERROR)
     _private_dir()
     with lock_registry():
         reg = load_registry()

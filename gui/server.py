@@ -2455,6 +2455,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "Type a name first."})
                     return
                 if name and not b.get("local"):
+                    if identify.reserved_name(name):
+                        self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                        return
                     # the enrolled spelling, so a case variant names the
                     # existing person and relabels under the name she has
                     name = identify.canonical_name(name)
@@ -2656,6 +2659,9 @@ class Handler(BaseHTTPRequestHandler):
                 b["new"] = identify.canonical_name(
                     b.get("new"), {k: v for k, v in identify.load_registry().items()
                                    if k != b.get("name")})
+                if identify.reserved_name(b["new"]):
+                    self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                    return
                 ok = identify.rename_person(b["name"], b["new"])
                 if not ok:
                     self._json({"ok": ok})
@@ -2679,6 +2685,9 @@ class Handler(BaseHTTPRequestHandler):
                 st_, sv = b["src"].split(":", 1)
                 dt_, dv = b["dst"].split(":", 1)
                 if dt_ == "name":
+                    if identify.reserved_name(dv):
+                        self._json({"ok": False, "error": identify.RESERVED_ERROR})
+                        return
                     dv = identify.canonical_name(dv)
                 heard = []
                 if st_ == "uid" and dt_ == "name":

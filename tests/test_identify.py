@@ -610,3 +610,38 @@ def test_naming_with_a_case_variant_promotes_into_the_existing_person(sandbox):
     reg = identify.load_registry()
     assert list(reg) == ["Alex Rivera"]
     assert identify.load_voiceprints()["Alex Rivera"].shape[0] == 3
+
+
+def _seed_unknown(uid, vec):
+    import json
+    from stt import config
+    np.save(config.VOICEPRINTS_DIR / f"{uid}.npy",
+            (vec / np.linalg.norm(vec)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 8, "speakers": {uid: {"file": f"{uid}.npy", "meetings": ["m"]}}}))
+
+
+@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 "])
+def test_an_unknown_id_is_never_a_person_name(sandbox, reserved):
+    """People and unknown voices share one folder. A person named 'U007'
+    took the unknown's U007.npy, and promoting the unknown later deleted it."""
+    from stt import config
+    _seed_unknown("U007", _near(1, 0))
+    before = np.load(config.VOICEPRINTS_DIR / "U007.npy").copy()
+    identify.enroll("Sam Chen", _near(0, 0))
+
+    assert identify.rename_person("Sam Chen", reserved) is False
+    with pytest.raises(ValueError):
+        identify.enroll(reserved, _near(2, 0))
+    assert identify.reassign_sample("Sam Chen", 0, reserved)["ok"] is False
+
+    assert list(identify.load_registry()) == ["Sam Chen"]
+    assert np.allclose(np.load(config.VOICEPRINTS_DIR / "U007.npy"), before)
+
+
+def test_a_new_file_never_reuses_an_unknowns_file_or_an_orphan(sandbox):
+    from stt import config
+    _seed_unknown("U007", _near(1, 0))
+    (config.VOICEPRINTS_DIR / "Orphan.npy").write_bytes(b"x")
+    assert identify._unique_filename("U007", {}) == "U007_2.npy"
+    assert identify._unique_filename("Orphan", {}) == "Orphan_2.npy"
