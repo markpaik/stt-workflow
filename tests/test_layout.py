@@ -457,3 +457,41 @@ def test_migration_leaves_unrelated_files_in_a_picked_folder_alone(sandbox, tmp_
     assert not (d / "2025-01-02 Notes").exists()
     for ext in (".json", ".txt", ".m4a"):
         assert (d / "Board Prep" / f"Board Prep{ext}").is_file()
+
+
+def test_migration_leaves_another_tools_segments_export_alone(sandbox, tmp_path):
+    """A json with a segments list and a paired .txt is not enough: another
+    tool's export has that shape too. Only a json the pipeline wrote (with
+    speakers and source_file) moves, dated name or not."""
+    d = tmp_path / "Work"
+    d.mkdir()
+    (d / "sub.json").write_text(json.dumps({"segments": [{"start": 0, "text": "x"}]}))
+    (d / "sub.txt").write_text("x")
+    (d / "odd.json").write_text(json.dumps({"segments": ["x"], "speakers": [],
+                                            "source_file": "odd.m4a"}))
+    (d / "odd.txt").write_text("x")
+    config.migrate_flat_meetings(d)
+    for name in ("sub.json", "sub.txt", "odd.json", "odd.txt"):
+        assert (d / name).is_file(), name
+    assert not (d / "sub").exists() and not (d / "odd").exists()
+
+
+def test_the_adopt_warning_names_other_files_and_flat_meetings(sandbox, tmp_path):
+    d = tmp_path / "Pick"
+    d.mkdir()
+    assert config.adopt_folder_warning(d) is None
+    (d / "Kept").mkdir()
+    (d / "Kept" / "Kept.json").write_text("{}")
+    (d / ".DS_Store").write_text("x")
+    assert config.adopt_folder_warning(d) is None   # only meeting folders
+    (d / "package.json").write_text("{}")
+    (d / "notes").mkdir()
+    w = config.adopt_folder_warning(d)
+    assert "2 item(s) that are not meetings" in w and "flat-layout" not in w
+    real = {"source_file": "Board Prep.m4a", "speakers": [], "segments": []}
+    (d / "Board Prep.json").write_text(json.dumps(real))
+    (d / "Board Prep.txt").write_text("stub")
+    (d / "Board Prep.m4a").write_text("x")
+    w = config.adopt_folder_warning(d)
+    assert "2 item(s)" in w and "1 older flat-layout meeting(s) will move" in w
+    assert config.flat_meeting_bases(d) == ["Board Prep"]

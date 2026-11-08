@@ -952,9 +952,11 @@ def backfill_meeting_ids(dest_dir=None) -> int:
 
 
 def _is_flat_meeting(j: Path) -> bool:
-    """A flat-layout meeting: a transcript json (an object with segments)
-    next to its .txt. A folder the owner picks may hold other work, and a
-    stray package.json or notes file must never be moved into a folder."""
+    """A flat-layout meeting: a json the pipeline wrote, next to its .txt.
+    The pipeline has always written "segments" and "speakers" lists and a
+    "source_file" name. A folder the owner picks may hold
+    other work, and a stray package.json, notes file or another tool's
+    {"segments": [...]} export must never be moved into a folder."""
     import json as _json
     if not j.with_suffix(".txt").is_file():
         return False
@@ -962,7 +964,50 @@ def _is_flat_meeting(j: Path) -> bool:
         data = _json.loads(j.read_text())
     except (OSError, ValueError):
         return False
-    return isinstance(data, dict) and isinstance(data.get("segments"), list)
+    if not isinstance(data, dict):
+        return False
+    segs = data.get("segments")
+    return (isinstance(segs, list) and all(isinstance(x, dict) for x in segs)
+            and isinstance(data.get("speakers"), list)
+            and isinstance(data.get("source_file"), str))
+
+
+def flat_meeting_bases(dest_dir=None) -> list:
+    """The flat-layout meetings migrate_flat_meetings would move."""
+    d = Path(dest_dir or meetings_dir())
+    if not d.is_dir():
+        return []
+    return sorted(j.stem for j in d.glob("*.json")
+                  if not j.name.endswith(_SIDECAR_JSON) and _is_flat_meeting(j))
+
+
+def adopt_folder_warning(dest_dir) -> str | None:
+    """What picking `dest_dir` as the transcripts folder would do to files
+    already in it, as one sentence. None when it holds only meeting folders
+    (or nothing). The panel asks the owner to confirm before it adopts a
+    folder with other files, or one whose flat meetings it would move."""
+    d = Path(dest_dir)
+    if not d.is_dir():
+        return None
+    flat = flat_meeting_bases(d)
+    live = set(meeting_bases(d))
+    other = 0
+    for e in d.iterdir():
+        if e.name.startswith(".") or e.name in live:
+            continue
+        if e.is_file() and any(e.name.startswith(b + ".") for b in flat):
+            continue
+        other += 1
+    if not flat and not other:
+        return None
+    parts = []
+    if other:
+        parts.append(f"This folder holds {other} item(s) that are not "
+                     "meetings. They stay where they are.")
+    if flat:
+        parts.append(f"{len(flat)} older flat-layout meeting(s) will move "
+                     "into their own folders.")
+    return " ".join(parts)
 
 
 def migrate_flat_meetings(dest_dir=None) -> int:
@@ -976,9 +1021,7 @@ def migrate_flat_meetings(dest_dir=None) -> int:
     if not d.exists():
         return 0
     moved = 0
-    bases = [j.stem for j in d.glob("*.json")
-             if not j.name.endswith(_SIDECAR_JSON) and _is_flat_meeting(j)]
-    for base in bases:
+    for base in flat_meeting_bases(d):
         folder = d / base
         folder.mkdir(exist_ok=True)
         for f in list(d.iterdir()):
