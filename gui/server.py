@@ -3140,17 +3140,20 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if b.get("action") == "delete":
                     self._json(review.delete_segment(b["base"], int(b["index"]),
-                                                     start=b.get("start")))
+                                                     start=b.get("start"),
+                                                     end=b.get("end")))
                     return
                 if b.get("action") == "split":
                     self._json(review.split_segment(
                         b["base"], int(b["index"]), start=b.get("start"),
                         text_a=b.get("text_a", ""), text_b=b.get("text_b", ""),
-                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b")))
+                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b"),
+                        end=b.get("end")))
                     return
                 self._json(review.apply(b["base"], int(b["index"]), b["action"],
                                         start=b.get("start"), text=b.get("text"),
-                                        speaker_id=b.get("speaker")))
+                                        speaker_id=b.get("speaker"),
+                                        end=b.get("end")))
             elif u.path == "/api/export":
                 if not self._require_base(b.get("base")):
                     return

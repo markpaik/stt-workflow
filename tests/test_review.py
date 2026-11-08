@@ -776,3 +776,62 @@ def test_channel_aware_mic_speaker_replays_and_drops_on_unenroll(sandbox):
     assert relabel.relabel_one("Call")
     d2 = json.loads((mfile("Call", ".json")).read_text())
     assert not any(s["id"] == channels.MIC_ID for s in d2["speakers"])
+
+
+def _two_lines(segs):
+    out = []
+    for st, en, spk, txt in segs:
+        out.append({"start": st, "end": en, "speaker": spk, "name": None,
+                    "display": spk, "text": txt, "flags": [], "overlap": False})
+    return out
+
+
+def test_a_stale_edit_of_a_merged_away_line_is_refused(sandbox):
+    """Tab A deleted a line, so 'Right.' (5.0-5.6) merged into the turn
+    before it. Tab B still edits 'Right.' by its old index and start. The
+    nearest start is now a different person's line 0.9 s away, which the
+    wide fallback used to edit."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 5.6, "SPEAKER_00", "Turn. Right."),
+                                (5.9, 9.0, "SPEAKER_01", "Victim line.")])
+    jpath.write_text(json.dumps(d))
+
+    r = review.apply("Mtg", 1, "edit", start=5.0, text="STALE PAGE EDIT")
+    assert not r["ok"] and "changed" in r["error"]
+    r = review.delete_segment("Mtg", 1, start=5.0)
+    assert not r["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["Turn. Right.", "Victim line."]
+
+
+def test_a_stale_edit_whose_end_no_longer_matches_is_refused(sandbox):
+    """The line 5.0-5.5 was deleted outright, leaving no merge behind. The
+    client sends its end too, and the nearest line ends 3.5 s later."""
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"] = _two_lines([(0.0, 5.0, "SPEAKER_00", "Turn."),
+                                (5.9, 9.0, "SPEAKER_01", "Victim line.")])
+    jpath.write_text(json.dumps(d))
+
+    r = review.apply("Mtg", 1, "edit", start=5.0, end=5.5, text="STALE PAGE EDIT")
+    assert not r["ok"]
+    assert not review.delete_segment("Mtg", 1, start=5.0, end=5.5)["ok"]
+    assert not review.split_segment("Mtg", 1, start=5.0, end=5.5,
+                                    text_a="a", text_b="b")["ok"]
+    after = json.loads(jpath.read_text())["segments"]
+    assert [s["text"] for s in after] == ["Turn.", "Victim line."]
+
+
+def test_a_nudged_line_with_a_matching_end_is_still_found(sandbox):
+    _make_meeting(sandbox)
+    jpath = mfile("Mtg", ".json")
+    d = json.loads(jpath.read_text())
+    d["segments"][1]["start"] = 5.4
+    jpath.write_text(json.dumps(d))
+    r = review.apply("Mtg", 1, "edit", start=5.0, end=6.0, text="Recovered.")
+    assert r["ok"]
+    assert json.loads(jpath.read_text())["segments"][1]["text"] == "Recovered."
+

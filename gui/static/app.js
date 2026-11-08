@@ -3380,7 +3380,7 @@ function renderReviewCard(){
   const el=p>=0?document.getElementById('mseg'+p):null;
   if(!el){reviewExit();return;}    // transcript changed underneath: bow out quietly
   MR.hold=false;
-  MR.at={index:it.index,start:it.start};
+  MR.at={index:it.index,start:it.start,end:it.end};
   const alts=(it.alt||[]).map((a,k)=>`<div class="mcalt">Second engine heard
       &#8220;<b>${esc(a.theirs||'(nothing)')}</b>&#8221; where this says
       &#8220;${esc(a.ours||'(nothing)')}&#8221;
@@ -3431,7 +3431,7 @@ async function reviewApply(action){
   if(!it)return;
   // the item carries the segment's ORIGINAL json index; start is the server's
   // cross-check in case the file changed since the list was fetched
-  const body={base:MP.base,index:it.index,start:it.start,action};
+  const body={base:MP.base,index:it.index,start:it.start,end:it.end,action};
   if(action==='edit'){
     const v=$('#mcspk').value;
     if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
@@ -3482,7 +3482,7 @@ async function reviewSave(){
   const at=MR.at;if(!at)return;
   const v=$('#mcspk')?$('#mcspk').value:null;
   if(v==='__new__'){mCardErr('Pick or name the speaker first.');return;}
-  const body={base:MP.base,index:at.index,start:at.start,action:'edit',
+  const body={base:MP.base,index:at.index,start:at.start,end:at.end,action:'edit',
     text:$('#mctext')?$('#mctext').value:'',speaker:v};
   MR.busy=true;
   let r;
@@ -3552,7 +3552,7 @@ async function reviewAcceptAllGo(btn){
   const base=MP.base;
   for(const it of MR.items.slice()){
     let r;
-    try{r=await api('/api/review',{base,index:it.index,start:it.start,action:'accept'});}
+    try{r=await api('/api/review',{base,index:it.index,start:it.start,end:it.end,action:'accept'});}
     catch(e){r={error:'The server did not answer.'};}
     if(route.view!=='meeting'||route.base!==base||!MR||!MR.active)return;
     if(!r.ok){
@@ -3651,7 +3651,7 @@ async function mEditSave(i,ev){
   if(spk==='__new__'){mCardErr('Pick or name the speaker first.');return;}
   const text=$('#mctext')?$('#mctext').value:g.text;
   // the segment's ORIGINAL json index rides along, never the array position
-  const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,action:'edit',text,speaker:spk});
+  const r=await api('/api/review',{base:MP.base,index:g.index,start:g.start,end:g.end,action:'edit',text,speaker:spk});
   if(!r.ok){mCardErr(r.error||'Save failed');return;}
   if(r.merged){mReloadSegs(r.index);return;}     // neighbors folded into one turn
   if(spk&&spk.startsWith('name:')){mReloadSegs(g.index);return;}  // fresh legend/colors
@@ -3687,7 +3687,7 @@ function mDeleteAsk(i,ev){
 }
 async function mDeleteGo(i){
   const g=MP.segs[i];
-  const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start});
+  const r=await api('/api/review',{base:MP.base,action:'delete',index:g.index,start:g.start,end:g.end});
   if(!r.ok){mCardErr(r.error||'Could not remove the line.');return;}
   mReloadSegs();
 }
@@ -3713,7 +3713,7 @@ function mSplitUI(i,ev){
 async function mSplitSave(i){
   const g=MP.segs[i],sa=$('#mcsa').value,sb=$('#mcsb').value;
   if(sa==='__new__'||sb==='__new__'){mCardErr('Pick or name both speakers first.');return;}
-  const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,
+  const r=await api('/api/review',{base:MP.base,action:'split',index:g.index,start:g.start,end:g.end,
     text_a:$('#mcta1').value,text_b:$('#mcta2').value,speaker_a:sa,speaker_b:sb});
   if(!r.ok){mCardErr(r.error||'Split failed');return;}
   mReloadSegs(r.index);
