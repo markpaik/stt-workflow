@@ -131,7 +131,8 @@ def spawn_args(job: dict) -> list:
                       ("ignore_battery", "--ignore-battery")):
         if job.get(key):
             args += [flag]
-    for key, flag in (("only", "--only"), ("speakers", "--speakers")):
+    for key, flag in (("only", "--only"), ("speakers", "--speakers"),
+                      ("source", "--source"), ("dest", "--dest")):
         if job.get(key):
             # one "--flag=value" token: a value that starts with "-" is
             # still read as the value, never as another option

@@ -1457,6 +1457,28 @@ def test_a_plain_job_adds_no_cli_flags(sandbox):
     ns = run_batch.build_parser().parse_args(jobs.spawn_args({**spec, "at": 1.0})[5:])
     assert not (ns.no_diarize or ns.keep_original or ns.ignore_battery)
     assert ns.only is None and ns.speakers is None
+    assert "source" not in spec and "dest" not in spec
+    # the default folders, named outright, are not stored either
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=str(run_batch.config.ICLOUD_DIR),
+              dest=str(run_batch.config.MEETINGS_DIR)), [])
+    assert "source" not in spec and "dest" not in spec
+
+
+def test_a_requeued_job_keeps_its_folders(sandbox, tmp_path):
+    """A --job run into a sandbox went back on the queue without --source
+    and --dest, so its replay read the real watched folder and wrote into
+    the real library. The pause is no gap: every spawned job runs with
+    --ignore-pause."""
+    from stt import jobs
+    src, dst = tmp_path / "-src dir", tmp_path / "dst, with comma"
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=str(src), dest=str(dst)), [])
+    assert spec["source"] == str(src) and spec["dest"] == str(dst)
+    argv = jobs.spawn_args({**spec, "at": 1.0})
+    ns = run_batch.build_parser().parse_args(argv[5:])
+    assert (ns.source, ns.dest) == (str(src), str(dst))
+    assert ns.ignore_pause
 
 
 def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):

@@ -176,6 +176,13 @@ def job_spec_from_args(args, todo) -> dict:
     for key in ("only", "speakers"):
         if getattr(args, key, None):
             spec[key] = getattr(args, key)
+    # a run into other folders replays into the same ones: without them a
+    # sandbox or test run's replay wrote into the real library. The default
+    # folders are left out, so a panel job stays as the panel queued it.
+    for key, default in (("source", config.ICLOUD_DIR), ("dest", config.MEETINGS_DIR)):
+        v = getattr(args, key, None)
+        if v and Path(v) != Path(default):
+            spec[key] = str(v)
     return spec
 
 
