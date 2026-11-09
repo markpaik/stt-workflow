@@ -329,7 +329,7 @@ this Mac either way. Settings in `stt.env`:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are reniced to this and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts under `taskpolicy -b nice -n` this value. A failure here never stops a run. |
+| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run. |
 | `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below |
 | `STT_LLM_REST_RATIO` | `1.0` | inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
 | `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds inside the quiet hours |

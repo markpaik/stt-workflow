@@ -4,6 +4,7 @@ flag and its idle regeneration, and what the panel receives. The model is
 faked throughout. Every name is synthetic."""
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -212,8 +213,30 @@ def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch)
         seen.append(args)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os, "getpriority", lambda which, who: 0)
     assert summarize._generate("hi") == "mlx"
     assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", "10"]
+
+
+def test_the_mlx_fallback_lands_at_the_setting_whatever_the_batch_runs_at(sandbox, monkeypatch):
+    """nice -n adds to the caller's own nice. A batch already at nice 4
+    must start the model at 10, not 14."""
+    _ollama_on(monkeypatch, sandbox)
+    monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
+    _fake_urlopen(monkeypatch, [], fail=True)
+    monkeypatch.setattr(summarize, "renice_ollama", lambda: 0)
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    seen = []
+
+    def fake_run(args, **k):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for mine, inc in ((4, "6"), (10, "0"), (15, "0")):
+        seen.clear()
+        monkeypatch.setattr(os, "getpriority", lambda which, who, v=mine: v)
+        assert summarize._generate("hi") == "mlx"
+        assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", inc]
 
 
 def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
@@ -230,7 +253,8 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
     assert summarize.renice_ollama() == 2
     renice = [c for c in calls if c[0] == "renice"]
     assert {c[-1] for c in renice} == {"101", "202", "303"}
-    assert all(c[1:3] == ["-n", "10"] for c in renice)
+    # the absolute form: "renice -n" is an increment on macOS
+    assert all(c[1:3] == ["10", "-p"] for c in renice)
     # background QoS too: it lowers the GPU priority that nice cannot
     qos = [c for c in calls if c[0] == "taskpolicy"]
     assert {c[-1] for c in qos} == {"101", "202", "303"}
@@ -606,3 +630,29 @@ def test_an_empty_reply_keeps_the_old_description_and_counts_as_a_failure(
     with pytest.raises(summarize.EmptyDescription):
         summarize.store_description(base, cached)
     assert _load(base)["ai_gist"] == GOOD["ai_gist"]
+
+
+def test_renice_holds_the_setting_over_repeated_calls(sandbox, monkeypatch):
+    """renice -n adds to the current nice on macOS, so STT_LLM_NICE=10 put
+    the model at 20 after two calls. A real process stays at 10."""
+    if not Path("/usr/bin/renice").exists():
+        pytest.skip("no renice")
+    if os.getpriority(os.PRIO_PROCESS, 0) > 10:
+        pytest.skip("this test runs above nice 10, and a user cannot lower it")
+    p = subprocess.Popen(["/bin/cat"], stdin=subprocess.PIPE)
+    real_run = subprocess.run
+
+    def fake_run(args, **k):
+        if args[0] == "pgrep":
+            return subprocess.CompletedProcess(args, 0, stdout=f"{p.pid}\n" if "-x" in args else "", stderr="")
+        if args[0] == "taskpolicy":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return real_run(args, **k)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    try:
+        for _ in range(3):
+            summarize.renice_ollama()
+            assert os.getpriority(os.PRIO_PROCESS, p.pid) == 10
+    finally:
+        p.kill()
+        p.wait()

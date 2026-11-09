@@ -479,10 +479,10 @@ def mic_speaker() -> str | None:
 
 # --- Local LLM hardware limits (the owner's rule: keep the fan quiet) ---
 # Every local LLM run (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback) runs at
-# lowered priority: before each call the Ollama processes are reniced to
-# STT_LLM_NICE and put on background QoS (`taskpolicy -b`, which also lowers
-# their GPU priority), and the MLX subprocess starts under
-# `taskpolicy -b nice -n STT_LLM_NICE`. A loop over many meetings
+# lowered priority: before each call the Ollama processes are set to nice
+# STT_LLM_NICE (an absolute value, never an increment) and put on background
+# QoS (`taskpolicy -b`, which also lowers their GPU priority), and the MLX
+# subprocess starts at nice STT_LLM_NICE under `taskpolicy -b`. A loop over many meetings
 # (tools/retitle_all.py, the batch's summary sweeps) rests after each
 # meeting. Inside STT_LLM_QUIET_HOURS (default 07:00-22:00) it rests
 # STT_LLM_REST_RATIO (default 1.0) times the wall time the meeting took,

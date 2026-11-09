@@ -240,8 +240,10 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
         # the MLX fallback runs at lowered priority too: background QoS
-        # (taskpolicy -b) and nice (config.llm_nice)
-        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(config.llm_nice()),
+        # (taskpolicy -b) and nice config.llm_nice(). `nice -n` ADDS to this
+        # process's own nice, so the increment is what lands the model at
+        # the setting, never past it (a batch already at nice 4 adds 6)
+        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(_nice_increment()),
                             str(LLM_PY), "-c", _RUNNER],
                            input=json.dumps({"model": MODEL, "prompt": prompt,
                                              "max_tokens": max_tokens, "think": think}),
@@ -282,10 +284,23 @@ class OllamaDown(RuntimeError):
 OLLAMA_THINK_TOKENS = 4000
 
 
+def _nice_increment() -> int:
+    """How much `nice -n` must add to this process's own nice for a child
+    to start at config.llm_nice(). Never negative: a user cannot raise
+    priority, and a process already at or past the setting adds nothing."""
+    try:
+        mine = os.getpriority(os.PRIO_PROCESS, 0)
+    except OSError:
+        mine = 0
+    return max(0, config.llm_nice() - mine)
+
+
 def renice_ollama() -> int:
-    """Lower the Ollama server and runner processes to nice
-    config.llm_nice() and background QoS before a call, so local LLM work yields the CPU and
-    keeps the fan quiet. Best effort: a failure never stops the run.
+    """Set the Ollama server and runner processes to nice config.llm_nice()
+    and background QoS before a call, so local LLM work yields the CPU and
+    keeps the fan quiet. The value is absolute (`renice 10 -p`): on macOS
+    `renice -n 10` adds 10 to the current nice, so repeated calls pushed
+    the model to nice 20. Best effort: a failure never stops the run.
     Returns how many processes were reniced."""
     import subprocess
     pids = set()
@@ -300,7 +315,7 @@ def renice_ollama() -> int:
         ok = False
         # renice lowers the CPU priority; taskpolicy -b puts the process on
         # background QoS, which also lowers its GPU priority (the fan)
-        for cmd in (["renice", "-n", str(config.llm_nice()), "-p", str(pid)],
+        for cmd in (["renice", str(config.llm_nice()), "-p", str(pid)],
                     ["taskpolicy", "-b", "-p", str(pid)]):
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
