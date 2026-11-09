@@ -95,3 +95,68 @@ def test_from_meeting_suspect_sample_requires_confirm(sandbox, monkeypatch):
     monkeypatch.setattr(sys, "argv", argv + ["--confirm"])
     assert enroll.main() == 0
     assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
+
+
+BAD_NAMES = ["", "   ", "\t", "Bad\nName", "Bad\rName", "A‮B", "Zed​Q",
+             "Line Two", "Nul\x00l", "C1\x85x", "﻿Lead"]
+
+
+@pytest.mark.parametrize("bad", BAD_NAMES)
+def test_enroll_refuses_an_empty_or_unsafe_name(sandbox, bad):
+    """'   ' was enrolled as '   .npy', '' as '.npy', and 'Bad\\nName' as a
+    person whose name split the transcript header in two. Nothing is written."""
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    with pytest.raises(names.BadName):
+        identify.enroll(bad, v, source="M1")
+    assert identify.load_registry() == {}
+    assert list((sandbox / "voiceprints").glob("*.npy")) == []
+
+
+def test_enroll_trims_the_edges_and_keeps_joiners(sandbox):
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll("Zed Q ", v, source="M1")
+    identify.enroll("Zed Q", v * 1.01, source="M2")
+    assert list(identify.load_registry()) == ["Zed Q"]
+    # U+200D (zero-width joiner) is part of real names and emoji: it stays
+    identify.enroll("Ana‍Lee", v * -1, source="M3")
+    assert "Ana‍Lee" in identify.load_registry()
+
+
+def test_rename_and_reassign_refuse_an_unsafe_name(sandbox):
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll("Alex Rivera", v, source="M1")
+    identify.enroll("Alex Rivera", v * 1.1 + 0.2, source="M2")
+    assert identify.rename_person("Alex Rivera", "Alex\nRivera") is False
+    assert identify.rename_person("Alex Rivera", "   ") is False
+    r = identify.reassign_sample("Alex Rivera", 0, "Sam‮Chen")
+    assert r == {"ok": False, "error": names.UNSAFE_NAME}
+    assert list(identify.load_registry()) == ["Alex Rivera"]
+
+
+@pytest.mark.parametrize("bad, msg", [
+    ("   ", "--name: Type a name first."),
+    ("Bad\nName", "--name: A name cannot hold a line break, a tab, or an "
+                  "invisible control character.")])
+def test_the_cli_refuses_an_empty_or_unsafe_name(sandbox, monkeypatch, bad, msg):
+    v = np.random.default_rng(3).normal(size=256)
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": [(0.0, 200.0)]}, {"SPEAKER_00": v})
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", bad])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == msg
+    assert identify.load_registry() == {}
+
+
+def test_the_cli_trims_the_name_it_enrolls(sandbox, monkeypatch):
+    v = np.random.default_rng(3).normal(size=256)
+    # forty clear 5 s turns: well over the quality floor
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                for i in range(40)]},
+                         {"SPEAKER_00": v})
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", "  Jo Lee  "])
+    enroll.main()
+    assert list(identify.load_registry()) == ["Jo Lee"]

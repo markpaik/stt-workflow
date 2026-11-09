@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stt import config, identify, unknowns
+from stt import config, identify, names, unknowns
 
 
 def _meeting_embeddings(base: str) -> dict:
@@ -68,6 +68,11 @@ def main():
 
     if not args.name:
         raise SystemExit("--name is required")
+    try:
+        # '   ' was enrolled as '   .npy', and a name was never trimmed
+        args.name = names.person_name(args.name)
+    except names.BadName as e:
+        raise SystemExit(f"--name: {e}")
 
     if args.from_meeting:
         embs = _meeting_embeddings(args.from_meeting)

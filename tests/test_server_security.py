@@ -1496,15 +1496,18 @@ def test_a_newline_in_a_settings_value_is_refused(running_server):
     a newline injects an arbitrary extra STT_*=... line into the file that
     stores the API keys. config re-reads that file on every call, so the
     injected line takes effect on the next poll with no restart."""
+    from stt import names
     envp = config.PROJECT_DIR / "stt.env"
     st, body = _post(running_server, "/api/mic_speaker",
                      {"name": "Alex Rivera\nSTT_ANTHROPIC_KEY=stolen"})
-    assert st == 500, "a line break in a settings value must be refused"
+    # refused as a name now, before it reaches the settings writer
+    assert (st, body) == (400, {"error": names.UNSAFE_NAME}), \
+        "a line break in a settings value must be refused"
     assert not envp.exists() or "STT_ANTHROPIC_KEY" not in envp.read_text()
 
     st, body = _post(running_server, "/api/mic_speaker",
                      {"name": "Alex Rivera\rSTT_MEETINGS_DIR=/tmp/evil"})
-    assert st == 500
+    assert st == 400
     assert not envp.exists() or "STT_MEETINGS_DIR" not in envp.read_text()
 
     # the ordinary value still saves
@@ -2079,3 +2082,75 @@ def test_a_request_with_two_host_headers_is_refused(running_server, hosts):
         data += chunk
     s.close()
     assert data.split(b"\r\n", 1)[0].split()[1] == b"403"
+
+
+# ---------- name rules (phase 4) ----------
+
+UNSAFE = ["Bad\nName", "Zoe: <b>X</b>\nLine2", "Sam\u202eChen", "Jo\u200bLee",
+          "Tab\tName", "Line\u2028Two"]
+
+
+def test_every_naming_route_refuses_an_unsafe_name(running_server, monkeypatch):
+    """A newline, a bidi control or a zero-width character in a person name
+    split the .txt header and roster, reordered how a name displays, or made
+    two look-alike people. Every route that stores a person name refuses
+    them, with one plain sentence, and writes nothing."""
+    import numpy as np
+
+    from stt import identify, names
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    base = _thin_local_meeting()
+    rich = "Rich Mtg"
+    _make_meeting_with_cache(rich, {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                   for i in range(40)]},
+                             {"SPEAKER_00": np.random.default_rng(4).normal(size=256)})
+    identify.enroll("Alex Rivera", np.random.default_rng(5).normal(size=256), source="M")
+    reg_before = identify.load_registry()
+    mj_before = mfile(base, ".json").read_text()
+    for bad in UNSAFE:
+        for body in ({"meeting": base, "speaker": "SPEAKER_00", "name": bad,
+                      "local": True},
+                     {"meeting": rich, "speaker": "SPEAKER_00", "name": bad,
+                      "confirm": True},
+                     {"uid": "U001", "name": bad, "confirm": True}):
+            st, out = _post(running_server, "/api/name", body)
+            assert (st, out) == (200, {"ok": False, "error": names.UNSAFE_NAME}), \
+                (bad, body)
+        st, out = _post(running_server, "/api/rename_speaker",
+                        {"name": "Alex Rivera", "new": bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+        st, out = _post(running_server, "/api/merge_speakers",
+                        {"src": "uid:U001", "dst": "name:" + bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+        st, out = _post(running_server, "/api/reassign_sample",
+                        {"name": "Alex Rivera", "index": 0, "to": bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+    assert identify.load_registry() == reg_before
+    assert mfile(base, ".json").read_text() == mj_before
+
+
+def test_an_empty_or_whitespace_name_never_enrolls(running_server):
+    import numpy as np
+
+    from stt import identify
+    rich = "Rich Mtg"
+    _make_meeting_with_cache(rich, {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                   for i in range(40)]},
+                             {"SPEAKER_00": np.random.default_rng(4).normal(size=256)})
+    for blank in ("", "   ", "\t \n"):
+        st, out = _post(running_server, "/api/name",
+                        {"meeting": rich, "speaker": "SPEAKER_00", "name": blank,
+                         "confirm": True})
+        assert out["ok"] is False and out["error"] in (
+            "Type a name first.",
+            "A name cannot hold a line break, a tab, or an invisible control "
+            "character."), blank
+    assert identify.load_registry() == {}
+
+
+def test_set_local_name_refuses_a_line_break(sandbox):
+    from stt import names, summarize
+    base = _thin_local_meeting()
+    r = summarize.set_local_name(base, "SPEAKER_00", "Zoe: <b>X</b>\nLine2")
+    assert r == {"ok": False, "error": names.UNSAFE_NAME}
+    assert "local_names" not in json.loads(mfile(base, ".json").read_text())

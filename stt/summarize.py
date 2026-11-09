@@ -1692,6 +1692,11 @@ def set_local_name(base: str, speaker_id, name: str) -> dict:
     nm = str(name or "").strip()
     if len(nm) > 80:
         return {"ok": False, "error": "that name is too long"}
+    from . import names
+    if names.has_unsafe(nm):
+        # it lands in the .txt header and on every line label: a newline
+        # split the header in two
+        return {"ok": False, "error": names.UNSAFE_NAME}
     j = config.meeting_file(base, ".json")
     if not j.exists():
         return {"ok": False, "error": f"no transcript for '{base}'"}

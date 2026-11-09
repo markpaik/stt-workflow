@@ -207,6 +207,12 @@ moment for context), a name box that suggests enrolled names as you type
 speaker" for noise. If a voice's source recordings were later deleted, the
 panel says so plainly instead of presenting a dead player.
 
+A name is one line of plain text. The panel, `enroll.py`, a rename and a
+meeting-only label all trim the edges and refuse an empty name, and they
+refuse a name that holds a line break, a tab, a bidirectional control such
+as U+202E, or a zero-width space. Those characters split the transcript
+header, reorder how a name displays, or make two names that look the same.
+
 Speaker management lives in the drawer: play any voice sample (each
 traceable to its source meeting), remove a bad one or reassign it to the
 right person, rename everywhere, merge duplicates, hide voices you'll never

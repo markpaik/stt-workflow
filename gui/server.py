@@ -21,8 +21,8 @@ from pathlib import Path
 
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, groups, identify, jobs,
-                 manifest, output, queue_order, rates, recorder, review, search,
-                 series, status, titles, unknowns)
+                 manifest, names, output, queue_order, rates, recorder, review,
+                 search, series, status, titles, unknowns)
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -2575,9 +2575,10 @@ class Handler(BaseHTTPRequestHandler):
                 # when a batch is already running — a Redo is never lost.
                 files = b.texts("files", [])
                 paths = b.texts("paths", [])
-                names = files + [Path(p).name for p in paths]
-                label = (", ".join(names[:2]) + (f" +{len(names)-2} more" if len(names) > 2 else "")
-                         ) if names else "all new recordings"
+                picked = files + [Path(p).name for p in paths]
+                label = (", ".join(picked[:2])
+                         + (f" +{len(picked)-2} more" if len(picked) > 2 else "")
+                         ) if picked else "all new recordings"
                 busy = bool(control.snapshot()["pids"])
                 jobs.add({"files": files, "paths": paths, "force": b.flag("force"),
                           "strict": b.flag("strict"), "verify": b.flag("verify"),
@@ -2681,6 +2682,11 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/name":
                 name = b.text("name", "", max_len=200).strip()
                 local, uid = b.flag("local"), b.text("uid", "")
+                if names.has_unsafe(name):
+                    # a newline split the .txt header and the roster, and a
+                    # bidi control reorders how the name displays
+                    self._json({"ok": False, "error": names.UNSAFE_NAME})
+                    return
                 # An empty name is the documented UNDO for a meeting-local
                 # label (set_local_name drops the entry). It means nothing
                 # anywhere else: an enrollment and a uid promotion have no
@@ -2893,9 +2899,14 @@ class Handler(BaseHTTPRequestHandler):
                 # the spelling rename_person will store: an enrolled case
                 # variant of the new name is a merge into that person
                 b.text("name")
+                try:
+                    new = names.person_name(b.text("new"))
+                except names.BadName as e:
+                    self._json({"ok": False, "error": str(e)})
+                    return
                 b["new"] = identify.canonical_name(
-                    b.text("new"), {k: v for k, v in identify.load_registry().items()
-                                    if k != b["name"]})
+                    new, {k: v for k, v in identify.load_registry().items()
+                          if k != b["name"]})
                 if identify.reserved_name(b["new"]):
                     self._json({"ok": False, "error": identify.RESERVED_ERROR})
                     return
@@ -2932,6 +2943,9 @@ class Handler(BaseHTTPRequestHandler):
                 st_, sv = _handle(b, "src")
                 dt_, dv = _handle(b, "dst")
                 if dt_ == "name":
+                    if names.has_unsafe(dv):
+                        self._json({"ok": False, "error": names.UNSAFE_NAME})
+                        return
                     if identify.reserved_name(dv):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
                         return
@@ -3521,6 +3535,9 @@ class Handler(BaseHTTPRequestHandler):
                 # channel-aware path for new recordings (they process as mono
                 # until this is set and that person is enrolled)
                 name = b.text("name", "").strip()
+                if names.has_unsafe(name):
+                    # a line break here also injected a line into stt.env
+                    raise BadRequest(names.UNSAFE_NAME)
                 if name:
                     _env_file_set({"STT_MIC_SPEAKER": name})
                 else:

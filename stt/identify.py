@@ -23,7 +23,7 @@ from datetime import datetime
 
 import numpy as np
 
-from . import config
+from . import config, names
 
 MAX_SAMPLES = 5
 
@@ -340,6 +340,8 @@ def rename_person(old: str, new: str) -> bool:
         reg = load_registry()
         if old not in reg:
             return False
+        if not str(new or "").strip() or names.has_unsafe(new):
+            return False
         new = canonical_name(new, {k: v for k, v in reg.items() if k != old})
         if not new or new == old or reserved_name(new):
             return False
@@ -515,6 +517,8 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
     to_name = (to_name or "").strip()
     if not to_name:
         return {"ok": False, "error": "a destination name is required"}
+    if names.has_unsafe(to_name):
+        return {"ok": False, "error": names.UNSAFE_NAME}
     if reserved_name(to_name):
         return {"ok": False, "error": RESERVED_ERROR}
     with lock_registry():
@@ -604,7 +608,13 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
     on disk carries plain-string `sources`, several readers index straight into
     it, and a shape change would have to be migrated everywhere at once. A
     parallel list is additive — an entry without one reads exactly as it did.
+
+    An empty name, or one with a line break or an invisible control
+    character in it, raises names.BadName (a ValueError) before anything is
+    written: '   ' became '   .npy', and 'Bad\nName' became a person whose
+    name split the transcript header in two.
     """
+    name = names.person_name(name)
     if reserved_name(name):
         raise ValueError(RESERVED_ERROR)
     _private_dir()
