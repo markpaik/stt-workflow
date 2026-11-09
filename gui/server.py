@@ -277,6 +277,12 @@ def _est_duration(p: Path):
 
 _meet_cache = {}
 _jobs_kicked = {"at": 0.0}
+# the batch _kick_jobs spawned last. Until it holds batch.lock the process
+# table shows no batch, so a burst of Run clicks (each one clears the
+# cooldown) spawned one batch per click: 120 of them, all but one exiting
+# at once. While the last spawn is still starting, it takes the queue.
+_kicked_proc = {"proc": None, "at": 0.0}
+_SPAWN_STARTUP_SEC = 60.0
 
 
 def _kick_jobs():
@@ -294,8 +300,12 @@ def _kick_jobs():
         return
     if _time.monotonic() - _jobs_kicked["at"] < 15:
         return
+    p = _kicked_proc["proc"]
+    if (p is not None and p.poll() is None
+            and _time.monotonic() - _kicked_proc["at"] < _SPAWN_STARTUP_SEC):
+        return      # still starting up: it claims the head job itself
     _jobs_kicked["at"] = _time.monotonic()
-    _spawn(jobs.spawn_args(nxt[0]))
+    _kicked_proc.update(proc=_spawn(jobs.spawn_args(nxt[0])), at=_time.monotonic())
 
 
 # ---------- duplicate transcripts: computed OFF the poll thread ----------
@@ -1784,8 +1794,8 @@ def _spawn(args):
     with open(config.PROJECT_DIR / "logs" / "spawned.log", "a") as log:
         log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
         log.flush()
-        subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
-                         stdout=log, stderr=log, start_new_session=True)
+        return subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
+                                stdout=log, stderr=log, start_new_session=True)
 
 
 def _relabel_all_background(reason: str):

@@ -405,3 +405,26 @@ def test_stop_still_takes_a_whole_group_the_batch_leads(sandbox, monkeypatch):
             os.killpg(pgid, 9)
         except (ProcessLookupError, PermissionError):
             pass
+
+
+def test_a_defunct_lock_holder_is_no_batch(sandbox, monkeypatch):
+    """A batch that exited but is not yet reaped (a zombie) still has its
+    pid, and batch.lock still names it. ps shows its command as
+    '<defunct>', so it never reads as a running batch and never blocks
+    the next run."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = subprocess.Popen([sys.executable, "-c", "pass", "run_batch.py"],
+                         start_new_session=True)
+    try:
+        _lock_names(sandbox, p.pid)
+        for _ in range(50):          # wait for it to exit, without reaping it
+            st = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(p.pid)],
+                                capture_output=True, text=True).stdout.strip()
+            if st.startswith("Z"):
+                break
+            time.sleep(0.05)
+        assert st.startswith("Z")
+        assert control._parent_pids() == []
+        assert control.batch_groups() == set()
+    finally:
+        p.wait()

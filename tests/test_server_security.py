@@ -100,6 +100,38 @@ def test_kick_jobs_suppressed_right_after_a_stop(sandbox, monkeypatch):
     assert len(spawned) == 1, "once the stop window clears, the queue drains normally"
 
 
+def test_a_burst_of_runs_spawns_one_batch_while_it_starts(sandbox, monkeypatch):
+    """Each Run click clears the kick cooldown, and until the new batch holds
+    batch.lock the process table shows no batch. A burst of 120 POSTs to
+    /api/run spawned 120 batches, and all but one exited at once. While the
+    last spawn is still starting, a kick leaves the queue to it. Once that
+    process has exited, the next kick spawns again."""
+    from stt import control, jobs
+    monkeypatch.setattr(control, "snapshot", lambda *a, **k: {"pids": [], "mem_mb": 0})
+    monkeypatch.setattr(srv, "_kicked_proc", {"proc": None, "at": 0.0})
+
+    class Proc:
+        alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+    procs = []
+
+    def spawn(args):
+        procs.append(Proc())
+        return procs[-1]
+    monkeypatch.setattr(srv, "_spawn", spawn)
+    for _ in range(5):
+        jobs.add({"label": "all new recordings", "files": []})
+        srv._jobs_kicked["at"] = 0.0      # what each /api/run does
+        srv._kick_jobs()
+    assert len(procs) == 1
+    procs[0].alive = False                # it exited: a lock loser, say
+    srv._jobs_kicked["at"] = 0.0
+    srv._kick_jobs()
+    assert len(procs) == 2
+
+
 def test_remove_sample_re_identifies_the_meetings_it_can_affect(running_server,
                                                                 monkeypatch):
     """Removing a sample changes who a profile matches, so it must re-run
