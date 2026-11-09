@@ -109,6 +109,34 @@ def test_repeated_titles_on_one_day_get_the_twin_suffix(sandbox):
     assert d["title"] == "Kim Weekly Check-in"
 
 
+def test_saving_a_twin_under_its_own_title_keeps_its_number(sandbox):
+    """restamp() peels the ' (N)' suffix and _unique_base took the lowest
+    free number, so a no-op save moved '(3)' to '(2)' and renamed the
+    folder, its id and every reference. A twin saved under the title it
+    already has keeps its own number."""
+    from stt import archive
+    _m("2026-05-05 Race Name", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (3)", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (4)", date="2026-05-05", title="Race Name")
+    assert archive.archive_meeting("2026-05-05 Race Name")["ok"]      # (2) is free
+    for twin in ("2026-05-05 Race Name (3)", "2026-05-05 Race Name (4)"):
+        r = summarize.rename_meeting(twin, "Race Name")
+        assert r == {"ok": True, "renamed": [], "base": twin}
+        # the typed stamp, the Keep path and a re-sent date are all no-ops too
+        assert summarize.rename_meeting(twin, "2026-05-05 Race Name")["base"] == twin
+        assert summarize.apply_meeting_edits(twin, title="Race Name",
+                                             date="2026-05-05")["base"] == twin
+        assert summarize.apply_meeting_edits(twin, title="Race Name",
+                                             title_state="confirmed")["base"] == twin
+    # a case-only fix on a twin keeps the number as well
+    r = summarize.rename_meeting("2026-05-05 Race Name (3)", "race name")
+    assert r["base"] == "2026-05-05 race name (3)"
+    # a real change still takes the lowest free number
+    _m("2026-05-05 Other", date="2026-05-05", title="Other")
+    assert summarize.rename_meeting("2026-05-05 Other", "Race Name")["base"] == (
+        "2026-05-05 Race Name (2)")
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")

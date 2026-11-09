@@ -1471,6 +1471,14 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # replacing an existing stamp in either form (peeling any
                 # ' (N)' twin suffix first) rather than adding a second date
                 want = dates.restamp(stem, on) if on else stem
+            # a twin saved under the name it already has keeps its own
+            # number. restamp() and canonical() peel the ' (N)', and
+            # _unique_base takes the LOWEST free one, so a no-op save on
+            # '(3)' moved it to '(2)': a new folder, id and every reference.
+            # A case-only fix keeps the number too.
+            own = dates.twin_suffix(base)
+            if own and want.lower() == base[:-len(own)].lower():
+                want += own
             want = _unique_base(want, base)
             d["title"] = dates.title_of(want)
         moved = d.get("date") != date_before
