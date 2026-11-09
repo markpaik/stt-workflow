@@ -468,10 +468,16 @@ def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
 
+    seen = []
+    real_set = status.set_stage
+    monkeypatch.setattr(status, "set_stage", lambda *a, **k: seen.append(k) or real_set(*a, **k))
     assert run_batch.summarize_one("Fresh Mtg.m4a") is True
     assert run_batch.summarize_one("Done Mtg.m4a") is False
     assert calls == ["Fresh Mtg"]
     assert status.read().get("active", {}) == {}
+    # the stage carries an estimate, and its time is kept for the next one
+    assert seen == [{"est_sec": status.SUMMARY_EST_DEFAULT}]
+    assert len(status.read()["summary_secs"]) == 1
 
 
 def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):

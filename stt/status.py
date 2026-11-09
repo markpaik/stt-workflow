@@ -108,7 +108,9 @@ def start_run(pending, sweep=False):
                 "active": {}, "pending": list(pending), "sweep": bool(sweep),
                 "recent": prev.get("recent", []),
                 "recording": prev.get("recording"),
-                "recorder_note": prev.get("recorder_note")})
+                "recorder_note": prev.get("recorder_note"),
+                # recent summary wall times: the summarizing stage's estimate
+                "summary_secs": prev.get("summary_secs", [])})
 
 
 def set_pending(pending):
@@ -196,14 +198,15 @@ def meeting_active(base: str) -> bool:
 
 
 def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=None,
-              base=None):
+              base=None, est_sec=None):
     """progress: 0..1 within the current stage (None = unknown); duration: audio
     seconds (sent once, then remembered). diarize/verify: this file's actual
     settings (sent once, then remembered) — estimate_progress() needs to know
     up front whether "diarizing"/"verifying" will happen at all, rather than
     inferring it from whatever the CURRENT stage happens to be, which made the
     ETA jump the instant a --no-diarize or verify-mode file reached a stage
-    the guess didn't anticipate."""
+    the guess didn't anticipate. est_sec: the expected seconds of a stage
+    outside the audio model (summarizing), kept while the stage lasts."""
     with _lock():
         d = read()
         active = d.get("active", {})
@@ -232,6 +235,10 @@ def set_stage(name, stage, progress=None, duration=None, diarize=None, verify=No
             entry["diarize"] = diarize if diarize is not None else prev.get("diarize")
         if verify is not None or "verify" in prev:
             entry["verify"] = verify if verify is not None else prev.get("verify")
+        if est_sec is not None:
+            entry["est_sec"] = round(float(est_sec), 1)
+        elif prev.get("stage") == stage and "est_sec" in prev:
+            entry["est_sec"] = prev["est_sec"]
         if progress is not None:
             entry["progress"] = round(float(progress), 3)
             # when the value last CHANGED — long hook-less stretches (pyannote's
@@ -295,6 +302,46 @@ def stage_tail(stage: str, n_active: int = 1) -> float:
 STAGE_ORDER = ["downloading", "converting", "transcribing", "diarizing",
                "verifying", "writing"]
 
+# The description runs after a file finishes and before the next one
+# starts (run_batch.summarize_one). Its time does not follow the audio
+# length the way the stages above do: most of it is the model's fixed cost.
+# So it counts down from the median of the last SUMMARY_KEEP summaries,
+# measured in wall seconds, else SUMMARY_EST_DEFAULT (60 to 80 s a file on
+# this Mac with the local model).
+SUMMARY_EST_DEFAULT = 75.0
+SUMMARY_KEEP = 8
+
+
+def note_summary(secs: float):
+    """Keep one summary's wall seconds for the next estimate."""
+    with _lock():
+        d = read()
+        d["summary_secs"] = (list(d.get("summary_secs") or [])
+                             + [round(float(secs), 1)])[-SUMMARY_KEEP:]
+        _write(d)
+
+
+def summary_estimate() -> float:
+    from statistics import median
+    vals = [v for v in read().get("summary_secs") or []
+            if isinstance(v, (int, float)) and v > 0]
+    return float(median(vals)) if vals else SUMMARY_EST_DEFAULT
+
+
+def _est_detail(entry: dict):
+    """progress_detail for a stage with its own estimate (est_sec): a
+    countdown on the clock, then 'running long' with a tail of
+    rates.DEFAULT_TAIL times the elapsed time."""
+    from . import rates
+    est = float(entry.get("est_sec") or 0)
+    ss = entry.get("stage_since")
+    if est <= 0 or ss is None:
+        return None
+    elapsed = max(0.0, _time.monotonic() - ss)
+    if elapsed > est:
+        return {"pct": 0.99, "eta": rates.DEFAULT_TAIL * elapsed, "over": elapsed - est}
+    return {"pct": min(0.99, elapsed / est), "eta": est - elapsed, "over": None}
+
 
 def progress_detail(entry: dict, n_active: int = 1):
     """{"pct": 0..1, "eta": seconds, "over": seconds or None} for one active
@@ -302,6 +349,8 @@ def progress_detail(entry: dict, n_active: int = 1):
     progress. None if unknowable. `over` is how far the current stage has run
     past its estimate: the panel shows "running long · +Xm" in place of a
     countdown once it is set."""
+    if entry.get("stage") not in STAGE_ORDER and entry.get("est_sec"):
+        return _est_detail(entry)
     dur = entry.get("duration")
     if not dur:
         return None

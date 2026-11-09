@@ -227,8 +227,10 @@ def summarize_one(key, base=None, track=None) -> bool:
             # already set no_speech, and the panel says "No speech found".
             print(f"   no speech in {base}: no summary written", flush=True)
             return False
-        st.set_stage(key, "summarizing")
+        st.set_stage(key, "summarizing", est_sec=st.summary_estimate())
+        t0 = time.monotonic()
         summarize.suggest_title(base)
+        st.note_summary(time.monotonic() - t0)
         done = True
     except Exception as e:
         print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
@@ -290,7 +292,7 @@ def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
         t0 = time.monotonic()
         ok, why = False, ""
         try:
-            st.set_stage(base, "summarizing", base=base)
+            st.set_stage(base, "summarizing", base=base, est_sec=st.summary_estimate())
             r = summarize.suggest_title(base)
             if isinstance(r, dict) and r.get("stored"):
                 ok = True
@@ -1000,9 +1002,12 @@ def main():
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             processed += 1
-            # the description lands NOW, while the next file transcribes —
-            # not hours later when the whole backlog ends (and never lost to
-            # a Stop pressed before then). The automatic title may rename the
+            # the description lands NOW, not hours later when the whole
+            # backlog ends (and never lost to a Stop pressed before then).
+            # One file at a time, it runs here BEFORE the next file starts
+            # (with --parallel, while the other workers transcribe), so the
+            # stage counts down from recent summary times
+            # (status.summary_estimate). The automatic title may rename the
             # folder, so the end-of-run sweep gets the folder's final name.
             track = {"base": res.get("base")}
             try:
