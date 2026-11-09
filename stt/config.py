@@ -238,8 +238,36 @@ RECLUSTER_MOVE_MIN_DUR = float(os.environ.get("STT_RECLUSTER_MOVE_MIN_DUR", "0.3
 RECLUSTER_DST_MIN_SECS = float(os.environ.get("STT_RECLUSTER_DST_MIN_SECS", "120"))
 RECLUSTER_ITERS = int(os.environ.get("STT_RECLUSTER_ITERS", "2"))
 
-# ASR backend: "parakeet" (default, native MLX) or "whisperx" (CPU, robustness hedge)
-ASR_BACKEND = os.environ.get("STT_ASR_BACKEND", "parakeet")
+# ASR backend: "parakeet" (default, native MLX), "mlxwhisper" (Whisper on the
+# GPU, the variant in STT_WHISPER_MLX_MODEL), or "cloud:<provider>".
+ASR_BACKENDS = ("parakeet", "mlxwhisper")
+CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
+
+
+def _asr_problem(raw):
+    """(backend, None) for a usable STT_ASR_BACKEND value, else
+    ("parakeet", why). Case and spaces are ignored. pipeline._load_asr runs
+    Whisper only on an exact "mlxwhisper", so a typo ('mlx-whisper',
+    'whisper', or the 'whisperx' an older stt.env.example named) ran
+    Parakeet with no message."""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return ASR_BACKENDS[0], None
+    if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
+        return v, None
+    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet, mlxwhisper, or cloud:"
+                             f"{'/'.join(CLOUD_ASR)}; using parakeet")
+
+
+def _asr_backend_setting() -> str:
+    raw = os.environ.get("STT_ASR_BACKEND", "")
+    v, why = _asr_problem(raw)
+    if why:
+        print(f"warning: STT_ASR_BACKEND={why}", file=sys.stderr, flush=True)
+    return v
+
+
+ASR_BACKEND = _asr_backend_setting()
 
 # --- Audio (video containers welcome too — ffmpeg extracts the audio track) ---
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".caf", ".m4b", ".flac",
@@ -638,6 +666,10 @@ def setting_problems() -> list:
     why = summarize.ollama_url_problem()
     if why:
         out.append(("STT_OLLAMA_URL", why))
+    _, why = _asr_problem(_env_file().get("STT_ASR_BACKEND")
+                          or os.environ.get("STT_ASR_BACKEND"))
+    if why:
+        out.append(("STT_ASR_BACKEND", why))
     return out
 
 
