@@ -161,6 +161,16 @@ def test_a_colon_in_a_typed_title_is_kept_in_a_safe_form(sandbox, typed, folder)
     assert meta["title"] == shown
 
 
+def test_an_old_folder_that_kept_its_colon_is_no_doctor_finding(sandbox):
+    """A folder from before the sanitizer can hold a colon, with the same
+    title. The doctor compared the folder with the title's safe form only,
+    so it reported every such folder as a name mismatch."""
+    from stt import doctor
+    _m("2026-01-15 Vendor Demo: Assessment Platform", date="2026-01-15",
+       title="Vendor Demo: Assessment Platform")
+    assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+
+
 def test_saving_a_colon_title_again_changes_nothing(sandbox):
     from stt import doctor
     _m("Voice Memo 1", date="2026-01-22")

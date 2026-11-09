@@ -291,10 +291,13 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:
             out.append(Finding("missing_keys", b, "lacks " + ", ".join(missing), False))
-        # the folder holds the title in its safe form: '1:1' is '1-1' on disk
-        title = names.file_title(d.get("title") or "") or dates.title_of(b)
-        want = (dates.stamp(title, d["date"]) if d.get("date") else title) + dates.twin_suffix(b)
-        if want != b:
+        # the folder holds the title in its safe form: '1:1' is '1-1' on
+        # disk. A folder from before the sanitizer may still hold the title
+        # as typed, colon and all, and that is no mismatch either.
+        raw = d.get("title") or dates.title_of(b)
+        wants = {(dates.stamp(t, d["date"]) if d.get("date") else t) + dates.twin_suffix(b)
+                 for t in (names.file_title(raw) or raw, raw)}
+        if b not in wants:
             why = "folder name differs from its title and date"
             if not dates.is_iso_form(b) and dates.meeting_date(b):
                 why += " (older MMDDYYYY form: tools/iso_rename.py moves it)"
