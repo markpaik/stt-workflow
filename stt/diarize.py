@@ -30,7 +30,7 @@ overlapped audio contaminates the very identity evidence refinement leans on.
 """
 import numpy as np
 
-from . import config, identify, refine, speakrs_diar
+from . import config, identify, recluster, refine, speakrs_diar
 
 _pipeline = None
 
@@ -346,11 +346,6 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
     vps = voiceprints if voiceprints is not None else identify.load_voiceprints()
     if allowed_names is not None:
         vps = {n: s for n, s in vps.items() if n in allowed_names}
-    cluster_names = ({k: v["name"] for k, v in
-                      identify.name_speakers(cent_emb, allowed_names=allowed_names,
-                                             context=context).items()}
-                     if vps else {k: None for k in cent_emb})
-    cluster_names = refine.resolve_split_clusters(cluster_names, cent_emb, vps)
 
     # absorption splitting runs BEFORE per-turn embedding so the pieces get
     # the same overlap-aware embeddings (and cache entries) as every other turn
@@ -365,11 +360,25 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
         print(f"   warning: {emb_failures}/{len(raw_turns)} turn embeddings failed "
               "— identity refinement degraded for this file")
 
+    # turn-level recluster (speakrs only), BEFORE naming so names land on the
+    # clusters as finally assigned; turn times do not change, so the
+    # embeddings above stay valid
+    n_moved = 0
+    if config.RECLUSTER and raw["engine"].startswith("speakrs"):
+        raw_turns, cent_emb, n_moved = recluster.apply(raw_turns, turn_embeddings, cent_emb)
+
+    cluster_names = ({k: v["name"] for k, v in
+                      identify.name_speakers(cent_emb, allowed_names=allowed_names,
+                                             context=context).items()}
+                     if vps else {k: None for k in cent_emb})
+    cluster_names = refine.resolve_split_clusters(cluster_names, cent_emb, vps)
+
     turns, names, stats = build_attribution(
         raw_turns, turn_embeddings, cluster_names, vps if do_refine else {},
         cluster_centroids=cent_emb, words=words, strict=strict)
     stats["overlap_spans"] = len(overlaps)
     stats["turns_split"] = n_cuts
+    stats["reclustered"] = n_moved
 
     return {"turns": turns, "names": names, "labels": sorted(names.keys()),
             "embeddings": cent_emb, "raw_turns": raw_turns,

@@ -170,6 +170,25 @@ SPEAKRS_MODELS = Path(os.environ.get(
     HOME / "Library/Application Support/com.stt-workflow/speakrs-models" / SPEAKRS_MODELS_REV))
 SPEAKRS_TIMEOUT_SEC = int(os.environ.get("STT_SPEAKRS_TIMEOUT_SEC", "3600"))
 
+# Turn-level recluster after speakrs (stt/recluster.py): a turn whose own
+# pyannote embedding fits another cluster's centroid better than its own (by
+# more than MARGIN, own weight left out) moves there. Centroids are built from
+# turns >= CENTROID_MIN_DUR; turns >= MOVE_MIN_DUR may move; a turn never moves
+# into a cluster with under DST_MIN_SECS of centroid-building talk. Measured
+# 2026-11 on 7 meetings vs Scribe v2 (qa/diar-opt/REPORT.md), final stage,
+# with the junk-repair guard below: mean agreement 89.73 -> 91.99, no meeting
+# lower. The moves carry S1 (+0.9) and S6 (+4.4). Swept on S1-S4, S5-S7 held
+# out. Margin 0-0.02 is a plateau; centroid turns >= 8 s lost 0.4 on S3; with
+# no destination floor S3 lost 2.4-3.6 (public commenters absorbed). Inert
+# under ~2 min (no cluster reaches the floor). speakrs engine only: the
+# pyannote fallback was not measured. STT_RECLUSTER=0 turns it off.
+RECLUSTER = os.environ.get("STT_RECLUSTER", "1") == "1"
+RECLUSTER_MARGIN = float(os.environ.get("STT_RECLUSTER_MARGIN", "0.02"))
+RECLUSTER_CENTROID_MIN_DUR = float(os.environ.get("STT_RECLUSTER_CENTROID_MIN_DUR", "5.0"))
+RECLUSTER_MOVE_MIN_DUR = float(os.environ.get("STT_RECLUSTER_MOVE_MIN_DUR", "0.3"))
+RECLUSTER_DST_MIN_SECS = float(os.environ.get("STT_RECLUSTER_DST_MIN_SECS", "120"))
+RECLUSTER_ITERS = int(os.environ.get("STT_RECLUSTER_ITERS", "2"))
+
 # ASR backend: "parakeet" (default, native MLX) or "whisperx" (CPU, robustness hedge)
 ASR_BACKEND = os.environ.get("STT_ASR_BACKEND", "parakeet")
 
@@ -258,6 +277,15 @@ REFINE_JUNK_REPAIR_MIN = float(
     os.environ.get("STT_REFINE_JUNK_REPAIR_MIN", "0.40"))
 REFINE_JUNK_REPAIR_MARGIN = float(
     os.environ.get("STT_REFINE_JUNK_REPAIR_MARGIN", "0.10"))
+# Junk repair skips a turn whose own cluster holds more than this much talk:
+# a fragment cluster is small, a large one is a real unmatched person. On S2
+# junk repair moved ~2000 s of three unmatched clusters (1239-3438 s each)
+# into one enrolled name. Measured 2026-11 with the recluster above: S2
+# 90.8 -> 93.0-93.3 at 100 s, 92.0 at 150-300 s, 93.4 at 80 s; none lower.
+# 100 s, not 80: S3 has a dense band of 70-85 s clusters, so a cut at 80 is
+# chance. Without the recluster the guard cost S6 0.5. 1e9 turns it off.
+REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = float(
+    os.environ.get("STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", "100"))
 
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
