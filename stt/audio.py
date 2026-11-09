@@ -1,5 +1,6 @@
 """Audio normalization + probing via ffmpeg/ffprobe."""
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -22,6 +23,48 @@ FFMPEG = _bin("ffmpeg")
 FFPROBE = _bin("ffprobe")
 
 
+class UnreadableAudio(RuntimeError):
+    """ffmpeg could not read the source: corrupt, truncated, not audio at
+    all. The message is one short line with ffmpeg's reason and the file's
+    name, never the command line or an absolute path."""
+
+
+_FF_PREFIX = re.compile(r"^\[[^\]]* @ 0x[0-9a-fA-F]+\]\s*")
+
+
+def _ffmpeg_reason(stderr, src: Path) -> str:
+    """The line of ffmpeg's error output that says why, with its
+    "[in#0 @ 0x...]" prefix and any path taken off. The first specific line
+    wins ("moov atom not found" over the generic "Invalid data found")."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    src = Path(src)
+    out = []
+    for ln in (stderr or "").splitlines():
+        ln = _FF_PREFIX.sub("", ln.replace("\ufffd", "")).strip()
+        if not ln or ln.startswith(("Error opening input file ",
+                                    "Error opening output file ")):
+            continue
+        for lead in ("Error opening input: ", "Error opening input files: ",
+                     "Error opening output files: "):
+            if ln.startswith(lead):
+                ln = ln[len(lead):]
+        ln = ln.replace(str(src), src.name)
+        if ln and ln not in out:
+            out.append(ln)
+    return out[0][:300] if out else "unknown error"
+
+
+def _run_ffmpeg(cmd: list, src: Path):
+    """Run one ffmpeg command. A failure raises UnreadableAudio with
+    ffmpeg's reason, never CalledProcessError and its command line."""
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        raise UnreadableAudio(f"ffmpeg could not decode {Path(src).name}: "
+                              f"{_ffmpeg_reason(r.stderr, src)}")
+    return r
+
+
 def duration_sec(src: Path) -> float:
     out = subprocess.run(
         [FFPROBE, "-v", "error", "-show_entries", "format=duration",
@@ -39,12 +82,10 @@ def to_wav16k(src: Path, dst: Path) -> Path:
     their decoders can never disagree on the audio.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [FFMPEG, "-y", "-i", str(src), "-vn",
+    _run_ffmpeg(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn",
          "-ar", str(config.SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
-         str(dst)],
-        check=True, capture_output=True,
-    )
+         str(dst)], src)
     return dst
 
 
@@ -67,11 +108,10 @@ def to_wav16k_channel(src: Path, dst: Path, channel: int) -> Path:
     filter picks a single channel without averaging, so no cross-channel bleed
     is introduced by the extraction itself."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [FFMPEG, "-y", "-i", str(src), "-vn",
+    _run_ffmpeg(
+        [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn",
          "-af", f"pan=mono|c0=c{int(channel)}",
-         "-ar", str(config.SAMPLE_RATE), "-c:a", "pcm_s16le", str(dst)],
-        check=True, capture_output=True)
+         "-ar", str(config.SAMPLE_RATE), "-c:a", "pcm_s16le", str(dst)], src)
     return dst
 
 
@@ -90,8 +130,7 @@ def extract_audio(src: Path, dst: Path) -> Path:
     r = subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "copy",
                         "-f", "ipod", str(tmp)], capture_output=True)
     if r.returncode != 0:  # audio codec not m4a-compatible; re-encode
-        subprocess.run([FFMPEG, "-y", "-i", str(src), "-vn", "-c:a", "aac",
-                        "-b:a", "160k", "-f", "ipod", str(tmp)],
-                       check=True, capture_output=True)
+        _run_ffmpeg([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                     "-vn", "-c:a", "aac", "-b:a", "160k", "-f", "ipod", str(tmp)], src)
     os.replace(tmp, dst)
     return dst

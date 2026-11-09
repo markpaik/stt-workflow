@@ -1286,3 +1286,39 @@ def test_process_one_names_an_empty_file(sandbox, monkeypatch):
         run_batch.process_one(str(f), str(config.MEETINGS_DIR),
                               {"do_diarize": False, "strict": False,
                                "allowed": None, "do_move": False})
+
+
+def _run_main(monkeypatch, *extra):
+    """run_batch.main() in the sandbox with the model steps stubbed off."""
+    import signal
+    import sys
+
+    from stt import config, summarize
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR), *extra])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        return run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
+def test_a_corrupt_source_fails_with_ffmpegs_reason_and_no_traceback(sandbox, monkeypatch, capsys):
+    """The failure line and the history row carry one short reason, never
+    the ffmpeg command line with absolute paths, and no Python traceback."""
+    from stt import config, status
+    (config.ICLOUD_DIR / "Corrupt Clip.wav").write_bytes(b"garbage")
+    assert _run_main(monkeypatch) == 1
+    err = capsys.readouterr().err
+    want = ("ffmpeg could not decode Corrupt Clip.wav: "
+            "Invalid data found when processing input")
+    assert f"FAILED: Corrupt Clip.wav: {want}" in err
+    assert "Traceback" not in err and "exit status" not in err
+    assert str(config.ICLOUD_DIR) not in err
+    row = status.read()["recent"][0]
+    assert row["name"] == "Corrupt Clip.wav" and row["summary"] == want

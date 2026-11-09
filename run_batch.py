@@ -65,7 +65,7 @@ def _load_env_file(repo=None):
 
 _load_env_file()
 
-from stt import config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
+from stt import audio, config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
 
 # a plain run re-reads the Voice Memos library at most this often while it
 # picks files, so a memo that finishes during a long run joins that run
@@ -629,6 +629,13 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "diarizer": res.get("diarizer")}
 
 
+def _trace(e):
+    """Print the traceback of a failed file, except for a source ffmpeg
+    cannot read: its one-line reason (audio.UnreadableAudio) says it all."""
+    if not isinstance(e, audio.UnreadableAudio):
+        traceback.print_exc()
+
+
 def _requeue_if_unintended(claimed_job) -> bool:
     """Put a claimed job back on the queue when the run is interrupted, so a
     crash or system sleep never loses it — UNLESS the interruption was an
@@ -975,7 +982,7 @@ def main():
             try:
                 _record(process_one(str(src), str(dest), opts_for(src)), 1)
             except Exception as e:
-                traceback.print_exc()
+                _trace(e)
                 nonlocal_fail(src.name, e)
 
     def run_in_parallel():
@@ -1045,7 +1052,7 @@ def main():
                         nonlocal_fail(src.name, RuntimeError(
                             "crashed its worker process twice — file skipped"))
                     except Exception as e:
-                        traceback.print_exc()
+                        _trace(e)
                         nonlocal_fail(src.name, e)
             if pool_ok:
                 return
