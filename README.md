@@ -119,7 +119,9 @@ batch and the panel skip them until the file holds data. A file that
 ffmpeg cannot read, or that fails three runs in a row without changing,
 is set aside: automatic runs skip it until the file changes, and its
 row's Retry runs it at once. The failure shows ffmpeg's own reason
-("moov atom not found", "no audio track").
+("moov atom not found", "no audio track"). A very long file name is cut
+to 120 bytes for its meeting folder, so every file in the folder stays
+under the 255-byte name limit of macOS.
 
 Four per-run options, from the Process popover:
 

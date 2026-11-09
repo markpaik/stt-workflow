@@ -392,3 +392,39 @@ def test_resolve_channel_ignores_a_non_object(sandbox, bad, tmp_path):
     stored = tmp_path / "a.json"
     stored.write_text(json.dumps(bad))
     assert pipeline._resolve_channel(src, stored, bad) == (None, None)
+
+
+@pytest.mark.parametrize("stem", ["L" * 236, "L" * 251, "Réunion équipe " * 16])
+def test_a_long_source_name_gets_a_folder_name_that_fits(sandbox, monkeypatch, stem):
+    """The folder name is the date plus the source stem, and every artifact
+    adds a suffix (.reviews.superseded.json is 24 bytes). A 236-character
+    stem gave a 247-byte folder, and a later artifact failed with Errno 63
+    (File name too long). The name from a source stem is capped."""
+    import json
+
+    from stt import dates
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    src = config.ICLOUD_DIR / f"{stem}.m4a"
+    src.write_bytes(b"x")
+    base = pipeline.resolve_base(src, config.MEETINGS_DIR)
+    assert len(base.encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert base.startswith(dates.meeting_date(base) or "")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert res["base"] == base
+    assert json.loads(res["json"].read_text())["source_file"] == src.name
+    # the longest artifact name still fits
+    long = config.meeting_file(base, ".reviews.superseded.unmerged-1731170000", config.MEETINGS_DIR)
+    long.write_text("[]")
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == base   # a Redo finds it again
+
+
+def test_cap_name_never_splits_a_character():
+    name = "2026-01-05 " + "é" * 100
+    capped = config.cap_name(name)
+    assert len(capped.encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert capped.encode("utf-8").decode("utf-8") == capped and name.startswith(capped)
+    assert config.cap_name("short") == "short"
+    assert config.cap_name("a" * 119 + " b") == "a" * 119     # no trailing space

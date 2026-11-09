@@ -2948,7 +2948,11 @@ class Handler(BaseHTTPRequestHandler):
                 was_failed = f.name in _failed_sources(status.read())
                 f.unlink()
                 # the recorder's channel-layout sidecar travels with its audio
-                f.with_suffix(".opts.json").unlink(missing_ok=True)
+                # (a name past the 255-byte limit has none, and raises)
+                try:
+                    f.with_suffix(".opts.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 out = {"ok": True, "freed_mb": mb}
                 if was_failed and dismiss_failure(f.name):
                     out["dismissed_failure"] = True
@@ -3039,7 +3043,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         freed += p.stat().st_size / 1e6
                         p.unlink()
-                        p.with_suffix(".opts.json").unlink(missing_ok=True)
+                        try:
+                            p.with_suffix(".opts.json").unlink(missing_ok=True)
+                        except OSError:
+                            pass    # a name too long to have a sidecar
                         deleted.append(f["name"])
                     except OSError as e:
                         _skip(f["name"], f"it could not be deleted ({e.strerror})")

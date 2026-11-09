@@ -579,11 +579,12 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     import json as _json
     input_opts = None
     side = src.with_suffix(".opts.json")
-    if side.exists():
-        try:
+    try:
+        if side.exists():
             input_opts = _json.loads(side.read_text())
-        except (OSError, ValueError):
-            input_opts = None
+    except (OSError, ValueError):
+        # unreadable, or a name past the 255-byte limit (no such sidecar)
+        input_opts = None
 
     # the source's content fingerprint, taken NOW: after this returns the file
     # may have been moved into the meeting folder (or, for a video, replaced by
@@ -630,9 +631,14 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
         ok, why = safe_to_delete(src, dest_audio, src_fp, src_size)
         if ok:
             src.unlink()
-            side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
             from stt import provenance
-            provenance.sidecar_path(src).unlink(missing_ok=True)
+            # the layout now lives in the meeting .json. A sidecar name past
+            # the 255-byte limit raises, and no such sidecar can exist
+            for extra in (side, provenance.sidecar_path(src)):
+                try:
+                    extra.unlink(missing_ok=True)
+                except OSError:
+                    pass
         else:
             print(f"   kept the source {src.name}: {why}", file=sys.stderr, flush=True)
 

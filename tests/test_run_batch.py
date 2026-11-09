@@ -1417,3 +1417,25 @@ def test_a_plain_job_adds_no_cli_flags(sandbox):
     ns = run_batch.build_parser().parse_args(jobs.spawn_args({**spec, "at": 1.0})[5:])
     assert not (ns.no_diarize or ns.keep_original or ns.ignore_battery)
     assert ns.only is None and ns.speakers is None
+
+
+def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):
+    """A 251-character stem: the meeting lands in a capped folder, the
+    audio copy fits, and the delete step (with its sidecar names past 255
+    bytes) removes the original without raising."""
+    from test_pipeline import _fake_asr
+
+    from stt import audio, config, icloud, pipeline
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    src = config.ICLOUD_DIR / ("L" * 251 + ".m4a")
+    src.write_bytes(b"\x01" * 256)
+    res = run_batch.process_one(str(src), str(config.MEETINGS_DIR),
+                                {"do_diarize": False, "strict": False,
+                                 "allowed": None, "do_move": True})
+    assert res["ok"] and len(res["base"].encode()) <= config.MAX_BASE_BYTES
+    assert config.meeting_file(res["base"], ".m4a").read_bytes() == b"\x01" * 256
+    assert not src.exists()

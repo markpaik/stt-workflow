@@ -628,6 +628,23 @@ AUDIO_SUFFIXES = _AUDIO_PREFERRED + tuple(sorted(AUDIO_EXTS - set(_AUDIO_PREFERR
 _SIDECAR_JSON = (".reviews.json", ".verify.json", ".reviews.superseded.json")
 
 
+# A meeting's folder name is also the stem of every file in it, and the
+# longest artifact name adds about 40 bytes (".reviews.superseded.unmerged-
+# <time>"), plus a " (NN)" twin suffix. macOS allows 255 bytes per name, so
+# a folder name made from a source file name is capped well under that.
+MAX_BASE_BYTES = 120
+
+
+def cap_name(name: str, limit: int = MAX_BASE_BYTES) -> str:
+    """`name` cut to at most `limit` UTF-8 bytes, never inside a character,
+    with no trailing space, dot, dash or underscore left by the cut."""
+    raw = str(name).encode("utf-8")
+    if len(raw) <= limit:
+        return name
+    cut = raw[:limit].decode("utf-8", "ignore")
+    return cut.rstrip(" .-_") or cut
+
+
 def meeting_dir(base: str, dest_dir=None) -> Path:
     return Path(dest_dir or meetings_dir()) / base
 

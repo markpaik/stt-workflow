@@ -224,16 +224,21 @@ def resolve_base(src: Path, dest_dir=None) -> str:
     # this file's own meeting already lives under the plain name (a legacy
     # pre-stamping meeting reprocessed from the watched folder): stay there —
     # stamping now would strand the transcript in a NEW folder as a duplicate
-    if (config.meeting_file(base, ".json", dest_dir).exists()
-            and _owns_meeting(base, src, dest_dir)):
-        return base
+    try:
+        if (config.meeting_file(base, ".json", dest_dir).exists()
+                and _owns_meeting(base, src, dest_dir)):
+            return base
+    except OSError:
+        pass    # a stem too long to be a folder name: never a meeting on disk
     # the folder takes the ISO-first form, "YYYY-MM-DD <name>": a plain name
     # gets the meeting's date in front, and a name that carries a date in the
     # older form ('Weekly 07102026', the old recorder's 'Recording 07112026
     # 1814') has it moved to the front. The date is the one the meeting will
     # store, so the folder name and the stored date agree.
     on = _meeting_date(src, None)
-    target = dates.canonical(base, on)
+    # capped: the folder name is the stem of every artifact, and a long
+    # source name made a later write fail with "File name too long"
+    target = config.cap_name(dates.canonical(base, on))
     # a folder named before the ISO rule ('Sync 05012026 (2)') that THIS
     # recording owns: a reprocess lands back in it rather than minting a
     # duplicate under the new name (tools/iso_rename.py moves it later)
@@ -243,8 +248,11 @@ def resolve_base(src: Path, dest_dir=None) -> str:
         while i < 100:
             cand = legacy if i == 1 else f"{legacy} ({i})"
             i += 1
-            if not config.meeting_dir(cand, dest_dir).exists():
-                break
+            try:
+                if not config.meeting_dir(cand, dest_dir).exists():
+                    break
+            except OSError:
+                break   # too long to exist on disk
             if _owns_meeting(cand, src, dest_dir):
                 return cand
     archive = config.archive_dir(dest_dir)
@@ -281,13 +289,15 @@ def _resolve_channel(src: Path, existing_json: Path, input_opts):
     if cl:
         return cl, ms
     for path in (existing_json, src.with_suffix(".opts.json")):
-        if path and path.exists():
-            try:
+        try:
+            # exists() inside the try: a sidecar name past the 255-byte
+            # limit raises "File name too long", and it cannot exist anyway
+            if path and path.exists():
                 cl, ms = _pick(_json.loads(path.read_text()))
                 if cl:
                     return cl, ms
-            except (OSError, ValueError):
-                pass
+        except (OSError, ValueError):
+            pass
     return None, None
 
 
