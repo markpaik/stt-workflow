@@ -199,6 +199,8 @@ def test_a_pdf_chrome_wrote_is_kept_when_chrome_crashes_on_exit(sandbox, tmp_pat
     args = (tmp_path / "chrome.args").read_text().splitlines()
     # its own throwaway profile: never the running Chrome's, which it can contend with
     assert any(a.startswith("--user-data-dir=") for a in args)
+    # and that profile never asks the login keychain, which opens a macOS dialog
+    assert "--use-mock-keychain" in args and "--password-store=basic" in args
 
 
 @pytest.mark.parametrize("body, rc", [(None, 2), ("", 0), ("%%PDF-1.4\\npartial", 0),

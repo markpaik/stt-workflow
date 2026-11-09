@@ -144,7 +144,8 @@ def to_pdf(base: str) -> Path:
     whole PDF and then crash on exit (crashpad, exit 2). A complete PDF is
     the export. A missing or partial one is removed and the export fails,
     so a retry never leaves a "name (n).pdf" behind. Chrome runs on a
-    throwaway profile, so it never contends with a Chrome already open."""
+    throwaway profile, so it never contends with a Chrome already open,
+    and on a mock keychain, so the profile never opens a keychain dialog."""
     if not Path(CHROME).exists():
         raise RuntimeError("Google Chrome not found — export Word instead, "
                            "or install Chrome for PDF export.")
@@ -156,6 +157,9 @@ def to_pdf(base: str) -> Path:
             rc = subprocess.run(
                 [CHROME, "--headless", "--disable-gpu", "--no-pdf-header-footer",
                  f"--user-data-dir={Path(td) / 'profile'}",
+                 # a new profile asks the login keychain for "Chrome Safe
+                 # Storage", and macOS shows a dialog for each export
+                 "--use-mock-keychain", "--password-store=basic",
                  f"--print-to-pdf={out}", str(page)],
                 capture_output=True, timeout=60).returncode
         except subprocess.TimeoutExpired:
