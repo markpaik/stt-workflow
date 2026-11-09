@@ -201,6 +201,30 @@ def test_saving_a_colon_title_again_changes_nothing(sandbox):
     assert (r["renamed"], d["title"]) == ([], "Dana Fox 1-1")
 
 
+def test_a_long_typed_title_fits_a_folder_name(sandbox):
+    """names.file_title limits characters, not bytes: 120 CJK characters
+    and the date are 371 bytes, past a macOS name, so the rename failed
+    with ENAMETOOLONG and the generic 500. The folder name is now cut by
+    bytes, and the title shown stays whole."""
+    from stt import names
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly")
+    long = "会議" * 60
+    r = summarize.rename_meeting("2026-07-04 Weekly", long)
+    assert r["ok"], r
+    assert len(r["base"].encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert r["base"].startswith("2026-07-04 会議")
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == long
+    # two long titles that share the cut form are twins
+    _m("2026-07-04 Other", date="2026-07-04", title="Other")
+    r2 = summarize.rename_meeting("2026-07-04 Other", long + "二")
+    assert r2["ok"] and r2["base"] == r["base"] + " (2)"
+    assert names.file_title(long) == long      # the characters are all kept
+    from stt import doctor
+    assert not [f for f in doctor.check(registry=False)
+                if f.kind == "name_mismatch" and f.subject.startswith("2026-07-04 会議")]
+
+
 def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
     """The keep-the-number rule kept '(3)' even after the plain name was
     deleted, so a twin could never drop its number. The number now stays

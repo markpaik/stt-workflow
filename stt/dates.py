@@ -131,11 +131,19 @@ def shown_title(title, base: str) -> str:
     a typed '1:1' shows as '1:1' while the folder says '1-1'. Anything else
     (no title, a stale or hand-edited key) gives title_of(base), so a name
     the folder does not carry is never shown."""
-    from . import names
+    from . import config, names
     folder = title_of(base)
     if isinstance(title, str):
         shown = title_of(names.clean_title(title))
-        if shown and names.file_title(shown) == folder:
+        safe = names.file_title(shown) if shown else ""
+        if shown and safe == folder:
+            return shown
+        # a long title whose folder name was cut by bytes (config.cap_name)
+        # still shows in full: the folder carries its cut form
+        whole = _UNIQ_SUFFIX.sub("", str(base or "").strip())
+        stamp_part = whole[:len(whole) - len(folder)] if folder else ""
+        if (shown and folder and whole.endswith(folder) and safe != folder
+                and config.cap_name(stamp_part + safe) == whole):
             return shown
     return folder
 

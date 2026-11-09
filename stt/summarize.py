@@ -1522,6 +1522,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             # number too. Once the plain name is free (the first one was
             # deleted), the twin takes it: the number only ever told two
             # meetings apart.
+            # a title of 120 characters can be 360 bytes or more (CJK), past
+            # what a folder name and its artifacts' names can hold: the
+            # name is cut by bytes, as a source file's name is
+            want = config.cap_name(want)
             own = dates.twin_suffix(base)
             if (own and want.lower() == base[:-len(own)].lower()
                     and _dest_taken(want)):

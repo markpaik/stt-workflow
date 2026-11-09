@@ -294,9 +294,12 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         # the folder holds the title in its safe form: '1:1' is '1-1' on
         # disk. A folder from before the sanitizer may still hold the title
         # as typed, colon and all, and that is no mismatch either.
+        # A long title's folder name is cut by bytes (config.cap_name).
         raw = d.get("title") or dates.title_of(b)
-        wants = {(dates.stamp(t, d["date"]) if d.get("date") else t) + dates.twin_suffix(b)
-                 for t in (names.file_title(raw) or raw, raw)}
+        stamped = {(dates.stamp(t, d["date"]) if d.get("date") else t)
+                   for t in (names.file_title(raw) or raw, raw)}
+        wants = {n + dates.twin_suffix(b)
+                 for n in stamped | {config.cap_name(n) for n in stamped}}
         if b not in wants:
             why = "folder name differs from its title and date"
             if not dates.is_iso_form(b) and dates.meeting_date(b):
