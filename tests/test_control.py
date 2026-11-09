@@ -344,3 +344,64 @@ def test_elapsed_time_parses_every_ps_form():
     assert control._etime_secs("05:07") == 307
     assert control._etime_secs("02:05:07") == 2 * 3600 + 307
     assert control._etime_secs("3-02:05:07") == 3 * 86400 + 2 * 3600 + 307
+
+
+def test_stop_leaves_the_script_that_started_the_batch(sandbox, monkeypatch):
+    """A script without job control that starts the batch in the background
+    shares its process group with the batch. stop_run sent SIGTERM to that
+    whole group, so Stop ended the script too. In a group the batch does
+    not lead, only the batch's own processes are signalled."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    pidfile = sandbox / "batch.pid"
+    # the script leads its own group; the fake batch runs in it as a
+    # background child, as `python run_batch.py &` in a script does
+    script = (f'{sys.executable} -c "import time;time.sleep(60)" run_batch.py & '
+              f'echo $! > "{pidfile}"; wait; sleep 30')
+    sh = subprocess.Popen(["/bin/bash", "-c", script], start_new_session=True)
+    try:
+        for _ in range(50):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.1)
+        batch = int(pidfile.read_text())
+        time.sleep(0.3)
+        assert os.getpgid(batch) == sh.pid != batch
+        _lock_names(sandbox, batch)
+        d = status.read()
+        d.update(running=True, pgid=sh.pid)
+        status._write(d)
+        assert control.batch_pids() == [batch]       # the script is not the batch
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == [] and not res["forced"]
+        time.sleep(0.2)
+        assert sh.poll() is None                     # the script lives on
+        assert subprocess.run(["/bin/ps", "-p", str(batch)],
+                              capture_output=True).returncode != 0
+    finally:
+        try:
+            os.killpg(sh.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        sh.wait()
+
+
+def test_stop_still_takes_a_whole_group_the_batch_leads(sandbox, monkeypatch):
+    """The panel, launchd and a terminal start the batch as its group's
+    leader (caffeinate execs its utility in its own pid). That group goes
+    whole, workers included."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _spawn_fake_batch(sandbox)
+    pgid = os.getpgid(p.pid)
+    try:
+        assert pgid == p.pid
+        _lock_names(sandbox, p.pid)
+        assert len(control.batch_pids()) >= 2       # the leader and its worker
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == []
+        assert subprocess.run(["pgrep", "-g", str(pgid)],
+                              capture_output=True, text=True).stdout == ""
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
