@@ -1280,6 +1280,18 @@ def test_a_sandboxed_batch_reads_the_sandbox_stt_env_not_the_repo_one(tmp_path, 
     assert os.environ.get("STT_MEETINGS_DIR") == "/real/meetings"
 
 
+def test_an_empty_file_named_by_paths_fails_in_one_line(sandbox, monkeypatch, capsys):
+    """--paths on a 0-byte file printed a Python traceback that ended in
+    'RuntimeError: zero.m4a is empty (0 bytes)'. It is one line now, as a
+    file ffmpeg cannot read is."""
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    assert _run_main(monkeypatch, "--paths", str(f)) == 1
+    err = capsys.readouterr().err
+    assert "FAILED: zero.m4a: zero.m4a is empty (0 bytes)" in err
+    assert "Traceback" not in err
+
+
 def test_iter_audio_skips_empty_files(sandbox):
     """A 0-byte file (a failed export, a copy still being created) is not a
     recording. The batch never picks it, and the panel never lists it."""

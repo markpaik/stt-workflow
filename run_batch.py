@@ -576,7 +576,9 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
 
     report("downloading")
     if src.stat().st_size == 0:
-        raise RuntimeError(f"{key} is empty (0 bytes)")
+        # no bytes is no audio: one line, like any file ffmpeg cannot read,
+        # never a traceback
+        raise audio.UnreadableAudio(f"{key} is empty (0 bytes)")
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
     # resolved again now the bytes are here: a Voice Memos date tag cannot
