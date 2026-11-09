@@ -289,6 +289,33 @@ def test_api_ask_library_saves_a_thread(running_server, monkeypatch):
     assert r["ok"]
 
 
+def test_a_question_that_finds_nothing_saves_no_new_thread(running_server, monkeypatch):
+    """Every nothing-found question ('???', 'the and of') saved a thread, so
+    the saved list filled with answers that cite nothing. The reply still
+    comes back with the closest hits. Inside a saved thread, a follow-up
+    that finds nothing stays in that thread."""
+    _world()
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: "NOT FOUND")
+    st, r = _post(running_server, "/api/ask_library", {"question": "roof reserve heater?"})
+    assert st == 200 and r["ok"] and r["thread"] is None
+    m = r["message"]
+    assert m["q"] == "roof reserve heater?" and m["nothing_found"]
+    assert m["a"] == ask.NOT_FOUND_TEXT
+    assert m["hits"] and m["hits"][0]["base"] == "Roof Budget 10012026"
+    assert m["hits"][0]["gone"] is False
+    st, r = _post(running_server, "/api/ask_library", {"question": "???"})
+    assert st == 200 and r["thread"] is None
+    assert ask.list_threads() == []
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: _cite_first(p))
+    st, r = _post(running_server, "/api/ask_library", {"question": "How big is the roof reserve?"})
+    tid = r["thread"]
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: "NOT FOUND")
+    st, r = _post(running_server, "/api/ask_library", {"question": "And the heater?", "thread": tid})
+    assert st == 200 and r["thread"] == tid and r["message"]["nothing_found"]
+    assert [(t["id"], t["n"]) for t in ask.list_threads()] == [(tid, 2)]
+
+
 def test_api_ask_library_busy_and_missing_model(running_server, monkeypatch):
     _world()
     monkeypatch.setattr(summarize, "available", lambda: False)

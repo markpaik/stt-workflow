@@ -362,6 +362,16 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _message(question: str, result: dict) -> dict:
+    """One exchange as a thread stores it."""
+    return {"q": question, "a": result.get("answer", ""),
+            "nothing_found": bool(result.get("nothing_found")),
+            "citations": result.get("citations") or [],
+            "hits": result.get("hits") or [],
+            "left_out": result.get("left_out") or 0,
+            "elapsed_sec": result.get("elapsed_sec"), "at": _now()}
+
+
 def save_message(tid, scope: dict, label: str, question: str, result: dict) -> dict:
     """Append one exchange to thread `tid` (a new thread when tid is None).
     Returns the stored thread."""
@@ -371,16 +381,21 @@ def save_message(tid, scope: dict, label: str, question: str, result: dict) -> d
             tid = uuid.uuid4().hex[:12]
             d = {"id": tid, "created_at": _now(),
                  "scope": dict(scope or {"kind": "all"}, label=label), "messages": []}
-        d["messages"].append({
-            "q": question, "a": result.get("answer", ""),
-            "nothing_found": bool(result.get("nothing_found")),
-            "citations": result.get("citations") or [],
-            "hits": result.get("hits") or [],
-            "left_out": result.get("left_out") or 0,
-            "elapsed_sec": result.get("elapsed_sec"), "at": _now()})
+        d["messages"].append(_message(question, result))
         d["updated_at"] = _now()
         _write(d)
     return d
+
+
+def unsaved_message(question: str, result: dict) -> dict:
+    """The exchange for a first question that found nothing, which starts
+    no thread: each '???' or 'the and of' saved one, and the saved list
+    filled with answers that cite nothing. Its hits are resolved, as
+    get_thread resolves a stored one."""
+    m = _message(question, result)
+    m["citations"] = [_resolve(c) for c in m["citations"]]
+    m["hits"] = [_resolve(h) for h in m["hits"]]
+    return m
 
 
 def history_of(tid) -> list:

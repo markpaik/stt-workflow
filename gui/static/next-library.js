@@ -118,7 +118,7 @@ function msgHTML(m){
 }
 function askScopeHTML(){
  const t=LIB.thread;
- if(t)return `<span class="meta">Answer from <strong>${esc((t.scope||{}).label||'All recordings')}</strong></span>`;
+ if(t&&!t.unsaved)return `<span class="meta">Answer from <strong>${esc((t.scope||{}).label||'All recordings')}</strong></span>`;
  const gs=LIB.groups||[];
  const opts=[['all','All recordings'],...gs.map(g=>['group:'+g.key,g.name+' ('+g.count+')']),['days:30','Last 30 days']];
  // a group that is gone falls back to all, once the groups are known
@@ -134,15 +134,15 @@ function askView(){
  const ts=LIB.threads||[];
  const list=`<div class="eyebrow">Saved <span class="n">${ts.length}</span></div>`+(ts.length?ts.map(x=>`<a class="hit ${x.id===LIB.tid?'sel':''}" href="#ask/${x.id}"><div class="hit-t">${esc(x.q)}</div><div class="meta">${esc(x.scope)}${x.n>1?' · '+plural(x.n,'question'):''}</div></a>`).join(''):'<div class="meta">Threads you ask save here.</div>');
  const t=LIB.thread;
- const msgs=t?(t.messages||[]).map(msgHTML).join(''):(LIB.tid?'<div class="meta">Loading the thread…</div>':'<div class="empty"><span>Ask about decisions, people, or topics across your meetings.</span></div>');
+ const msgs=t?(t.messages||[]).map(msgHTML).join('')+(t.unsaved?'<div class="meta">Not saved: nothing was found.</div>':''):(LIB.tid?'<div class="meta">Loading the thread…</div>':'<div class="empty"><span>Ask about decisions, people, or topics across your meetings.</span></div>');
  const pending=LIB.apending?`<div class="msg q">${esc(LIB.apending)}</div><div class="msg a meta" role="status">Reading your meetings…</div>`:'';
  const why=off||LIB.areason||(LIB.abusy?'The assistant is answering. Your question stays here.':'');
- const del=t?`<button class="btn plain ${LIB.aconfirm?'danger':''}" type="button" data-act="ask-del">${LIB.aconfirm?'Confirm: delete thread':'Delete thread'}</button>`:'';
+ const del=t&&!t.unsaved?`<button class="btn plain ${LIB.aconfirm?'danger':''}" type="button" data-act="ask-del">${LIB.aconfirm?'Confirm: delete thread':'Delete thread'}</button>`:'';
  return `<div class="head"><h1>Ask</h1><span class="tools">${del}<button class="btn" type="button" data-act="ask-new">New question</button></span></div>
   <div class="ask-grid"><nav class="stack thread-list" aria-label="Saved threads">${list}</nav>
   <div class="stack" style="min-width:0;gap:var(--s4)"><div class="tools">${askScopeHTML()}<span class="meta">${esc(where)}</span></div>
   <div class="thread">${msgs}${pending}</div>
-  <div class="ask-form"><input type="text" id="ask-q" placeholder="${t?'Ask a follow-up':'Ask across your meetings'}" aria-label="Question" autocomplete="off" value="${esc(LIB.adraft)}" maxlength="2000"><button class="btn primary" type="button" data-act="ask-send" ${off||LIB.abusy?'disabled':''}>Ask</button></div>
+  <div class="ask-form"><input type="text" id="ask-q" placeholder="${t&&!t.unsaved?'Ask a follow-up':'Ask across your meetings'}" aria-label="Question" autocomplete="off" value="${esc(LIB.adraft)}" maxlength="2000"><button class="btn primary" type="button" data-act="ask-send" ${off||LIB.abusy?'disabled':''}>Ask</button></div>
   ${why?`<div class="meta ${LIB.areason?'attn-t':''}" id="ask-why">${esc(why)}</div>`:''}</div></div>`;
 }
 async function askSend(){
@@ -153,7 +153,12 @@ async function askSend(){
  LIB.abusy=false;LIB.apending=null;
  // a failure, a busy model included, keeps the typed question in the field
  if(!r||r.error||r.ok===false){LIB.areason=(r&&r.error)||'That did not work.';render(true);return;}
- LIB.adraft='';LIB.tid=r.thread;
+ LIB.adraft='';
+ // a first question that found nothing comes back unsaved (thread null):
+ // show it here, and the next question starts fresh
+ if(!r.thread){LIB.tid=null;LIB.thread={id:null,unsaved:true,scope:{label:r.scope_label||''},messages:[r.message||{}]};
+  render(true);const i=document.getElementById('ask-q');if(i&&i.focus)i.focus();return;}
+ LIB.tid=r.thread;
  if(location.hash!=='#ask/'+r.thread)history.replaceState(null,'','#ask/'+r.thread);
  await Promise.all([loadThread(r.thread),loadThreads()]);render(true);
  const i=document.getElementById('ask-q');if(i&&i.focus)i.focus();

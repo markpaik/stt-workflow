@@ -3092,6 +3092,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if scope.get("kind") == "group":
                     groups.log_use("group_ask")
+                if r.get("nothing_found") and not tid:
+                    # a first question that found nothing starts no thread:
+                    # the page shows the reply and its closest hits unsaved
+                    self._json({"ok": True, "thread": None,
+                                "message": ask.unsaved_message(q_, r),
+                                "scope_label": r.get("scope_label", "")})
+                    return
                 t = ask.save_message(tid, {k: v for k, v in scope.items() if k != "label"},
                                      r.get("scope_label", ""), q_, r)
                 self._json({"ok": True, "thread": t["id"],
