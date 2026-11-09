@@ -1295,6 +1295,8 @@ def _move_folder(base: str, new_base: str) -> list:
 
 
 _UNSET = object()
+# the earliest year a meeting date may carry; the latest is next year
+DATE_YEAR_MIN = 2000
 # pass as recorded_at= to remove the key (an undo back to a meeting that
 # never had one)
 DROP = "$drop"
@@ -1362,6 +1364,13 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             iso = _date.fromisoformat(str(date).strip()).isoformat()
         except ValueError:
             return {"ok": False, "error": "date should look like 2026-07-04"}
+        # a sane year: 0001-01-01 renamed the folder, and a year outside
+        # dates._valid (2000-2099) is not read back as a stamp, so the next
+        # edit stacked a second date in front of it
+        last = _date.today().year + 1
+        if not DATE_YEAR_MIN <= int(iso[:4]) <= last:
+            return {"ok": False,
+                    "error": f"date should be between {DATE_YEAR_MIN} and {last}"}
 
     cat = None
     if category is not None:

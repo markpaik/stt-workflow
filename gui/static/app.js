@@ -1789,7 +1789,7 @@ function rowDateEdit(ev,id){
   const span=rowEl&&rowEl.querySelector('.rdate');
   if(!span||rowEl.querySelector('.dateinput'))return;    // already editing
   const cur=(rowById(id)||{}).date||'';
-  span.outerHTML=`<input type="date" class="dateinput" value="${esc(cur)}" aria-label="Meeting date">`;
+  span.outerHTML=`<input type="date" class="dateinput" value="${esc(cur)}" min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" aria-label="Meeting date">`;
   const inp=rowEl.querySelector('.dateinput');
   if(!inp)return;
   inp.focus();
@@ -2032,7 +2032,7 @@ function bulkDate(btn){                     // date input in a popover, never a 
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Set the date for ${n} selected</div>
       <div class="ppcnote">The folder name is re-stamped to match. Each keeps its own name.</div>
-      <input class="ppinput" type="date" aria-label="New date for all selected">
+      <input class="ppinput" type="date" min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" aria-label="New date for all selected">
       <div class="ppcrow">
         <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
         <button class="btn primary mini" type="button" onclick="bulkDateGo()">Set date</button>
@@ -4446,7 +4446,7 @@ function fsTitleHTML(row){
       <input class="renameinput" id="fstitle" type="text" value="${esc(t)}" aria-label="Meeting title"
         onkeydown="fsTitleKey(event)">
       <input class="dateinput" id="fsdate" type="date" value="${esc(d)}" aria-label="Meeting date"
-        onkeydown="fsTitleKey(event)">
+        min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" onkeydown="fsTitleKey(event)">
       <button class="btn primary mini" id="fsaccept" type="button" onclick="fsAccept()"
         title="Accept this title and date (Enter)">Accept</button>
       ${stem&&stem.trim().toLowerCase()!==t.trim().toLowerCase()

@@ -405,3 +405,29 @@ def test_undo_takes_off_a_date_the_move_added(sandbox, monkeypatch, tmp_path):
 
     d = json.loads(j.read_text())
     assert "date" not in d and "date_source" not in d and "renamed_from" not in d
+
+
+def test_a_date_outside_2000_to_next_year_is_refused(sandbox):
+    """0001-01-01 was accepted and renamed the folder. A year outside
+    dates._valid's 2000-2099 is not read back as a stamp either, so the next
+    edit stacked a second one: '2999-01-01 1999-01-01 Board Prep Session'."""
+    from datetime import date
+    _m("2026-07-04 Board Prep Session", date="2026-07-04")
+    last = date.today().year + 1
+    for bad in ("0001-01-01", "1999-12-31", "2999-01-01", f"{last + 1}-01-01"):
+        r = summarize.set_meeting_date("2026-07-04 Board Prep Session", bad)
+        assert r == {"ok": False, "error": f"date should be between 2000 and {last}"}, bad
+        r = summarize.apply_meeting_edits("2026-07-04 Board Prep Session", date=bad)
+        assert r["ok"] is False
+    assert config.meeting_bases() == ["2026-07-04 Board Prep Session"]
+    # both ends of the range still land, and each edit replaces the stamp
+    r = summarize.set_meeting_date("2026-07-04 Board Prep Session", "2000-01-01")
+    assert r["ok"] and r["base"] == "2000-01-01 Board Prep Session"
+    r = summarize.set_meeting_date(r["base"], f"{last}-12-31")
+    assert r["ok"] and r["base"] == f"{last}-12-31 Board Prep Session"
+
+
+def test_the_classic_date_inputs_carry_the_same_range():
+    js = (Path(__file__).resolve().parent.parent / "gui/static/app.js").read_text()
+    # summarize.apply_meeting_edits takes 2000 to next year
+    assert js.count('min="2000-01-01" max="${new Date().getFullYear()+1}-12-31"') == 3
