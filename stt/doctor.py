@@ -32,8 +32,9 @@ drops):
 
 What it only reports: a folder name that disagrees with its `title` and
 date, meetings missing the store keys (tools/backfill_keys.py adds them),
-scratch audio left in work/, and (with deep=True) a stored duration longer
-than the audio.
+scratch audio left in work/, an stt.env value that cannot be read and is
+replaced by its default (`bad_setting`), and (with deep=True) a stored
+duration longer than the audio.
 """
 import hashlib
 import json
@@ -335,6 +336,8 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
     if housekeeping.cap_calibration(dry_run=True):
         out.append(Finding("calibration_oversize", "calibration.jsonl",
                            "over its cap", True))
+    for name, why in config.setting_problems():
+        out.append(Finding("bad_setting", name, why, False))
     return out
 
 

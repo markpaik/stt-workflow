@@ -582,25 +582,70 @@ def llm_rest_min_sec() -> float:
 
 
 def _hm(s: str) -> int:
-    h, m = s.strip().split(":")
-    h, m = int(h), int(m)
+    """Minutes since midnight for 'HH:MM' or a bare hour ('10')."""
+    h, _, m = s.strip().partition(":")
+    h, m = int(h), int(m or 0)
     if not (0 <= h <= 24 and 0 <= m < 60):
         raise ValueError(s)
     return h * 60 + m
 
 
+def quiet_window(raw: str):
+    """(start, end) in minutes since midnight for an STT_LLM_QUIET_HOURS
+    value. The two times are joined by '-', an en or em dash, or 'to', with
+    or without spaces ('10:00–12:00', '10-12', '10:00 to 12:00'). A time is
+    'HH:MM' or a bare hour. Raises ValueError for anything else."""
+    parts = re.split(r"\s*(?:-|\u2013|\u2014|\bto\b)\s*", str(raw or "").strip(),
+                     flags=re.I)
+    if len(parts) != 2:
+        raise ValueError(raw)
+    return _hm(parts[0]), _hm(parts[1])
+
+
+_setting_warned = set()
+
+
+def _warn_setting(name: str, raw, rule: str, using):
+    """One warning per process for each unreadable value of a setting that
+    is read fresh on every call: a loop must not print it every meeting."""
+    if (name, raw) not in _setting_warned:
+        _setting_warned.add((name, raw))
+        print(f"warning: {name}={raw!r} is not {rule}; using {using}",
+              file=sys.stderr, flush=True)
+
+
+def _quiet_raw():
+    return _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
+
+
+def setting_problems() -> list:
+    """[(setting, why)] for each stt.env value that cannot be read and is
+    replaced by its default. The doctor lists them: a typo there used to
+    change behavior with no word anywhere."""
+    out = []
+    raw = _quiet_raw()
+    if raw:
+        try:
+            quiet_window(raw)
+        except ValueError:
+            out.append(("STT_LLM_QUIET_HOURS",
+                        f"{raw!r} is not a window such as 07:00-22:00; "
+                        f"using {LLM_QUIET_HOURS_DEFAULT}"))
+    return out
+
+
 def llm_quiet_now(now=None) -> bool:
     """True inside STT_LLM_QUIET_HOURS ("HH:MM-HH:MM", may wrap midnight).
-    An unreadable value falls back to the default window."""
+    An unreadable value warns once and falls back to the default window."""
     from datetime import datetime as _dt
     now = now or _dt.now()
-    raw = _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
+    raw = _quiet_raw()
     try:
-        a, b = (raw or LLM_QUIET_HOURS_DEFAULT).split("-")
-        start, end = _hm(a), _hm(b)
+        start, end = quiet_window(raw or LLM_QUIET_HOURS_DEFAULT)
     except ValueError:
-        a, b = LLM_QUIET_HOURS_DEFAULT.split("-")
-        start, end = _hm(a), _hm(b)
+        _warn_setting("STT_LLM_QUIET_HOURS", raw, "a window such as 07:00-22:00",
+                      LLM_QUIET_HOURS_DEFAULT)
+        start, end = quiet_window(LLM_QUIET_HOURS_DEFAULT)
     t = now.hour * 60 + now.minute
     if start == end:
         return True

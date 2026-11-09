@@ -261,6 +261,34 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
     assert all(c[1:3] == ["-b", "-p"] for c in qos)
 
 
+@pytest.mark.parametrize("raw", ["10:00–12:00", "10:00—12:00", "10-12", "10:00 to 12:00",
+                                 " 10:00 - 12:00 ", "10 TO 12"])
+def test_a_quiet_window_written_by_hand_parses(sandbox, raw):
+    """'10:00–12:00' (an en dash), '10-12' and '10:00 to 12:00' raised
+    ValueError and fell back to 07:00-22:00 with no word."""
+    from datetime import datetime
+    (sandbox / "stt.env").write_text(f"STT_LLM_QUIET_HOURS={raw}\n")
+    assert config.quiet_window(raw) == (600, 720)
+    assert not config.llm_quiet_now(datetime(2026, 11, 8, 8))
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 11))
+    assert config.setting_problems() == []
+
+
+def test_an_unreadable_quiet_window_warns_once_and_the_doctor_lists_it(sandbox, capsys):
+    from datetime import datetime
+    from stt import doctor
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=mornings\n")
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 8))     # the default window
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 9))
+    err = capsys.readouterr().err
+    assert err.count("STT_LLM_QUIET_HOURS='mornings'") == 1
+    assert "using 07:00-22:00" in err
+    assert [p[0] for p in config.setting_problems()] == ["STT_LLM_QUIET_HOURS"]
+    found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+    assert [(f.subject, f.fixable) for f in found] == [("STT_LLM_QUIET_HOURS", False)]
+    assert "07:00-22:00" in found[0].detail
+
+
 def test_hardware_settings_come_from_stt_env(sandbox, monkeypatch):
     monkeypatch.delenv("STT_LLM_REST_MIN_SEC", raising=False)
     monkeypatch.delenv("STT_LLM_REST_RATIO", raising=False)
