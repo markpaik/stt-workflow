@@ -340,7 +340,8 @@ def rename_person(old: str, new: str) -> bool:
         reg = load_registry()
         if old not in reg:
             return False
-        if not str(new or "").strip() or names.has_unsafe(new):
+        if (not str(new or "").strip() or names.has_unsafe(new)
+                or len(str(new).strip()) > names.NAME_MAX):
             return False
         new = canonical_name(new, {k: v for k, v in reg.items() if k != old})
         if not new or new == old or reserved_name(new):
@@ -358,7 +359,7 @@ def rename_person(old: str, new: str) -> bool:
         oldf = config.VOICEPRINTS_DIR / meta["file"]
         if not oldf.exists():
             return False  # orphaned entry: file gone out-of-band, nothing to rename
-        newf = _unique_filename(new.replace("/", "_"), reg)
+        newf = _unique_filename(names.file_stem(new), reg)
         # copy -> commit registry -> delete original, so a crash always leaves
         # either the old or the new mapping fully valid. A rename-before-save
         # could orphan the moved file with the registry still pointing at the
@@ -627,7 +628,7 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
         # brand-new name gets one that can't collide with any OTHER enrolled
         # person's file.
         fname = reg[name]["file"] if name in reg else _unique_filename(
-            name.replace("/", "_"), reg)
+            names.file_stem(name), reg)
         fpath = config.VOICEPRINTS_DIR / fname
         vector = _l2(vector)  # raises on zero/non-finite
         if source_id is None and source and source != "?":

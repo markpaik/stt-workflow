@@ -184,3 +184,38 @@ def test_the_cli_trims_the_name_it_enrolls(sandbox, monkeypatch):
                                       "--speaker", "SPEAKER_00", "--name", "  Jo Lee  "])
     enroll.main()
     assert list(identify.load_registry()) == ["Jo Lee"]
+
+
+def test_enroll_refuses_a_name_that_is_not_text_or_too_long(sandbox):
+    """identify.enroll(5, v) wrote '5.npy', and a 300-character name raised
+    a raw OSError (File name too long). Both are a BadName now, before
+    anything is written. The panel already capped a name at 200."""
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    for bad, msg in ((5, names.NOT_TEXT), (["A"], names.NOT_TEXT),
+                     ("x" * 201, names.LONG_NAME)):
+        with pytest.raises(names.BadName) as ei:
+            identify.enroll(bad, v, source="M1")
+        assert str(ei.value) == msg
+    assert identify.load_registry() == {}
+    assert list((sandbox / "voiceprints").glob("*")) == []
+
+
+def test_a_voiceprint_file_name_is_never_hidden_or_too_long(sandbox):
+    """'.' was saved as the hidden '..npy', which a '*.npy' listing never
+    sees. A 200-character name in a script of 3-byte characters is 600
+    bytes, past the 255 a file name may hold."""
+    import os
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll(".", v, source="M1")
+    identify.enroll("a/b", v * -1, source="M1")
+    long = "名" * 200
+    identify.enroll(long, v + 3, source="M1")
+    reg = identify.load_registry()
+    assert reg["."]["file"] == "person.npy"
+    assert reg["a/b"]["file"] == "a_b.npy"
+    f = reg[long]["file"]
+    assert len(f.encode("utf-8")) <= 255 and f.startswith("名")
+    files = sorted(os.listdir(sandbox / "voiceprints"))
+    assert not [n for n in files if n.startswith(".") and n.endswith(".npy")]
+    assert identify.load_voiceprints().keys() >= {".", "a/b", long}

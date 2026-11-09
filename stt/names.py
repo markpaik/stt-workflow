@@ -30,6 +30,10 @@ ZERO_WIDTH = frozenset("\u200b\u2060\ufeff")
 EMPTY_NAME = "Type a name first."
 UNSAFE_NAME = ("A name cannot hold a line break, a tab, or an invisible "
                "control character.")
+# the panel's own limit for a typed name (gui/server.py, max_len=200)
+NAME_MAX = 200
+LONG_NAME = f"A name can be {NAME_MAX} characters at most."
+NOT_TEXT = "A name must be text."
 
 
 class BadName(ValueError):
@@ -57,14 +61,36 @@ def strip_unsafe(s) -> str:
 def person_name(raw) -> str:
     """The name to store for what someone typed: the edges stripped.
 
-    Raises BadName for an empty or whitespace-only name, and for one that
-    holds an unsafe character anywhere inside it."""
+    Raises BadName for an empty or whitespace-only name, for one that holds
+    an unsafe character anywhere inside it, for one over NAME_MAX
+    characters, and for a value that is not text (5 enrolled as '5.npy')."""
+    if raw is not None and not isinstance(raw, str):
+        raise BadName(NOT_TEXT)
     name = str(raw or "").strip()
     if not name:
         raise BadName(EMPTY_NAME)
     if has_unsafe(name):
         raise BadName(UNSAFE_NAME)
+    if len(name) > NAME_MAX:
+        raise BadName(LONG_NAME)
     return name
+
+
+# a voiceprint file name: macOS allows 255 bytes, and _unique_filename may
+# add "_NN" before ".npy"
+_STEM_MAX_BYTES = 200
+
+
+def file_stem(name: str) -> str:
+    """The voiceprint file stem for a person's name: '/' as '_' (a path
+    separator), no leading dot ('.' named the hidden file '..npy', which
+    a '*.npy' listing never sees), and at most _STEM_MAX_BYTES bytes, cut
+    on a character. A name of dots only gives 'person'."""
+    stem = str(name).replace("/", "_").lstrip(".")
+    raw = stem.encode("utf-8")
+    if len(raw) > _STEM_MAX_BYTES:
+        stem = raw[:_STEM_MAX_BYTES].decode("utf-8", "ignore").rstrip()
+    return stem or "person"
 
 
 # --------------------------------------------------------- meeting titles ---
