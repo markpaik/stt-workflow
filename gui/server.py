@@ -3315,7 +3315,25 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "no group"}, 400)
                     return
                 mkey = config.id_of(b["base"]) or b["base"]
-                self._json(groups.set_override(mkey, key, exclude=not b.flag("undo")))
+                undo = b.flag("undo")
+                # the key must name a real group: an invented one was stored
+                # forever, matching nothing. An undo may name a group its own
+                # exclusion dissolved (one meeting is no group), so the key
+                # already stored for this meeting is enough for it.
+                g = groups.by_key(key)
+                if undo:
+                    if g is None and key not in groups.load_overrides().get(mkey, ()):
+                        self._json({"ok": False, "error": "no such group"}, 400)
+                        return
+                elif g is None:
+                    self._json({"ok": False, "error": "no such group -- refresh "
+                                                      "and try again"}, 400)
+                    return
+                elif b["base"] not in g["bases"]:
+                    self._json({"ok": False, "error": "that meeting is not in "
+                                                      "this group"}, 400)
+                    return
+                self._json(groups.set_override(mkey, key, exclude=not undo))
             elif u.path == "/api/usage":
                 # one count line per group open or group question, no title
                 ok = groups.log_use(b.text("event", ""))

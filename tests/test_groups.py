@@ -378,3 +378,32 @@ def test_a_grouping_failure_never_breaks_the_state_poll(running_server, monkeypa
     assert st == 200
     row = next(m for m in state["meetings"] if m["base"] == "Grant Writing 10012026")
     assert "group" not in row
+
+
+def test_an_override_must_name_a_real_group(running_server):
+    """An invented key was stored forever: {"ok": true, "not_in": ["bogus"]},
+    and it matched no group, ever. The key must be a current group's, and the
+    meeting must be in it. An undo may still name the group its exclusion
+    dissolved, because the stored key is proof enough."""
+    _mk("Grant Writing 10012026", mid="m1")
+    _mk("Grant Writing 10082026", mid="m2")
+    _mk("Budget Review 10092026", mid="m3")
+    (g,) = groups.current()
+    st, r = _post(running_server, "/api/group_override",
+                  {"base": "Grant Writing 10082026", "group": "bogus"})
+    assert (st, r) == (400, {"ok": False, "error": "no such group -- refresh and try again"})
+    st, r = _post(running_server, "/api/group_override",
+                  {"base": "Budget Review 10092026", "group": g["key"]})
+    assert (st, r) == (400, {"ok": False, "error": "that meeting is not in this group"})
+    st, r = _post(running_server, "/api/group_override",
+                  {"base": "Grant Writing 10082026", "group": "bogus", "undo": True})
+    assert (st, r) == (400, {"ok": False, "error": "no such group"})
+    assert groups.load_overrides() == {}, "nothing invented reaches the file"
+    # excluding one of two dissolves the group, and the undo still lands
+    st, r = _post(running_server, "/api/group_override",
+                  {"base": "Grant Writing 10082026", "group": g["key"]})
+    assert st == 200 and r["ok"] and groups.current() == []
+    st, r = _post(running_server, "/api/group_override",
+                  {"base": "Grant Writing 10082026", "group": g["key"], "undo": True})
+    assert st == 200 and r == {"ok": True, "not_in": []}
+    assert [x["key"] for x in groups.current()] == [g["key"]]
