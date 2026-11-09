@@ -169,6 +169,13 @@ def test_an_old_folder_that_kept_its_colon_is_no_doctor_finding(sandbox):
     _m("2026-01-15 Vendor Demo: Assessment Platform", date="2026-01-15",
        title="Vendor Demo: Assessment Platform")
     assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+    # saving the title it already has leaves that folder where it is
+    base = "2026-01-15 Vendor Demo: Assessment Platform"
+    assert summarize.rename_meeting(base, "Vendor Demo: Assessment Platform") == {
+        "ok": True, "renamed": [], "base": base}
+    # a real change still lands on the safe form
+    r = summarize.rename_meeting(base, "Vendor Demo: Scoring")
+    assert r["base"] == "2026-01-15 Vendor Demo - Scoring"
 
 
 def test_saving_a_colon_title_again_changes_nothing(sandbox):

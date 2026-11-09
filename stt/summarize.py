@@ -1390,7 +1390,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     from the inbox without renaming) must not silently rename anything.
     Returns {ok, base, renamed, date, category, reviewed}.
     """
-    from . import dates, review, titles
+    from . import dates, names, review, titles
 
     if base not in config.meeting_bases():
         return {"ok": False, "error": f"no meeting '{base}'"}
@@ -1517,6 +1517,14 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             own = dates.twin_suffix(base)
             if own and want.lower() == base[:-len(own)].lower():
                 want += own
+            # the title this folder already carries, typed again on the
+            # same date, moves nothing: an old folder that still holds a
+            # colon keeps it until the title really changes
+            if (title is not None and d.get("date") == date_before
+                    and dates.is_iso_form(base)
+                    and dates.meeting_date(base) == d.get("date")
+                    and dates.title_of(names.clean_title(title)) == dates.title_of(base)):
+                want = base
             want = _unique_base(want, base)
             d["title"] = dates.shown_title(shown, want)
         moved = d.get("date") != date_before
