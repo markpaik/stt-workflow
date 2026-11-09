@@ -49,7 +49,7 @@ from pathlib import Path
 
 from . import config, dates, output
 
-SCHEMA = "5"
+SCHEMA = "6"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
 _RAW_TOKENIZE = "unicode61 remove_diacritics 2"
 _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
@@ -182,10 +182,13 @@ def _summary_text(d) -> str:
     # next steps are not indexed (removed, owner 2026-11-05). SCHEMA "5"
     # rebuilds every docs row so no old next-steps text stays searchable
     # ai_summary already holds the gist and the decision and question lists;
-    # the tags go in by label, so a search for "Special education" finds them
+    # the tags go in by label, so a search for "Special education" finds them.
+    # Only a tag in the vocabulary goes in: the panel hides any other slug (a
+    # hand edit), so a search must not find a meeting by a tag nobody sees.
+    # SCHEMA "6" rebuilds every docs row that held one.
     from . import series
-    tags = [series.TAG_LABELS.get(t, t) for t in (d.get("ai_tags") or [])
-            if isinstance(t, str)]
+    tags = [series.TAG_LABELS[t] for t in (d.get("ai_tags") or [])
+            if isinstance(t, str) and t in series.TAG_LABELS]
     parts = [d.get("ai_title"), d.get("ai_summary")] + ([" · ".join(tags)] if tags else [])
     return "\n".join(str(p) for p in parts if p)
 

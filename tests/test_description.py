@@ -384,9 +384,22 @@ def test_the_shell_shows_the_gist_sections_and_tag_filter():
 
 
 def test_search_indexes_tag_labels(sandbox):
+    """Only a tag the panel shows is searchable. A slug outside the
+    vocabulary (a hand edit) is hidden in the list, so a title search must
+    not find the meeting by it either."""
     from stt import search
     txt = search._summary_text({"ai_title": "T", "ai_summary": "S", "ai_tags": ["math", "nope"]})
-    assert "Math" in txt and "nope" in txt
+    assert "Math" in txt and "nope" not in txt
+
+
+def test_an_unknown_tag_slug_does_not_match_a_title_search(sandbox):
+    from stt import search
+    j = mfile("2026-02-02 Edge Case Lab", ".json")
+    j.write_text(json.dumps({"title": "Edge Case Lab", "segments": [], "speakers": [],
+                             "ai_tags": ["special-education", "bogus-tag"]}))
+    assert search.meetings("bogus") == []
+    assert [m["base"] for m in search.meetings("special education")] == [
+        "2026-02-02 Edge Case Lab"]
 
 
 def test_a_title_that_is_a_series_name_fixes_the_series_in_code(owner, monkeypatch):
