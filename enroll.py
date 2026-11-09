@@ -96,9 +96,17 @@ def main():
                 raise SystemExit(f"{args.speaker} in '{args.from_meeting}': {veto}")
     elif args.audio:
         from stt import audio as A, diarize
+        # a mistyped path reached ffmpeg and ended in a traceback
+        src = Path(args.audio).expanduser()
+        if not src.is_file():
+            raise SystemExit(f"audio file not found: {args.audio}")
         config.WORK_DIR.mkdir(parents=True, exist_ok=True)
         wav = config.WORK_DIR / "enroll.wav"
-        A.to_wav16k(Path(args.audio), wav)
+        try:
+            A.to_wav16k(src, wav)
+        except A.UnreadableAudio as e:
+            wav.unlink(missing_ok=True)
+            raise SystemExit(str(e))
         try:
             diar = diarize.diarize(wav)
         finally:

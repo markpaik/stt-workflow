@@ -36,11 +36,35 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
         return sandbox / "voiceprints" / "mark.npy"
 
     monkeypatch.setattr(identify, "enroll", fake_enroll)
+    clip = sandbox / "mark.m4a"
+    clip.write_bytes(b"audio")
     monkeypatch.setattr(sys, "argv",
-                        ["enroll", "--audio", "mark.m4a", "--name", "Mark"])
+                        ["enroll", "--audio", str(clip), "--name", "Mark"])
     assert enroll.main() == 0
     # the 30s cluster (SPEAKER_00 -> vec_a) must win, not the 2s SPEAKER_01
     assert np.array_equal(captured["vec"], vec_a)
+
+
+def test_a_missing_or_unreadable_audio_file_is_one_line(sandbox, monkeypatch):
+    """A mistyped --audio path reached ffmpeg and ended in a traceback."""
+    ran = []
+    monkeypatch.setattr(diarize, "diarize", lambda wav: ran.append(wav))
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(sandbox / "nope.wav"),
+                                      "--name", "Mark"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == f"audio file not found: {sandbox / 'nope.wav'}"
+    bad = sandbox / "bad.m4a"
+    bad.write_bytes(b"not audio")
+
+    def unreadable(src, dst):
+        raise audio.UnreadableAudio("ffmpeg could not decode bad.m4a: Invalid data")
+    monkeypatch.setattr(audio, "to_wav16k", unreadable)
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(bad), "--name", "Mark"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == "ffmpeg could not decode bad.m4a: Invalid data"
+    assert ran == [] and "Mark" not in identify.load_registry()
 
 
 def _seed_cached_meeting(base, cluster_turns, cent_emb):
