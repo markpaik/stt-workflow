@@ -2732,6 +2732,14 @@ class Handler(BaseHTTPRequestHandler):
                                     "error": "That voice was already named or "
                                              "removed. Refresh and try again."})
                         return
+                    if (unknowns.load()["speakers"].get(b["uid"]) or {}).get("dropped"):
+                        # "Not a real speaker" keeps a tombstone; a stale tab
+                        # or a direct POST must not name it back to life
+                        self._json({"ok": False,
+                                    "error": "That voice was removed as not a "
+                                             "real speaker, so it cannot be "
+                                             "named. Refresh the page."})
+                        return
                     if not confirm:
                         # naming an unknown as an EXISTING person appends the
                         # unknown's samples to that stack — same quality bar

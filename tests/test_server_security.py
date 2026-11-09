@@ -2192,3 +2192,31 @@ def test_a_case_only_speaker_rename_through_the_panel_keeps_the_samples(
     assert st == 200 and body["ok"] is True
     assert list(identify.load_registry()) == ["sam chen"]
     assert identify.load_voiceprints()["sam chen"].shape[0] == 2
+
+
+def test_a_dropped_voice_cannot_be_named_back_to_life(running_server, monkeypatch):
+    """After "Not a real speaker" (/api/forget), a stale tab or a direct
+    POST named the same uid: 'Ghost' was enrolled and the tombstone was
+    deleted, so the suppressed voice could surface again. merge() already
+    refused a dropped voice. promote() now does too."""
+    import numpy as np
+
+    from stt import identify, unknowns
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    v = np.random.default_rng(8).normal(size=256)
+    np.save(config.VOICEPRINTS_DIR / "U007.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 8, "speakers": {"U007": {"file": "U007.npy", "meetings": ["M"]}}}))
+    st, body = _post(running_server, "/api/forget", {"uid": "U007"})
+    assert body["ok"] is True
+    st, body = _post(running_server, "/api/name",
+                     {"uid": "U007", "name": "Ghost", "confirm": True})
+    assert body == {"ok": False, "error": "That voice was removed as not a real "
+                                          "speaker, so it cannot be named. "
+                                          "Refresh the page."}
+    st, body = _post(running_server, "/api/merge_speakers",
+                     {"src": "uid:U007", "dst": "name:Ghost", "confirm": True})
+    assert body == {"ok": False}
+    assert unknowns.promote("U007", "Ghost") is False
+    assert "Ghost" not in identify.load_registry()
+    assert unknowns.load()["speakers"]["U007"].get("dropped"), "the tombstone stays"
