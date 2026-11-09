@@ -78,19 +78,50 @@ _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 _ollama_seen = {"at": 0.0, "up": False, "key": None}
 
 
+def _ollama_check():
+    """(url or None, problem or None) for STT_OLLAMA_URL. A value with no
+    scheme ('localhost:11434') is read as http: urlparse took 'localhost'
+    for the scheme, so the host was None and Ollama turned off with no
+    word. A port that is not a number, a scheme that is not http, or a host
+    that is not a loopback address gives no URL and a problem that says
+    why. 'off' gives neither."""
+    from urllib.parse import urlparse
+    raw = (_setting("STT_OLLAMA_URL", OLLAMA_URL) or "").strip()
+    url = raw.rstrip("/")
+    if not url or url.lower() in ("off", "0", "none", "false"):
+        return None, None
+    if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url):
+        url = "http://" + url
+    try:
+        parts = urlparse(url)
+        host = parts.hostname
+        parts.port                      # a port that is not a number raises
+    except ValueError:
+        return None, f"{raw!r} has a port that is not a number"
+    if parts.scheme.lower() not in ("http", "https"):
+        return None, f"{raw!r} is not an http address"
+    if host not in _LOOPBACK:
+        return None, (f"{raw!r} is not on this Mac: only a loopback address "
+                      "is used, so transcripts never leave it")
+    return url, None
+
+
+def ollama_url_problem():
+    """Why STT_OLLAMA_URL turns Ollama off, or None when it is fine or
+    'off'. For the doctor (config.setting_problems)."""
+    url, why = _ollama_check()
+    return f"{why}; Ollama is off and the MLX model answers" if why else None
+
+
 def _ollama_url():
     """The Ollama base URL, or None when it is off or not a loopback
     address. A remote host would carry transcripts off this Mac, so it is
-    refused, never used."""
-    from urllib.parse import urlparse
-    url = (_setting("STT_OLLAMA_URL", OLLAMA_URL) or "").strip().rstrip("/")
-    if not url or url.lower() in ("off", "0", "none", "false"):
-        return None
-    try:
-        host = urlparse(url).hostname
-    except ValueError:
-        return None
-    return url if host in _LOOPBACK else None
+    refused, never used. An unusable value warns once."""
+    url, why = _ollama_check()
+    if why:
+        config._warn_once(("STT_OLLAMA_URL", why),
+                          f"STT_OLLAMA_URL={why}; Ollama is off and the MLX model answers")
+    return url
 
 
 def ollama_model() -> str:

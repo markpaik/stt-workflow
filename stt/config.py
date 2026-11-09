@@ -605,13 +605,16 @@ def quiet_window(raw: str):
 _setting_warned = set()
 
 
-def _warn_setting(name: str, raw, rule: str, using):
+def _warn_once(key, msg: str):
     """One warning per process for each unreadable value of a setting that
     is read fresh on every call: a loop must not print it every meeting."""
-    if (name, raw) not in _setting_warned:
-        _setting_warned.add((name, raw))
-        print(f"warning: {name}={raw!r} is not {rule}; using {using}",
-              file=sys.stderr, flush=True)
+    if key not in _setting_warned:
+        _setting_warned.add(key)
+        print(f"warning: {msg}", file=sys.stderr, flush=True)
+
+
+def _warn_setting(name: str, raw, rule: str, using):
+    _warn_once((name, raw), f"{name}={raw!r} is not {rule}; using {using}")
 
 
 def _quiet_raw():
@@ -631,6 +634,10 @@ def setting_problems() -> list:
             out.append(("STT_LLM_QUIET_HOURS",
                         f"{raw!r} is not a window such as 07:00-22:00; "
                         f"using {LLM_QUIET_HOURS_DEFAULT}"))
+    from . import summarize
+    why = summarize.ollama_url_problem()
+    if why:
+        out.append(("STT_OLLAMA_URL", why))
     return out
 
 

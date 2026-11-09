@@ -201,6 +201,39 @@ def test_a_non_loopback_ollama_url_is_refused(sandbox, monkeypatch):
     assert summarize.local_engine() == "mlx"
 
 
+@pytest.mark.parametrize("raw,url", [
+    ("localhost:11434", "http://localhost:11434"),
+    ("127.0.0.1:11434/", "http://127.0.0.1:11434"),
+    ("http://localhost:11434", "http://localhost:11434"),
+])
+def test_an_ollama_url_without_a_scheme_is_read_as_http(sandbox, monkeypatch, raw, url):
+    """urlparse('localhost:11434') reads 'localhost' as the scheme, so the
+    host was None and Ollama turned off with no message."""
+    _ollama_on(monkeypatch, sandbox, url=raw)
+    assert summarize._ollama_url() == url
+    assert summarize.ollama_url_problem() is None
+    assert config.setting_problems() == []
+
+
+@pytest.mark.parametrize("raw,why", [
+    ("http://localhost:abc", "has a port that is not a number"),
+    ("ftp://localhost:11434", "is not an http address"),
+    ("http://10.0.0.5:11434", "is not on this Mac"),
+])
+def test_an_unusable_ollama_url_turns_ollama_off_and_says_why(sandbox, monkeypatch, capsys,
+                                                             raw, why):
+    from stt import doctor
+    _ollama_on(monkeypatch, sandbox, url=raw)
+    assert summarize._ollama_url() is None
+    assert summarize._ollama_url() is None
+    assert summarize.local_engine() == "mlx"
+    err = capsys.readouterr().err
+    assert err.count(f"STT_OLLAMA_URL={raw!r}") == 1 and why in err
+    assert summarize.ollama_url_problem().startswith(f"{raw!r} {why}")
+    found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+    assert [f.subject for f in found] == ["STT_OLLAMA_URL"] and why in found[0].detail
+
+
 def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch):
     _ollama_on(monkeypatch, sandbox)
     monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
