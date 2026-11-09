@@ -28,6 +28,9 @@ import urllib.request
 from pathlib import Path
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# a fresh profile asks the login keychain for "Chrome Safe Storage",
+# and macOS shows a dialog for each launch
+NO_KEYCHAIN = ("--use-mock-keychain", "--password-store=basic")
 LIVE_PORT = 8737
 ROUTES = ("home", "recordings", "groups", "ask", "activity", "speakers", "archive", "settings")
 WIDTHS = (700, 1440)
@@ -39,6 +42,7 @@ def shot(port, route, width, theme, out: Path, profile: Path, height=1000) -> Pa
     png = out / f"{_name(route)}-{width}-{theme}.png"
     subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
                     f"--user-data-dir={profile}", "--no-first-run",
+                    *NO_KEYCHAIN,
                     f"--window-size={width},{height}", "--virtual-time-budget=6000",
                     f"--screenshot={png}", url],
                    check=True, capture_output=True, timeout=90)
@@ -52,6 +56,7 @@ def overflow(port, route, width, theme, profile: Path) -> dict:
     url = f"http://127.0.0.1:{port}/?theme={theme}&probe=1#{route}"
     r = subprocess.run([CHROME, "--headless=new", "--disable-gpu",
                         f"--user-data-dir={profile}", "--no-first-run",
+                        *NO_KEYCHAIN,
                         f"--window-size={width},1000", "--virtual-time-budget=6000",
                         "--dump-dom", url],
                        check=True, capture_output=True, text=True, timeout=90)
