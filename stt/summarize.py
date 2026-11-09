@@ -496,7 +496,9 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
         return {"ok": False, "error": str(e)}
     sample, truncated = _transcript_sample(base, max_chars=QA_MAX_CHARS)
     hist = ""
-    for h in (history or [])[-QA_MAX_HISTORY:]:
+    # the panel sends this, so it is the client's: an item that is not an
+    # {"q","a"} object is dropped, never an AttributeError
+    for h in [h for h in (history or []) if isinstance(h, dict)][-QA_MAX_HISTORY:]:
         q = str(h.get("q", ""))[:2000].strip()
         a = str(h.get("a", ""))[:4000].strip()
         if q and a:

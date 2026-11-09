@@ -49,6 +49,11 @@ def test_ask_happy_path_passes_history_through(running_server, monkeypatch):
     st, body = _post(running_server, "/api/ask",
                      {"base": "Mtg", "question": "again?", "history": "bogus"})
     assert st == 200 and seen["history"] is None
+    # and so is an item of it that is not an object (it was a 500)
+    st, body = _post(running_server, "/api/ask",
+                     {"base": "Mtg", "question": "again?",
+                      "history": ["x", 3, {"q": "a", "a": "b"}]})
+    assert st == 200 and seen["history"] == [{"q": "a", "a": "b"}]
 
 
 def test_ask_not_ok_result_maps_to_400(running_server, monkeypatch):

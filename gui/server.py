@@ -3046,7 +3046,8 @@ class Handler(BaseHTTPRequestHandler):
                 # history is optional context: a malformed one is dropped
                 # (test_server_ask), never a reason to refuse the question
                 hist = b.get("history")
-                hist = hist if isinstance(hist, list) else None
+                hist = ([h for h in hist if isinstance(h, dict)]
+                        if isinstance(hist, list) else None)
                 try:
                     r = summarize.answer_question(b["base"], q_, history=hist)
                     self._json(r, 200 if r.get("ok") else 400)
