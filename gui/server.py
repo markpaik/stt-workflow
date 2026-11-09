@@ -3030,13 +3030,15 @@ class Handler(BaseHTTPRequestHandler):
                 from stt import summarize
                 self._json(summarize.rename_meeting(b["base"], b.text("new")))
             elif u.path == "/api/ask":
+                # the body's own shape first: a question of the wrong type is
+                # that, whatever meeting it names
+                q_ = b.text("question", "").strip()
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
                 if not summarize.available():
                     self._json({"error": "local LLM not installed"}, 503)
                     return
-                q_ = b.text("question", "").strip()
                 if not q_:
                     self._json({"error": "empty question"}, 400)
                     return

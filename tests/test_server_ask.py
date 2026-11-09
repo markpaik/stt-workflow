@@ -13,6 +13,13 @@ def test_ask_unknown_base_is_rejected(running_server):
     assert st == 400 and body["error"] == "unknown meeting"
 
 
+def test_ask_a_question_of_the_wrong_type_says_so_for_any_meeting(running_server):
+    """With an unknown base, question: [1] answered "unknown meeting"."""
+    for base in ("no such meeting", 5):
+        st, body = _post(running_server, "/api/ask", {"base": base, "question": [1]})
+        assert (st, body) == (400, {"error": "'question' must be text"})
+
+
 def test_ask_requires_llm_and_a_real_question(running_server, monkeypatch):
     _make_meeting("Mtg")
     monkeypatch.setattr(summarize, "available", lambda: False)
