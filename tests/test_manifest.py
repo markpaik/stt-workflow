@@ -209,12 +209,39 @@ def test_a_downloaded_placeholder_is_no_longer_parked(sandbox, monkeypatch):
     mtime once it downloads. Its blocks change, so it is not parked."""
     from stt import icloud
     p = _src(sandbox)
-    monkeypatch.setattr(icloud, "is_dataless", lambda path: True)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: False)
     for _ in range(manifest.FAIL_PARK_AFTER):
         manifest.record_failure(p.name, p, "iCloud file did not fully materialize")
     assert manifest.is_parked(manifest.load(), p.name, p)
-    monkeypatch.setattr(icloud, "is_dataless", lambda path: False)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: True)
     assert not manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_a_half_downloaded_placeholder_is_unparked_once_it_completes(
+        sandbox, monkeypatch):
+    """A download that timed out halfway has blocks on disk, so it is not
+    "dataless". The old signature recorded dataless=False, the finished
+    download read the same, and the file stayed parked for good."""
+    from stt import icloud
+    p = _src(sandbox)
+    monkeypatch.setattr(icloud, "is_dataless", lambda path: False)  # has blocks
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: False)
+    for _ in range(manifest.FAIL_PARK_AFTER):
+        manifest.record_failure(p.name, p, "iCloud file did not fully materialize")
+    assert manifest.is_parked(manifest.load(), p.name, p)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: True)  # all bytes
+    assert not manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_an_older_failure_record_still_reads(sandbox):
+    """A record written before the change holds "dataless", not "partial"."""
+    p = _src(sandbox)
+    st = p.stat()
+    with manifest.update() as m:
+        m.setdefault("failed", {})[p.name] = {
+            "mtime": round(st.st_mtime, 3), "size": st.st_size,
+            "dataless": False, "count": 3, "parked": True}
+    assert manifest.is_parked(manifest.load(), p.name, p)
 
 
 def test_a_success_clears_the_failure_record(sandbox):

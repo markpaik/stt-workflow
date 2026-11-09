@@ -182,19 +182,24 @@ FAIL_PARK_AFTER = 3
 
 
 def _signature(path):
-    """(mtime, size, dataless) of a source file. A placeholder that
+    """(mtime, size, partial) of a source file. A placeholder that
     downloads keeps its mtime and size, so its download state is part of
-    the signature: a failed download is retried once the bytes arrive."""
+    the signature: a failed download is retried once the bytes arrive.
+    `partial` is True until every byte is on disk. A download that timed
+    out halfway has blocks, so "no blocks at all" (icloud.is_dataless)
+    stayed the same when it finished, and the file stayed parked."""
     from . import icloud
     st = Path(path).stat()
-    return round(st.st_mtime, 3), st.st_size, bool(icloud.is_dataless(path))
+    return round(st.st_mtime, 3), st.st_size, not icloud._fully_present(path)
 
 
 def _same(rec: dict, sig) -> bool:
-    mtime, size, dataless = sig
+    mtime, size, partial = sig
+    # a record from before "partial" holds "dataless", the older test
+    was = rec.get("partial", rec.get("dataless"))
     try:
         return (abs(float(rec.get("mtime", 0)) - mtime) < 1.0
-                and rec.get("size") == size and bool(rec.get("dataless")) == dataless)
+                and rec.get("size") == size and bool(was) == partial)
     except (TypeError, ValueError):
         return False
 
@@ -210,7 +215,7 @@ def record_failure(key: str, path, error: str = "", unreadable: bool = False) ->
         failed = m.setdefault("failed", {})
         prev = failed.get(key)
         n = (int(prev.get("count", 0)) if isinstance(prev, dict) and _same(prev, sig) else 0) + 1
-        rec = {"mtime": sig[0], "size": sig[1], "dataless": sig[2], "count": n,
+        rec = {"mtime": sig[0], "size": sig[1], "partial": sig[2], "count": n,
                "parked": bool(unreadable) or n >= FAIL_PARK_AFTER,
                "error": str(error or "")[:300],
                "at": datetime.now().isoformat(timespec="seconds")}
