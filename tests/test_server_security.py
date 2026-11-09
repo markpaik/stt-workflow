@@ -2173,3 +2173,22 @@ def test_a_corrupt_diar_cache_never_500s_the_naming_panel(running_server, payloa
     assert st == 200 and body["ok"] is False
     assert "changed while you were naming it" in body["error"]
     assert str(config.PROJECT_DIR) not in json.dumps(body)
+
+
+def test_a_case_only_speaker_rename_through_the_panel_keeps_the_samples(
+        running_server, monkeypatch):
+    """The scan saw 'Sam Chen' -> 'sam chen' answer 500 with both server
+    paths (shutil.SameFileError). identify.rename_person already renames the
+    key alone for a case-only change (b3c9f28); this pins the route."""
+    import numpy as np
+
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    rng = np.random.default_rng(2)
+    identify.enroll("Sam Chen", rng.normal(size=256), source="M1")
+    identify.enroll("Sam Chen", rng.normal(size=256), source="M2")
+    st, body = _post(running_server, "/api/rename_speaker",
+                     {"name": "Sam Chen", "new": "sam chen"})
+    assert st == 200 and body["ok"] is True
+    assert list(identify.load_registry()) == ["sam chen"]
+    assert identify.load_voiceprints()["sam chen"].shape[0] == 2
