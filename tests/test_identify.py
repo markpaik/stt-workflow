@@ -324,24 +324,31 @@ def test_corrupt_registry_warns_instead_of_silently_resetting(sandbox, capsys):
 
 
 def test_corrupt_registry_is_preserved_not_clobbered(sandbox):
-    """A corrupt registry.json must be routed to a timestamped .json.corrupt
-    sidecar before the next save overwrites it, and a previously-written GOOD
-    .json.bak must survive untouched (never clobbered by the corrupt content)."""
-    from stt import config
-    # a good .bak already exists from an earlier valid save
+    """A damaged registry.json is never written over. An enrollment saved
+    over it left a one-person registry, and the NEXT save copied that over
+    the good .bak, so the only good copy was gone. The enrollment is now
+    refused before anything is written, the damaged bytes stay where they
+    are, and the good .bak survives."""
+    import pytest
+
+    from stt import config, errors
     good_bak = config.VOICEPRINTS_DIR / "registry.json.bak"
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
     good_bak.write_text('{"Priya": {"file": "Priya.npy", "n_samples": 1}}')
-    # the live registry is now corrupt on disk
-    (config.VOICEPRINTS_DIR / "registry.json").write_text("{not json")
-
-    identify.enroll("Mark", _vec(1))  # a normal save over the corrupt file
-
-    corrupt_sidecars = list(config.VOICEPRINTS_DIR.glob("registry.json.corrupt*"))
-    assert corrupt_sidecars, "corrupt registry bytes were destroyed with no sidecar"
-    assert corrupt_sidecars[0].read_text() == "{not json"
-    # the good .bak is intact, not overwritten by the corrupt content
-    assert '"Priya"' in good_bak.read_text()
+    (config.VOICEPRINTS_DIR / "Priya.npy").write_bytes(b"x")
+    for damaged in ("{not json", "[1, 2]"):
+        (config.VOICEPRINTS_DIR / "registry.json").write_text(damaged)
+        for _ in range(2):
+            with pytest.raises(identify.RegistryUnreadable) as ei:
+                identify.enroll("Rowan Pike", _vec(1))
+            assert isinstance(ei.value, errors.UserError)   # the panel shows it
+            assert "registry.json.bak" in str(ei.value)
+        assert (config.VOICEPRINTS_DIR / "registry.json").read_text() == damaged
+        assert '"Priya"' in good_bak.read_text()
+        # no stray voiceprint for the refused person
+        assert sorted(p.name for p in config.VOICEPRINTS_DIR.glob("*.npy")) == ["Priya.npy"]
+        with pytest.raises(identify.RegistryUnreadable):
+            identify.save_registry({"Rowan Pike": {}})
 
 
 def test_save_registry_no_absence_window_for_unlocked_reader(sandbox, monkeypatch):

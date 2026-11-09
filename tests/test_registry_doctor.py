@@ -421,8 +421,16 @@ def test_a_corrupt_registry_and_its_orphaned_files_are_reported(sandbox):
     assert sorted(f.subject for f in _of(fs, "unreferenced_file")) == [
         "Alex Rivera.npy", "Sam Chen.npy"]
     assert not any(f.fixable for f in fs if f.kind in ("corrupt", "unreferenced_file"))
-    # the registry reads as empty, so the next enrollment starts a new one;
-    # the orphans are still reported, never "clean"
+    # the next enrollment is refused: it would have started a new one-person
+    # registry over the damaged one (identify.RegistryUnreadable)
+    import pytest
+    with pytest.raises(identify.RegistryUnreadable):
+        identify.enroll("Jo Lee", _unit(7), source="M")
+    fs = registry_doctor.check()
+    assert [f.subject for f in _of(fs, "corrupt")] == ["registry.json"]
+    # once it is moved aside, a new registry starts, and the orphans are
+    # still reported, never "clean"
+    reg.rename(vp / "registry.json.damaged")
     identify.enroll("Jo Lee", _unit(7), source="M")
     fs = registry_doctor.check()
     assert _of(fs, "corrupt") == []
@@ -468,3 +476,27 @@ def test_the_cli_names_a_corrupt_registry(sandbox, tmp_path):
     assert r.returncode == 1, r.stderr
     assert "corrupt     registry.json: cannot be read" in r.stdout
     assert "Traceback" not in r.stderr
+
+
+def test_a_rebuild_sets_a_damaged_registry_aside_first(sandbox, tmp_path):
+    """Nothing writes over a damaged registry now, so the doctor's advice,
+    "rebuild it with tools/rebuild_voiceprints.py", moves the damaged file
+    aside before it enrolls anyone. A dry run moves nothing."""
+    home = tmp_path / "home"
+    (home / "voiceprints").mkdir(parents=True)
+    (home / "meetings").mkdir()
+    (home / "voiceprints" / "registry.json").write_text("{trunc")
+    env = dict(os.environ, STT_HOME=str(home))
+    for k in ("STT_PROJECT_DIR", "STT_VOICEPRINTS_DIR", "STT_MEETINGS_DIR",
+              "STT_ICLOUD_DIR", "STT_RECORDINGS_DIR"):
+        env.pop(k, None)
+    tool = [sys.executable, str(ROOT / "tools/rebuild_voiceprints.py")]
+    r = subprocess.run(tool, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert (home / "voiceprints" / "registry.json").read_text() == "{trunc"
+    r = subprocess.run(tool + ["--apply"], capture_output=True, text=True,
+                       env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert "moved aside to registry.json.corrupt-" in r.stdout
+    aside = list((home / "voiceprints").glob("registry.json.corrupt-*"))
+    assert [p.read_text() for p in aside] == ["{trunc"]

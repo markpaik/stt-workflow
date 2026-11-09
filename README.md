@@ -237,7 +237,9 @@ namings all land.
 If the registry is ever lost, `tools/rebuild_voiceprints.py` reconstructs
 every voiceprint from the meeting caches; the batch warns loudly if it
 starts with an empty registry while named transcripts exist, and every
-registry write keeps a rolling backup.
+registry write keeps a rolling backup. A registry.json that cannot be read
+is never written over: naming a voice says so until it is restored from
+registry.json.bak or rebuilt (`--apply` moves the damaged file aside).
 
 ## The drawer
 
