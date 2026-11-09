@@ -409,6 +409,12 @@ For development and testing there is a fully sandboxed data home:
 nothing you try there can touch your real meetings. Under `STT_HOME` the
 batch and `run.sh` read `$STT_HOME/stt.env`, never the checkout's own.
 
+The panel's API answers a request it cannot use with HTTP 400 and a plain
+message that names the field: a body that is not one JSON object, a missing
+field, or a field of the wrong type. An error nobody planned for shows
+"Something went wrong in the panel" and nothing more. The route and the full
+traceback go to the panel log, `logs/gui.err.log`, and never to the page.
+
 ## How it works
 
 ```

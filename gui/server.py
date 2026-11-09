@@ -6,6 +6,7 @@ the same entrypoints the CLI uses, so the panel can never bypass the pipeline's
 locks and safety rails.
 """
 import json
+import math
 import os
 import plistlib
 import re
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1928,6 +1930,170 @@ def _suggested(meta, speakers) -> list:
     return out
 
 
+# ---------- request validation ----------
+# One layer between the client and every handler. A request the client got
+# wrong -- a body that is not one JSON object, a missing field, a field of the
+# wrong type -- answers HTTP 400 with a plain message that names the field.
+# Anything else that goes wrong answers 500 with one fixed sentence, and the
+# detail (route, exception, traceback) goes to the panel's log instead:
+# exception text carries server paths and Python internals, and the panel
+# shows the `error` text to the user as it is.
+
+class BadRequest(Exception):
+    """The client's mistake. Answered with HTTP `code` (400 unless given) and
+    `msg` as the `error` text. `msg` is written for a person: it never holds
+    exception text or a filesystem path."""
+
+    def __init__(self, msg: str, code: int = 400):
+        super().__init__(msg)
+        self.msg, self.code = msg, code
+
+
+INTERNAL_ERROR = ("Something went wrong in the panel. The details are in the "
+                  "panel log.")
+# no JSON body the panel sends comes near this; a file goes to /api/upload
+_BODY_MAX = 8 << 20
+_REQUIRED = object()
+
+
+def _no_constant(name):
+    # Python's json reads NaN, Infinity and -Infinity, which are not JSON. A
+    # NaN time compares as nothing (`end <= start` is False for it), and a
+    # stored one writes a bare NaN token that no browser JSON.parse reads.
+    raise ValueError(f"{name} is not a JSON number")
+
+
+class Fields(dict):
+    """A request's parameters with typed reads: the JSON object body of a
+    POST, or the query string of a GET (`query=True`: every value arrives as
+    text, and a number is parsed from it).
+
+    It is still a dict, so `.get()` and `in` work as before, and `f["key"]`
+    on a key the client left out raises BadRequest, not KeyError.
+
+    Each reader takes `default`. Left out, the field is required. Given, a
+    missing or null field reads as the default. A field that is present with
+    the wrong type is always a 400: a mistake is never read as the default."""
+
+    def __init__(self, data=(), query=False):
+        super().__init__(data)
+        self.query = query
+
+    def __missing__(self, key):
+        raise BadRequest(f"missing field '{key}'")
+
+    def _value(self, key, default):
+        """(absent, value): the default when the field is missing or null."""
+        v = dict.get(self, key)
+        if v is None:
+            if default is _REQUIRED:
+                raise BadRequest(f"missing field '{key}'")
+            return True, default
+        return False, v
+
+    def text(self, key, default=_REQUIRED, max_len=None):
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, str):
+            raise BadRequest(f"'{key}' must be text")
+        if max_len is not None and len(v) > max_len:
+            raise BadRequest(f"'{key}' is too long ({max_len} characters at most)")
+        return v
+
+    def _range(self, key, v, lo, hi):
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            if lo is not None and hi is not None:
+                raise BadRequest(f"'{key}' must be from {lo} to {hi}")
+            if lo is not None:
+                raise BadRequest(f"'{key}' must be {lo} or more")
+            raise BadRequest(f"'{key}' must be {hi} or less")
+        return v
+
+    def number(self, key, default=_REQUIRED, lo=None, hi=None):
+        """A finite number. NaN and the infinities are refused."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if self.query and isinstance(v, str):
+            try:
+                v = float(v)
+            except ValueError:
+                raise BadRequest(f"'{key}' must be a number") from None
+        if (isinstance(v, bool) or not isinstance(v, (int, float))
+                or not math.isfinite(v)):
+            raise BadRequest(f"'{key}' must be a number")
+        return self._range(key, v, lo, hi)
+
+    def integer(self, key, default=_REQUIRED, lo=None, hi=None):
+        """A whole number. 3.0 reads as 3, and 3.5 is refused."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if self.query and isinstance(v, str):
+            try:
+                v = int(v.strip())
+            except ValueError:
+                raise BadRequest(f"'{key}' must be a whole number") from None
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise BadRequest(f"'{key}' must be a whole number")
+        return self._range(key, v, lo, hi)
+
+    def flag(self, key, default=False):
+        """A JSON true or false, and nothing else. The string "false" is
+        truthy in Python: a delete that read it as a yes deleted the
+        meeting."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, bool):
+            raise BadRequest(f"'{key}' must be true or false")
+        return v
+
+    def texts(self, key, default=_REQUIRED):
+        """A list of text values. A bare string is refused: iterated, it is
+        a list of its characters."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise BadRequest(f"'{key}' must be a list of text values")
+        return v
+
+    def array(self, key, default=_REQUIRED):
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, list):
+            raise BadRequest(f"'{key}' must be a list")
+        return v
+
+    def obj(self, key, default=_REQUIRED):
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, dict):
+            raise BadRequest(f"'{key}' must be an object")
+        return v
+
+
+def parse_body(raw: bytes) -> Fields:
+    """A POST body as Fields. An empty body is {}: several buttons post none.
+    Anything that is not one JSON object is the client's mistake."""
+    if not raw.strip():
+        return Fields()
+    try:
+        obj = json.loads(raw, parse_constant=_no_constant)
+    except (ValueError, RecursionError):
+        # JSONDecodeError and UnicodeDecodeError are both ValueErrors
+        raise BadRequest("the request body is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise BadRequest("the request body must be a JSON object")
+    return Fields(obj)
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -1942,9 +2108,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        return json.loads(self.rfile.read(n) or b"{}")
+    def _body(self) -> Fields:
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise BadRequest("Content-Length must be a number") from None
+        if n < 0:
+            raise BadRequest("Content-Length must be a number")
+        if n > _BODY_MAX:
+            raise BadRequest("the request body is too large", 413)
+        return parse_body(self.rfile.read(n) if n else b"")
+
+    def _failed(self, route):
+        """An error nobody planned for. The route, the exception and its
+        traceback go to the panel log (stderr, which launchd writes to
+        logs/gui.err.log). The client gets INTERNAL_ERROR and no detail."""
+        print(f"panel: {self.command} {route} failed", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        try:
+            self._json({"error": INTERNAL_ERROR}, 500)
+        except OSError:
+            pass    # the client is gone
 
     def _serve_audio(self, audio_f):
         """Serve an audio file with byte-range support (a <audio> element seeks
@@ -2080,7 +2264,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        q = dict(urllib.parse.parse_qsl(u.query))
+        q = Fields(urllib.parse.parse_qsl(u.query), query=True)
         if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
@@ -2362,8 +2546,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 self._json({"error": "not found"}, 404)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
+        except BadRequest as e:
+            self._json({"error": e.msg}, e.code)
+        except Exception:
+            self._failed(u.path)
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -2374,7 +2560,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/upload":
                 # raw-body upload — must branch BEFORE _body(), which would
                 # buffer the whole file and try to parse it as JSON
-                self._upload(dict(urllib.parse.parse_qsl(u.query)))
+                self._upload(Fields(urllib.parse.parse_qsl(u.query), query=True))
                 return
             b = self._body()
             if u.path == "/api/run":
@@ -3165,8 +3351,13 @@ class Handler(BaseHTTPRequestHandler):
                     # report. Every item is now tried, and every outcome told.
                     try:
                         r = self._bulk_one(action, bs, value, confirmed)
-                    except Exception as e:
-                        r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                    except Exception:
+                        # the detail to the log: exception text names paths
+                        print(f"panel: bulk {action} on one meeting failed",
+                              file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        r = {"ok": False, "error": "this one could not be "
+                                                   "changed (see the panel log)"}
                     results.append({"base": bs, **r})
                 out = {"ok": all(r.get("ok") for r in results) and not dropped,
                        "n_ok": sum(1 for r in results if r.get("ok")),
@@ -3250,7 +3441,12 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     self._json(json.loads(r.stdout.strip().splitlines()[-1]))
                 except Exception:
-                    self._json({"error": (r.stderr or "re-transcription failed")[-300:]}, 500)
+                    # the child's stderr is a traceback with server paths in
+                    # it: the log keeps it, and the client gets a sentence
+                    print("panel: re-transcription failed:\n"
+                          + (r.stderr or "")[-2000:], file=sys.stderr)
+                    self._json({"error": "The second listen failed. The "
+                                         "details are in the panel log."}, 500)
             elif u.path == "/api/remove_sample":
                 ok = identify.remove_sample(b["name"], int(b["index"]))
                 if not ok:
@@ -3298,8 +3494,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"error": "not found"}, 404)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
+        except BadRequest as e:
+            self._json({"error": e.msg}, e.code)
+        except Exception:
+            self._failed(u.path)
 
 
 def check_updates():
