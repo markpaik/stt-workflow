@@ -21,7 +21,8 @@ start, who, snippet}, newest meeting first):
    finds nothing (token search cannot match mid-word, so "orama" only ever
    finds "panorama" this way), when the query has no word characters, and
    when SQLite fails for any reason (locked, corrupt, built without FTS5).
-   A short query never falls back to the substring scan when FTS finds
+   A corrupt index is first deleted, rebuilt and asked again (_read_index),
+   so a query gives the same answer before and after the damage. A short query never falls back to the substring scan when FTS finds
    nothing: "ai" sits inside "said". When SQLite fails, it scans for the
    whole word instead.
 
@@ -641,9 +642,10 @@ def _fts(q: str, limit: int, f=None, bases=None, exact=None):
     return {"query": q, "hits": hits, "total": total}
 
 
-def _discard_if_corrupt(e):
-    """A damaged index is rebuilt, not repaired: delete it and let the next
-    query make a new one. A busy or locked index is left alone."""
+def _discard_if_corrupt(e) -> bool:
+    """A damaged index is rebuilt, not repaired: delete it so the next read
+    makes a new one. A busy or locked index is left alone. True when the
+    index was deleted."""
     if isinstance(e, sqlite3.DatabaseError) and not isinstance(e, sqlite3.OperationalError):
         with _lock:
             for f in _companions(db_path()):
@@ -651,6 +653,23 @@ def _discard_if_corrupt(e):
                     f.unlink()
                 except OSError:
                     pass
+        return True
+    return False
+
+
+def _read_index(read):
+    """read(), a read of the index. A corrupt index is deleted and read()
+    runs once more, which builds a new index from the meeting jsons. The
+    substring scan has no accent folding or stemming, so falling back to it
+    at once made 'cafe' miss 'café' on the first query after the damage and
+    find it on the next. Raises what the second read raises."""
+    try:
+        return read()
+    except Exception as e:
+        if not _discard_if_corrupt(e):
+            raise
+        _warn("rebuilt", f"index unreadable, rebuilt ({e})")
+    return read()
 
 
 def _prepare(q, filters):
@@ -703,7 +722,7 @@ def _query(q, limit, f, bases, typed=None):
         if not ok:
             return {"query": q, "hits": [], "total": 0}
         try:
-            r = _fts(q, limit, f, bases, exact)
+            r = _read_index(lambda: _fts(q, limit, f, bases, exact))
         except Exception as e:
             _warn(type(e).__name__, f"index unavailable, scanning instead ({e})")
             _discard_if_corrupt(e)
@@ -712,7 +731,7 @@ def _query(q, limit, f, bases, typed=None):
         # no substring scan when FTS finds nothing: 'ai' sits in 'said'
         return r
     try:
-        r = _fts(q, limit, f, bases)
+        r = _read_index(lambda: _fts(q, limit, f, bases))
     except Exception as e:
         _warn(type(e).__name__, f"index unavailable, scanning instead ({e})")
         _discard_if_corrupt(e)
@@ -741,7 +760,7 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
         return []
     conds, cargs = _where(f, bases)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    try:
+    def read():
         with _lock:
             conn = _open()
             try:
@@ -749,7 +768,7 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
                 # the whole words match stemmed (`docs`), the last word as a
                 # prefix of an unstemmed word (`docs_raw`): porter stems a
                 # part-typed word, so 'attendan*' on `docs` finds nothing
-                rows = conn.execute(
+                return conn.execute(
                     f"""SELECT f.base, d.title, min(h.r) AS r, d.summary FROM (
                            SELECT rowid AS id, bm25(docs, 5.0, 1.0) AS r
                              FROM docs WHERE docs MATCH ?
@@ -765,6 +784,8 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
             finally:
                 conn.close()
                 _secure(db_path())
+    try:
+        rows = _read_index(read)
     except Exception as e:
         _warn(type(e).__name__, f"index unavailable ({e})")
         _discard_if_corrupt(e)
@@ -788,12 +809,12 @@ def ranked_lines(terms, bases=None, limit: int = 60) -> list:
     expr = " OR ".join(f'"{t}"' for t in toks)
     conds, cargs = _where({}, bases)
     where = (" AND " + " AND ".join(conds)) if conds else ""
-    try:
+    def read():
         with _lock:
             conn = _open()
             try:
                 _sync(conn)
-                rows = conn.execute(
+                return conn.execute(
                     f"""SELECT f.base, f.mid, f.day, d.title, s.rowid % {_ROW},
                                s.start, s.who, s.text, bm25(segs) AS r
                         FROM segs s JOIN files f ON f.id = s.rowid / {_ROW}
@@ -803,6 +824,8 @@ def ranked_lines(terms, bases=None, limit: int = 60) -> list:
             finally:
                 conn.close()
                 _secure(db_path())
+    try:
+        rows = _read_index(read)
     except Exception as e:
         _warn(type(e).__name__, f"index unavailable ({e})")
         _discard_if_corrupt(e)
@@ -844,17 +867,19 @@ def neighbors(base: str, index: int, before: int = 2, after: int = 2) -> list:
 def facet_rows() -> list:
     """[{base, mid, day, recorded_at, date_source, route}] for every live
     meeting, from the index (synced first). Empty when the index fails."""
-    try:
+    def read():
         with _lock:
             conn = _open()
             try:
                 _sync(conn)
-                rows = conn.execute(
+                return conn.execute(
                     "SELECT base, mid, day, recorded_at, date_source, route FROM files"
                 ).fetchall()
             finally:
                 conn.close()
                 _secure(db_path())
+    try:
+        rows = _read_index(read)
     except Exception as e:
         _warn(type(e).__name__, f"index unavailable ({e})")
         _discard_if_corrupt(e)

@@ -163,14 +163,28 @@ def test_sqlite_failure_falls_back(corpus, monkeypatch):
     assert r["total"] == 1 and r["hits"][0]["base"] == "Budget Review 01052026"
 
 
-def test_corrupt_index_falls_back_then_rebuilds(corpus):
+def test_corrupt_index_is_rebuilt_and_answers_the_same_query(corpus):
+    """The first query after a corrupt index went to the substring scan,
+    which has no accent folding or stemming, so 'cafe' missed 'café' once
+    and found it on the next try. The query now rebuilds the index and asks
+    it again before any scan."""
     config.SEARCH_DB.write_bytes(b"x" * 4096)
-    r = search.query("capital reserve")
-    assert r["total"] == 1                      # the scan answered
-    assert not config.SEARCH_DB.exists()        # the bad file is gone
-    search.query("capital reserve")             # the next query builds it again
+    r = search.query("cafe adds")
+    assert r["total"] == 1 and r["hits"][0]["base"] == "Lunch Menu 01082026"
     assert _indexed() == {b for b, _, _ in KNOWN} | {
         "Budget Overview 12012025", "Bus Survey 12022025"}
+    config.SEARCH_DB.write_bytes(b"x" * 4096)
+    assert search.query("interviewed three")["total"] == 1      # stemmed
+    config.SEARCH_DB.write_bytes(b"x" * 4096)
+    assert search.meetings("budget review")[0]["base"] == "Budget Review 01052026"
+
+
+def test_an_index_that_stays_corrupt_falls_back_to_the_scan(corpus, monkeypatch):
+    def broken(*a, **k):
+        raise sqlite3.DatabaseError("file is not a database")
+    monkeypatch.setattr(search, "_open", broken)
+    r = search.query("capital reserve")
+    assert r["total"] == 1                      # the scan answered
 
 
 def test_short_query_touches_nothing(sandbox):
