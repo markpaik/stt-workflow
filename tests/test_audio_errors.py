@@ -47,3 +47,26 @@ def test_a_good_source_still_decodes(tmp_path):
                     "sine=frequency=440:duration=1", str(src)], check=True)
     out = audio.to_wav16k(src, tmp_path / "out.wav")
     assert out.stat().st_size > 1000
+
+
+def _silent_video(path):
+    subprocess.run([audio.FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc=d=1:s=160x120", "-c:v", "mpeg4", str(path)], check=True)
+    return path
+
+
+def test_a_video_with_no_audio_track_says_so(tmp_path):
+    src = _silent_video(tmp_path / "Silent video.mov")
+    with pytest.raises(audio.UnreadableAudio) as ei:
+        audio.to_wav16k(src, tmp_path / "out.wav")
+    assert str(ei.value) == "no audio track in Silent video.mov"
+
+
+def test_a_failed_decode_leaves_no_meeting_folder(sandbox):
+    """process_file made the meeting folder before it decoded the source,
+    so a file that could not be read left an empty folder behind."""
+    from stt import config, pipeline
+    src = _silent_video(sandbox / "source" / "Silent video.mov")
+    with pytest.raises(audio.UnreadableAudio):
+        pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert list(config.MEETINGS_DIR.iterdir()) == []

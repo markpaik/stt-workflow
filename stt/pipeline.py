@@ -378,7 +378,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     do_verify = config.VERIFY if do_verify is None else do_verify
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
     base = resolve_base(src, dest_dir)
-    config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+    # the meeting folder is made only once there is a transcript to write
+    # (just before the write phase below): a source that cannot be decoded
+    # or transcribed leaves no empty folder behind
     txt_path = config.meeting_file(base, ".txt", dest_dir)
     json_path = config.meeting_file(base, ".json", dest_dir)
     emb_path = config.meeting_file(base, ".emb.npz", dest_dir)
@@ -512,6 +514,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # The id is decided BEFORE the lock, so the lock is named for it from the
     # start, and a new meeting's two first runs queue on one lock (_write_lock).
     from . import review
+    config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
     with _write_lock(base, json_path, dest_dir) as meeting_id:
         # human-owned flags survive a Redo exactly like the corrected date: the
         # Work/Personal category and the reviewed state were set in the panel, and

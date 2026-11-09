@@ -113,9 +113,9 @@ def clean_scratch():
 
 
 def _sweep_shells() -> int:
-    """Drop meeting folders left behind with NO transcript json — process_file
-    mkdirs the folder up front, so a run that dies before the write phase strands
-    an empty shell (or one holding just a stray .txt). They are invisible in the
+    """Drop meeting folders left behind with NO transcript json — a run that
+    dies inside the write phase (process_file makes the folder just before it)
+    strands an empty shell (or one holding just a stray .txt). They are invisible in the
     panel (meeting_bases requires the json) but they pile up, and they used to
     push every retry onto the next ' (N)' suffix.
 

@@ -60,8 +60,12 @@ def _run_ffmpeg(cmd: list, src: Path):
     ffmpeg's reason, never CalledProcessError and its command line."""
     r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:
-        raise UnreadableAudio(f"ffmpeg could not decode {Path(src).name}: "
-                              f"{_ffmpeg_reason(r.stderr, src)}")
+        why = _ffmpeg_reason(r.stderr, src)
+        if "does not contain any stream" in why:
+            # -vn left nothing to write: the source has no audio stream
+            # (a screen recording with video only)
+            raise UnreadableAudio(f"no audio track in {Path(src).name}")
+        raise UnreadableAudio(f"ffmpeg could not decode {Path(src).name}: {why}")
     return r
 
 
