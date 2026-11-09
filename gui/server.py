@@ -790,14 +790,31 @@ def _dismissed_failures() -> dict:
         return {}
 
 
-def _voice_ids(b: dict):
+def _voice_ids(b):
     """The clusters a per-meeting voice request acts on: the body's
     `speakers` list (every cluster of one split voice) when it sends one,
     else its single `speaker`, as before the list existed."""
-    sids = b.get("speakers")
-    if isinstance(sids, list) and sids:
+    sids = b.texts("speakers", None)
+    if sids:
         return sids
-    return b.get("speaker", "")
+    return b.text("speaker", "")
+
+
+def _folder_kind(b) -> str:
+    """`which` for the folder pickers. Anything but "source" used to mean
+    the transcripts folder, so a typo moved the meeting store."""
+    which = b.text("which")
+    if which not in ("source", "dest"):
+        raise BadRequest("'which' must be source or dest")
+    return which
+
+
+def _handle(b, key):
+    """One side of a merge: ("uid", "U003") or ("name", "Jordan")."""
+    kind, sep, value = b.text(key).partition(":")
+    if not sep or kind not in ("uid", "name") or not value:
+        raise BadRequest(f"'{key}' must look like uid:U003 or name:Jordan")
+    return kind, value
 
 
 _dismiss_lock = threading.Lock()
@@ -2062,14 +2079,6 @@ class Fields(dict):
             raise BadRequest(f"'{key}' must be a list of text values")
         return v
 
-    def array(self, key, default=_REQUIRED):
-        absent, v = self._value(key, default)
-        if absent:
-            return v
-        if not isinstance(v, list):
-            raise BadRequest(f"'{key}' must be a list")
-        return v
-
     def obj(self, key, default=_REQUIRED):
         absent, v = self._value(key, default)
         if absent:
@@ -2300,18 +2309,15 @@ class Handler(BaseHTTPRequestHandler):
                             "truncated": dupes.cache_truncated(),
                             "threshold": dupes.THRESHOLD})
             elif u.path == "/api/snippet":
-                meeting = q.get("meeting", "")
+                meeting, speaker = q.get("meeting", ""), q.text("speaker")
                 if meeting and not _known_base(meeting):
                     # a stale reference (a meeting renamed/deleted before the
                     # registries tracked renames) must not kill playback — the
                     # client string is DISCARDED, never used as a path, and
                     # find_voice_clip searches the real library instead
                     meeting = ""
-                try:
-                    secs = float(q.get("secs", 30.0))  # default sample length for ▶ playback
-                except ValueError:
-                    secs = 30.0
-                f = _snippet_for(meeting, q["speaker"], secs=secs)
+                # 30 s is the default sample length for ▶ playback
+                f = _snippet_for(meeting, speaker, secs=q.number("secs", 30.0))
                 if f is None:
                     self._json({"error": "no snippet"}, 404)
                     return
@@ -2412,7 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
                     "talk_secs": round(sum(s.get("end", 0) - s.get("start", 0)
                                            for s in mine), 1)})
             elif u.path == "/api/transcript":
-                base = q["base"]
+                base = q.text("base")
                 if not self._require_base(base):
                     return
                 j = config.meeting_file(base, ".json")
@@ -2567,30 +2573,33 @@ class Handler(BaseHTTPRequestHandler):
                 # every run goes through the job queue: it starts immediately
                 # when the machine is idle, and WAITS (visible in the panel)
                 # when a batch is already running — a Redo is never lost.
-                files = b.get("files") or []
-                paths = b.get("paths") or []
+                files = b.texts("files", [])
+                paths = b.texts("paths", [])
                 names = files + [Path(p).name for p in paths]
                 label = (", ".join(names[:2]) + (f" +{len(names)-2} more" if len(names) > 2 else "")
                          ) if names else "all new recordings"
                 busy = bool(control.snapshot()["pids"])
-                jobs.add({"files": files, "paths": paths, "force": bool(b.get("force")),
-                          "strict": bool(b.get("strict")), "verify": bool(b.get("verify")),
-                          "onetime": bool(b.get("onetime")),
-                          "parallel": int(b.get("parallel", 1)), "label": label})
+                jobs.add({"files": files, "paths": paths, "force": b.flag("force"),
+                          "strict": b.flag("strict"), "verify": b.flag("verify"),
+                          "onetime": b.flag("onetime"),
+                          "parallel": b.integer("parallel", 1, lo=1, hi=2),
+                          "label": label})
                 control.clear_stopping()  # an explicit new run overrides a recent Stop
                 _jobs_kicked["at"] = 0.0  # a fresh click may bypass the cooldown
                 _kick_jobs()
                 self._json({"ok": True, "queued": busy})
             elif u.path == "/api/unqueue":
-                self._json({"ok": jobs.remove(float(b["at"]))})
+                self._json({"ok": jobs.remove(float(b.number("at")))})
             elif u.path == "/api/pick_folder":
-                p = pick_folder(b.get("prompt", "Choose a folder"))
+                which = _folder_kind(b)
+                p = pick_folder(b.text("prompt", "Choose a folder", max_len=200))
                 if p is None:
                     self._json({"cancelled": True})
                 else:
-                    self._json(set_folder(b["which"], p))
+                    self._json(set_folder(which, p))
             elif u.path == "/api/set_folder":
-                self._json(set_folder(b["which"], b["path"], bool(b.get("confirm"))))
+                self._json(set_folder(_folder_kind(b), b.text("path"),
+                                      b.flag("confirm")))
             elif u.path == "/api/pick_files":
                 fs = pick_files()
                 self._json({"cancelled": True} if fs is None else {"ok": True, "paths": fs})
@@ -2604,12 +2613,11 @@ class Handler(BaseHTTPRequestHandler):
                 control.resume()
                 self._json({"ok": True})
             elif u.path == "/api/schedule":
-                hh, mm = int(b["hour"]), int(b["minute"])
-                assert 0 <= hh < 24 and 0 <= mm < 60
-                write_schedule(hh, mm)
+                write_schedule(b.integer("hour", lo=0, hi=23),
+                               b.integer("minute", lo=0, hi=59))
                 self._json({"ok": True})
             elif u.path == "/api/model":
-                choice = b["model"]
+                choice = b.text("model")
                 # only a model the settings UI actually offers. Any other string
                 # went into STT_ASR_BACKEND verbatim, so a plain typo silently
                 # corrupted the backend setting, and this was the route the
@@ -2638,7 +2646,7 @@ class Handler(BaseHTTPRequestHandler):
                 # every failure here answers with an empty preview, never an
                 # error the user has to read.
                 vec, uids, here = None, (), None
-                if b.get("uid"):
+                if b.text("uid", ""):
                     vec = unknowns.samples_of(b["uid"])
                     if vec is None:
                         # already named, merged or forgotten: the save itself
@@ -2655,7 +2663,7 @@ class Handler(BaseHTTPRequestHandler):
                             config.meeting_file(b["meeting"], ".diar.npz"))
                     except (OSError, ValueError, KeyError):
                         cent_emb = {}
-                    vec = cent_emb.get(b.get("speaker"))
+                    vec = cent_emb.get(b.text("speaker", ""))
                     here = b["meeting"]
                 try:
                     from stt import centroids
@@ -2671,24 +2679,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"targets": tgts, "here": here,
                             "looks_like": _looks_like(vec)})
             elif u.path == "/api/name":
-                name = str(b.get("name") or "").strip()
+                name = b.text("name", "", max_len=200).strip()
+                local, uid = b.flag("local"), b.text("uid", "")
                 # An empty name is the documented UNDO for a meeting-local
                 # label (set_local_name drops the entry). It means nothing
                 # anywhere else: an enrollment and a uid promotion have no
                 # entry to clear, so an empty name there is simply a mistake.
                 # The old bare `assert name` refused the undo outright, which
                 # left a meeting-local label removable only by a full Redo.
-                if not name and not (b.get("local") and not b.get("uid")):
+                if not name and not (local and not uid):
                     self._json({"ok": False, "error": "Type a name first."})
                     return
-                if name and not b.get("local"):
+                if name and not local:
                     if identify.reserved_name(name):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
                         return
                     # the enrolled spelling, so a case variant names the
                     # existing person and relabels under the name she has
                     name = identify.canonical_name(name)
-                confirm = bool(b.get("confirm"))
+                confirm = b.flag("confirm")
 
                 def _warn_payload(w):
                     # additive: ok stays boolean, error stays the inline text
@@ -2704,7 +2713,7 @@ class Handler(BaseHTTPRequestHandler):
                 # which meetings this naming can touch. Each branch below fills
                 # in what it knows before falling through to the shared tail.
                 tgt = {"vector": None, "names": [name], "uids": (), "first": None}
-                if b.get("uid"):
+                if uid:
                     # the uid is GONE (already named, merged, or forgotten —
                     # a stale legend chip is the usual way this arrives). Say
                     # so, before anything else: with None samples the quality
@@ -2762,7 +2771,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
-                    if b.get("local"):
+                    if local:
                         # a transcript label for THIS meeting only: no floor
                         # check and no enrollment, because nothing is learned.
                         # The panel offers this after the floor refuses the
@@ -2816,7 +2825,7 @@ class Handler(BaseHTTPRequestHandler):
                                              "were naming it. Refresh and try "
                                              "again."})
                         return
-                    if b["speaker"] not in cent_emb:
+                    if b.text("speaker") not in cent_emb:
                         self._json({"ok": False,
                                     "error": "That speaker has no voice embedding "
                                              "in this meeting."})
@@ -2865,7 +2874,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "note": "relabeling the meetings this voice appears in",
                             **res})
             elif u.path == "/api/forget":
-                self._json({"ok": unknowns.drop(b["uid"])})
+                self._json({"ok": unknowns.drop(b.text("uid"))})
             elif u.path == "/api/dismiss_voice":
                 # "Not a real speaker" for a voice the registry never tracked:
                 # a PER-MEETING silence, not a tombstone. /api/forget drops an
@@ -2877,21 +2886,22 @@ class Handler(BaseHTTPRequestHandler):
                 # cluster of one split voice, dismissed or restored in ONE
                 # write, all or none
                 from stt import summarize
-                fn = (summarize.restore_voice if b.get("restore")
+                fn = (summarize.restore_voice if b.flag("restore")
                       else summarize.dismiss_voice)
                 self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
                 # the spelling rename_person will store: an enrolled case
                 # variant of the new name is a merge into that person
+                b.text("name")
                 b["new"] = identify.canonical_name(
-                    b.get("new"), {k: v for k, v in identify.load_registry().items()
-                                   if k != b.get("name")})
+                    b.text("new"), {k: v for k, v in identify.load_registry().items()
+                                    if k != b["name"]})
                 if identify.reserved_name(b["new"]):
                     self._json({"ok": False, "error": identify.RESERVED_ERROR})
                     return
                 # a rename onto an enrolled person is a merge: the same
                 # wrong-person check as /api/merge_speakers, before confirm
-                if (not b.get("confirm") and b["new"] != b.get("name")
+                if (not b.flag("confirm") and b["new"] != b["name"]
                         and b["new"] in identify.load_registry()):
                     prints = identify.load_voiceprints()
                     warn = _merge_warning(b["new"], prints.get(b.get("name")), prints,
@@ -2910,7 +2920,7 @@ class Handler(BaseHTTPRequestHandler):
                     names=[b["name"], b["new"]],
                     vector=identify.load_voiceprints().get(b["new"]))})
             elif u.path == "/api/remove_speaker":
-                ok = identify.remove_person(b["name"])
+                ok = identify.remove_person(b.text("name"))
                 if not ok:
                     self._json({"ok": ok})
                     return
@@ -2919,8 +2929,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, **_relabel_targets(names=[b["name"]])})
             elif u.path == "/api/merge_speakers":
                 # src/dst are "uid:U003" or "name:Jordan"
-                st_, sv = b["src"].split(":", 1)
-                dt_, dv = b["dst"].split(":", 1)
+                st_, sv = _handle(b, "src")
+                dt_, dv = _handle(b, "dst")
                 if dt_ == "name":
                     if identify.reserved_name(dv):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
@@ -2929,7 +2939,7 @@ class Handler(BaseHTTPRequestHandler):
                     # the same quality bar as /api/name: folding a voice that
                     # does not match into a person poisons the profile, so a
                     # mismatch asks for confirm first
-                    if not b.get("confirm") and st_ in ("uid", "name"):
+                    if not b.flag("confirm") and st_ in ("uid", "name"):
                         prints = identify.load_voiceprints()
                         rows = (unknowns.samples_of(sv) if st_ == "uid"
                                 else prints.get(sv))
@@ -2972,7 +2982,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.rename_meeting(b["base"], b["new"]))
+                self._json(summarize.rename_meeting(b["base"], b.text("new")))
             elif u.path == "/api/ask":
                 if not self._require_base(b.get("base")):
                     return
@@ -2980,17 +2990,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not summarize.available():
                     self._json({"error": "local LLM not installed"}, 503)
                     return
-                q_ = (b.get("question") or "").strip()
+                q_ = b.text("question", "").strip()
                 if not q_:
                     self._json({"error": "empty question"}, 400)
                     return
                 if len(q_) > 2000:
                     self._json({"error": "question too long (2000 chars max)"}, 400)
                     return
+                # history is optional context: a malformed one is dropped
+                # (test_server_ask), never a reason to refuse the question
                 hist = b.get("history")
+                hist = hist if isinstance(hist, list) else None
                 try:
-                    r = summarize.answer_question(
-                        b["base"], q_, history=hist if isinstance(hist, list) else None)
+                    r = summarize.answer_question(b["base"], q_, history=hist)
                     self._json(r, 200 if r.get("ok") else 400)
                 except summarize.LLMBusy:
                     self._json({"error": "The local model is busy with another "
@@ -3002,14 +3014,14 @@ class Handler(BaseHTTPRequestHandler):
                 # to its thread. Busy is a 503 with busy:true, and the page
                 # keeps the typed question.
                 from stt import ask, summarize
-                q_ = (b.get("question") or "").strip()
+                q_ = b.text("question", "").strip()
                 if not q_:
                     self._json({"error": "empty question"}, 400)
                     return
                 if len(q_) > 2000:
                     self._json({"error": "question too long (2000 chars max)"}, 400)
                     return
-                tid = b.get("thread") or None
+                tid = b.text("thread", "") or None
                 if tid is not None and not ask.valid_id(tid):
                     self._json({"error": "no such thread"}, 400)
                     return
@@ -3018,7 +3030,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "no such thread"}, 404)
                     return
                 # a follow-up keeps its thread's scope
-                scope = (prev or {}).get("scope") or b.get("scope") or {"kind": "all"}
+                scope = ((prev or {}).get("scope") or b.obj("scope", None)
+                         or {"kind": "all"})
                 if not isinstance(scope, dict):
                     self._json({"error": "bad scope"}, 400)
                     return
@@ -3047,10 +3060,11 @@ class Handler(BaseHTTPRequestHandler):
                             "scope_label": r.get("scope_label", "")})
             elif u.path == "/api/thread_delete":
                 from stt import ask
-                self._json({"ok": ask.delete_thread(b.get("id"))})
+                self._json({"ok": ask.delete_thread(b.text("id", ""))})
             elif u.path == "/api/hide_unknown":
-                ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
-                      else unknowns.restore(b["uid"]))
+                uid = b.text("uid")
+                ok = (unknowns.archive(uid) if b.flag("hide", True)
+                      else unknowns.restore(uid))
                 self._json({"ok": ok})
             elif u.path == "/api/cloud_keys":
                 from stt import asr_cloud
@@ -3058,9 +3072,9 @@ class Handler(BaseHTTPRequestHandler):
                             for prov, meta in asr_cloud.PROVIDERS.items()}
                 key_envs["anthropic"] = "STT_ANTHROPIC_KEY"  # assistant, not ASR
                 updates, remove = {}, set()
-                cleared = {str(p) for p in (b.get("clear") or [])}
+                cleared = set(b.texts("clear", []))
                 for prov, key_env in key_envs.items():
-                    v = (b.get(prov) or "").strip()
+                    v = b.text(prov, "", max_len=4000).strip()
                     if v:  # a pasted key wins over a clear for the same provider
                         updates[key_env] = v
                     elif prov in cleared:
@@ -3071,7 +3085,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "set": _cloud_key_status()})
             elif u.path == "/api/llm_backend":
                 from stt import summarize
-                backend = str(b.get("backend") or "")
+                backend = b.text("backend", "")
                 if backend not in summarize.LLM_BACKENDS:
                     self._json({"error": "unknown assistant backend"}, 400)
                     return
@@ -3083,24 +3097,24 @@ class Handler(BaseHTTPRequestHandler):
                 _env_file_set({"STT_LLM_BACKEND": backend})
                 self._json({"ok": True, "backend": backend})
             elif u.path == "/api/automation":
-                self._json(write_automation(
-                    watch=(bool(b["watch"]) if "watch" in b else None),
-                    nightly=(bool(b["nightly"]) if "nightly" in b else None)))
+                self._json(write_automation(watch=b.flag("watch", None),
+                                            nightly=b.flag("nightly", None)))
             elif u.path == "/api/set_date":
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.set_meeting_date(b["base"], b.get("date", "")))
+                self._json(summarize.set_meeting_date(b["base"], b.text("date", "")))
             elif u.path == "/api/set_category":
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+                self._json(summarize.set_meeting_category(b["base"],
+                                                          b.text("category", "")))
             elif u.path == "/api/queue_hold":
                 # park a waiting file: automatic runs skip it until released.
                 # Same membership gate as preview/delete.
                 from stt import holds
-                f = _queue_file(b.get("name"))
+                f = _queue_file(b.text("name", ""))
                 if f is None:
                     self._json({"ok": False, "error": "no such queued file"})
                     return
@@ -3108,10 +3122,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/queue_delete":
                 # bin a waiting source file (a bad take, a test recording) before
                 # it ever becomes a meeting. Same membership gate as the preview.
-                if not b.get("confirm"):
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
-                name = b.get("name")
+                name = b.text("name", "")
                 # every copy of this name, in the queue's own resolution order:
                 # the first is the file the row showed and the only one deleted
                 found = _queue_files(name)
@@ -3162,7 +3176,7 @@ class Handler(BaseHTTPRequestHandler):
                 # past meeting's source is flagged in the row and deletable one
                 # by one, because a recurring export honestly reuses one name for
                 # different meetings, and this action has no undo.
-                if not b.get("confirm"):
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
                 from stt import holds as _holds
@@ -3243,7 +3257,7 @@ class Handler(BaseHTTPRequestHandler):
                 # "keep both": this pair is two different meetings. Nothing is
                 # deleted and nothing is hidden from the library — the pair just
                 # stops being offered for review.
-                a, b_ = str(b.get("a") or ""), str(b.get("b") or "")
+                a, b_ = b.text("a", ""), b.text("b", "")
                 if not _known_base(a) or not _known_base(b_):
                     self._json({"ok": False, "error": "unknown meeting"}, 400)
                     return
@@ -3262,7 +3276,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/dismiss_failure":
                 # the X on a failed row whose source file no longer exists:
                 # nothing to delete, just stop showing that old failure
-                self._json({"ok": dismiss_failure(b.get("name", ""))})
+                self._json({"ok": dismiss_failure(b.text("name", ""))})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
@@ -3296,15 +3310,15 @@ class Handler(BaseHTTPRequestHandler):
                 # "Not part of this group", keyed on meeting_id, with undo
                 if not self._require_base(b.get("base")):
                     return
-                key = str(b.get("group") or "")
+                key = b.text("group", "").strip()
                 if not key:
                     self._json({"ok": False, "error": "no group"}, 400)
                     return
                 mkey = config.id_of(b["base"]) or b["base"]
-                self._json(groups.set_override(mkey, key, exclude=not b.get("undo")))
+                self._json(groups.set_override(mkey, key, exclude=not b.flag("undo")))
             elif u.path == "/api/usage":
                 # one count line per group open or group question, no title
-                ok = groups.log_use(str(b.get("event") or ""))
+                ok = groups.log_use(b.text("event", ""))
                 self._json({"ok": ok}, 200 if ok else 400)
             elif u.path == "/api/seen":
                 # the panel is in front of the owner: record the look, so the
@@ -3328,20 +3342,21 @@ class Handler(BaseHTTPRequestHandler):
                 # a Keep on ONE meeting: the title is confirmed, and a person
                 # did look at it
                 self._json(summarize.apply_meeting_edits(
-                    b["base"], title=(b.get("name") or None),
-                    date=(b.get("date") or None), category=b.get("category"),
+                    b["base"], title=(b.text("name", "") or None),
+                    date=(b.text("date", "") or None),
+                    category=b.text("category", None),
                     reviewed=True, title_state="confirmed"))
             elif u.path == "/api/bulk":
                 # multi-select actions. Every op below gates on live/archived
                 # MEMBERSHIP internally before it builds a path, so an unknown or
                 # traversal base is simply refused per-item — never applied.
-                action = str(b.get("action") or "")
-                value, confirmed = b.get("value"), bool(b.get("confirm"))
+                action = b.text("action", "")
+                value, confirmed = b.text("value", None), b.flag("confirm")
                 results = []
                 # the cap is real, so the answer says so: a selection above it
                 # silently lost its tail and the client could not tell a
                 # dropped item from one that was never selected
-                asked = [str(x) for x in (b.get("bases") or [])]
+                asked = b.texts("bases", [])
                 dropped = max(0, len(asked) - 500)
                 for bs in asked[:500]:
                     # PER ITEM: one meeting's OSError (an unwritable folder, a
@@ -3379,46 +3394,51 @@ class Handler(BaseHTTPRequestHandler):
                 # meeting. restore_meeting gates on archived-list membership
                 # before any path is built — same defense, different universe.
                 from stt import archive
-                self._json(archive.restore_meeting(str(b.get("base") or "")))
+                self._json(archive.restore_meeting(b.text("base", "")))
             elif u.path == "/api/delete_meeting":
                 # live or archived; delete_meeting gates on membership in one
                 # of the two lists before any path is built. confirm is a
-                # seatbelt so nothing deletes on a malformed call.
-                if not b.get("confirm"):
+                # seatbelt so nothing deletes on a malformed call: only a JSON
+                # true confirms (the string "false" used to delete).
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
                 from stt import archive
-                self._json(archive.delete_meeting(str(b.get("base") or "")))
+                self._json(archive.delete_meeting(b.text("base", "")))
             elif u.path == "/api/review":
                 if not self._require_base(b.get("base")):
                     return
-                if b.get("action") == "accept_minor":
+                action = b.text("action")
+                if action == "accept_minor":
                     self._json(review.accept_minor(b["base"]))
                     return
-                if b.get("action") == "insert":
-                    self._json(review.insert_segment(b["base"], b["start"], b["end"],
-                                                     b["speaker"], b.get("text", "")))
+                if action == "insert":
+                    self._json(review.insert_segment(
+                        b["base"], b.number("start"), b.number("end"),
+                        b.text("speaker"), b.text("text", "")))
                     return
-                if b.get("action") == "delete":
-                    self._json(review.delete_segment(b["base"], int(b["index"]),
-                                                     start=b.get("start"),
-                                                     end=b.get("end")))
+                # the client's snapshot of the line it means: `start` and
+                # `end` cross-check `index` against the file as it is now
+                start, end = b.number("start", None), b.number("end", None)
+                if action == "delete":
+                    self._json(review.delete_segment(b["base"], b.integer("index"),
+                                                     start=start, end=end))
                     return
-                if b.get("action") == "split":
+                if action == "split":
                     self._json(review.split_segment(
-                        b["base"], int(b["index"]), start=b.get("start"),
-                        text_a=b.get("text_a", ""), text_b=b.get("text_b", ""),
-                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b"),
-                        end=b.get("end")))
+                        b["base"], b.integer("index"), start=start,
+                        text_a=b.text("text_a", ""), text_b=b.text("text_b", ""),
+                        speaker_a=b.text("speaker_a", None),
+                        speaker_b=b.text("speaker_b", None), end=end))
                     return
-                self._json(review.apply(b["base"], int(b["index"]), b["action"],
-                                        start=b.get("start"), text=b.get("text"),
-                                        speaker_id=b.get("speaker"),
-                                        end=b.get("end")))
+                self._json(review.apply(b["base"], b.integer("index"), action,
+                                        start=start, text=b.text("text", None),
+                                        speaker_id=b.text("speaker", None),
+                                        end=end))
             elif u.path == "/api/export":
                 if not self._require_base(b.get("base")):
                     return
-                if b["fmt"] == "reveal":
+                if b.text("fmt") == "reveal":
                     f = config.meeting_file(b["base"], ".txt")
                     subprocess.run(["open", "-R", str(f)], capture_output=True)
                     self._json({"ok": f.exists()})
@@ -3432,8 +3452,8 @@ class Handler(BaseHTTPRequestHandler):
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
                     [str(config.PROJECT_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
-                     b["base"], str(b["start"]), str(b["end"]),
-                     b.get("engine") or "parakeet"],
+                     b["base"], str(b.number("start")), str(b.number("end")),
+                     b.text("engine", "") or "parakeet"],
                     capture_output=True, text=True, timeout=180,
                     cwd=str(config.PROJECT_DIR),
                     env={**__import__("os").environ,
@@ -3448,7 +3468,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "The second listen failed. The "
                                          "details are in the panel log."}, 500)
             elif u.path == "/api/remove_sample":
-                ok = identify.remove_sample(b["name"], int(b["index"]))
+                ok = identify.remove_sample(b.text("name"), b.integer("index"))
                 if not ok:
                     self._json({"ok": False,
                                 "error": "Can't remove the only sample — remove the person instead."})
@@ -3465,23 +3485,24 @@ class Handler(BaseHTTPRequestHandler):
                                 names=[b["name"]],
                                 vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/reassign_sample":
-                r = identify.reassign_sample(b["name"], int(b["index"]), b.get("to", ""))
+                r = identify.reassign_sample(b.text("name"), b.integer("index"),
+                                             b.text("to", ""))
                 if not r.get("ok"):
                     self._json(r)
                     return
                 # a moved voice changes BOTH profiles, so both names count
-                to = str(b.get("to") or "").strip()
+                to = b.text("to", "").strip()
                 self._json({**r, **_relabel_targets(
                     names=[n for n in (b["name"], to) if n],
                     vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/punctuate":
-                _env_file_set({"STT_PUNCTUATE": "1" if b.get("on") else "0"})
+                _env_file_set({"STT_PUNCTUATE": "1" if b.flag("on") else "0"})
                 self._json({"ok": True})
             elif u.path == "/api/mic_speaker":
                 # who "me" is on the meeting recorder's mic channel; enables the
                 # channel-aware path for new recordings (they process as mono
                 # until this is set and that person is enrolled)
-                name = (b.get("name") or "").strip()
+                name = b.text("name", "").strip()
                 if name:
                     _env_file_set({"STT_MIC_SPEAKER": name})
                 else:

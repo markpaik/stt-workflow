@@ -254,3 +254,98 @@ def test_query_fields_parse_numbers_from_text():
     # a JSON body never parses text as a number
     with pytest.raises(srv.BadRequest):
         srv.Fields({"n": "3"}).integer("n")
+
+
+# ---------- typed fields, route by route ----------
+
+B = "2026-04-08 Team Weekly"
+
+
+@pytest.mark.parametrize("route, body, msg", [
+    ("/api/review", {"base": B, "index": "abc", "action": "accept"},
+     "'index' must be a whole number"),
+    ("/api/review", {"base": B, "action": "accept"}, "missing field 'index'"),
+    ("/api/review", {"base": B, "index": 0, "action": "accept", "start": "abc"},
+     "'start' must be a number"),
+    ("/api/review", {"base": B, "index": 0}, "missing field 'action'"),
+    ("/api/review", {"base": B, "action": "insert", "start": "x", "end": 2,
+                     "speaker": "SPEAKER_00", "text": "hi"},
+     "'start' must be a number"),
+    ("/api/ask_library", {"question": 123}, "'question' must be text"),
+    ("/api/ask_library", {"question": "why", "scope": "all"},
+     "'scope' must be an object"),
+    ("/api/ask", {"base": B, "question": ["x"]}, "'question' must be text"),
+    ("/api/bulk", {"action": "archive", "bases": B},
+     "'bases' must be a list of text values"),
+    ("/api/bulk", {"action": "rename", "bases": [B], "value": 7},
+     "'value' must be text"),
+    ("/api/run", {"files": "notalist"}, "'files' must be a list of text values"),
+    ("/api/run", {"parallel": "x"}, "'parallel' must be a whole number"),
+    ("/api/run", {"parallel": 5}, "'parallel' must be from 1 to 2"),
+    ("/api/run", {"force": "yes"}, "'force' must be true or false"),
+    ("/api/unqueue", {"at": "abc"}, "'at' must be a number"),
+    ("/api/schedule", {"hour": 99, "minute": 1}, "'hour' must be from 0 to 23"),
+    ("/api/schedule", {"hour": 9}, "missing field 'minute'"),
+    ("/api/merge_speakers", {"src": "Jordan", "dst": "name:Alex"},
+     "'src' must look like uid:U003 or name:Jordan"),
+    ("/api/set_folder", {"which": "x", "path": "/tmp"},
+     "'which' must be source or dest"),
+    ("/api/rename", {"base": B, "new": 5}, "'new' must be text"),
+    ("/api/automation", {"watch": "yes"}, "'watch' must be true or false"),
+    ("/api/name", {"meeting": B, "speaker": "SPEAKER_00", "name": "X",
+                   "local": "no"}, "'local' must be true or false"),
+    ("/api/rename_speaker", {"name": "Alex Rivera"}, "missing field 'new'"),
+    ("/api/remove_sample", {"name": "Alex Rivera", "index": "0"},
+     "'index' must be a whole number"),
+    ("/api/retranscribe", {"base": B, "start": 1}, "missing field 'end'"),
+    ("/api/cloud_keys", {"clear": "scribe"},
+     "'clear' must be a list of text values"),
+])
+def test_a_wrong_or_missing_field_is_a_400_that_names_it(running_server, monkeypatch,
+                                                         route, body, msg):
+    """Each of these was a 500 carrying Python's own words: "invalid literal
+    for int() with base 10: 'abc'", "'int' object has no attribute 'strip'",
+    "can only concatenate str (not \\"list\\") to str", or an empty string
+    from a bare assert. /api/bulk iterated a string as its characters."""
+    from stt import jobs, summarize
+    _make_meeting(B)
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(srv, "_spawn", lambda a: pytest.fail("spawned"))
+    st, out = _post(running_server, route, body)
+    assert (st, out) == (400, {"error": msg})
+    assert jobs.items() == [], "a refused run must queue nothing"
+
+
+def test_snippet_secs_that_is_not_a_number_is_a_400(running_server):
+    st, out = _get(running_server, "/api/snippet?speaker=U001&secs=abc")
+    assert (st, out) == (400, {"error": "'secs' must be a number"})
+
+
+def test_delete_confirmation_must_be_a_real_true(running_server):
+    """The README promises delete-forever behind a two-step confirm. The API
+    tested only truthiness, so {"confirm": "false"} deleted the meeting."""
+    _make_meeting(B)
+    for bad in ("false", "true", 1, [True], {"x": 1}):
+        st, out = _post(running_server, "/api/delete_meeting",
+                        {"base": B, "confirm": bad})
+        assert (st, out) == (400, {"error": "'confirm' must be true or false"}), bad
+        assert B in config.meeting_bases()
+    st, out = _post(running_server, "/api/delete_meeting", {"base": B, "confirm": False})
+    assert out == {"ok": False, "error": "missing confirmation"}
+    st, out = _post(running_server, "/api/bulk",
+                    {"action": "delete", "bases": [B], "confirm": "false"})
+    assert st == 400 and B in config.meeting_bases()
+    st, out = _post(running_server, "/api/delete_meeting", {"base": B, "confirm": True})
+    assert st == 200 and out["ok"] is True
+    assert B not in config.meeting_bases()
+
+
+def test_queue_deletes_need_a_real_true_too(running_server):
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "take one.m4a").write_bytes(b"\0" * 64)
+    for route, body in (("/api/queue_delete", {"name": "take one.m4a"}),
+                        ("/api/queue_delete_dupes", {})):
+        st, out = _post(running_server, route, {**body, "confirm": "false"})
+        assert (st, out) == (400, {"error": "'confirm' must be true or false"})
+    assert (src / "take one.m4a").exists()
