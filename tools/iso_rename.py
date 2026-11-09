@@ -198,7 +198,9 @@ def plan(log=print) -> dict:
                                 + (f"{dates.twin_suffix(base).strip()} -> " if dates.twin_suffix(base) else "")
                                 + f"{dates.twin_suffix(new_base).strip()}")
         old_title = d.get("title") or dates.title_of(base)
-        new_title = dates.title_of(new_base)
+        # the title the apply step stores: a '1:1' kept while the folder
+        # holds '1-1' is no change (dates.shown_title)
+        new_title = dates.shown_title(d.get("title"), new_base)
         if old_title != new_title:
             row["flags"].append(f"title changes: {old_title!r} -> {new_title!r}")
         row.update(new_base=new_base, new_title=new_title, date=iso,

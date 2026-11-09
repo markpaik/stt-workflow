@@ -403,6 +403,23 @@ def test_the_dry_run_lists_old_to_new_and_changes_nothing(lib, capsys):
     assert stat.S_IMODE(ir.plan_path().stat().st_mode) == 0o600
 
 
+def test_the_dry_run_flags_no_title_change_the_apply_step_keeps(sandbox,
+                                                               monkeypatch, tmp_path):
+    """A title '1:1' on a folder in the old form ('Kim 1-1 08032026')
+    keeps '1:1' when the apply step moves it, so the dry run's
+    "title changes: '1:1' -> '1-1'" flagged a change that never lands."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("Kim 1-1 08032026", date="2026-08-03", mid="mid-k", title="Kim 1:1")
+    assert ir.main([]) == 0
+    rows = {r["old_base"]: r for r in json.loads(ir.plan_path().read_text())["rows"]}
+    r = rows["Kim 1-1 08032026"]
+    assert r["new_base"] == "2026-08-03 Kim 1-1" and r["new_title"] == "Kim 1:1"
+    assert not any(f.startswith("title changes") for f in r["flags"])
+    assert ir.main(["--apply"]) == 0
+    d = json.loads(config.meeting_file("2026-08-03 Kim 1-1", ".json").read_text())
+    assert d["title"] == "Kim 1:1"
+
+
 def test_a_collision_with_an_iso_name_gets_the_twin_suffix(lib):
     _m("2026-08-03 Kim Weekly Check-in – Plans (3)", date="2026-08-03")
     _m("2026-08-09 Standup", date="2026-08-09")
