@@ -29,10 +29,40 @@ class UnreadableAudio(RuntimeError):
     name, never the command line or an absolute path."""
 
 
+class WriteFailed(RuntimeError):
+    """ffmpeg read the source but could not write the converted audio: a
+    full disk, or a work folder it may not write. The file is fine, so a
+    failure of this kind never counts against it (manifest.record_failure).
+    The message names no path."""
+
+
 _FF_PREFIX = re.compile(r"^\[[^\]]* @ 0x[0-9a-fA-F]+\]\s*")
+# ffmpeg tags each line with the part that wrote it: "[in#0 @ 0x..]" is the
+# input, "[out#0/wav @ 0x..]" the output file and "[aost#0:0/pcm_s16le @
+# 0x..]" an output stream
+_FF_OUTPUT_PART = re.compile(r"^\[(?:out#|[avsdt]?ost#)")
+_FF_FULL = ("No space left on device", "Disk quota exceeded",
+            "Read-only file system")
 
 
-def _ffmpeg_reason(stderr, src: Path) -> str:
+def _output_side(stderr) -> str | None:
+    """Why ffmpeg could not write, or None when the failure is the input's:
+    'No space left on device', 'Permission denied'."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    for ln in (stderr or "").splitlines():
+        ln = ln.strip()
+        full = next((f for f in _FF_FULL if f in ln), None)
+        if full:
+            return full
+        if _FF_OUTPUT_PART.match(ln) or ln.startswith("Error opening output"):
+            # "Error opening output out.wav: Permission denied": the reason
+            # is the part after the last colon, and it holds no path
+            return ln.rsplit(": ", 1)[-1].strip() or "unknown error"
+    return None
+
+
+def _ffmpeg_reason(stderr, src: Path, dst: Path = None) -> str:
     """The line of ffmpeg's error output that says why, with its
     "[in#0 @ 0x...]" prefix and any path taken off. The first specific line
     wins ("moov atom not found" over the generic "Invalid data found")."""
@@ -50,21 +80,30 @@ def _ffmpeg_reason(stderr, src: Path) -> str:
             if ln.startswith(lead):
                 ln = ln[len(lead):]
         ln = ln.replace(str(src), src.name)
+        if dst is not None:
+            ln = ln.replace(str(dst), Path(dst).name)
         if ln and ln not in out:
             out.append(ln)
     return out[0][:300] if out else "unknown error"
 
 
-def _run_ffmpeg(cmd: list, src: Path):
+def _run_ffmpeg(cmd: list, src: Path, dst: Path = None):
     """Run one ffmpeg command. A failure raises UnreadableAudio with
-    ffmpeg's reason, never CalledProcessError and its command line."""
+    ffmpeg's reason, never CalledProcessError and its command line. A
+    failure to write the output (a full disk, a folder it may not write)
+    raises WriteFailed instead: the source is not to blame."""
     r = subprocess.run(cmd, capture_output=True)
     if r.returncode != 0:
-        why = _ffmpeg_reason(r.stderr, src)
+        why = _ffmpeg_reason(r.stderr, src, dst)
         if "does not contain any stream" in why:
             # -vn left nothing to write: the source has no audio stream
-            # (a screen recording with video only)
+            # (a screen recording with video only). ffmpeg says it of the
+            # output, but the source is the one at fault.
             raise UnreadableAudio(f"no audio track in {Path(src).name}")
+        out_why = _output_side(r.stderr)
+        if out_why is not None:
+            raise WriteFailed(f"could not write the converted audio for "
+                              f"{Path(src).name}: {out_why}")
         raise UnreadableAudio(f"ffmpeg could not decode {Path(src).name}: {why}")
     return r
 
@@ -89,7 +128,7 @@ def to_wav16k(src: Path, dst: Path) -> Path:
     _run_ffmpeg(
         [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn",
          "-ar", str(config.SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
-         str(dst)], src)
+         str(dst)], src, dst)
     return dst
 
 
@@ -115,7 +154,7 @@ def to_wav16k_channel(src: Path, dst: Path, channel: int) -> Path:
     _run_ffmpeg(
         [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn",
          "-af", f"pan=mono|c0=c{int(channel)}",
-         "-ar", str(config.SAMPLE_RATE), "-c:a", "pcm_s16le", str(dst)], src)
+         "-ar", str(config.SAMPLE_RATE), "-c:a", "pcm_s16le", str(dst)], src, dst)
     return dst
 
 
@@ -135,6 +174,7 @@ def extract_audio(src: Path, dst: Path) -> Path:
                         "-f", "ipod", str(tmp)], capture_output=True)
     if r.returncode != 0:  # audio codec not m4a-compatible; re-encode
         _run_ffmpeg([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-                     "-vn", "-c:a", "aac", "-b:a", "160k", "-f", "ipod", str(tmp)], src)
+                     "-vn", "-c:a", "aac", "-b:a", "160k", "-f", "ipod", str(tmp)],
+                    src, tmp)
     os.replace(tmp, dst)
     return dst

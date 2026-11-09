@@ -104,7 +104,7 @@ def main():
         wav = config.WORK_DIR / "enroll.wav"
         try:
             A.to_wav16k(src, wav)
-        except A.UnreadableAudio as e:
+        except (A.UnreadableAudio, A.WriteFailed) as e:
             wav.unlink(missing_ok=True)
             raise SystemExit(str(e))
         try:

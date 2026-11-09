@@ -70,3 +70,41 @@ def test_a_failed_decode_leaves_no_meeting_folder(sandbox):
     with pytest.raises(audio.UnreadableAudio):
         pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
     assert list(config.MEETINGS_DIR.iterdir()) == []
+
+
+def test_a_folder_ffmpeg_may_not_write_is_not_the_sources_fault(tmp_path):
+    """Every non-zero exit was UnreadableAudio, so a read-only work folder
+    set a good file aside at its first failure, and the message said
+    "could not decode" with the work folder's absolute path in it."""
+    src = tmp_path / "tone.m4a"
+    subprocess.run([audio.FFMPEG, "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=1", str(src)], check=True)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o555)
+    try:
+        with pytest.raises(audio.WriteFailed) as ei:
+            audio.to_wav16k(src, ro / "out.wav")
+    finally:
+        ro.chmod(0o755)
+    assert not isinstance(ei.value, audio.UnreadableAudio)
+    assert str(ei.value) == ("could not write the converted audio for tone.m4a: "
+                             "Permission denied")
+
+
+def test_a_full_disk_is_not_the_sources_fault(tmp_path, monkeypatch):
+    # ffmpeg's own words when the disk filled during a decode
+    full = ("[aost#0:0/pcm_s16le @ 0x79e90d0000] Error submitting a packet to "
+            "the muxer: No space left on device\n"
+            "[out#0/wav @ 0x79e904c180] Error muxing a packet\n"
+            "[out#0/wav @ 0x79e904c180] Error writing trailer: No space left "
+            "on device\n")
+    monkeypatch.setattr(audio.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 228, b"", full.encode()))
+    with pytest.raises(audio.WriteFailed) as ei:
+        audio.to_wav16k(tmp_path / "Board.m4a", tmp_path / "w" / "out.wav")
+    assert str(ei.value) == ("could not write the converted audio for Board.m4a: "
+                             "No space left on device")
+    # an input-side failure stays the source's
+    bad = "[in#0 @ 0x77] Error opening input: Invalid data found when processing input\n"
+    assert audio._output_side(bad) is None

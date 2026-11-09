@@ -1386,6 +1386,31 @@ def test_a_file_that_keeps_failing_is_set_aside_after_three_runs(sandbox, monkey
     assert len(seen) == manifest.FAIL_PARK_AFTER
 
 
+def test_a_full_disk_never_sets_a_file_aside(sandbox, monkeypatch):
+    """A failure that is this Mac's (the converted audio could not be
+    written: a full disk) parked every file a run touched, and the files
+    stayed parked after space was freed."""
+    import errno as _errno
+
+    from stt import audio, config, manifest
+    (config.ICLOUD_DIR / "Board.m4a").write_bytes(b"\x00" * 64)
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        # a new exception each time: a kept one holds the run's frames, and
+        # with them the lock file of a finished run
+        seen.append(src_str)
+        if len(seen) % 2:
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        raise audio.WriteFailed("could not write the converted audio for "
+                                "Board.m4a: No space left on device")
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    for _ in range(manifest.FAIL_PARK_AFTER + 2):
+        _run_main(monkeypatch)
+    assert len(seen) == manifest.FAIL_PARK_AFTER + 2
+    assert "Board.m4a" not in (manifest.load().get("failed") or {})
+
+
 def test_a_second_batch_never_blanks_the_lock_holders_pid(sandbox):
     """acquire_lock opened batch.lock with "w", so every run that LOST the
     lock race (the folder watch fires often) truncated the pid the running

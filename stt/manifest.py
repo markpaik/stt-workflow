@@ -174,7 +174,9 @@ def mark(m: dict, key: str, mtime: float, outputs: list, fp=None, size=None):
 # after FAIL_PARK_AFTER of them, or at the first one when ffmpeg cannot
 # read it (audio.UnreadableAudio: the same bytes fail the same way). A
 # parked file is skipped by automatic runs until it changes. Naming it
-# (Retry, --files) or --force still runs it, and a success clears it.
+# (Retry, --files) or --force still runs it, and a success clears it. A
+# failure that is the Mac's, not the file's (a full disk: audio.WriteFailed),
+# is never counted (run_batch._machine_at_fault).
 
 FAIL_PARK_AFTER = 3
 

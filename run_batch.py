@@ -26,6 +26,7 @@ starts nothing new, lets the file in flight finish, and ends cleanly (no
 chained job). The pause flag, by contrast, only gates a run's START.
 """
 import argparse
+import errno
 import fcntl
 import os
 import shutil
@@ -703,10 +704,21 @@ def _stop_own_processes():
             pass
 
 
+def _machine_at_fault(e) -> bool:
+    """True when a failure is this Mac's, not the file's: a full disk, or a
+    folder the batch may not write. It never counts toward setting the file
+    aside, so the file runs again once space is freed."""
+    if isinstance(e, audio.WriteFailed):
+        return True
+    return isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT,
+                                                  errno.EROFS)
+
+
 def _trace(e):
-    """Print the traceback of a failed file, except for a source ffmpeg
-    cannot read: its one-line reason (audio.UnreadableAudio) says it all."""
-    if not isinstance(e, audio.UnreadableAudio):
+    """Print the traceback of a failed file, except for an ffmpeg failure:
+    its one-line reason (audio.UnreadableAudio, audio.WriteFailed) says it
+    all."""
+    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed)):
         traceback.print_exc()
 
 
@@ -1185,7 +1197,8 @@ def main():
         failed_names.add(name)
         print(f"   FAILED: {name}: {e}  (original preserved)", file=sys.stderr, flush=True)
         status.finish_file(name, False, str(e))
-        note_failure(name, str(e), unreadable=isinstance(e, audio.UnreadableAudio))
+        if not _machine_at_fault(e):
+            note_failure(name, str(e), unreadable=isinstance(e, audio.UnreadableAudio))
 
     def note_failure(name, why, unreadable=False):
         """Count the failure against the unchanged file, and say so when it
