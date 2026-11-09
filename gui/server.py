@@ -373,7 +373,8 @@ def _dupe_pair_rows(dst_dir=None):
             if not meta:
                 break
             sides.append({"base": base, "title": meta["title"], "date": meta["date"],
-                          "minutes": meta["minutes"], "speakers": meta["speakers"],
+                          "minutes": meta["minutes"], "seconds": meta["seconds"],
+                          "speakers": meta["speakers"],
                           "source_file": meta.get("source_file")})
         if len(sides) == 2:
             rows.append({"a": sides[0], "b": sides[1], "score": p["score"]})
@@ -617,6 +618,9 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 # ':' or '/' shows as typed ('1:1' on a '... 1-1' folder)
                 "title": _shown_title(d, j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
+                # whole seconds: a clip under a minute rounds to 0 minutes,
+                # and the page shows '22 sec' for it, never '0 min'
+                "seconds": round(float(d.get("duration_sec") or 0)),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
                 "named": sorted(named, key=lambda k: -named[k]),
                 # {display: cluster id} for the voices this meeting heard but
@@ -1013,13 +1017,15 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                         "suggested_title": meta["suggested"],
                         "suggested_date": meta["date"],
                         "has_audio": bool(meta["audio"]),
-                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "minutes": meta["minutes"], "seconds": meta["seconds"],
+                        "speakers": meta["speakers"],
                         "named": meta["named"],
                         "unnamed_clusters": meta["unnamed_clusters"],
                         "summary": _preview(meta["summary"])})
         else:
             row.update({"id": meta["base"], "state": "ready",
-                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "minutes": meta["minutes"], "seconds": meta["seconds"],
+                        "speakers": meta["speakers"],
                         "named": meta["named"],
                         "category": meta["category"],
                         "review_substantial": meta["flagged"],
@@ -2358,7 +2364,8 @@ class Handler(BaseHTTPRequestHandler):
                     items.append({"base": b, "title": _display_title(b),
                                   "date": d.get("date") or dates.meeting_date(b) or "",
                                   "category": d.get("category"),
-                                  "minutes": round(d.get("duration_sec", 0) / 60)})
+                                  "minutes": round(d.get("duration_sec", 0) / 60),
+                                  "seconds": round(float(d.get("duration_sec") or 0))})
                 items.sort(key=lambda r: r["date"] or "", reverse=True)
                 self._json({"items": items})
             elif u.path == "/api/voice_clips":

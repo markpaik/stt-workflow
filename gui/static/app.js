@@ -532,7 +532,7 @@ function bodyAndSlot(row){
       // the date is click-to-edit in place (old page parity); rowDateEdit
       // swaps it for a date input, /api/set_date re-stamps the folder
       if(row.date)bits.push(`<span class="rdate" title="Click to change the meeting date" onclick="rowDateEdit(event,'${escJs(row.id)}')">${shortDate(row.date)}</span>`);
-      if(row.minutes!=null)bits.push(row.minutes+' min');
+      if(row.minutes!=null)bits.push(durMin(row));
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
       // Boardroom right rail, beneath the state pill: the category chip (or
       // the hollow untagged dot) and the review count as plain amber TEXT
@@ -678,9 +678,13 @@ function finishDotsHTML(row){
 // the unnamed voices as ONE teal count, the same finish.voices the Voices dot
 // and the strip show. A raw "Speaker N" or "Voice N" label never appears: a
 // board meeting's row listed 22 of them.
+// a recording's length: whole seconds under a minute ('22 sec', never '0 min')
+function durMin(row){const s=row.seconds!=null?Math.round(+row.seconds||0):null;return s!=null&&s<60?s+' sec':row.minutes+' min';}
 function peopleMetaBits(row){
   const bits=[],named=row.named||[],n=(row.finish&&row.finish.voices)||0;
-  if(row.minutes!=null)bits.push(row.minutes+' min');
+  // durMin's rule, inline: whole seconds under a minute, never "0 min"
+  const secs=row.seconds!=null?Math.round(+row.seconds||0):null;
+  if(row.minutes!=null)bits.push(secs!=null&&secs<60?secs+' sec':row.minutes+' min');
   if(named.length)bits.push(esc(named.slice(0,3).join(', '))
     +(named.length>3?` +${named.length-3}`:''));
   if(n>0)bits.push(`<span class="unn">${n} unnamed</span>`);
@@ -929,7 +933,7 @@ function sigOf(r){
   r.dup_of,r.dup_reason,r.dup_archived,
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
   r.est_detail,
-  r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
+  r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,r.seconds,
   (r.speakers||[]).join(','),(r.named||[]).join(','),
   // the finish record paints a To finish row's dots, and moves as voices are
   // named and flags checked while nothing else on the row changes
@@ -2457,7 +2461,7 @@ async function buildMeeting(base){
 // Lindqvist, Elena Ruiz, Voice 2, Speaker 72, Speaker 86, ..."
 function mMetaBits(m){
   const bits=m.date?[esc(shortDate(m.date))]:[];
-  return bits.concat(peopleMetaBits({minutes:m.minutes,named:m.named,
+  return bits.concat(peopleMetaBits({minutes:m.minutes,seconds:m.seconds,named:m.named,
     finish:{voices:Object.keys(m.unnamed_clusters||{}).length}}));
 }
 // the poll keeps that line current: a name saved on the page drops the
@@ -5764,7 +5768,7 @@ function dArchRender(){
     const arm=DRAWER.dconfirm==='adel:'+it.base;
     return `<div class="drow">
       <div class="grow"><div class="dname">${esc(it.title||it.base)}</div>
-        <div class="dsub">${esc(day)}${it.minutes?' &middot; '+it.minutes+' min':''}${
+        <div class="dsub">${esc(day)}${it.minutes!=null&&(it.minutes||it.seconds)?' &middot; '+durMin(it):''}${
           it.category?' &middot; '+(it.category==='work'?'Work':'Personal'):''}</div></div>
       <button class="iact" type="button" title="Bring it back into the library exactly as it was"
         onclick="dRestore('${escJs(it.base)}',this)">Restore</button>
@@ -5866,7 +5870,7 @@ function _dupeSide(side,other,score){
   const arm=DRAWER.dconfirm==='dupdel:'+side.base;
   return `<div class="dupside">
     <div class="grow"><div class="dname">${esc(side.title||side.base)}</div>
-      <div class="dsub">${esc(day)}${side.minutes?' &middot; '+side.minutes+' min':''}${
+      <div class="dsub">${esc(day)}${side.minutes!=null&&(side.minutes||side.seconds)?' &middot; '+durMin(side):''}${
         who?' &middot; '+esc(who):''}</div>
       ${side.source_file?`<div class="dsub">from ${esc(side.source_file)}</div>`:''}</div>
     <a class="dlink" href="#m/${encodeURIComponent(side.base)}"

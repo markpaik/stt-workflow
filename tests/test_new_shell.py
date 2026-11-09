@@ -6675,3 +6675,15 @@ def test_screen_names_for_routes_with_a_slash():
     assert next_screens._name("m/Some Base 10012026") == "meeting"
     assert next_screens._name("m/Some Base 10012026/t/12") == "meeting-transcript"
     assert next_screens._name("home") == "home"
+
+
+def test_the_classic_meta_line_shows_seconds_under_a_minute():
+    """round(22 / 60) is 0, so a 22 s clip read '0 min'. The classic rows
+    and the reader header read `seconds` and show '22 sec' instead."""
+    out = _run_node(_js_fn("peopleMetaBits") + """
+const esc=s=>String(s);
+console.log(JSON.stringify([peopleMetaBits({minutes:0,seconds:22})[0],
+  peopleMetaBits({minutes:3,seconds:180})[0], peopleMetaBits({minutes:4})[0]]));
+""")
+    assert out == ["22 sec", "3 min", "4 min"]
+    assert "minutes:m.minutes,seconds:m.seconds" in NEW_JS

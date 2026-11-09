@@ -470,6 +470,9 @@ def compute(rows: list, me=None, overrides=None) -> list:
         groups.append({"key": key, "kind": g["kind"], "name": name, "why": why,
                        "count": len(rs),
                        "hours": round(sum(r.get("duration_sec") or 0 for r in rs) / 3600, 1),
+                       # the total in seconds: a group of short clips shows
+                       # '5 min' or '22 sec', never '0 h'
+                       "seconds": round(sum(r.get("duration_sec") or 0 for r in rs)),
                        "bases": [r["base"] for r in rs]})
     groups.sort(key=lambda g: (-g["count"], g["name"].lower(), g["key"]))
     return groups

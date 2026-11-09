@@ -56,7 +56,8 @@ is accepted, video included.
 
 Every meeting is one row, and the row tells you everything: a category dot,
 the title, date, length and attendees, a two-line summary preview, and its
-current state at the right edge.
+current state at the right edge. A length under a minute shows in seconds
+("22 sec"), and a group's total shows in minutes until it reaches an hour.
 
 - **Actionable rows pin to the top**, whatever their date: a live recording
   with its ticking clock, files transcribing with a progress hairline and

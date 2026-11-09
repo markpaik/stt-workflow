@@ -62,7 +62,7 @@ function groupsView(){
  const undo=LIB.gundo?`<div class="notice"><span>${esc(LIB.gundo.title)} is no longer part of this group.</span><button class="btn quiet" type="button" data-act="g-undo">Undo</button></div>`:'';
  return `<div class="head"><div><h1>Groups</h1><p class="meta">These form by themselves from title words, people, and hour. No file moves, and there is nothing to file.</p></div></div>
   <div class="f-grid"><nav class="tree" aria-label="Groups">${tree}</nav>
-  <div class="stack sections" style="min-width:0"><div class="head"><div style="min-width:0"><h2>${esc(g.name)}</h2><div class="meta">${plural(g.count,'recording')} · <span class="mono">${g.hours} h</span> · ${esc(g.why)}</div></div>
+  <div class="stack sections" style="min-width:0"><div class="head"><div style="min-width:0"><h2>${esc(g.name)}</h2><div class="meta">${plural(g.count,'recording')} · <span class="mono">${g.seconds!=null?totalText(g.seconds):g.hours+' h'}</span> · ${esc(g.why)}</div></div>
    ${typeof askGroupBtn==='function'?askGroupBtn(g):''}</div>${undo}${errLine('group')}
    <div class="stack">${rows.map(m=>rowHTML(m,{group:g.key})).join('')}</div></div></div>`;
 }
