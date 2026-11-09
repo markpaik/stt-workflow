@@ -980,7 +980,7 @@ function drawTimeline(s){
   // the list. A meeting the chips filter out drops its lines too. SAID_TOP is
   // the line Enter in the search field opens.
   const byId=new Map(all.map(r=>[r.id,r]));
-  const live=HITS&&q.length>=3&&HITS.query===q?HITS:null;
+  const live=HITS&&q.length>=2&&HITS.query===q?HITS:null;
   const groups0=live?saidGroups(live.hits,base=>{
     const r=byId.get(base);
     if(!r)return base;
@@ -2084,7 +2084,7 @@ function selAllShown(){
 }
 
 /* --------------------------------------------------------------- search ---- *
- * Debounced full-text (>=3 chars) into HITS; drawTimeline renders them as the
+ * Debounced full-text (>=2 chars, sent as typed so 'AI' searches as an acronym) into HITS; drawTimeline renders them as the
  * "Said in" group at the top of the list (docs/ui-refresh phase 4). A hit
  * opens the in-shell meeting page (#m/<base>) and seeks the audio to the
  * hit's moment via mSeek once the page is built; with two panes it opens in
@@ -2100,7 +2100,7 @@ let searchTimer=null;
 function scheduleSearch(){
   clearTimeout(searchTimer);
   const q=$('#search').value.trim();
-  if(q.length<3){if(HITS){HITS=null;render();}return;}
+  if(q.length<2){if(HITS){HITS=null;render();}return;}
   searchTimer=setTimeout(async()=>{
     let r;
     try{r=await api('/api/search?q='+encodeURIComponent(q));}catch(e){return;}

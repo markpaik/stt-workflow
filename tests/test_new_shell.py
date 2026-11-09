@@ -5767,7 +5767,7 @@ console.log(JSON.stringify(o));
     sched = _js_fn("scheduleSearch")
     assert "HITS=r;render();" in sched
     assert "$('#search').value.trim().toLowerCase()!==r.query" in sched
-    assert "if(q.length<3){if(HITS){HITS=null;render();}return;}" in sched
+    assert "if(q.length<2){if(HITS){HITS=null;render();}return;}" in sched
 
 
 def _setup_env():

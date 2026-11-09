@@ -87,7 +87,11 @@ current state at the right edge.
   Process > Other files for a picker.
 - **Search everything**: the box filters by title and attendee as you type,
   and full-text results show every place a phrase was said; clicking one
-  opens the meeting with the audio cued to that exact moment.
+  opens the meeting with the audio cued to that exact moment. Two letters
+  are enough for an acronym: typed in capitals (`AI`, `IT`, `HR`), the word
+  is found only where it is written in capitals, so `IT` skips every "it".
+  A two-letter word in lower case matches whole words, and a two-letter
+  stop word such as "is" or "of" does not search.
 - **Keyboard throughout**: `/` focuses search, `j`/`k` walk the rows, `Enter`
   opens (or accepts a naming row), `e` peeks the summary, `Escape` backs out.
 

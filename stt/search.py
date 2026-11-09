@@ -12,11 +12,18 @@ start, who, snippet}, newest meeting first):
    matches a line when either table matches. A last word under 3 characters
    is not a prefix ("ai?" does not find "air"). The words of a query must
    sit together as a phrase in one transcript line, as the substring scan
-   required.
+   required. A query under 3 characters searches only when it is one
+   two-character word (_short): typed in capitals ("AI", "IT", "HR") it is
+   an acronym and matches the word in capitals only, typed in lower case it
+   matches the whole word, and a two-letter stop word ("is", "of") does not
+   search. One character never searches.
 2. The original in-memory substring scan, as the fallback. It runs when FTS
    finds nothing (token search cannot match mid-word, so "orama" only ever
    finds "panorama" this way), when the query has no word characters, and
    when SQLite fails for any reason (locked, corrupt, built without FTS5).
+   A short query never falls back to the substring scan when FTS finds
+   nothing: "ai" sits inside "said". When SQLite fails, it scans for the
+   whole word instead.
 
 The index is derived data. Every query first compares each live meeting's
 json (mtime and size) with what the index holds, re-reads the changed ones,
@@ -46,6 +53,11 @@ SCHEMA = "5"
 _TOKENIZE = "porter unicode61 remove_diacritics 2"
 _RAW_TOKENIZE = "unicode61 remove_diacritics 2"
 _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
+# two-letter words that sit in most transcript lines: a query of one of them
+# alone would list the whole library, so it does not search
+_SHORT_STOP = frozenset(
+    "ah am an as at be by do eh go ha he hi if in is it me my no of oh ok on "
+    "or so to uh um up us we ya yo".split())
 # a line's FTS rowid is file_id * _ROW + its segment index, so one meeting's
 # rows are a rowid RANGE: dropping a meeting is a range delete, which FTS5
 # serves from its rowid b-tree instead of scanning every row
@@ -411,11 +423,14 @@ def _match_expr(q: str):
     return phrase, phrase + star, toks
 
 
-def _snippet(text: str, q: str, toks) -> str:
+def _snippet(text: str, q: str, toks, exact=None) -> str:
     """The same window as the scan: 60 characters before the match, 90 after.
-    A stemmed or prefix match has no exact substring, so look for the words."""
+    A stemmed or prefix match has no exact substring, so look for the words.
+    An acronym's window opens on the word in capitals (`exact`), not on the
+    first 'it' in the line."""
     low = text.lower()
-    pos, n = low.find(q), len(q)
+    m = exact.search(text) if exact is not None else None
+    pos, n = (m.start(), len(m.group(0))) if m else (low.find(q), len(q))
     if pos < 0:
         for t in toks:
             for probe in (t, t[:max(3, len(t) - 2)]):
@@ -574,7 +589,10 @@ _HITS = """WITH hit(id) AS (
                 SELECT rowid FROM segs_raw WHERE segs_raw MATCH ?)"""
 
 
-def _fts(q: str, limit: int, f=None, bases=None):
+def _fts(q: str, limit: int, f=None, bases=None, exact=None):
+    """FTS hits for `q`. `exact`, a compiled pattern, is a second test each
+    hit's text must pass (an acronym typed in capitals): every candidate is
+    read, so `total` counts only the lines that pass it."""
     stem, prefix, toks = _match_expr(q)
     if stem is None:
         return None
@@ -585,27 +603,37 @@ def _fts(q: str, limit: int, f=None, bases=None):
         conn = _open()
         try:
             _sync(conn)
-            if conds:
-                total = conn.execute(
-                    f"""{_HITS} SELECT count(*) FROM hit h
-                        JOIN segs s ON s.rowid = h.id
-                        JOIN files f ON f.id = h.id / {_ROW}{where}""",
-                    (stem, prefix, *cargs)).fetchone()[0]
+            if exact is not None:
+                rows = [r for r in conn.execute(
+                    f"""{_HITS}
+                        SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
+                        FROM hit h JOIN segs s ON s.rowid = h.id
+                        JOIN files f ON f.id = h.id / {_ROW}{where}
+                        ORDER BY f.mtime DESC, f.base, s.rowid""",
+                    (stem, prefix, *cargs)) if exact.search(r[4] or "")]
+                total, rows = len(rows), rows[:limit]
             else:
-                total = conn.execute(f"{_HITS} SELECT count(*) FROM hit",
-                                     (stem, prefix)).fetchone()[0]
-            rows = conn.execute(
-                f"""{_HITS}
-                    SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
-                    FROM hit h JOIN segs s ON s.rowid = h.id
-                    JOIN files f ON f.id = h.id / {_ROW}{where}
-                    ORDER BY f.mtime DESC, f.base, s.rowid
-                    LIMIT ?""", (stem, prefix, *cargs, limit)).fetchall() if total else []
+                if conds:
+                    total = conn.execute(
+                        f"""{_HITS} SELECT count(*) FROM hit h
+                            JOIN segs s ON s.rowid = h.id
+                            JOIN files f ON f.id = h.id / {_ROW}{where}""",
+                        (stem, prefix, *cargs)).fetchone()[0]
+                else:
+                    total = conn.execute(f"{_HITS} SELECT count(*) FROM hit",
+                                         (stem, prefix)).fetchone()[0]
+                rows = conn.execute(
+                    f"""{_HITS}
+                        SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
+                        FROM hit h JOIN segs s ON s.rowid = h.id
+                        JOIN files f ON f.id = h.id / {_ROW}{where}
+                        ORDER BY f.mtime DESC, f.base, s.rowid
+                        LIMIT ?""", (stem, prefix, *cargs, limit)).fetchall() if total else []
         finally:
             conn.close()
             _secure(db_path())
     hits = [{"base": base, "index": idx, "start": start, "who": who,
-             "snippet": _snippet(text, q, toks)}
+             "snippet": _snippet(text, q, toks, exact)}
             for base, idx, start, who, text in rows]
     return {"query": q, "hits": hits, "total": total}
 
@@ -623,14 +651,31 @@ def _discard_if_corrupt(e):
 
 
 def _prepare(q, filters):
-    """(text, clean filters, group bases or None) for a query plus any
-    explicit filters. Inline filters in the text win over explicit ones."""
+    """(text, clean filters, group bases or None, text as typed) for a query
+    plus any explicit filters. Inline filters in the text win over explicit
+    ones. The text is lower-cased. The typed text keeps its case, which only
+    a short query reads (_short)."""
     text, inline = split_query(q)
     raw = dict(filters or {})
     raw.update(inline)
     f = clean_filters(raw)
     bases = _group_bases(f["in"]) if "in" in f else None
-    return text.strip().lower(), f, bases
+    return text.strip().lower(), f, bases, text.strip()
+
+
+def _short(q: str, typed: str):
+    """How a query under _PREFIX_MIN characters searches: (searches, exact).
+
+    Only one two-character word searches. Typed in capitals ('AI', 'IT',
+    'HR', 'Q3'), it is an acronym: `exact` is a case-sensitive whole-word
+    pattern each hit must also match, so 'IT' never lists the lines that
+    say 'it'. Typed in lower case, it matches the whole word (exact None),
+    unless it is a stop word, which would list most of the library."""
+    if not re.fullmatch(r"\w{2}", q):
+        return False, None
+    if typed.isupper():
+        return True, re.compile(r"(?<!\w)" + re.escape(typed) + r"(?!\w)")
+    return q not in _SHORT_STOP, None
 
 
 def query(q: str, limit: int = 40, filters: dict | None = None) -> dict:
@@ -639,19 +684,30 @@ def query(q: str, limit: int = 40, filters: dict | None = None) -> dict:
     With filters (inline in `q` or in `filters`), the answer also carries
     `filters`, the values used, and a bad value answers with `error`."""
     try:
-        q, f, bases = _prepare(q, filters)
+        q, f, bases, typed = _prepare(q, filters)
     except FilterError as e:
         return {"query": (q or "").strip().lower(), "hits": [], "total": 0,
                 "error": str(e)}
-    out = _query(q, limit, f, bases)
+    out = _query(q, limit, f, bases, typed)
     if f:
         out["filters"] = f
     return out
 
 
-def _query(q, limit, f, bases):
-    if len(q) < 3:
-        return {"query": q, "hits": [], "total": 0}
+def _query(q, limit, f, bases, typed=None):
+    if len(q) < _PREFIX_MIN:
+        ok, exact = _short(q, q if typed is None else typed)
+        if not ok:
+            return {"query": q, "hits": [], "total": 0}
+        try:
+            r = _fts(q, limit, f, bases, exact)
+        except Exception as e:
+            _warn(type(e).__name__, f"index unavailable, scanning instead ({e})")
+            _discard_if_corrupt(e)
+            return _scan(q, limit, f, bases, exact or re.compile(
+                r"(?<!\w)" + re.escape(q) + r"(?!\w)", re.I))
+        # no substring scan when FTS finds nothing: 'ai' sits in 'said'
+        return r
     try:
         r = _fts(q, limit, f, bases)
     except Exception as e:
@@ -668,12 +724,17 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
     [{base, title}]. Not behind /api/search, whose line-level shape the page
     depends on. Empty when the index cannot answer or a filter is bad."""
     try:
-        q, f, bases = _prepare(q, filters)
+        q, f, bases, typed = _prepare(q, filters)
     except FilterError:
         return []
     f.pop("from", None)          # a speaker filter has no meaning for a title
     stem, prefix, _ = _match_expr(q)
-    if len(q) < 3 or stem is None:
+    exact = None
+    if len(q) < _PREFIX_MIN:
+        ok, exact = _short(q, typed)
+        if not ok:
+            return []
+    if stem is None:
         return []
     conds, cargs = _where(f, bases)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
@@ -686,7 +747,7 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
                 # prefix of an unstemmed word (`docs_raw`): porter stems a
                 # part-typed word, so 'attendan*' on `docs` finds nothing
                 rows = conn.execute(
-                    f"""SELECT f.base, d.title, min(h.r) AS r FROM (
+                    f"""SELECT f.base, d.title, min(h.r) AS r, d.summary FROM (
                            SELECT rowid AS id, bm25(docs, 5.0, 1.0) AS r
                              FROM docs WHERE docs MATCH ?
                            UNION ALL
@@ -694,8 +755,10 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
                              FROM docs_raw WHERE docs_raw MATCH ?) h
                        JOIN docs d ON d.rowid = h.id
                        JOIN files f ON f.id = h.id{where}
-                       GROUP BY h.id ORDER BY r, f.base LIMIT ?""",
-                    (stem, prefix, *cargs, limit)).fetchall()
+                       GROUP BY h.id ORDER BY r, f.base"""
+                    + ("" if exact is not None else " LIMIT ?"),
+                    (stem, prefix, *cargs) + (() if exact is not None else (limit,))
+                ).fetchall()
             finally:
                 conn.close()
                 _secure(db_path())
@@ -703,7 +766,10 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
         _warn(type(e).__name__, f"index unavailable ({e})")
         _discard_if_corrupt(e)
         return []
-    return [{"base": b, "title": t} for b, t, _r in rows]
+    if exact is not None:
+        rows = [r for r in rows
+                if exact.search(r[1] or "") or exact.search(r[3] or "")][:limit]
+    return [{"base": b, "title": t} for b, t, _r, _s in rows]
 
 
 def ranked_lines(terms, bases=None, limit: int = 60) -> list:
@@ -839,10 +905,11 @@ def _segments(jpath):
     return rows, fc
 
 
-def _scan(q: str, limit: int = 40, f=None, bases=None) -> dict:
+def _scan(q: str, limit: int = 40, f=None, bases=None, rx=None) -> dict:
     """Case-insensitive substring search over all transcript segments.
     `q` arrives stripped and lowercased. Newest meeting first. The filters
-    apply as they do on the index path."""
+    apply as they do on the index path. `rx`, a compiled pattern, replaces
+    the substring test (a short query's whole word)."""
     f = f or {}
     hits, total = [], 0
     files = sorted((config.meeting_file(b, ".json") for b in config.meeting_bases()),
@@ -854,7 +921,11 @@ def _scan(q: str, limit: int = 40, f=None, bases=None) -> dict:
         if (f or bases is not None) and not meeting_passes(fc, f, bases):
             continue
         for idx, start, who, low, text in rows:
-            pos = low.find(q)
+            if rx is not None:
+                m = rx.search(text)
+                pos = m.start() if m else -1
+            else:
+                pos = low.find(q)
             if pos < 0:
                 continue
             if who_has and who_has not in str(who or "").lower():

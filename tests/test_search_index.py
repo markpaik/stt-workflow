@@ -174,8 +174,74 @@ def test_corrupt_index_falls_back_then_rebuilds(corpus):
 
 
 def test_short_query_touches_nothing(sandbox):
-    assert search.query("ab") == {"query": "ab", "hits": [], "total": 0}
+    # one character, or a two-letter stop word, never searches
+    assert search.query("a") == {"query": "a", "hits": [], "total": 0}
+    assert search.query("is") == {"query": "is", "hits": [], "total": 0}
     assert not config.SEARCH_DB.exists()
+
+
+def _acronym_corpus():
+    _mk("Mtg A 03052026", ["We tried the AI tutor pilot.", "Chronic absence is down."],
+        mtime=1_800_000_000)
+    _mk("Mtg B 03062026", ["Send it to IT before Friday.", "Then file it."],
+        mtime=1_800_000_100)
+    _mk("Mtg C 03092026", ["She said the air was cold.", "It is what it is."],
+        mtime=1_800_000_200)
+    _mk("Mtg D 03102026", ["HR signs the offer letters."], mtime=1_800_000_300)
+
+
+def test_a_two_letter_acronym_in_capitals_finds_the_word_in_capitals(sandbox):
+    """A query under 3 characters returned nothing, so 'AI', 'IT' and 'HR'
+    never searched. Typed in capitals, a two-letter word is an acronym: it
+    matches the whole word in capitals only, so 'IT' skips every 'it'."""
+    _acronym_corpus()
+    r = search.query("AI")
+    assert [h["base"] for h in r["hits"]] == ["Mtg A 03052026"] and r["total"] == 1
+    assert r["hits"][0]["snippet"] == "We tried the AI tutor pilot."
+    r = search.query("IT")
+    assert [(h["base"], h["index"]) for h in r["hits"]] == [("Mtg B 03062026", 0)]
+    assert r["total"] == 1
+    assert [h["base"] for h in search.query("HR")["hits"]] == ["Mtg D 03102026"]
+    # the substring scan never answers a short query: 'ai' sits in 'said'
+    assert search.query("AI", limit=40)["total"] == 1
+
+
+def test_an_acronym_snippet_opens_on_the_word_in_capitals(sandbox):
+    line = "It was late, and " + "we talked about it for a long while, " * 3 + "then IT called."
+    _mk("Mtg A 03052026", [line])
+    snip = search.query("IT")["hits"][0]["snippet"]
+    assert "IT called." in snip and snip.startswith("…")
+
+
+def test_a_short_query_scans_for_the_whole_word_when_sqlite_fails(sandbox, monkeypatch):
+    _acronym_corpus()
+    def broken(*a, **k):
+        raise sqlite3.OperationalError("no such module: fts5")
+    monkeypatch.setattr(search, "_open", broken)
+    assert [h["base"] for h in search.query("ai")["hits"]] == ["Mtg A 03052026"]
+    assert [(h["base"], h["index"]) for h in search.query("IT")["hits"]] == [
+        ("Mtg B 03062026", 0)]
+
+
+def test_a_two_letter_word_in_lower_case_matches_whole_words(sandbox):
+    _acronym_corpus()
+    r = search.query("ai")
+    assert [h["base"] for h in r["hits"]] == ["Mtg A 03052026"]   # not 'said', not 'air'
+    assert search.query("hr")["total"] == 1
+    # a stop word would match most lines, so it does not search
+    for stop in ("is", "it", "of", "to", "um"):
+        assert search.query(stop)["total"] == 0, stop
+
+
+def test_a_two_letter_acronym_finds_titles(sandbox):
+    _mk("AI Pilot 03052026", ["nothing relevant"], title="AI Pilot")
+    _mk("Air Quality 03062026", ["also nothing"], title="Air Quality",
+        ai_summary="She said the filters arrive in May.")
+    _mk("Team Sync 03092026", ["nothing"], title="Team Sync",
+        ai_summary="It was agreed that IT owns the laptops.")
+    assert [m["base"] for m in search.meetings("AI")] == ["AI Pilot 03052026"]
+    assert [m["base"] for m in search.meetings("IT")] == ["Team Sync 03092026"]
+    assert search.meetings("is") == []
 
 
 # ---------- keeping the index right ----------
