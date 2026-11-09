@@ -259,7 +259,8 @@ def _spellings() -> dict:
     'PSSP', 'PowerSchool'. A plural the lists write ('IEPs', 'RFPs') gives
     its singular. Read from the lists, so a new tag or series adds its own."""
     text = " ".join([f"{label} {hint}" for _, label, hint in TAGS]
-                    + [f"{sr.template} {sr.hint}" for sr in SERIES])
+                    + [f"{sr.template} {sr.hint}" for sr in SERIES]
+                    + list(_MORE_ACRONYMS))
     out = {}
     for w in re.findall(r"(?<!\w)[A-Za-z][A-Za-z0-9]*", text):
         if not any(c.isupper() for c in w[1:]):
@@ -271,6 +272,9 @@ def _spellings() -> dict:
 
 
 _SPELLINGS = None
+# school acronyms a meeting topic uses that no tag or series writes. Only
+# ones that are never an English word: 'it' and 'sip' stay words.
+_MORE_ACRONYMS = ("PLC", "PLCs", "MTSS", "SEL", "ELA", "ELL", "ESL", "KPI", "KPIs")
 
 
 def _known(part: str):
@@ -309,21 +313,8 @@ def title_case(t: str) -> str:
     such as 'ESE', 'OKRs', 'PlayLab') is kept as written. A word the model
     wrote without one takes the tag list's or the catalog's spelling when
     they write it ('iep' -> 'IEP', 'powerschool' -> 'PowerSchool'), each
-    part of a hyphenated word on its own."""
-    out = []
-    for i, w in enumerate(str(t or "").split()):
-        if any(c.isupper() for c in w[1:]) or any(c.isdigit() for c in w):
-            out.append(w)
-            continue
-        parts = w.split("-")
-        known = [_known(p) for p in parts]
-        if any(known):
-            out.append("-".join(k or _cap(p) for k, p in zip(known, parts)))
-        elif i and w.lower() in _SMALL:
-            out.append(w.lower())
-        else:
-            out.append(_cap(w))
-    s = " ".join(out)
+    part of a hyphenated or slashed word on its own."""
+    s = " ".join(_case_word(w, i == 0) for i, w in enumerate(str(t or "").split()))
     # program names whose second word is a small word ('Early On' is the
     # Part C program, 'Transfer In' a workflow): the small-word rule above
     # must not lower-case them
@@ -333,6 +324,22 @@ def title_case(t: str) -> str:
 
 
 _PROPER = ("Early On", "Transfer In")
+
+
+def _case_word(w: str, first: bool) -> str:
+    """One word of title_case. A slash parts two words, and each is cased
+    on its own ('iep/ese' read as one word and came out 'Iep/ese')."""
+    if "/" in w.strip("/"):
+        return "/".join(_case_word(p, first) if p else p for p in w.split("/"))
+    if any(c.isupper() for c in w[1:]) or any(c.isdigit() for c in w):
+        return w
+    parts = w.split("-")
+    known = [_known(p) for p in parts]
+    if any(known):
+        return "-".join(k or _cap(p) for k, p in zip(known, parts))
+    if not first and w.lower() in _SMALL:
+        return w.lower()
+    return _cap(w)
 
 
 def _first(name: str) -> str:
