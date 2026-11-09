@@ -347,6 +347,23 @@ console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('href="#m
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_palette_says_a_stop_word_was_not_searched():
+    """'is' showed "No matches.", which reads as "nobody said it". The
+    server's note says the word is too common to search on its own."""
+    out = _run_node("""
+S={meetings:[{base:'b',title:'Budget',date:'2026-10-02',minutes:9,named:[],ask_clusters:{}}]};
+const note='\u201cof\u201d is too common to search on its own. Add another word.';
+UI.pq='of';UI.pres={q:'of',total:0,meetings:[],hits:[],note};
+const h=palResults();
+UI.pq='zq';UI.pres={q:'zq',total:0,meetings:[],hits:[],note:''};
+const h2=palResults();
+console.log(JSON.stringify({note:h.includes('too common'),nm:h.includes('No matches.'),
+ h2:h2.includes('No matches.')}));
+""")
+    assert out == {"note": True, "nm": False, "h2": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_tab_title_counts_items_that_joined_while_hidden():
     out = _run_node("""
 S={meetings:[],needs_you:[{kind:'needs_title'}]};UI.route='home';

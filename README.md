@@ -95,8 +95,9 @@ current state at the right edge. A length under a minute shows in seconds
   opens the meeting with the audio cued to that exact moment. Two letters
   are enough for an acronym: typed in capitals (`AI`, `IT`, `HR`), the word
   is found only where it is written in capitals, so `IT` skips every "it".
-  A two-letter word in lower case matches whole words, and a two-letter
-  stop word such as "is" or "of" does not search.
+  A two-letter word in lower case matches whole words. A two-letter stop
+  word such as "is" or "of" sits in most lines, so it does not search on
+  its own, and the search box says so instead of "No matches."
 - **Keyboard throughout**: `/` focuses search, `j`/`k` walk the rows, `Enter`
   opens (or accepts a naming row), `e` peeks the summary, `Escape` backs out.
 

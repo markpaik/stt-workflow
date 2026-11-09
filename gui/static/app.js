@@ -1004,7 +1004,8 @@ function drawTimeline(s){
   // empty states (quiet, centered), rendered inside the timeline under Now.
   // "No matches." only when the Said in group found nothing either.
   if((all.length===0||rows.length===0)&&!UPLOADS.length){
-    const empty=first?setup:said?'':'<p class="empty">No matches.</p>';
+    // a stop word alone ('is') is not searched: the note says so
+    const empty=first?setup:said?'':'<p class="empty">'+esc(live&&live.note||'No matches.')+'</p>';
     const sig=(first?'EMPTY':'NOMATCH:'+lfsig+':'+q)+'|'+tsig+'|'+fsig;
     $('#rail').hidden=true;
     if(tl.dataset.sig===sig)return;

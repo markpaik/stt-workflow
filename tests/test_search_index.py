@@ -190,7 +190,9 @@ def test_an_index_that_stays_corrupt_falls_back_to_the_scan(corpus, monkeypatch)
 def test_short_query_touches_nothing(sandbox):
     # one character, or a two-letter stop word, never searches
     assert search.query("a") == {"query": "a", "hits": [], "total": 0}
-    assert search.query("is") == {"query": "is", "hits": [], "total": 0}
+    assert search.query("is") == {
+        "query": "is", "hits": [], "total": 0,
+        "note": "“is” is too common to search on its own. Add another word."}
     assert not config.SEARCH_DB.exists()
 
 
@@ -260,6 +262,17 @@ def test_a_two_letter_word_in_lower_case_matches_whole_words(sandbox):
     # a stop word would match most lines, so it does not search
     for stop in ("is", "it", "of", "to", "um"):
         assert search.query(stop)["total"] == 0, stop
+
+
+def test_a_stop_word_alone_says_it_was_not_searched(sandbox):
+    """'is' answered no hits and no reason, which read as "nobody said
+    it". It still does not search (it sits in most lines), and the answer
+    now says why. Typed in capitals it is an acronym and searches."""
+    _acronym_corpus()
+    r = search.query("of")
+    assert r["hits"] == [] and "too common" in r["note"]
+    assert "note" not in search.query("zq")      # not a stop word: no note
+    assert "note" not in search.query("ai")
 
 
 def test_a_two_letter_acronym_finds_titles(sandbox):

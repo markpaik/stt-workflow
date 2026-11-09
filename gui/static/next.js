@@ -448,12 +448,14 @@ function palResults(){
  const titles=[...local,...fromIdx].filter((m,i,a)=>a.indexOf(m)===i).slice(0,6);
  const said=r?(r.hits||[]).slice(0,10):[];
  const pending=q.length>=2&&!r;
- if(!titles.length&&!said.length)return `<div class="empty">${pending?'Searching…':'No matches.'}</div>`;
+ // a stop word alone ('is') is not searched: say so, never 'No matches.'
+ const note=r&&r.note?`<div class="meta pop-note">${esc(r.note)}</div>`:'';
+ if(!titles.length&&!said.length)return pending?'<div class="empty">Searching…</div>':(note||'<div class="empty">No matches.</div>');
  const tby=b=>{const m=byBase(b);return m?m.title:b;};
  return (titles.length?`<div class="eyebrow">Titles <span class="n">${titles.length}</span></div>`:'')+titles.map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${hl(m.title,q)}</div><div class="meta">${esc(whenText(m))} · ${durText(m)}</div></a>`).join('')
   +(said.length?`<div class="eyebrow">Said in <span class="n">${r.total>said.length?said.length+' of '+r.total:said.length}</span></div>`:'')
   +said.map(h=>`<a class="hit" href="${meetingHref(h.base,h.start)}"><div class="meta">${esc(tby(h.base))}</div><div>${hl(h.snippet||h.text||'',q)}</div><div class="meta"><span class="mono">${fmtT(h.start)}</span>${h.who?' · '+esc(h.who):''}</div></a>`).join('')
-  +(pending?'<div class="meta pop-note">Searching transcripts…</div>':'');
+  +(pending?'<div class="meta pop-note">Searching transcripts…</div>':'')+note;
 }
 let palTimer=null,palSeq=0;
 // the query goes as typed: two letters in capitals ('AI', 'IT', 'HR') search
@@ -464,7 +466,7 @@ function palSearch(){
  palTimer=setTimeout(async()=>{const seq=++palSeq;
   const [a,b]=await Promise.all([api('/api/search?q='+encodeURIComponent(q)).catch(()=>({hits:[]})),api('/api/search_meetings?q='+encodeURIComponent(q)).catch(()=>({meetings:[]}))]);
   if(seq!==palSeq||UI.pq.trim()!==q)return;   // a stale answer
-  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[],error:a.error||''};
+  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[],error:a.error||'',note:a.note||''};
   const box=$('#pal-res');if(box)box.innerHTML=palResults();},180);
 }
 function showPop(anchor,html){const p=$('#pop');p.innerHTML=html;p.hidden=false;const r=anchor.getBoundingClientRect();p.style.left='0';p.style.top='0';

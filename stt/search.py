@@ -59,6 +59,9 @@ _PREFIX_MIN = 3   # a shorter last word matches whole, not as a prefix
 _SHORT_STOP = frozenset(
     "ah am an as at be by do eh go ha he hi if in is it me my no of oh ok on "
     "or so to uh um up us we ya yo".split())
+# the answer to a stop word alone, so "No matches." never reads as "nobody
+# said it"
+STOP_NOTE = "“{q}” is too common to search on its own. Add another word."
 # a line's FTS rowid is file_id * _ROW + its segment index, so one meeting's
 # rows are a rowid RANGE: dropping a meeting is a range delete, which FTS5
 # serves from its rowid b-tree instead of scanning every row
@@ -744,7 +747,11 @@ def _query(q, limit, f, bases, typed=None):
     if len(q) < _PREFIX_MIN:
         ok, exact = _short(q, q if typed is None else typed)
         if not ok:
-            return {"query": q, "hits": [], "total": 0}
+            out = {"query": q, "hits": [], "total": 0}
+            if q in _SHORT_STOP:
+                # it is not that nothing was said: the word was not searched
+                out["note"] = STOP_NOTE.format(q=q)
+            return out
         try:
             r = _read_index(lambda: _fts(q, limit, f, bases, exact))
         except Exception as e:

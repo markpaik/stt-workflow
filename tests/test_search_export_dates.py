@@ -67,7 +67,9 @@ def test_search_survives_meeting_vanishing_mid_request(sandbox, monkeypatch):
 
 def test_search_short_query_ignored(sandbox):
     _mk("Mtg A", ["hello there"], sandbox)
-    assert search.query("he") == {"query": "he", "hits": [], "total": 0}
+    r = search.query("he")
+    assert (r["hits"], r["total"]) == ([], 0)
+    assert r["note"] == search.STOP_NOTE.format(q="he")   # it says why
 
 
 def test_search_cache_invalidates_on_change(sandbox):
