@@ -3,6 +3,8 @@
 import os
 import types
 
+import pytest
+
 import run_batch
 
 # one spoken line: the summary guard skips a transcript with 0 segments (unified
@@ -1650,3 +1652,19 @@ def test_a_dry_run_previews_while_another_batch_holds_the_lock(sandbox, monkeypa
         assert "Another batch is already running" in capsys.readouterr().out
     finally:
         held.close()
+
+
+def test_the_library_in_other_letter_case_is_still_the_library(sandbox, tmp_path):
+    """APFS folds letter case and Path.resolve() does not, so a --dest of
+    '~/projects/...' beside a library at '~/Projects/...' read as another
+    folder, and the run wrote no descriptions or automatic titles."""
+    from stt import config
+    lib = config.meetings_dir()
+    other = lib.parent / lib.name.swapcase()
+    if not other.exists():
+        pytest.skip("this volume is case-sensitive")
+    assert config.is_live_store(other)
+    assert config.is_live_store(lib)
+    (tmp_path / "elsewhere").mkdir()
+    assert not config.is_live_store(tmp_path / "elsewhere")
+    assert not config.is_live_store(tmp_path / "not made yet")

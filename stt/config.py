@@ -524,9 +524,17 @@ def meetings_dir() -> Path:
 def is_live_store(d) -> bool:
     """True when folder `d` is the meetings library (meetings_dir()). A run
     that writes somewhere else (a test or demo dest) must never touch the
-    library's index, or its meetings by name."""
+    library's index, or its meetings by name.
+
+    Two folders that both exist compare as files (os.path.samefile): APFS
+    folds letter case and resolve() does not, so '~/projects/...' and
+    '~/Projects/...' read as two folders and a run into the library wrote
+    no descriptions."""
     try:
-        return Path(d).resolve() == meetings_dir().resolve()
+        a, b = Path(d), meetings_dir()
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+        return a.resolve() == b.resolve()
     except OSError:
         return False
 
