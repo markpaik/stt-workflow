@@ -1,8 +1,10 @@
 """Central configuration. Override most values via environment variables."""
 import contextlib
 import fcntl
+import math
 import os
 import re
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -138,6 +140,25 @@ def migration_dir() -> Path:
         return _HOME / "migration"
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
+def _env_number(name, default, cast, valid, rule):
+    """An import-time number setting from the environment. An empty value
+    means the default. A value that does not parse, or that breaks `rule`,
+    prints a warning that names the setting and keeps the default: a typo
+    in stt.env must never stop every command that imports this module."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        v = cast(raw.strip())
+        if valid(v):
+            return v
+    except ValueError:
+        pass
+    print(f"warning: {name}={raw!r} is not {rule}; using {default}",
+          file=sys.stderr, flush=True)
+    return default
+
+
 # --- Models ---
 # Parakeet TDT 0.6B v3 (Nov 2026 swap from v2): closer to Scribe v2 in a shadow test, keeps fillers, ~15% slower.
 PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
@@ -157,7 +178,9 @@ DIARIZATION_MODEL = os.environ.get(
 DIARIZER = os.environ.get("STT_DIARIZER", "speakrs").strip().lower()
 # AHC merge threshold. speakrs' default 0.6 merged two late speakers into the
 # main one in a 4-hour meeting; 0.55 kept them apart and changed nothing else.
-SPEAKRS_AHC = float(os.environ.get("STT_SPEAKRS_AHC", "0.55"))
+SPEAKRS_AHC = _env_number("STT_SPEAKRS_AHC", 0.55, float,
+                          lambda v: math.isfinite(v) and v >= 0,
+                          "a finite number 0 or above")
 SPEAKRS_BIN = Path(os.environ.get(
     "STT_SPEAKRS_BIN",
     Path(__file__).resolve().parent.parent / "native/speakrs/target/release/stt-speakrs"))
@@ -168,7 +191,8 @@ SPEAKRS_MODELS_REV = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8"
 SPEAKRS_MODELS = Path(os.environ.get(
     "STT_SPEAKRS_MODELS",
     HOME / "Library/Application Support/com.stt-workflow/speakrs-models" / SPEAKRS_MODELS_REV))
-SPEAKRS_TIMEOUT_SEC = int(os.environ.get("STT_SPEAKRS_TIMEOUT_SEC", "3600"))
+SPEAKRS_TIMEOUT_SEC = _env_number("STT_SPEAKRS_TIMEOUT_SEC", 3600, int,
+                                  lambda v: v > 0, "a whole number of seconds above 0")
 
 # Turn-level recluster after speakrs (stt/recluster.py): a turn whose own
 # pyannote embedding fits another cluster's centroid better than its own (by

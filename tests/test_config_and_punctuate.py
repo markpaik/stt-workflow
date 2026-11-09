@@ -1,4 +1,8 @@
 """config env parsing + punctuate's word-preserving safety guarantees."""
+import os
+
+import pytest
+
 from stt import config, punctuate
 
 
@@ -306,3 +310,44 @@ def test_an_uncached_model_downloads_as_normal_and_leaves_the_environment_alone(
     assert cfg.hf_repo_id == punctuate._HF_REPO and cfg.directory is None
     assert (cfg.spe_filename, cfg.model_filename) == \
         (punctuate._SPE_FILENAME, punctuate._ONNX_FILENAME)
+
+
+# ---------- a bad number in stt.env warns and keeps the default ----------
+
+def _import_config(tmp_path, **env):
+    """Import stt.config in a fresh interpreter with `env` set. Returns
+    (returncode, stdout, stderr)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items()
+         if not k.startswith("STT_SPEAKRS") and k != "STT_DIARIZER"}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), **env})
+    r = subprocess.run([sys.executable, "-c",
+                        "from stt import config as c; "
+                        "print(c.SPEAKRS_AHC, c.SPEAKRS_TIMEOUT_SEC, c.DIARIZER)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    return r.returncode, r.stdout.strip(), r.stderr
+
+
+@pytest.mark.parametrize("name, raw", [
+    ("STT_SPEAKRS_AHC", "abc"), ("STT_SPEAKRS_AHC", "-1"), ("STT_SPEAKRS_AHC", "nan"),
+    ("STT_SPEAKRS_AHC", "inf"), ("STT_SPEAKRS_TIMEOUT_SEC", "abc"),
+    ("STT_SPEAKRS_TIMEOUT_SEC", "0"), ("STT_SPEAKRS_TIMEOUT_SEC", "-5"),
+    ("STT_SPEAKRS_TIMEOUT_SEC", "12.5")])
+def test_a_bad_speakrs_number_warns_and_keeps_the_default(tmp_path, name, raw):
+    """float('') or int('abc') at import stopped every command that imports
+    stt.config. -1 or nan passed, then every file fell back to pyannote, and
+    a timeout of 0 timed every helper run out at once."""
+    rc, out, err = _import_config(tmp_path, **{name: raw})
+    assert rc == 0, err
+    assert out == "0.55 3600 speakrs"
+    assert name in err and "using" in err
+
+
+def test_an_empty_or_good_speakrs_number_is_quiet(tmp_path):
+    rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC="", STT_SPEAKRS_TIMEOUT_SEC="")
+    assert (rc, out) == (0, "0.55 3600 speakrs") and "warning" not in err
+    rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC=" 0.6 ", STT_SPEAKRS_TIMEOUT_SEC="900")
+    assert (rc, out) == (0, "0.6 900 speakrs") and "warning" not in err

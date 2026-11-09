@@ -289,7 +289,9 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 Without the speakrs helper the pipeline uses pyannote on CPU instead
 (`STT_DIARIZER=pyannote` forces it). The helper runs with network access
-denied.
+denied. `STT_SPEAKRS_AHC` (merge threshold, default 0.55) and
+`STT_SPEAKRS_TIMEOUT_SEC` (default 3600) tune it; a value that is not a
+valid number prints a warning that names it, and the default is used.
 
 **Hugging Face token (one-time, required for speaker identification):**
 1. Signed in on huggingface.co, open
