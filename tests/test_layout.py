@@ -495,3 +495,28 @@ def test_the_adopt_warning_names_other_files_and_flat_meetings(sandbox, tmp_path
     w = config.adopt_folder_warning(d)
     assert "2 item(s)" in w and "1 older flat-layout meeting(s) will move" in w
     assert config.flat_meeting_bases(d) == ["Board Prep"]
+
+
+def test_every_ingested_type_is_found_as_stored_audio(sandbox):
+    """A non-video source is stored under its own suffix (<base>.flac). The
+    stored-audio lookup listed only six suffixes, so a .flac, .ogg or .caf
+    meeting had no audio for Redo, playback or the shell sweep."""
+    from stt import config
+    assert set(config.AUDIO_SUFFIXES) == config.AUDIO_EXTS
+    assert config.AUDIO_SUFFIXES[0] == ".m4a"          # the preferred copy first
+    for ext in (".flac", ".ogg", ".caf", ".opus", ".aac", ".wma", ".m4b"):
+        base = f"2026-01-05 Mtg {ext[1:]}"
+        p = config.meeting_file(base, ext)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+        assert config.meeting_audio(base) == p
+
+
+def test_the_shell_sweep_keeps_a_folder_holding_flac(sandbox):
+    import run_batch
+    from stt import config
+    d = config.meeting_dir("2026-01-05 Mtg")
+    d.mkdir(parents=True)
+    (d / "2026-01-05 Mtg.flac").write_bytes(b"x")
+    assert run_batch._sweep_shells() == 0
+    assert d.exists()

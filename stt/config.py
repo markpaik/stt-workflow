@@ -575,7 +575,11 @@ def llm_rest(work_sec: float, log=None, sleep=None) -> float:
 # The folder AND the files carry the meeting name, so a rename in the GUI
 # renames both and everything stays greppable/openable from Finder.
 
-AUDIO_SUFFIXES = (".m4a", ".mp4", ".wav", ".mp3", ".aiff", ".mov")
+# a meeting's stored audio: every type the batch ingests, since a non-video
+# source is stored under its own suffix (<base>.flac). One list: the order
+# only says which copy meeting_audio() prefers when a folder holds two.
+_AUDIO_PREFERRED = (".m4a", ".mp4", ".wav", ".mp3", ".aiff", ".mov")
+AUDIO_SUFFIXES = _AUDIO_PREFERRED + tuple(sorted(AUDIO_EXTS - set(_AUDIO_PREFERRED)))
 # sidecar jsons that are NOT a meeting's main transcript
 _SIDECAR_JSON = (".reviews.json", ".verify.json", ".reviews.superseded.json")
 
