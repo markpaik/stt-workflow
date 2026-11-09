@@ -13,7 +13,10 @@ reference that names nothing on disk (dangling), a lock file for a meeting
 that can never lock under that key again (orphan_lock), and an unknowns
 counter sitting below its own high-water mark (stale_next). `invalid` covers
 the structural checks — a missing .npy, a sample count that disagrees with the
-rows on disk, a row that is not a finite unit vector.
+rows on disk, a row that is not a finite unit vector, an entry of the wrong
+shape. `corrupt` is a registry.json or unknowns.json that cannot be read, and
+`unreferenced_file` is a .npy that no registry entry points at. Neither is
+fixed: an unreferenced file may be someone's only voiceprint.
 
 --fix merges duplicate global numbers, moves a split stack's minority samples
 onto fresh numbers, drops dead references, prunes orphan locks, and heals the
