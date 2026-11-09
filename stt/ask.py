@@ -93,6 +93,9 @@ def terms(question: str) -> list:
     return out[:MAX_TERMS]
 
 
+DAYS_MAX = 3650
+
+
 def scope_bases(scope: dict):
     """(bases or None for all, label, error). Scope kinds: all, group, days."""
     scope = scope if isinstance(scope, dict) else {}
@@ -106,14 +109,18 @@ def scope_bases(scope: dict):
             return set(), "A group that no longer exists", "that group no longer exists"
         return set(g["bases"]), g["name"], None
     if kind == "days":
-        try:
-            n = max(1, min(3650, int(scope.get("days") or 30)))
-        except (TypeError, ValueError):
-            return set(), "", "days should be a number"
+        # a whole number of days, 30 when left out. It was clamped before,
+        # so -5 and true read 'Last 1 days' and 99999999 'Last 3650 days':
+        # a label for a window nobody chose
+        n = scope.get("days", 30)
+        if (isinstance(n, bool) or not isinstance(n, (int, float))
+                or not 1 <= n <= DAYS_MAX or n != int(n)):
+            return set(), "", f"days should be a whole number from 1 to {DAYS_MAX}"
+        n = int(n)
         since = (date.today() - timedelta(days=n)).isoformat()
         rows = search.facet_rows()
         return ({r["base"] for r in rows if (r.get("day") or "") >= since},
-                f"Last {n} days", None)
+                f"Last {n} day" + ("" if n == 1 else "s"), None)
     return set(), "", f"unknown scope '{kind}'"
 
 

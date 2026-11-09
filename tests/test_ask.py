@@ -99,6 +99,23 @@ def test_scope_limits_the_meetings(sandbox):
     assert ask.scope_bases({"kind": "nonsense"})[2]
 
 
+def test_a_days_scope_is_a_whole_number_of_days_and_reads_right(sandbox):
+    """days -5 and true read 'Last 1 days', 0 read 'Last 30 days', 2.5 read
+    'Last 2 days' and 99999999 'Last 3650 days': each label named a window
+    nobody chose. A days value is a whole number from 1 to 3650, and one
+    day reads 'Last 1 day'."""
+    _world()
+    assert ask.scope_bases({"kind": "days", "days": 1})[1] == "Last 1 day"
+    assert ask.scope_bases({"kind": "days", "days": 7})[1] == "Last 7 days"
+    assert ask.scope_bases({"kind": "days"})[1] == "Last 30 days"
+    assert ask.scope_bases({"kind": "days", "days": 14.0})[1] == "Last 14 days"
+    for bad in (-5, 0, True, False, 2.5, 99999999, "7", None, [3],
+                float("inf"), float("nan")):
+        bases, label, err = ask.scope_bases({"kind": "days", "days": bad})
+        assert err == "days should be a whole number from 1 to 3650", bad
+        assert bases == set() and label == ""
+
+
 # --------------------------------------------------------------- answers ---
 
 def test_an_answer_cites_with_meeting_id(sandbox):
