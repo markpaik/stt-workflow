@@ -73,7 +73,9 @@ current state at the right edge.
   Fix either, press Enter, and it files itself.
 - **Click a row to peek**: it expands in place with the full summary and
   committed next steps. Click the title or the date to edit them right there.
-  A date must fall between 2000 and the end of next year.
+  A date must fall between 2000 and the end of next year. A title stays on
+  one line: a line break becomes a space, and a bidirectional control or a
+  zero-width space is dropped.
   Hover for actions: play the audio inline with a scrubber, open the
   transcript, or the full menu (export, copy, reveal, rename, reprocess,
   archive, delete).
