@@ -517,6 +517,15 @@ def _display_title(base: str) -> str:
     return dates.strip_stamp(base)
 
 
+def _shown_title(d: dict, base: str) -> str:
+    """_display_title(base), or the stored title as typed when the folder
+    holds it in its safe form (dates.shown_title): '1:1' on '... 1-1'."""
+    shown = dates.shown_title(d.get("title") if isinstance(d, dict) else None, base)
+    if shown != dates.title_of(base):
+        return shown + dates.twin_suffix(base)
+    return _display_title(base)
+
+
 def _archived_title(base: str) -> str:
     """The display title of an ARCHIVED meeting, read from its own folder.
 
@@ -604,8 +613,9 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "date": iso,
                 # display name: the folder carries the date so recurring
                 # meetings stay unique on disk, but the panel shows the clean
-                # name (the date is shown separately)
-                "title": _display_title(j.stem),
+                # name (the date is shown separately). A title typed with a
+                # ':' or '/' shows as typed ('1:1' on a '... 1-1' folder)
+                "title": _shown_title(d, j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
                 "named": sorted(named, key=lambda k: -named[k]),

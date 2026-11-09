@@ -75,7 +75,11 @@ current state at the right edge.
   committed next steps. Click the title or the date to edit them right there.
   A date must fall between 2000 and the end of next year. A title stays on
   one line: a line break becomes a space, and a bidirectional control or a
-  zero-width space is dropped.
+  zero-width space is dropped. A colon or a slash is kept: the title shows
+  as typed (`Dana 1:1`, `Q3/Q4 Planning`), and the folder on disk, which
+  cannot hold either one, says `Dana 1-1` and `Q3-Q4 Planning`. Saving a
+  title the meeting already has never renames its folder, and a same-day
+  twin keeps its `(2)` or `(3)`.
   Hover for actions: play the audio inline with a scrubber, open the
   transcript, or the full menu (export, copy, reveal, rename, reprocess,
   archive, delete).

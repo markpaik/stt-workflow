@@ -46,7 +46,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from . import config, dates, housekeeping, provenance, registry_doctor, status
+from . import config, dates, housekeeping, names, provenance, registry_doctor, status
 from . import fieldjournal as fj
 
 REPORT_PATH_NAME = "doctor.json"
@@ -290,7 +290,8 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:
             out.append(Finding("missing_keys", b, "lacks " + ", ".join(missing), False))
-        title = d.get("title") or dates.title_of(b)
+        # the folder holds the title in its safe form: '1:1' is '1-1' on disk
+        title = names.file_title(d.get("title") or "") or dates.title_of(b)
         want = (dates.stamp(title, d["date"]) if d.get("date") else title) + dates.twin_suffix(b)
         if want != b:
             why = "folder name differs from its title and date"

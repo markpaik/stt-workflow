@@ -124,6 +124,22 @@ def title_of(base: str) -> str:
     return strip_stamp(_UNIQ_SUFFIX.sub("", str(base or "").strip()))
 
 
+def shown_title(title, base: str) -> str:
+    """The title to show for the meeting in folder `base`. `title` is the
+    stored `title` key or a typed one. It wins, without its stamp and twin
+    suffix, when the folder carries it in its safe form (names.file_title):
+    a typed '1:1' shows as '1:1' while the folder says '1-1'. Anything else
+    (no title, a stale or hand-edited key) gives title_of(base), so a name
+    the folder does not carry is never shown."""
+    from . import names
+    folder = title_of(base)
+    if isinstance(title, str):
+        shown = title_of(names.clean_title(title))
+        if shown and names.file_title(shown) == folder:
+            return shown
+    return folder
+
+
 def twin_suffix(base: str) -> str:
     """' (2)' for a same-name twin folder, else ''."""
     m = _UNIQ_SUFFIX.search(str(base or ""))

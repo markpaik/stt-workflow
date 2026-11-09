@@ -20,6 +20,7 @@ identity, and quietly changing it would enroll someone under a spelling
 nobody typed. A meeting title STRIPS them (strip_unsafe), as it always
 stripped control characters: a title is only a label.
 """
+import re
 import unicodedata
 
 BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
@@ -64,3 +65,35 @@ def person_name(raw) -> str:
     if has_unsafe(name):
         raise BadName(UNSAFE_NAME)
     return name
+
+
+# --------------------------------------------------------- meeting titles ---
+# A folder or file name cannot hold < > " \ | ? * or a control character.
+# ':' and '/' carry meaning in a title ('1:1', '9:30', 'Q3/Q4'), so on disk
+# they become a hyphen (file_title) and the title a person sees keeps them
+# (clean_title, stored as the meeting's `title`).
+_TITLE_DROP = re.compile(r'[<>"\\|?*\x00-\x1f]')
+TITLE_MAX = 120
+
+
+def clean_title(s) -> str:
+    """A typed meeting title as it is shown: the unsafe characters stripped
+    (strip_unsafe), the characters no file name can hold dropped apart from
+    ':' and '/', leading dots removed (a bare '.' or '..' would name the
+    parent folder), whitespace runs collapsed, at most TITLE_MAX
+    characters."""
+    s = _TITLE_DROP.sub("", strip_unsafe(s)).strip().lstrip(".")
+    return re.sub(r"\s+", " ", s)[:TITLE_MAX].strip()
+
+
+def file_title(s) -> str:
+    """clean_title(s) in the form a folder name holds. A ':' or '/' between
+    two characters becomes '-' ('1:1' -> '1-1', 'Q3/Q4' -> 'Q3-Q4'). One
+    with a space beside it becomes ' - ' ('Demo: Platform' -> 'Demo -
+    Platform'). One at either end is dropped ('Agenda:' -> 'Agenda'), and
+    so is a dot it leaves at the front (':.x' never names a hidden
+    folder)."""
+    s = re.sub(r"^[\s:/]+|[\s:/]+$", "", clean_title(s)).lstrip(".")
+    s = re.sub(r"(?<=\S)[:/]+(?=\S)", "-", s)
+    s = re.sub(r"\s*[:/]+\s*", " - ", s)
+    return re.sub(r"\s+", " ", s)[:TITLE_MAX].strip()

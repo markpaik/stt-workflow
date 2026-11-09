@@ -1218,18 +1218,18 @@ CATEGORIES = ("work", "personal")
 
 
 def _sanitize_name(s: str) -> str:
-    """A safe folder/file name (mirrors recorder.final_name): drop path/wildcard/
+    """A safe folder/file name (names.file_title): drop path/wildcard/
     control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
     the class strip and resolve the meeting folder to the parent dir or a hidden
-    name. Collapse whitespace runs and cap the length.
+    name. Collapse whitespace runs and cap the length. A ':' or '/' becomes a
+    hyphen: deleting it made '1:1' into '11', which reads as another meeting.
 
     The control characters are names.unsafe's: the C0 and C1 ranges, the line
     separators, the bidirectional controls and the zero-width spaces. A
     U+202E made '2025-05-28 <U+202E>gnp.txt' show in Finder as '...txt.png'."""
     from . import names
-    s = names.strip_unsafe(s)
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s).strip().lstrip(".")
-    return re.sub(r"\s+", " ", s)[:120].strip()
+    return names.file_title(s)
+
 
 
 def _write_json(j: Path, d: dict):
@@ -1443,9 +1443,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             d["title_state"] = title_state
 
         want = base
+        # the title as typed, else the one already shown: shown_title
+        # keeps it when the folder is its safe form ('1:1' on '... 1-1')
+        shown = title if title is not None else d.get("title")
         if to_base is not None:
             want = to_base
-            d["title"] = dates.title_of(want)
+            d["title"] = dates.shown_title(d.get("title"), want)
         elif title is not None or date is not None:
             # a typed date counts only as a STAMP: a leading ISO date
             # ('2026-06-15 Review') or a trailing 8-digit run ('Review
@@ -1480,7 +1483,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             if own and want.lower() == base[:-len(own)].lower():
                 want += own
             want = _unique_base(want, base)
-            d["title"] = dates.title_of(want)
+            d["title"] = dates.shown_title(shown, want)
         moved = d.get("date") != date_before
         if moved or (date is not None and date_source is not None):
             # the date changed (the picker, a repair, or a typed stamp in a

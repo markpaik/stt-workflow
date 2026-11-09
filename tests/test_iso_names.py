@@ -137,6 +137,53 @@ def test_saving_a_twin_under_its_own_title_keeps_its_number(sandbox):
         "2026-05-05 Race Name (2)")
 
 
+@pytest.mark.parametrize("typed,folder", [
+    ("Dana Fox 1:1", "Dana Fox 1-1"),
+    ("Standup 9:30", "Standup 9-30"),
+    ("Vendor Demo: Assessment Platform", "Vendor Demo - Assessment Platform"),
+    ("Q3/Q4 Planning", "Q3-Q4 Planning"),
+    ("Agenda:", "Agenda"),
+    ("Standup 9:30 01222026", "Standup 9-30"),
+])
+def test_a_colon_in_a_typed_title_is_kept_in_a_safe_form(sandbox, typed, folder):
+    """_sanitize_name deleted the colon, so '1:1' became '11' and read as
+    another meeting. On disk a colon or slash becomes a hyphen, and the
+    title the panel shows keeps what was typed."""
+    from gui import server as srv
+    _m("Voice Memo 1", date="2026-01-22")
+    r = summarize.rename_meeting("Voice Memo 1", typed)
+    assert r["ok"] and r["base"] == f"2026-01-22 {folder}"
+    shown = dates.title_of(typed) if typed != "Agenda:" else "Agenda:"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == shown
+    srv._meet_cache.clear()
+    meta = srv._meeting_meta(config.meeting_file(r["base"], ".json"), config.meetings_dir())
+    assert meta["title"] == shown
+
+
+def test_saving_a_colon_title_again_changes_nothing(sandbox):
+    from stt import doctor
+    _m("Voice Memo 1", date="2026-01-22")
+    base = summarize.rename_meeting("Voice Memo 1", "Dana Fox 1:1")["base"]
+    assert summarize.rename_meeting(base, "Dana Fox 1:1") == {
+        "ok": True, "renamed": [], "base": base}
+    # a date edit moves the folder and keeps the typed title
+    r = summarize.set_meeting_date(base, "2026-01-23")
+    assert r["base"] == "2026-01-23 Dana Fox 1-1"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == "Dana Fox 1:1"
+    # the doctor reads the folder as the title's safe form, not a mismatch
+    assert not [f for f in doctor.check(registry=False)
+                if f.kind == "name_mismatch" and f.subject == r["base"]]
+    # the short-date reader sees the typed '1:1', never '1-1' as January 1
+    assert "short_typed" not in provenance.candidates(
+        r["base"], d, None, None, today="2026-02-01")
+    # a hyphen typed on purpose replaces the colon
+    r = summarize.rename_meeting(r["base"], "Dana Fox 1-1")
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert (r["renamed"], d["title"]) == ([], "Dana Fox 1-1")
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")

@@ -188,7 +188,9 @@ def candidates(base: str, d: dict, raw_name, mtime, probe=None, today=None) -> d
         # the title only, never a raw name the title no longer shows: a
         # rename that dropped a typed '7.15' replaced the label, and the
         # date it kept was the one a person saw last
-        s = dates.short_date(dates.title_of(base), ref)
+        # The title as shown: a typed '1:1' is '1-1' in the folder, and
+        # '1-1' would read as January 1. A colon is not a date separator.
+        s = dates.short_date(dates.shown_title(d.get("title"), base), ref)
         if s:
             out["short_typed"] = (s, None)
     if mday:
