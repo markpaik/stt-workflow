@@ -351,3 +351,16 @@ def test_an_empty_or_good_speakrs_number_is_quiet(tmp_path):
     assert (rc, out) == (0, "0.55 3600 speakrs") and "warning" not in err
     rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC=" 0.6 ", STT_SPEAKRS_TIMEOUT_SEC="900")
     assert (rc, out) == (0, "0.6 900 speakrs") and "warning" not in err
+
+
+@pytest.mark.parametrize("raw, want, warns", [
+    ("speakr", "speakrs", True), ("pyanote", "speakrs", True), ("cuda", "speakrs", True),
+    ("pyannote", "pyannote", False), (" PyAnnote ", "pyannote", False),
+    ("speakrs", "speakrs", False), ("", "speakrs", False)])
+def test_an_unknown_diarizer_warns_and_keeps_the_default(tmp_path, raw, want, warns):
+    """diarize() tests only == "speakrs", so STT_DIARIZER=speakr (a typo)
+    switched every file to the slow CPU engine with no message."""
+    rc, out, err = _import_config(tmp_path, STT_DIARIZER=raw)
+    assert rc == 0, err
+    assert out.split()[-1] == want
+    assert ("STT_DIARIZER" in err and "speakrs" in err and "pyannote" in err) is warns

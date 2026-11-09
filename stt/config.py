@@ -175,7 +175,27 @@ DIARIZATION_MODEL = os.environ.get(
 # centroids (centroid naming, unknown ids, enroll --audio) come from the engine
 # that ran: under speakrs, its Core ML port of the same WeSpeaker embedder
 # (cosine 0.995-1.000 to pyannote's centroids in the bakeoff).
-DIARIZER = os.environ.get("STT_DIARIZER", "speakrs").strip().lower()
+DIARIZERS = ("speakrs", "pyannote")
+
+
+def _diarizer_setting() -> str:
+    """STT_DIARIZER, checked: diarize() runs speakrs only on an exact
+    "speakrs", so a typo ("speakr") used to switch every file to the slow
+    CPU engine with no message. An unknown value warns and keeps the
+    default; an empty one is the default."""
+    raw = os.environ.get("STT_DIARIZER", "")
+    v = raw.strip().lower()
+    if not v:
+        return DIARIZERS[0]
+    if v not in DIARIZERS:
+        print(f"warning: STT_DIARIZER={raw!r} is not one of "
+              f"{' or '.join(DIARIZERS)}; using {DIARIZERS[0]}",
+              file=sys.stderr, flush=True)
+        return DIARIZERS[0]
+    return v
+
+
+DIARIZER = _diarizer_setting()
 # AHC merge threshold. speakrs' default 0.6 merged two late speakers into the
 # main one in a 4-hour meeting; 0.55 kept them apart and changed nothing else.
 SPEAKRS_AHC = _env_number("STT_SPEAKRS_AHC", 0.55, float,

@@ -69,9 +69,10 @@ def diarizer_family(engine) -> str:
 
 def effective_diarizer() -> str:
     """The engine diarize() will actually run: config.DIARIZER, except that a
-    speakrs setting with the helper or models missing runs pyannote (any
-    other value runs pyannote too). The ETA and its learned samples follow
-    this, not the setting, so a fallback install is estimated at CPU speed."""
+    speakrs setting with the helper or models missing runs pyannote
+    (config checks the setting, so it is "speakrs" or "pyannote"). The ETA
+    and its learned samples follow this, not the setting, so a fallback
+    install is estimated at CPU speed."""
     if config.DIARIZER != "speakrs":
         return "pyannote"
     from . import speakrs_diar
