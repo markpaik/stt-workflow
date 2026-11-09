@@ -201,6 +201,18 @@ def test_saving_a_colon_title_again_changes_nothing(sandbox):
     assert (r["renamed"], d["title"]) == ([], "Dana Fox 1-1")
 
 
+def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
+    """The keep-the-number rule kept '(3)' even after the plain name was
+    deleted, so a twin could never drop its number. The number now stays
+    only while the plain name is taken, live or archived."""
+    from stt import archive
+    _m("2026-05-05 Race Name", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (3)", date="2026-05-05", title="Race Name")
+    assert archive.delete_meeting("2026-05-05 Race Name")["ok"]
+    r = summarize.rename_meeting("2026-05-05 Race Name (3)", "Race Name")
+    assert r["base"] == "2026-05-05 Race Name"
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")

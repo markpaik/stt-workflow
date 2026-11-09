@@ -1515,17 +1515,24 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # ' (N)' twin suffix first) rather than adding a second date
                 want = dates.restamp(stem, on) if on else stem
             # a twin saved under the name it already has keeps its own
-            # number. restamp() and canonical() peel the ' (N)', and
-            # _unique_base takes the LOWEST free one, so a no-op save on
-            # '(3)' moved it to '(2)': a new folder, id and every reference.
-            # A case-only fix keeps the number too.
+            # number while the plain name is taken. restamp() and
+            # canonical() peel the ' (N)', and _unique_base takes the LOWEST
+            # free one, so a no-op save on '(3)' moved it to '(2)': a new
+            # folder, id and every reference. A case-only fix keeps the
+            # number too. Once the plain name is free (the first one was
+            # deleted), the twin takes it: the number only ever told two
+            # meetings apart.
             own = dates.twin_suffix(base)
-            if own and want.lower() == base[:-len(own)].lower():
+            if (own and want.lower() == base[:-len(own)].lower()
+                    and _dest_taken(want)):
                 want += own
+            plain_free = bool(own) and not _dest_taken(base[:-len(own)])
             # the title this folder already carries, typed again on the
             # same date, moves nothing: an old folder that still holds a
-            # colon keeps it until the title really changes
-            if (title is not None and d.get("date") == date_before
+            # colon keeps it until the title really changes. A twin whose
+            # plain name is free is the exception (above).
+            if (title is not None and not plain_free
+                    and d.get("date") == date_before
                     and dates.is_iso_form(base)
                     and dates.meeting_date(base) == d.get("date")
                     and dates.title_of(names.clean_title(title)) == dates.title_of(base)):
