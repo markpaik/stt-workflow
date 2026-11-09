@@ -426,13 +426,11 @@ def final_name(raw=None, now=None) -> str:
     typed with a date is kept as typed: the pipeline moves its stamp to the
     front (dates.canonical). Uniquified against files already in staging and
     in the meetings store."""
-    import re
-
     from . import dates, names
     iso, hhmm = _stamp(now)
-    raw = names.strip_unsafe(raw or "").strip()
-    raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", raw).strip().lstrip(".")
-    raw = re.sub(r"\s+", " ", raw)[:120].strip()
+    # the panel's own rule for a typed title on disk: '1:1' is '1-1' (it
+    # was '11'), and a folder name never holds / or a control character
+    raw = names.file_title(raw or "")
     if not raw:
         base = f"{iso} Recording {hhmm}"
     elif dates.meeting_date(raw) is None:

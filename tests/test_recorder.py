@@ -429,6 +429,16 @@ def test_an_orphaned_transcode_part_is_swept(sandbox):
     assert live.exists(), "a .part still being written must be left alone"
 
 
+def test_final_name_keeps_a_colon_in_the_panels_safe_form(sandbox):
+    """The recorder deleted ':' and '/', so 'Kim 1:1' became 'Kim 11'. It
+    now writes them as the panel does: '1:1' is '1-1' on disk."""
+    assert recorder.final_name("Kim 1:1", now=FIXED) == "2026-07-09 Kim 1-1"
+    assert recorder.final_name("Standup 9:30", now=FIXED) == "2026-07-09 Standup 9-30"
+    assert recorder.final_name("Demo: Platform", now=FIXED) == "2026-07-09 Demo - Platform"
+    assert recorder.final_name("a/b:c", now=FIXED) == "2026-07-09 a-b-c"
+    assert recorder.final_name(":::", now=FIXED) == "2026-07-09 Recording 1430"
+
+
 def test_final_name_strips_bidi_and_zero_width_characters(sandbox):
     assert recorder.final_name("‮gnp.txt", now=FIXED) == "2026-07-09 gnp.txt"
     assert recorder.final_name("Budget​Sync\nTwo", now=FIXED) == \
