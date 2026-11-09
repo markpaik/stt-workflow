@@ -617,7 +617,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # some other folder (a demo home, a test dest) has no business
         # rewriting the library's map.
         try:
-            if Path(dest_dir).resolve() == config.meetings_dir().resolve():
+            if config.is_live_store(dest_dir):
                 config.index_set(meta["meeting_id"], base)
                 if meta.get("ai_stale"):
                     # the batch finds out-of-date descriptions from this

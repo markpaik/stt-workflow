@@ -723,7 +723,10 @@ def _requeue_if_unintended(claimed_job) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default=str(config.ICLOUD_DIR))
-    ap.add_argument("--dest", default=str(config.MEETINGS_DIR))
+    ap.add_argument("--dest", default=str(config.MEETINGS_DIR),
+                    help="the meetings folder to write into (default: the library). "
+                         "A run into any other folder writes no descriptions or "
+                         "automatic titles")
     ap.add_argument("--no-diarize", action="store_true")
     ap.add_argument("--keep-original", action="store_true")
     ap.add_argument("--only", help="only files whose name contains this substring")
@@ -805,6 +808,14 @@ def main():
     if not preflight_source(source):
         return 3
     dest.mkdir(parents=True, exist_ok=True)
+    # descriptions and automatic titles resolve a meeting through the
+    # library (config.meetings_dir()), never --dest. A run that writes
+    # somewhere else must not read or rewrite the library's same-named
+    # meeting, so it writes none.
+    describe = config.is_live_store(dest)
+    if not describe and not args.dry_run:
+        print("note: --dest is not the meetings library, so this run writes no "
+              "descriptions or automatic titles", flush=True)
     if not args.dry_run:
         clean_scratch()
         # size caps: logs/ at 10 MB keeping 3 gzips, calibration.jsonl at
@@ -981,7 +992,8 @@ def main():
             # folder, so the end-of-run sweep gets the folder's final name.
             track = {"base": res.get("base")}
             try:
-                summarize_one(res["key"], res.get("base"), track=track)
+                if describe:
+                    summarize_one(res["key"], res.get("base"), track=track)
             finally:
                 succeeded.append((res["key"], track.get("base")))
         else:
@@ -1176,7 +1188,7 @@ def main():
         run_one_at_a_time()
     claimed_job = None  # the work is done — a stray late SIGTERM must not re-queue it
 
-    if not args.dry_run and succeeded:
+    if not args.dry_run and succeeded and describe:
         n_sum = auto_summarize(succeeded)
         if n_sum:
             print(f"  auto-summarized {n_sum} meeting(s)", flush=True)
@@ -1199,7 +1211,7 @@ def main():
 
     # idle now: the queue is done. Refresh descriptions a Redo left out of
     # date, unless a stop was asked or a panel job waits (it chains below)
-    if not args.dry_run and not finish["asked"] and not jobs.items():
+    if not args.dry_run and describe and not finish["asked"] and not jobs.items():
         n_re = regenerate_stale()
         if n_re:
             print(f"  refreshed {n_re} out-of-date description(s)", flush=True)

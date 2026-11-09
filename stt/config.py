@@ -488,6 +488,16 @@ def meetings_dir() -> Path:
     return Path(_env_file().get("STT_MEETINGS_DIR") or MEETINGS_DIR)
 
 
+def is_live_store(d) -> bool:
+    """True when folder `d` is the meetings library (meetings_dir()). A run
+    that writes somewhere else (a test or demo dest) must never touch the
+    library's index, or its meetings by name."""
+    try:
+        return Path(d).resolve() == meetings_dir().resolve()
+    except OSError:
+        return False
+
+
 def recordings_dir() -> Path:
     return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
 

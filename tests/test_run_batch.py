@@ -1453,3 +1453,85 @@ def test_office_lock_files_are_not_recordings(sandbox):
     assert [p.name for p in run_batch.iter_audio(src)] == [
         "Meeting ~$ notes.m4a", "~Tilde Start.m4a"]
     assert not config.is_source_audio(src / "~$lock.m4a")
+
+
+def _summary_spy(monkeypatch):
+    from stt import summarize
+    calls = []
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "has_speech", lambda base: True)
+    monkeypatch.setattr(summarize, "suggest_title", lambda base: calls.append(("describe", base)))
+    monkeypatch.setattr(summarize, "apply_auto_title",
+                        lambda base: calls.append(("title", base)) or {"ok": False})
+    monkeypatch.setattr(summarize, "stale_bases", lambda: [])
+    return calls
+
+
+def _fake_done(src_str, dest_str, opts):
+    from pathlib import Path
+    src = Path(src_str)
+    return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime, "outputs": [],
+            "summary": "1 speaker(s)", "who": "", "base": "2026-01-05 Mtg",
+            "duration_sec": 1.0, "stage_secs": {}}
+
+
+def test_a_run_into_another_folder_never_describes_the_librarys_meeting(sandbox, monkeypatch, capsys):
+    """summarize_one resolved the just-finished meeting through the library
+    (config.meetings_dir()), not --dest. A run with --dest elsewhere read,
+    and could rewrite, the library's same-named meeting."""
+    import json
+    import signal
+    import sys
+
+    from conftest import mfile
+    from stt import config
+    mfile("2026-01-05 Mtg", ".json").write_text(json.dumps(
+        {"source_file": "other.m4a", "segments": SPOKEN, "speakers": []}))
+    (config.ICLOUD_DIR / "Mtg.m4a").write_bytes(b"\x00" * 64)
+    other = sandbox / "other_dest"
+    calls = _summary_spy(monkeypatch)
+    monkeypatch.setattr(run_batch, "process_one", _fake_done)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(other)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert calls == []
+    assert "not the meetings library" in capsys.readouterr().out
+    # nor the idle refresh of out-of-date library descriptions
+    stale = []
+    monkeypatch.setattr(run_batch, "regenerate_stale", lambda *a, **k: stale.append(1) or 0)
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert stale == []
+
+
+def test_a_run_into_the_library_still_describes_its_meeting(sandbox, monkeypatch):
+    import json
+    import signal
+    import sys
+
+    from conftest import mfile
+    from stt import config
+    mfile("2026-01-05 Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Mtg.m4a", "segments": SPOKEN, "speakers": []}))
+    (config.ICLOUD_DIR / "Mtg.m4a").write_bytes(b"\x00" * 64)
+    calls = _summary_spy(monkeypatch)
+    monkeypatch.setattr(run_batch, "process_one", _fake_done)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert ("describe", "2026-01-05 Mtg") in calls
