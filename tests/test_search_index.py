@@ -220,6 +220,21 @@ def test_a_two_letter_acronym_in_capitals_finds_the_word_in_capitals(sandbox):
     assert search.query("AI", limit=40)["total"] == 1
 
 
+def test_an_acronym_search_is_narrowed_by_the_index(sandbox, monkeypatch):
+    """'IT' read every line that says 'it', with no limit, and tested each
+    in Python under the index lock on every keystroke. The index now keeps
+    only the lines that hold 'IT' in capitals, so a cap on the lines read
+    never hides an older IT line behind newer lines that say 'it'."""
+    _mk("Mtg A 03052026", ["Send it to IT.", "IT owns the laptops."], mtime=1_800_000_000)
+    _mk("Mtg B 03062026", [f"We said it {i} times." for i in range(40)],
+        mtime=1_800_000_100)
+    monkeypatch.setattr(search, "_EXACT_READ_MAX", 3)
+    r = search.query("IT")
+    assert [(h["base"], h["index"]) for h in r["hits"]] == [
+        ("Mtg A 03052026", 0), ("Mtg A 03052026", 1)]
+    assert r["total"] == 2
+
+
 def test_an_acronym_snippet_opens_on_the_word_in_capitals(sandbox):
     line = "It was late, and " + "we talked about it for a long while, " * 3 + "then IT called."
     _mk("Mtg A 03052026", [line])

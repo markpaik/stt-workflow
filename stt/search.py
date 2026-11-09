@@ -594,9 +594,11 @@ _HITS = """WITH hit(id) AS (
 
 
 def _fts(q: str, limit: int, f=None, bases=None, exact=None):
-    """FTS hits for `q`. `exact`, a compiled pattern, is a second test each
-    hit's text must pass (an acronym typed in capitals): every candidate is
-    read, so `total` counts only the lines that pass it."""
+    """FTS hits for `q`. `exact`, an _Acronym, is a second test each hit's
+    text must pass (an acronym typed in capitals). The index first keeps
+    only the lines that hold the word in capitals (instr is case-sensitive),
+    so a search for 'IT' never reads every line that says 'it'. `total`
+    counts the lines that pass, up to _EXACT_READ_MAX read."""
     stem, prefix, toks = _match_expr(q)
     if stem is None:
         return None
@@ -608,13 +610,16 @@ def _fts(q: str, limit: int, f=None, bases=None, exact=None):
         try:
             _sync(conn)
             if exact is not None:
+                narrow = (" AND " if conds else " WHERE ") + "instr(s.text, ?) > 0"
                 rows = [r for r in conn.execute(
                     f"""{_HITS}
                         SELECT f.base, s.rowid % {_ROW}, s.start, s.who, s.text
                         FROM hit h JOIN segs s ON s.rowid = h.id
-                        JOIN files f ON f.id = h.id / {_ROW}{where}
-                        ORDER BY f.mtime DESC, f.base, s.rowid""",
-                    (stem, prefix, *cargs)) if exact.search(r[4] or "")]
+                        JOIN files f ON f.id = h.id / {_ROW}{where}{narrow}
+                        ORDER BY f.mtime DESC, f.base, s.rowid
+                        LIMIT ?""",
+                    (stem, prefix, *cargs, exact.word, _EXACT_READ_MAX))
+                    if exact.search(r[4] or "")]
                 total, rows = len(rows), rows[:limit]
             else:
                 if conds:
@@ -685,6 +690,25 @@ def _prepare(q, filters):
     return text.strip().lower(), f, bases, text.strip()
 
 
+class _Acronym:
+    """A two-letter word typed in capitals: a case-sensitive whole-word
+    pattern (`search`), and the word itself for the index to narrow by
+    (`word`) before any line is read."""
+
+    def __init__(self, word: str):
+        self.word = word
+        self._re = re.compile(r"(?<!\w)" + re.escape(word) + r"(?!\w)")
+
+    def search(self, text):
+        return self._re.search(text)
+
+
+# the most lines an acronym search reads after the index has narrowed them
+# to the ones that hold the word in capitals. Past it, `total` is the count
+# of the lines read: a lower bound
+_EXACT_READ_MAX = 5000
+
+
 def _short(q: str, typed: str):
     """How a query under _PREFIX_MIN characters searches: (searches, exact).
 
@@ -696,7 +720,7 @@ def _short(q: str, typed: str):
     if not re.fullmatch(r"\w{2}", q):
         return False, None
     if typed.isupper():
-        return True, re.compile(r"(?<!\w)" + re.escape(typed) + r"(?!\w)")
+        return True, _Acronym(typed)
     return q not in _SHORT_STOP, None
 
 
@@ -760,6 +784,14 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
         return []
     conds, cargs = _where(f, bases)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    # an acronym: only the meetings whose title or summary holds it in capitals
+    narrow, nargs = "", ()
+    if exact is not None:
+        narrow = ((" AND " if conds else " WHERE ")
+                  + "(instr(coalesce(d.title, ''), ?) > 0"
+                  " OR instr(coalesce(d.summary, ''), ?) > 0)")
+        nargs = (exact.word, exact.word)
+
     def read():
         with _lock:
             conn = _open()
@@ -776,10 +808,10 @@ def meetings(q: str, limit: int = 20, filters: dict | None = None) -> list:
                            SELECT rowid, bm25(docs_raw, 5.0, 1.0)
                              FROM docs_raw WHERE docs_raw MATCH ?) h
                        JOIN docs d ON d.rowid = h.id
-                       JOIN files f ON f.id = h.id{where}
-                       GROUP BY h.id ORDER BY r, f.base"""
-                    + ("" if exact is not None else " LIMIT ?"),
-                    (stem, prefix, *cargs) + (() if exact is not None else (limit,))
+                       JOIN files f ON f.id = h.id{where}{narrow}
+                       GROUP BY h.id ORDER BY r, f.base LIMIT ?""",
+                    (stem, prefix, *cargs, *nargs,
+                     limit if exact is None else _EXACT_READ_MAX)
                 ).fetchall()
             finally:
                 conn.close()
