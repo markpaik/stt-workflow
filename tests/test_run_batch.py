@@ -1401,7 +1401,7 @@ def test_a_requeued_job_keeps_every_cli_flag(sandbox):
                  only="Mid", speakers="A Person,B Person", ignore_battery=True)
     spec = run_batch.job_spec_from_args(args, [])
     argv = jobs.spawn_args({**spec, "at": 1.0})
-    assert argv[3:5] == [str(run_batch.config.PROJECT_DIR / "run.sh"), "batch"]
+    assert argv[3:5] == [str(run_batch.config.CODE_DIR / "run.sh"), "batch"]
     ns = run_batch.build_parser().parse_args(argv[5:])
     assert ns.no_diarize and ns.keep_original and ns.ignore_battery
     assert ns.only == "Mid" and ns.speakers == "A Person,B Person"

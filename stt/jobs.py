@@ -110,7 +110,7 @@ def clear() -> int:
 def spawn_args(job: dict) -> list:
     """The full command that runs this job (caffeinate keeps the Mac awake;
     run.sh resolves the venv). Mirrors what the panel builds for a direct run."""
-    args = ["caffeinate", "-i", "-s", str(config.PROJECT_DIR / "run.sh"),
+    args = ["caffeinate", "-i", "-s", str(config.CODE_DIR / "run.sh"),
             "batch", "--ignore-pause", "--job", str(job["at"])]
     if job.get("files"):
         args += ["--files", join_list(job["files"])]

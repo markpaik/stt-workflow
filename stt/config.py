@@ -63,6 +63,11 @@ RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
 # repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   _HOME or Path(__file__).resolve().parent.parent))
+# The checkout itself: run.sh, .venv and the code. A spawned command starts
+# from here, never from PROJECT_DIR, which under STT_HOME is a data home with
+# no run.sh in it: the panel's run sat queued while spawned.log said
+# ".../run.sh: No such file or directory".
+CODE_DIR = Path(__file__).resolve().parent.parent
 VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
                                       PROJECT_DIR / "voiceprints"))
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"

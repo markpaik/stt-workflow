@@ -15,7 +15,7 @@ import rumps
 from stt import config, control, recorder, status
 from gui import server as panel
 
-ICON = str(config.PROJECT_DIR / "gui" / "waveform.png")
+ICON = str(config.CODE_DIR / "gui" / "waveform.png")
 AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
 LABEL = "com.stt-workflow.batch"
 
@@ -391,7 +391,7 @@ class STTMenuBar(rumps.App):
         mid-batch queues itself this way instead of waiting for the next trigger)."""
         # manual runs override the pause flag and hold the Mac awake
         subprocess.Popen(["caffeinate", "-i", "-s",
-                          str(config.PROJECT_DIR / "run.sh"), "batch", "--ignore-pause"],
+                          str(config.CODE_DIR / "run.sh"), "batch", "--ignore-pause"],
                          start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

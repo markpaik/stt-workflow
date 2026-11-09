@@ -43,7 +43,7 @@ AGENT = Path(config._home_default(
     "LaunchAgents/com.stt-workflow.batch.plist",
     Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"))
 LABEL = "com.stt-workflow.batch"
-RUN_SH = config.PROJECT_DIR / "run.sh"
+RUN_SH = config.CODE_DIR / "run.sh"     # code, never the data home
 
 _SAME_ORIGIN = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?(/|$)")
 
@@ -3483,13 +3483,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
-                    [str(config.PROJECT_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
+                    [str(config.CODE_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
                      b["base"], str(b.number("start")), str(b.number("end")),
                      b.text("engine", "") or "parakeet"],
                     capture_output=True, text=True, timeout=180,
-                    cwd=str(config.PROJECT_DIR),
-                    env={**__import__("os").environ,
-                         "PYTHONPATH": str(config.PROJECT_DIR)})
+                    cwd=str(config.CODE_DIR),
+                    env={**os.environ, "PYTHONPATH": str(config.CODE_DIR)})
                 try:
                     self._json(json.loads(r.stdout.strip().splitlines()[-1]))
                 except Exception:
