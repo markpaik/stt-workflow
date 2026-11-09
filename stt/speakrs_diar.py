@@ -116,6 +116,19 @@ def centroids(emb, clusters, clean, labels):
     return out
 
 
+def _no_speech(r) -> bool:
+    """True when the helper found no speech: both segment lists present
+    and empty."""
+    return (isinstance(r, dict) and r.get("segments") == []
+            and r.get("exclusive_segments") == [])
+
+
+def _empty(r: dict) -> dict:
+    return {"labels": [], "raw_turns": [], "overlaps": [], "centroids": {},
+            "engine": engine_id(str(r.get("engine") or ENGINE)),
+            "run_sec": r.get("pipeline_run_sec")}
+
+
 def run(wav_path) -> dict:
     """Diarize one 16 kHz mono WAV. Returns {"labels", "raw_turns", "overlaps",
     "centroids", "engine", "run_sec"}. Raises SpeakrsUnavailable on any failure
@@ -144,6 +157,11 @@ def run(wav_path) -> dict:
             raise SpeakrsUnavailable(f"speakrs exit {p.returncode}: {tail[0][:300]}")
         try:
             r = json.loads(res_path.read_text())
+            if _no_speech(r):
+                # silence (a muted recording, a silent stereo channel): the
+                # helper writes no hard clusters, so the arrays cannot be
+                # shaped. Nobody spoke, which is a result, not a failure
+                return _empty(r)
             chunks, spk, dim = r["emb_shape"]
             emb = np.fromfile(out_dir / "emb.f32", dtype="<f4").reshape(chunks, spk, dim)
             hc = np.fromfile(out_dir / "clusters.i32", dtype="<i4").reshape(chunks, spk)
