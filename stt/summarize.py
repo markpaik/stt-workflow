@@ -668,6 +668,10 @@ def _summary_source(base: str, backend: str, think: bool = False) -> tuple:
 # plain text (speaker_text.compose_summary). ai_stale marks a description
 # a Redo left out of date.
 GIST_MAX_WORDS = 20
+# the list limits the prompt states, enforced in build_description: a model
+# that ignores the prompt still has only this many lines stored and shown
+DECISIONS_MAX = 6
+QUESTIONS_MAX = 4
 DESCRIPTION_KEYS = ("ai_title", "ai_summary", "ai_gist",
                     "ai_decisions", "ai_open_questions", "ai_tags", "ai_series",
                     "ai_topic", "ai_person", "ai_tmpl", "ai_model",
@@ -733,9 +737,9 @@ def description_prompt(heading: str, source: str, old_title: str = "",
         "5. TAGS: 3 to 5 tags, comma-separated, ONLY from this list:\n"
         f"{series.tags_text()}\n"
         "6. DECISIONS: the decisions actually made, most important first, at "
-        "most 6, one per line, short and specific. If none, write exactly:  "
+        f"most {DECISIONS_MAX}, one per line, short and specific. If none, write exactly:  "
         "- none\n"
-        "7. OPEN QUESTIONS: the questions left unresolved, at most 4, one per "
+        f"7. OPEN QUESTIONS: the questions left unresolved, at most {QUESTIONS_MAX}, one per "
         "line. If none, write exactly:  - none\n"
         "Do not invent anything. Answer in exactly this format:\n"
         "SERIES: <id>\nPERSON: <name or none>\nTOPIC: <topic>\nGIST: <gist>\n"
@@ -963,8 +967,8 @@ def build_description(out: str, ctx: dict) -> dict:
         # checked BEFORE clipping, or "long" could never fire
         problems = gist_problems(raw_gist, people + ([owner] if owner else []), series_name)
         gist = clip_gist(raw_gist)
-        fields = {"gist": gist, "decisions": f["decisions"],
-                  "open_questions": f["open_questions"]}
+        fields = {"gist": gist, "decisions": f["decisions"][:DECISIONS_MAX],
+                  "open_questions": f["open_questions"][:QUESTIONS_MAX]}
     tags = series.normalize_tags(f["tags"])
     tmpl = speaker_text.make(fields, snap, raw_turns)
     rendered = speaker_text.render(tmpl, snap)

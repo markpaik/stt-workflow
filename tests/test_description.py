@@ -645,6 +645,25 @@ def test_an_empty_reply_keeps_the_old_description_and_counts_as_a_failure(
     assert _load(base)["ai_gist"] == GOOD["ai_gist"]
 
 
+def test_decisions_and_open_questions_are_capped_at_the_prompt_limits(owner):
+    """The prompt asks for at most 6 decisions and 4 open questions, but a
+    model that ignored it had every line stored and shown."""
+    base = _meeting()
+    reply = (REPLY.split("DECISIONS:")[0] + "DECISIONS:\n"
+             + "".join(f"- decision {i}\n" for i in range(1, 13))
+             + "OPEN QUESTIONS:\n" + "".join(f"- question {i}?\n" for i in range(1, 10)))
+    desc = summarize.build_description(reply, summarize.context_for(base))
+    assert desc["decisions"] == [f"decision {i}" for i in range(1, 7)]
+    assert desc["open_questions"] == [f"question {i}?" for i in range(1, 5)]
+    assert (summarize.DECISIONS_MAX, summarize.QUESTIONS_MAX) == (6, 4)
+    prompt = summarize.description_prompt("heading", "source")
+    assert "at most 6" in prompt and "at most 4" in prompt
+    summarize.store_description(base, desc)
+    d = _load(base)
+    assert len(d["ai_decisions"]) == 6 and len(d["ai_open_questions"]) == 4
+    assert "decision 7" not in d["ai_summary"] and "question 5?" not in d["ai_summary"]
+
+
 def test_renice_holds_the_setting_over_repeated_calls(sandbox, monkeypatch):
     """renice -n adds to the current nice on macOS, so STT_LLM_NICE=10 put
     the model at 20 after two calls. A real process stays at 10."""
