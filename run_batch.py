@@ -159,13 +159,23 @@ def job_spec_from_args(args, todo) -> dict:
     re-queue a --job run if it's interrupted before finishing (see
     _terminate() in main()) — manifest idempotency makes replaying it, files
     already done included, a safe no-op for anything that already succeeded."""
-    return {"files": jobs.split_list(args.files) if args.files else [],
+    spec = {"files": jobs.split_list(args.files) if args.files else [],
             "paths": jobs.split_list(args.paths) if args.paths else [],
             "force": args.force, "strict": args.strict,
             "verify": args.verify, "parallel": args.parallel,
             "onetime": getattr(args, "one_time_speakers", False),
             "label": (", ".join(s.name for s in todo[:2])
                      + (f" +{len(todo) - 2} more" if len(todo) > 2 else "")) or "resumed run"}
+    # the CLI-only options too, so a replay runs exactly what was asked: a
+    # --keep-original run must never delete originals on its replay, and a
+    # --only run must never sweep the whole folder. Only set ones are kept.
+    for key in ("no_diarize", "keep_original", "ignore_battery"):
+        if getattr(args, key, False):
+            spec[key] = True
+    for key in ("only", "speakers"):
+        if getattr(args, key, None):
+            spec[key] = getattr(args, key)
+    return spec
 
 
 def spawn_chained_job(job: dict):
@@ -655,7 +665,7 @@ def _requeue_if_unintended(claimed_job) -> bool:
     return True
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default=str(config.ICLOUD_DIR))
     ap.add_argument("--dest", default=str(config.MEETINGS_DIR))
@@ -685,7 +695,11 @@ def main():
                     help="queued-job id (panel): claimed from the queue once the "
                          "lock is held, so a lost lock race never loses the job")
     ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     if control.is_paused() and not args.ignore_pause and not args.dry_run:
         print("Automatic processing is paused (resume from the menu bar); exiting.")

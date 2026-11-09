@@ -1389,3 +1389,31 @@ def test_a_second_batch_never_blanks_the_lock_holders_pid(sandbox):
         assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
     finally:
         again.close()
+
+
+def test_a_requeued_job_keeps_every_cli_flag(sandbox):
+    """A SIGTERM mid-run re-queues the claimed job from job_spec_from_args.
+    The spec dropped --no-diarize, --keep-original, --only, --speakers and
+    --ignore-battery, so the replay deleted originals a --keep-original run
+    kept, and a --only run swept the whole folder."""
+    from stt import jobs
+    args = _args(files="U1 Mid.wav,U2 Long.wav", no_diarize=True, keep_original=True,
+                 only="Mid", speakers="A Person,B Person", ignore_battery=True)
+    spec = run_batch.job_spec_from_args(args, [])
+    argv = jobs.spawn_args({**spec, "at": 1.0})
+    assert argv[3:5] == [str(run_batch.config.PROJECT_DIR / "run.sh"), "batch"]
+    ns = run_batch.build_parser().parse_args(argv[5:])
+    assert ns.no_diarize and ns.keep_original and ns.ignore_battery
+    assert ns.only == "Mid" and ns.speakers == "A Person,B Person"
+    assert jobs.split_list(ns.files) == ["U1 Mid.wav", "U2 Long.wav"]
+    # a value that starts with "-" stays a value
+    argv = jobs.spawn_args({**spec, "only": "-x", "at": 1.0})
+    assert run_batch.build_parser().parse_args(argv[5:]).only == "-x"
+
+
+def test_a_plain_job_adds_no_cli_flags(sandbox):
+    from stt import jobs
+    spec = run_batch.job_spec_from_args(_args(files="A.m4a"), [])
+    ns = run_batch.build_parser().parse_args(jobs.spawn_args({**spec, "at": 1.0})[5:])
+    assert not (ns.no_diarize or ns.keep_original or ns.ignore_battery)
+    assert ns.only is None and ns.speakers is None
