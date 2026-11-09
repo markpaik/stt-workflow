@@ -1257,7 +1257,7 @@ def _queue_and_dupes():
             pass
     try:
         for p in _qfiles:
-            if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
+            if config.is_source_audio(p):
                 done = manifest.is_processed(m, p.name, p.stat().st_mtime)
                 dur = None if done else _est_duration(p)
                 est_min, est_detail = None, None

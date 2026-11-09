@@ -108,6 +108,18 @@ def test_local_file_is_fully_present(sandbox):
 
 def test_missing_file_not_present(sandbox):
     assert not icloud._fully_present(sandbox / "nope.m4a")
+
+
+def test_materialize_returns_at_once_on_an_empty_file(sandbox):
+    """A 0-byte file is not an iCloud placeholder (a placeholder reports
+    its full size) and holds nothing to wait for. materialize() used to
+    poll it until the timeout, 900 s by default, with the batch lock held."""
+    import time
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    t0 = time.monotonic()
+    assert icloud.materialize(f, timeout=5, poll=0.1) is False
+    assert time.monotonic() - t0 < 1.0
     assert not icloud.is_dataless(sandbox / "nope.m4a")
 
 

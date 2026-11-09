@@ -198,6 +198,21 @@ AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".caf", ".m4b", ".flac",
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 SAMPLE_RATE = 16000
 
+
+def is_source_audio(p) -> bool:
+    """True when a file in a watched folder is a recording the batch takes:
+    an audio or video type, not a hidden file, and not empty. A 0-byte file
+    (a failed export, a copy still being made) is skipped until it has
+    bytes. The batch, the panel's queue and the menu bar share this test,
+    so the panel never lists a file the batch will not pick."""
+    p = Path(p)
+    if p.suffix.lower() not in AUDIO_EXTS or p.name.startswith("."):
+        return False
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
 # --- Speaker naming (cosine similarity of pyannote embeddings) ---
 # Start ~0.5-0.65 and tune on real audio. Higher = stricter (fewer false names).
 NAMING_THRESHOLD = float(os.environ.get("STT_NAMING_THRESHOLD", "0.60"))

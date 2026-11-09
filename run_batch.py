@@ -442,7 +442,7 @@ def iter_audio(folder: Path):
     if not Path(folder).is_dir():
         return
     for p in sorted(Path(folder).iterdir()):
-        if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
+        if config.is_source_audio(p):
             yield p
 
 
@@ -547,6 +547,8 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
                     diarize=opts["do_diarize"], verify=opts.get("verify", False))
 
     report("downloading")
+    if src.stat().st_size == 0:
+        raise RuntimeError(f"{key} is empty (0 bytes)")
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
     # resolved again now the bytes are here: a Voice Memos date tag cannot

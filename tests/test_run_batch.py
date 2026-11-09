@@ -1261,3 +1261,28 @@ def test_a_sandboxed_batch_reads_the_sandbox_stt_env_not_the_repo_one(tmp_path, 
     monkeypatch.delenv("STT_ZZ_HOME")
     run_batch._load_env_file(repo)
     assert os.environ.get("STT_MEETINGS_DIR") == "/real/meetings"
+
+
+def test_iter_audio_skips_empty_files(sandbox):
+    """A 0-byte file (a failed export, a copy still being created) is not a
+    recording. The batch never picks it, and the panel never lists it."""
+    src = sandbox / "source"
+    (src / "zero.m4a").write_bytes(b"")
+    (src / "real.m4a").write_bytes(b"x" * 64)
+    assert [p.name for p in run_batch.iter_audio(src)] == ["real.m4a"]
+    from stt import config
+    assert not config.is_source_audio(src / "zero.m4a")
+    assert config.is_source_audio(src / "real.m4a")
+
+
+def test_process_one_names_an_empty_file(sandbox, monkeypatch):
+    """A 0-byte file named by --paths fails at once with a reason that
+    says so, never after a 15-minute wait on iCloud."""
+    import pytest
+    from stt import config
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    with pytest.raises(RuntimeError, match="empty"):
+        run_batch.process_one(str(f), str(config.MEETINGS_DIR),
+                              {"do_diarize": False, "strict": False,
+                               "allowed": None, "do_move": False})

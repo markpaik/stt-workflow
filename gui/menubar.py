@@ -82,8 +82,7 @@ def gather():
     for folder in config.source_dirs():
         try:
             for p in sorted(folder.iterdir()):
-                if (p.is_file() and p.suffix.lower() in config.AUDIO_EXTS
-                        and not p.name.startswith(".") and p.name not in active
+                if (config.is_source_audio(p) and p.name not in active
                         and p.name not in queued
                         and not manifest.is_processed(m, p.name, p.stat().st_mtime)):
                     queued.append(p.name)

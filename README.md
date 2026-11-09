@@ -114,6 +114,8 @@ macOS stops delivering audio), or let recordings land in the watched folder
 process within a minute of arriving while the Mac is awake, at a nightly
 run, and at login catch-up; pausing automation gates every trigger with one
 switch. A held file waits indefinitely without blocking anything else.
+An empty (0-byte) file and a hidden (dot) file are not recordings: the
+batch and the panel skip them until the file holds data.
 
 Four per-run options, from the Process popover:
 
