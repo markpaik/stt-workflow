@@ -414,7 +414,7 @@ quick links to the panel and folders.
 CLI equivalents:
 
 ```bash
-./run.sh batch --dry-run                          # show what would process (works while a batch runs)
+./run.sh batch --dry-run                          # show what would process, and any 0-byte file it skips (works while a batch runs)
 ./run.sh batch --strict --files "Interview.m4a"   # strict: flag, never guess
 ./run.sh relabel --all                            # re-apply names everywhere
 ./run.sh enroll --from-meeting "2026-05-21 Team Sync"

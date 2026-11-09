@@ -1292,6 +1292,20 @@ def test_an_empty_file_named_by_paths_fails_in_one_line(sandbox, monkeypatch, ca
     assert "Traceback" not in err
 
 
+def test_the_dry_run_names_an_empty_file_it_skips(sandbox, monkeypatch, capsys):
+    """A 0-byte file is skipped without a word on every run. The preview
+    says so, so the owner can see why it never runs."""
+    from stt import config
+    (config.ICLOUD_DIR / "zero.m4a").write_bytes(b"")
+    (config.ICLOUD_DIR / "~$lock.m4a").write_bytes(b"")
+    (config.ICLOUD_DIR / "real.m4a").write_bytes(b"x" * 64)
+    assert _run_main(monkeypatch, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "[would process] real.m4a" in out
+    assert "[skipped, 0 bytes] zero.m4a" in out
+    assert "lock.m4a" not in out              # an Office lock file is no recording
+
+
 def test_iter_audio_skips_empty_files(sandbox):
     """A 0-byte file (a failed export, a copy still being created) is not a
     recording. The batch never picks it, and the panel never lists it."""

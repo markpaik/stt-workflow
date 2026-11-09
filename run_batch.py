@@ -466,6 +466,17 @@ def sync_voice_memos(dry_run=False) -> dict:
     return r
 
 
+def _empty_audio(p) -> bool:
+    """A 0-byte file of an audio type in a watched folder: iter_audio skips
+    it until it has bytes."""
+    p = Path(p)
+    try:
+        return (p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith((".", "~$"))
+                and p.is_file() and p.stat().st_size == 0)
+    except OSError:
+        return False
+
+
 def iter_audio(folder: Path):
     if not Path(folder).is_dir():
         return
@@ -941,6 +952,12 @@ def main():
     if args.dry_run:
         for src in todo:
             print(f"[would process] {src.name}")
+        # an empty file is skipped without a word on every run (it may be a
+        # copy still arriving); the preview is where the owner asks why
+        for folder in config.source_dirs(source):
+            for p in (sorted(Path(folder).iterdir()) if Path(folder).is_dir() else []):
+                if _empty_audio(p):
+                    print(f"[skipped, 0 bytes] {p.name}")
         print(f"\n{len(todo)} to process, {skipped} already done"
               + (f", {len(missing)} not found." if missing else "."))
         return 0
