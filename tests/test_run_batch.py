@@ -1439,3 +1439,17 @@ def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):
     assert res["ok"] and len(res["base"].encode()) <= config.MAX_BASE_BYTES
     assert config.meeting_file(res["base"], ".m4a").read_bytes() == b"\x01" * 256
     assert not src.exists()
+
+
+def test_office_lock_files_are_not_recordings(sandbox):
+    """'~$name.m4a' is an Office owner/lock file, not audio. iter_audio
+    skipped only dot files, so the dry run listed it to process."""
+    from stt import config
+    src = sandbox / "source"
+    (src / "~$lock.m4a").write_bytes(b"x" * 162)
+    (src / "~$Board Prep.m4a").write_bytes(b"x" * 162)
+    (src / "Meeting ~$ notes.m4a").write_bytes(b"x" * 64)   # only a leading ~$
+    (src / "~Tilde Start.m4a").write_bytes(b"x" * 64)       # a plain name with ~
+    assert [p.name for p in run_batch.iter_audio(src)] == [
+        "Meeting ~$ notes.m4a", "~Tilde Start.m4a"]
+    assert not config.is_source_audio(src / "~$lock.m4a")

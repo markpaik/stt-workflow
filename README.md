@@ -114,8 +114,9 @@ macOS stops delivering audio), or let recordings land in the watched folder
 process within a minute of arriving while the Mac is awake, at a nightly
 run, and at login catch-up; pausing automation gates every trigger with one
 switch. A held file waits indefinitely without blocking anything else.
-An empty (0-byte) file and a hidden (dot) file are not recordings: the
-batch and the panel skip them until the file holds data. A file that
+An empty (0-byte) file, a hidden (dot) file and an Office lock file
+(`~$name`) are not recordings: the batch and the panel skip them (an
+empty file until it holds data). A file that
 ffmpeg cannot read, or that fails three runs in a row without changing,
 is set aside: automatic runs skip it until the file changes, and its
 row's Retry runs it at once. The failure shows ffmpeg's own reason
