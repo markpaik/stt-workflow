@@ -220,6 +220,15 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
            "STT_MEETINGS_DIR": str(tmp_path / "dst"),
            "PYTHONPATH": str(_P(run_batch.__file__).parent)}
     (tmp_path / "src").mkdir()
+    repo_lock = _P(run_batch.__file__).parent / "batch.lock"
+
+    def _stamp(p):
+        try:
+            st = p.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return None
+    before = _stamp(repo_lock)
     r = subprocess.run(
         [_sys.executable, run_batch.__file__, "--dry-run",
          "--paths", str(audio), "--force"],
@@ -228,10 +237,10 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "already running" not in r.stdout, r.stdout
     assert "Redo Me 07012026.m4a" in r.stdout  # the path actually parsed
-    # hermeticity: the lock lived in tmp (proof STT_PROJECT_DIR was honored),
-    # never in the real repo — before the fix the subprocess ignored the env
-    # var and this file would sit under the repo instead.
-    assert (proj / "batch.lock").exists()
+    # a dry run takes no lock, in tmp or in the repo: it writes nothing, and
+    # it previews even while a real batch holds the lock
+    assert not (proj / "batch.lock").exists()
+    assert _stamp(repo_lock) == before
 
 
 def test_main_has_no_shadowed_module_imports():
@@ -1556,3 +1565,35 @@ def test_a_files_name_that_matches_nothing_is_reported(sandbox, monkeypatch, cap
     assert "Here.m4a" not in cap.err
     assert "[would process] Here.m4a" in cap.out
     assert "1 to process, 0 already done, 1 not found." in cap.out
+
+
+def test_a_dry_run_previews_while_another_batch_holds_the_lock(sandbox, monkeypatch, capsys):
+    """The lock was taken before the dry-run branch, so a preview, which
+    writes nothing, could not run during a batch."""
+    import fcntl
+    import sys
+
+    from stt import config
+    _lengths(monkeypatch, {"Here.m4a": 600})
+    _drop("Here.m4a")
+    held = open(config.PROJECT_DIR / "batch.lock", "a+")
+    held.write("4242")
+    held.flush()
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        monkeypatch.setattr(sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize",
+                                          "--source", str(config.ICLOUD_DIR),
+                                          "--dest", str(config.MEETINGS_DIR)])
+        assert run_batch.main() == 0
+        out = capsys.readouterr().out
+        assert "[would process] Here.m4a" in out and "already running" not in out
+        # the running batch's pid is untouched
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == "4242"
+        # a real run still waits its turn
+        monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                          "--source", str(config.ICLOUD_DIR),
+                                          "--dest", str(config.MEETINGS_DIR)])
+        assert run_batch.main() == 0
+        assert "Another batch is already running" in capsys.readouterr().out
+    finally:
+        held.close()

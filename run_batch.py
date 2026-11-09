@@ -763,8 +763,10 @@ def main():
         print("Automatic processing is paused (resume from the menu bar); exiting.")
         return 0
 
-    lock = acquire_lock()
-    if lock is None:
+    # a dry run writes nothing, so it previews even while a batch runs: it
+    # takes no lock, and it never touches the running batch's batch.lock
+    lock = None if args.dry_run else acquire_lock()
+    if lock is None and not args.dry_run:
         print("Another batch is already running; exiting (this is normal)."
               + (" The queued job stays queued." if args.job else ""))
         return 0
