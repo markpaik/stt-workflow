@@ -192,8 +192,12 @@ def main(argv=None) -> int:
     ap.add_argument("--no-probe", action="store_true", help="skip the audio tag read")
     ap.add_argument("--journal-dir", help="journal folder (default: config.migration_dir())")
     a = ap.parse_args(argv)
-    if a.undo:
-        r = undo(a.undo, journal_dir=a.journal_dir, dry_run=not a.apply)
+    if a.undo is not None:     # "" is a mistyped run, not "no undo"
+        try:
+            r = undo(a.undo, journal_dir=a.journal_dir, dry_run=not a.apply)
+        except fj.NoSuchRun as e:
+            print(e, file=sys.stderr)
+            return 1
         word = "would restore" if r["dry_run"] else "restored"
         print(f"undo {a.undo}: {word} {len(r['restored'])} dates, "
               f"kept {len(r['kept'])} changed since, {len(r['missing'])} gone, "

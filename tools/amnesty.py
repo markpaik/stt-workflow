@@ -228,12 +228,8 @@ def apply(store=None, journal_dir=None, run_id=None) -> dict:
 
 
 def _journal_entries(run_id: str, journal_dir=None) -> list:
-    jpath = Path(journal_dir or config.migration_dir()) / f"{run_id}.jsonl"
-    out = []
-    for ln in jpath.read_text().splitlines():
-        if ln.strip():
-            out.append(json.loads(ln))
-    return out
+    from stt import fieldjournal
+    return fieldjournal.entries(run_id, journal_dir)
 
 
 def _bases_by_id(store=None) -> dict:
@@ -336,8 +332,14 @@ def main(argv=None) -> int:
     ap.add_argument("--field", action="append", help="limit --undo to this field")
     ap.add_argument("--journal-dir", help="journal folder (default: config.migration_dir())")
     a = ap.parse_args(argv)
-    if a.undo:
-        r = undo(a.undo, fields=a.field, journal_dir=a.journal_dir, dry_run=not a.apply)
+    if a.undo is not None:     # "" is a mistyped run, not "no undo"
+        from stt import fieldjournal
+        try:
+            r = undo(a.undo, fields=a.field, journal_dir=a.journal_dir,
+                     dry_run=not a.apply)
+        except fieldjournal.NoSuchRun as e:
+            print(e, file=sys.stderr)
+            return 1
         word = "would restore" if r["dry_run"] else "restored"
         print(f"undo {a.undo}: {word} {len(r['restored'])} fields, "
               f"kept {len(r['kept'])} edited since, "

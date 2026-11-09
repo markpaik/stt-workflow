@@ -10,10 +10,20 @@ Used by tools/backfill_keys.py (per-field undo) and tools/fix_dates.py
 """
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
 from . import config
+
+# what every run id this code makes looks like ("backfill-20261109T101500"):
+# no slash and no leading dot, so an id can never walk out of the folder
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+class NoSuchRun(ValueError):
+    """An undo named a run with no journal: mistyped, or not a run id at all
+    ('../../x'). The message is the one line a CLI prints."""
 
 MISSING = {"$missing": True}
 
@@ -86,12 +96,19 @@ class Journal:
 
 
 def journal_path(run_id: str, journal_dir=None) -> Path:
+    if not _RUN_ID.fullmatch(str(run_id or "")):
+        raise NoSuchRun(f"no such run: {run_id!r} is not a run id")
     return Path(journal_dir or config.migration_dir()) / f"{run_id}.jsonl"
 
 
 def entries(run_id: str, journal_dir=None) -> list:
+    """The journal of one run. NoSuchRun when there is none."""
+    try:
+        text = journal_path(run_id, journal_dir).read_text()
+    except FileNotFoundError:
+        raise NoSuchRun(f"no such run: {run_id}") from None
     out = []
-    for ln in journal_path(run_id, journal_dir).read_text().splitlines():
+    for ln in text.splitlines():
         if ln.strip():
             out.append(json.loads(ln))
     return out
