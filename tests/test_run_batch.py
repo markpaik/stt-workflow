@@ -1535,3 +1535,24 @@ def test_a_run_into_the_library_still_describes_its_meeting(sandbox, monkeypatch
     finally:
         signal.signal(signal.SIGTERM, old)
     assert ("describe", "2026-01-05 Mtg") in calls
+
+
+def test_a_files_name_that_matches_nothing_is_reported(sandbox, monkeypatch, capsys):
+    """--paths printed 'skip (not a file)' for a bad path, but --files
+    printed nothing for a name no source file has: a Redo of a file that
+    left the source folder looked like a success."""
+    import sys
+
+    from stt import config
+    _lengths(monkeypatch, {"Here.m4a": 600})
+    _drop("Here.m4a")
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize",
+                                      "--files", "Nope.wav,Here.m4a",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    assert run_batch.main() == 0
+    cap = capsys.readouterr()
+    assert "   not found in source: Nope.wav" in cap.err
+    assert "Here.m4a" not in cap.err
+    assert "[would process] Here.m4a" in cap.out
+    assert "1 to process, 0 already done, 1 not found." in cap.out

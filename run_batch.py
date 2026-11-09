@@ -868,11 +868,13 @@ def main():
                 print(f"   skip (not a file): {p}", file=sys.stderr)
     from stt import holds
     held = holds.items()
+    found = set()          # the --files names a source file carries
     for src in iter_sources(source):
         if args.paths and wanted is None:
             break  # explicit-paths run: don't also sweep the source folder
         if wanted is not None and src.name not in wanted:
             continue
+        found.add(src.name)
         if args.only and args.only.lower() not in src.name.lower():
             continue
         # a held file is parked ON PURPOSE: every automatic sweep leaves it alone.
@@ -899,14 +901,24 @@ def main():
             continue
         todo.append(src)
 
+    # a --files name no source file carries says so, as a bad --paths path
+    # does: a Redo of a file that left the source folder printed nothing and
+    # looked like a success. It counts as skipped.
+    found |= {p.name for p in explicit_paths}
+    missing = sorted(wanted - found) if wanted is not None else []
+    for name in missing:
+        print(f"   not found in source: {name}", file=sys.stderr, flush=True)
+
     # shortest first: a short recording never waits behind multi-hour board
     # meetings that happen to sort first by name (stt.queue_order)
     todo = queue_order.shortest_first(todo)
     if args.dry_run:
         for src in todo:
             print(f"[would process] {src.name}")
-        print(f"\n{len(todo)} to process, {skipped} already done.")
+        print(f"\n{len(todo)} to process, {skipped} already done"
+              + (f", {len(missing)} not found." if missing else "."))
         return 0
+    skipped += len(missing)
 
     if args.job is not None:
         # claim only now, with every abort guard (lock, battery, folders, token)
