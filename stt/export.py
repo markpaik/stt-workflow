@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config, dates
+from .errors import UserError
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -147,7 +148,7 @@ def to_pdf(base: str) -> Path:
     throwaway profile, so it never contends with a Chrome already open,
     and on a mock keychain, so the profile never opens a keychain dialog."""
     if not Path(CHROME).exists():
-        raise RuntimeError("Google Chrome not found — export Word instead, "
+        raise UserError("Google Chrome not found — export Word instead, "
                            "or install Chrome for PDF export.")
     out = _out_path(base, "pdf")
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
@@ -167,7 +168,7 @@ def to_pdf(base: str) -> Path:
     if _is_pdf(out):
         return out
     out.unlink(missing_ok=True)
-    raise RuntimeError(f"Chrome did not write the PDF (exit {rc}). "
+    raise UserError(f"Chrome did not write the PDF (exit {rc}). "
                        "Try again, or export Word instead.")
 
 

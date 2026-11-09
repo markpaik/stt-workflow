@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .errors import UserError
 
 MODEL = "mlx-community/Qwen3-8B-4bit"
 # mlx-lm lives in its OWN venv (.venv-llm): its transformers pin conflicts with the
@@ -198,15 +199,16 @@ def _backend_for(base: str) -> str:
     if backend != "local" and _strict_meeting(base):
         if LLM_PY.exists() or ollama_up():
             return "local"
-        raise RuntimeError(
+        raise UserError(
             "this is a strict recording — its transcript never leaves this "
             "Mac, and the local model isn't installed. Install .venv-llm or "
             "switch the assistant back to the local model.")
     return backend
 
 
-class LLMBusy(RuntimeError):
+class LLMBusy(UserError):
     """The local LLM is already loaded by another request or process."""
+    code = 503
 
 
 @contextlib.contextmanager
@@ -267,7 +269,7 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
 
     import subprocess
     if not LLM_PY.exists():
-        raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
+        raise UserError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
         # the MLX fallback runs at lowered priority too: background QoS
@@ -306,8 +308,9 @@ def _empty_description(desc: dict) -> bool:
     return _no_description(desc.get("tmpl"), desc.get("gist"), desc.get("summary"))
 
 
-class OllamaDown(RuntimeError):
+class OllamaDown(UserError):
     """Ollama did not answer: the caller may fall back to MLX."""
+    code = 503
 
 
 # Ollama reasons apart from its answer: with think on, the reasoning
@@ -360,7 +363,7 @@ def renice_ollama() -> int:
 def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
     """One chat turn to Ollama on this Mac. The caller holds llm.lock: one
     large model works at a time, whichever engine serves it. A connection
-    failure raises OllamaDown. A reply with an error raises RuntimeError.
+    failure raises OllamaDown. A reply with an error raises UserError.
     One request at a time: llm.lock serializes every caller, so nothing
     sends to Ollama in parallel."""
     import urllib.error
@@ -394,11 +397,11 @@ def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
             detail = json.loads(e.read().decode("utf-8")).get("error", "")
         except Exception:
             pass
-        raise RuntimeError(f"Ollama request failed ({e.code}): {detail[:200]}") from e
+        raise UserError(f"Ollama request failed ({e.code}): {detail[:200]}") from e
     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
         raise OllamaDown(str(e)) from e
     if d.get("error"):
-        raise RuntimeError(f"Ollama request failed: {str(d['error'])[:200]}")
+        raise UserError(f"Ollama request failed: {str(d['error'])[:200]}")
     out = (d.get("message") or {}).get("content") or ""
     out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL)
     return out.strip()
@@ -408,7 +411,7 @@ def _generate_anthropic(prompt: str, max_tokens: int) -> str:
     import anthropic
     key = _setting("STT_ANTHROPIC_KEY")
     if not key:
-        raise RuntimeError("no Anthropic API key — add one under Cloud keys in Settings")
+        raise UserError("no Anthropic API key — add one under Cloud keys in Settings")
     # Haiku: these are brief summaries and single-transcript Q&A. No sampling
     # params and no thinking config — both portable across every current model
     # if STT_ANTHROPIC_MODEL points somewhere else (Opus rejects temperature).
@@ -418,9 +421,9 @@ def _generate_anthropic(prompt: str, max_tokens: int) -> str:
             model=model, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
     except anthropic.APIError as e:
-        raise RuntimeError(f"Claude request failed: {e}") from e
+        raise UserError(f"Claude request failed: {e}") from e
     if r.stop_reason == "refusal":
-        raise RuntimeError("the model declined this request")
+        raise UserError("the model declined this request")
     return "".join(b.text for b in r.content if b.type == "text").strip()
 
 
@@ -428,7 +431,7 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
     import requests
     key = _setting("STT_OPENAI_KEY")
     if not key:
-        raise RuntimeError("no OpenAI API key — add one under Cloud keys in Settings")
+        raise UserError("no OpenAI API key — add one under Cloud keys in Settings")
     model = _setting("STT_OPENAI_LLM_MODEL", "gpt-4o-mini")
     r = requests.post(
         "https://api.openai.com/v1/chat/completions",
@@ -437,7 +440,7 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
               "messages": [{"role": "user", "content": prompt}]},
         timeout=120)
     if r.status_code != 200:
-        raise RuntimeError(f"OpenAI request failed ({r.status_code}): {r.text[:200]}")
+        raise UserError(f"OpenAI request failed ({r.status_code}): {r.text[:200]}")
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 

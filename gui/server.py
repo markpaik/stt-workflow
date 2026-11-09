@@ -23,6 +23,7 @@ from gui import jobqueue
 from stt import (config, control, dates, dupes, export, groups, identify, jobs,
                  manifest, names, output, queue_order, rates, recorder, review,
                  search, series, status, titles, unknowns)
+from stt.errors import UserError
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -1967,10 +1968,12 @@ def _suggested(meta, speakers) -> list:
 # One layer between the client and every handler. A request the client got
 # wrong -- a body that is not one JSON object, a missing field, a field of the
 # wrong type -- answers HTTP 400 with a plain message that names the field.
-# Anything else that goes wrong answers 500 with one fixed sentence, and the
-# detail (route, exception, traceback) goes to the panel's log instead:
-# exception text carries server paths and Python internals, and the panel
-# shows the `error` text to the user as it is.
+# A planned failure whose message was written for a person (stt.errors.
+# UserError: "Google Chrome not found -- export Word instead") answers with
+# that message. Anything else that goes wrong answers 500 with one fixed
+# sentence, and the detail (route, exception, traceback) goes to the panel's
+# log instead: exception text carries server paths and Python internals, and
+# the panel shows the `error` text to the user as it is.
 
 class BadRequest(Exception):
     """The client's mistake. Answered with HTTP `code` (400 unless given) and
@@ -2571,6 +2574,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, 404)
         except BadRequest as e:
             self._json({"error": e.msg}, e.code)
+        except UserError as e:
+            # planned, and its text is the help ("Google Chrome not found
+            # -- export Word instead"): shown as it is
+            self._json({"ok": False, "error": str(e)}, e.code)
         except Exception:
             self._failed(u.path)
 
@@ -3502,12 +3509,15 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/export":
                 if not self._require_base(b.get("base")):
                     return
-                if b.text("fmt") == "reveal":
+                fmt = b.text("fmt")
+                if fmt not in ("docx", "pdf", "reveal"):
+                    raise BadRequest("'fmt' must be docx, pdf or reveal")
+                if fmt == "reveal":
                     f = config.meeting_file(b["base"], ".txt")
                     subprocess.run(["open", "-R", str(f)], capture_output=True)
                     self._json({"ok": f.exists()})
                 else:
-                    path = export.export(b["base"], b["fmt"])
+                    path = export.export(b["base"], fmt)
                     subprocess.run(["open", "-R", str(path)], capture_output=True)
                     self._json({"ok": True, "path": str(path)})
             elif u.path == "/api/retranscribe":
@@ -3583,6 +3593,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "not found"}, 404)
         except BadRequest as e:
             self._json({"error": e.msg}, e.code)
+        except UserError as e:
+            # planned, and its text is the help ("Google Chrome not found
+            # -- export Word instead"): shown as it is
+            self._json({"ok": False, "error": str(e)}, e.code)
         except Exception:
             self._failed(u.path)
 

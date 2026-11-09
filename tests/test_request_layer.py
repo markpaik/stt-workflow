@@ -217,6 +217,66 @@ def test_a_failed_second_listen_names_no_path(running_server, monkeypatch, capsy
     assert "/Users/someone/checkout" in capsys.readouterr().err
 
 
+
+def test_a_message_written_for_the_user_reaches_the_user(running_server,
+                                                        monkeypatch, capsys):
+    """A planned failure keeps its own text: the catch-all turned "Google
+    Chrome not found -- export Word instead" and "the local model (Ollama)
+    is not reachable" into the fixed sentence, so the help never arrived."""
+    from stt import errors, export, summarize
+    _make_meeting("2026-04-08 Team Weekly")
+    monkeypatch.setattr(export, "CHROME", "/nonexistent/Google Chrome")
+    st, out = _post(running_server, "/api/export",
+                    {"base": "2026-04-08 Team Weekly", "fmt": "pdf"})
+    assert st == 500 and out["ok"] is False
+    assert out["error"].startswith("Google Chrome not found")
+
+    def down(*a, **k):
+        raise summarize.OllamaDown("the local model (Ollama) is not reachable")
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "describe", down)
+    monkeypatch.setattr(summarize, "has_speech", lambda base: True)
+    st, out = _post(running_server, "/api/suggest", {"base": "2026-04-08 Team Weekly"})
+    assert (st, out) == (503, {"ok": False,
+                               "error": "the local model (Ollama) is not reachable"})
+    monkeypatch.setattr(summarize, "_generate", down)
+    st, out = _post(running_server, "/api/ask",
+                    {"base": "2026-04-08 Team Weekly", "question": "who?"})
+    assert st == 503 and out["error"] == "the local model (Ollama) is not reachable"
+
+    def no_key(*a, **k):
+        raise errors.UserError("no Anthropic API key — add one under Cloud "
+                               "keys in Settings")
+    from stt import ask
+    monkeypatch.setattr(ask, "ask", no_key)
+    st, out = _post(running_server, "/api/ask_library", {"question": "who?"})
+    assert st == 500 and out["error"].startswith("no Anthropic API key")
+    # a planned failure is not an unplanned one: no traceback in the log
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_an_unknown_export_format_is_a_400(running_server):
+    _make_meeting("2026-04-08 Team Weekly")
+    st, out = _post(running_server, "/api/export",
+                    {"base": "2026-04-08 Team Weekly", "fmt": "odt"})
+    assert (st, out) == (400, {"error": "'fmt' must be docx, pdf or reveal"})
+
+
+def test_an_unplanned_runtime_error_still_hides_its_text(running_server,
+                                                        monkeypatch):
+    """Only a UserError is shown. A plain RuntimeError (the MLX runner's
+    stderr tail, say) can hold a path, so it stays the fixed sentence."""
+    from stt import summarize
+    _make_meeting("2026-04-08 Team Weekly")
+
+    def runner(*a, **k):
+        raise RuntimeError('LLM runner failed: File "/Users/someone/x.py"')
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "has_speech", lambda base: True)
+    monkeypatch.setattr(summarize, "describe", runner)
+    st, out = _post(running_server, "/api/suggest", {"base": "2026-04-08 Team Weekly"})
+    assert (st, out) == (500, {"error": srv.INTERNAL_ERROR})
+
 # ---------- Fields, the typed reader ----------
 
 def test_fields_readers():
