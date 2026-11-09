@@ -98,6 +98,29 @@ def test_split_title():
     assert series.split_title("Budget Review") == (None, "Budget Review")
 
 
+def test_title_case_restores_known_acronyms_written_in_lower_case():
+    """'iep review' came out 'Iep Review'. A word the tag list or the series
+    catalog writes in capitals (IEP, OKR, HR, AI, LT, PSSP) or in mixed case
+    (PowerSchool) takes that spelling, with a plural or possessive kept."""
+    from stt import series
+    assert series.title_case("iep review") == "IEP Review"
+    assert series.title_case("q3 mid-year review of iep's") == "q3 Mid-year Review of IEP's"
+    assert series.title_case("okrs and hr policy") == "OKRs and HR Policy"
+    assert series.title_case("ai tools pilot") == "AI Tools Pilot"
+    assert series.title_case("Ese referrals") == "ESE Referrals"
+    assert series.title_case("lt agenda (pssp)") == "LT Agenda (PSSP)"
+    assert series.title_case("powerschool sync") == "PowerSchool Sync"
+    assert series.title_case("cte-fte costs") == "CTE-FTE Costs"
+    # what the model wrote in capitals stays, known or not
+    assert series.title_case("UAT review") == "UAT Review"
+    # a word that only looks like one keeps its title case
+    assert series.title_case("hrs logged") == "Hrs Logged"
+    assert series.title_case("aid plan") == "Aid Plan"
+    # a name with an O' prefix keeps its second capital
+    assert series.title_case("meeting with o'brien") == "Meeting with O'Brien"
+    assert series.build_title("one_off", "iep review with o'brien") == "IEP Review with O'Brien"
+
+
 def test_title_case_keeps_program_names_with_small_words():
     from stt import series
     assert series.title_case("early on workflow UAT review") == "Early On Workflow UAT Review"
