@@ -17,7 +17,8 @@ The joiners U+200C and U+200D stay: several scripts and emoji need them.
 
 A person's name REFUSES these characters (person_name): a name is an
 identity, and quietly changing it would enroll someone under a spelling
-nobody typed.
+nobody typed. A meeting title STRIPS them (strip_unsafe), as it always
+stripped control characters: a title is only a label.
 """
 import unicodedata
 
@@ -42,6 +43,14 @@ def unsafe(ch: str) -> bool:
 
 def has_unsafe(s) -> bool:
     return any(unsafe(ch) for ch in str(s or ""))
+
+
+def strip_unsafe(s) -> str:
+    """`s` without its unsafe characters, for a meeting title. One that is
+    whitespace (a newline, a tab, a line separator) becomes a space, so two
+    lines never run together into one word."""
+    return "".join((" " if ch.isspace() else "") if unsafe(ch) else ch
+                   for ch in str(s or ""))
 
 
 def person_name(raw) -> str:

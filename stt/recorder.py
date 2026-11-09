@@ -428,9 +428,9 @@ def final_name(raw=None, now=None) -> str:
     in the meetings store."""
     import re
 
-    from . import dates
+    from . import dates, names
     iso, hhmm = _stamp(now)
-    raw = (raw or "").strip()
+    raw = names.strip_unsafe(raw or "").strip()
     raw = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", raw).strip().lstrip(".")
     raw = re.sub(r"\s+", " ", raw)[:120].strip()
     if not raw:

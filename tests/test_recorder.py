@@ -427,3 +427,9 @@ def test_an_orphaned_transcode_part_is_swept(sandbox):
     assert recorder.recover_orphans() == []
     assert not orphan.exists()
     assert live.exists(), "a .part still being written must be left alone"
+
+
+def test_final_name_strips_bidi_and_zero_width_characters(sandbox):
+    assert recorder.final_name("‮gnp.txt", now=FIXED) == "2026-07-09 gnp.txt"
+    assert recorder.final_name("Budget​Sync\nTwo", now=FIXED) == \
+        "2026-07-09 BudgetSync Two"

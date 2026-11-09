@@ -1221,8 +1221,14 @@ def _sanitize_name(s: str) -> str:
     """A safe folder/file name (mirrors recorder.final_name): drop path/wildcard/
     control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
     the class strip and resolve the meeting folder to the parent dir or a hidden
-    name. Collapse whitespace runs and cap the length."""
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(s)).strip().lstrip(".")
+    name. Collapse whitespace runs and cap the length.
+
+    The control characters are names.unsafe's: the C0 and C1 ranges, the line
+    separators, the bidirectional controls and the zero-width spaces. A
+    U+202E made '2025-05-28 <U+202E>gnp.txt' show in Finder as '...txt.png'."""
+    from . import names
+    s = names.strip_unsafe(s)
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s).strip().lstrip(".")
     return re.sub(r"\s+", " ", s)[:120].strip()
 
 
