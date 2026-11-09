@@ -9,6 +9,9 @@ so a pid-by-name kill orphans them — each holding several GB of models. All
 run_batch processes share their launcher's process group (caffeinate/launchd),
 and status.json records that pgid, so we can find and signal every member even
 after the parent dies. stop_run() verifies termination and escalates to SIGKILL.
+
+The batch parent itself is the pid that the holder of this home's batch.lock
+wrote into it (_parent_pids), never a machine-wide match on the name.
 """
 import json
 import os
@@ -183,9 +186,54 @@ def _pgrep(args):
         return []
 
 
+def batch_lock_path():
+    return config.PROJECT_DIR / "batch.lock"
+
+
+def _etime_secs(s: str) -> int:
+    """Seconds from ps's elapsed time, "[[dd-]hh:]mm:ss"."""
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = int(d)
+    parts = [int(x) for x in s.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
 def _parent_pids():
-    """run_batch.py parents (found by command line)."""
-    return _pgrep(["-f", "run_batch.py"])
+    """The run_batch.py parent of THIS data home, as a list (empty or one).
+
+    The batch that holds PROJECT_DIR/batch.lock writes its pid into it
+    (run_batch.acquire_lock). That pid counts only while the process is
+    alive, its command line runs run_batch.py, and it started before the
+    lock was written: a pid recycled onto a later process started after.
+    A machine-wide `pgrep -f run_batch.py` used to stand in here. It also
+    matched a shell running a command that names the file, an editor, and
+    another home's batch, so the panel read "running" with no batch of
+    its own, and Stop signalled those groups."""
+    p = batch_lock_path()
+    try:
+        pid = int(p.read_text().strip())
+        written = p.stat().st_mtime
+    except (OSError, ValueError):
+        return []
+    if pid <= 0:
+        return []
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "etime=,command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        etime, _, cmd = out.partition(" ")
+        started = time.time() - _etime_secs(etime)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if "run_batch.py" not in cmd:
+        return []
+    if started > written + 2.0:   # ps's elapsed time is whole seconds
+        return []
+    return [pid]
 
 
 def _group_is_ours(pgid) -> bool:

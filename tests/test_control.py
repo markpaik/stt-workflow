@@ -7,6 +7,9 @@ import time
 
 from stt import config, control, status
 
+# the real finder, kept before conftest's sandbox fixture stubs it per test
+_REAL_PARENT_PIDS = control._parent_pids
+
 
 def test_pause_resume_states(sandbox):
     assert not control.is_paused()
@@ -264,3 +267,80 @@ def test_a_blank_started_marker_is_not_a_running_relabel(sandbox):
     p.write_text(json.dumps({"pid": os.getpid(),
                              "started": control._proc_started(os.getpid())}))
     assert control.relabel_running() is True
+
+
+# ---------- which batch is THIS home's: the batch.lock holder ----------
+
+def _decoy(*argv):
+    """A live process whose command line holds `argv` (it sleeps 30 s)."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", *argv])
+
+
+def _lock_names(sandbox, pid, age=0.0):
+    lk = sandbox / "batch.lock"
+    lk.write_text(str(pid))
+    if age:
+        t = time.time() - age
+        os.utime(lk, (t, t))
+
+
+def test_a_command_line_that_mentions_run_batch_is_not_a_batch(sandbox, monkeypatch):
+    """pgrep -f run_batch.py matched any process on the machine: a shell
+    running a command that names the file, an editor, another home's batch.
+    The panel then read "running" with no batch of its own, and Stop
+    signalled those groups."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py", "--files", "x.m4a")
+    try:
+        time.sleep(0.2)
+        assert control._parent_pids() == []
+        assert control.batch_groups() == set()
+        assert control.snapshot(max_age=0)["pids"] == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_the_process_named_in_batch_lock_is_the_batch(sandbox, monkeypatch):
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid)
+        assert control._parent_pids() == [p.pid]
+    finally:
+        p.kill()
+        p.wait()
+    assert control._parent_pids() == []      # the holder is gone
+
+
+def test_a_lock_pid_that_is_not_run_batch_is_ignored(sandbox, monkeypatch):
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("something_else.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid)
+        assert control._parent_pids() == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_a_recycled_lock_pid_is_ignored(sandbox, monkeypatch):
+    """A batch that died leaves its pid in batch.lock. A later process that
+    gets the same pid started AFTER the lock was written: not the batch."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid, age=600)
+        assert control._parent_pids() == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_elapsed_time_parses_every_ps_form():
+    assert control._etime_secs("05:07") == 307
+    assert control._etime_secs("02:05:07") == 2 * 3600 + 307
+    assert control._etime_secs("3-02:05:07") == 3 * 86400 + 2 * 3600 + 307

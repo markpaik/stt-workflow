@@ -1369,3 +1369,23 @@ def test_a_file_that_keeps_failing_is_set_aside_after_three_runs(sandbox, monkey
     for _ in range(manifest.FAIL_PARK_AFTER + 2):
         _run_main(monkeypatch)
     assert len(seen) == manifest.FAIL_PARK_AFTER
+
+
+def test_a_second_batch_never_blanks_the_lock_holders_pid(sandbox):
+    """acquire_lock opened batch.lock with "w", so every run that LOST the
+    lock race (the folder watch fires often) truncated the pid the running
+    batch wrote. The panel reads that pid to find this home's batch."""
+    from stt import config
+    first = run_batch.acquire_lock()
+    try:
+        assert first is not None
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+        assert run_batch.acquire_lock() is None
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+    finally:
+        first.close()
+    again = run_batch.acquire_lock()       # a fresh holder writes only its pid
+    try:
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+    finally:
+        again.close()

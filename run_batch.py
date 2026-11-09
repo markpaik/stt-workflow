@@ -73,12 +73,19 @@ VM_RESYNC_SECONDS = 60.0
 
 
 def acquire_lock():
-    fd = open(config.PROJECT_DIR / "batch.lock", "w")
+    """The single-instance lock. The holder writes its pid into batch.lock,
+    and the panel finds this home's batch by that pid (control._parent_pids).
+    The file is opened without truncating it ("a+"), and emptied only once
+    the lock is held: a run that loses the race never blanks the pid of the
+    batch that holds it."""
+    fd = open(config.PROJECT_DIR / "batch.lock", "a+")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         fd.close()
         return None
+    fd.seek(0)
+    fd.truncate()
     fd.write(str(os.getpid()))
     fd.flush()
     return fd
