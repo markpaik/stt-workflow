@@ -485,6 +485,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
         if config.PUNCTUATE:
             punctuate.restore_segments(segments)
+        if not do_diarize:
+            for seg in segments:
+                seg["display"] = output.NOT_SEPARATED
         speakers = output.build_speakers(labels, names)
 
         verify_engine, verify_regions = None, None

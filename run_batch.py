@@ -66,7 +66,8 @@ def _load_env_file(repo=None):
 
 _load_env_file()
 
-from stt import audio, config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
+from stt import (audio, config, control, icloud, jobs, manifest, output,  # noqa: E402
+                 queue_order, rates, status)
 
 # a plain run re-reads the Voice Memos library at most this often while it
 # picks files, so a memo that finishes during a long run joins that run
@@ -653,7 +654,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             print(f"   kept the source {src.name}: {why}", file=sys.stderr, flush=True)
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
-    summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
+    summary = f"{res['n_speakers']} speaker(s), {output.length_text(res['duration_sec'])}"
     return {"ok": success, "key": key, "base": base, "mtime": mtime,
             "fp": src_fp, "size": src_size,
             "outputs": [str(o) for o in outputs + [dest_audio]],

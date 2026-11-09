@@ -43,6 +43,61 @@ def test_a_header_under_a_minute_gives_seconds(sandbox):
     assert summarize._TXT_HEADER.sub("", p.read_text(), count=1) == "[00:00] Voice 1: hi\n"
 
 
+def test_the_batch_history_gives_seconds_under_a_minute(sandbox, monkeypatch):
+    """The header said '2 sec', but results.jsonl, the console and the
+    panel's recent list still said '0 speaker(s), 0.0 min'."""
+    assert output.length_text(2.4) == "2 sec"
+    assert output.length_text(59.6) == "1.0 min"
+    assert output.length_text(None) == "0 sec"
+    import run_batch
+    from stt import config, icloud, pipeline
+    config.source_dir().mkdir(parents=True, exist_ok=True)
+    src = config.source_dir() / "Clip 05012026.m4a"
+    src.write_bytes(b"AUDIO")
+
+    def fake_process_file(s, dest_dir=None, **kw):
+        base = "2026-05-01 Clip"
+        config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+        j = config.meeting_file(base, ".json", dest_dir)
+        j.write_text("{}")
+        t = config.meeting_file(base, ".txt", dest_dir)
+        t.write_text("x")
+        return {"base": base, "txt": t, "json": j, "emb": None,
+                "duration_sec": 2.4, "n_speakers": 0, "identified": []}
+    monkeypatch.setattr(pipeline, "process_file", fake_process_file)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": False}
+    r = run_batch.process_one(str(src), str(config.MEETINGS_DIR), opts)
+    assert r["summary"] == "0 speaker(s), 2 sec"
+
+
+def test_lines_with_no_diarization_read_speaker(sandbox, monkeypatch, tmp_path):
+    """--no-diarize wrote every line as 'Voice ?', which reads like a fault.
+    Nothing told the voices apart, so each line reads 'Speaker'."""
+    import json
+    import subprocess
+
+    from stt import config, pipeline
+    from stt.audio import FFMPEG
+    from tests.test_layout import _fake_asr
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    src = tmp_path / "Clip 08032026.m4a"
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=2", "-ac", "1", "-c:a", "aac",
+                    str(src)], check=True, capture_output=True)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    txt = config.meeting_file(res["base"], ".txt").read_text()
+    assert "Voice ?" not in txt
+    assert "] Speaker: hello from the pipeline" in txt
+    d = json.loads(config.meeting_file(res["base"], ".json").read_text())
+    assert {s.get("display") for s in d["segments"]} == {"Speaker"}
+    # an unassigned line in a diarized meeting keeps its own fallback
+    assert output.speaker_display(None, None) == "Voice ?"
+
+
 def test_a_transcript_with_no_speech_says_so(sandbox):
     """A silent file wrote a header and an empty body, with no word on why."""
     p = sandbox / "t.txt"

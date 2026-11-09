@@ -23,6 +23,13 @@ def _atomic_write(path, text: str):
     os.replace(tmp, path)
 
 
+# the label every line carries when no diarization ran (--no-diarize):
+# nothing told the voices apart, so no line is anyone's in particular.
+# "Voice ?" read like a fault. No number, so it never reads as the unknown
+# registry's "Speaker N".
+NOT_SEPARATED = "Speaker"
+
+
 def speaker_display(label, name=None) -> str:
     """Human-readable speaker name (real name, else a transcript-LOCAL
     'Voice N'). 'Voice' — not 'Speaker' — on purpose: the global unknown
@@ -92,16 +99,21 @@ def refresh_txt_header(path, name: str) -> bool:
     return True
 
 
+def length_text(duration_sec) -> str:
+    """A recording's length as the header and the batch history say it:
+    whole seconds under a minute ('0.0 min' said nothing about a 2 s clip),
+    else minutes to one decimal."""
+    secs = float(duration_sec or 0)
+    return f"{round(secs)} sec" if round(secs) < 60 else f"{round(secs / 60, 1)} min"
+
+
 def txt_header(source_file, duration_sec, speakers, strict=False,
                processed_at=None) -> str:
     """The one canonical .txt header line (pipeline, relabel, and review all
     regenerate the .txt and must agree). `source_file` is what the line
     opens with: callers pass header_name(), the meeting's date and title."""
     named = [s["name"] for s in speakers if s.get("name")]
-    # under a minute, whole seconds: '0.0 min' said nothing about a 2 s clip
-    secs = float(duration_sec or 0)
-    length = f"{round(secs)} sec" if round(secs) < 60 else f"{round(secs / 60, 1)} min"
-    h = (f"{source_file}  |  {length}  |  "
+    h = (f"{source_file}  |  {length_text(duration_sec)}  |  "
          f"{len(speakers)} speaker(s)")
     if named:
         h += "  |  identified: " + ", ".join(named)
