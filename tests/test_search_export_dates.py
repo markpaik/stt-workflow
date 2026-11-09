@@ -1,6 +1,8 @@
 """dates: filename conventions; search: cross-meeting queries; export: docx/html."""
 import json
 
+import pytest
+
 from stt import config, dates, export, search
 from conftest import mfile
 
@@ -161,3 +163,49 @@ def test_export_dir_reads_stt_env_and_anchors_a_relative_value(sandbox, monkeypa
     env.write_text("")
     monkeypatch.setenv("STT_EXPORT_DIR", "other")
     assert export.export_dir() == fake_user / "other"
+
+
+# ---------- PDF: the file decides, not Chrome's exit code ----------
+
+def _fake_chrome(tmp_path, monkeypatch, body: str, rc: int):
+    """A stand-in for headless Chrome: writes `body` (printf format) to the
+    --print-to-pdf path, records its arguments, and exits with `rc`."""
+    script = tmp_path / "chrome"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{tmp_path}/chrome.args"\n'
+        'for a in "$@"; do case "$a" in --print-to-pdf=*) out="${a#--print-to-pdf=}";; esac; done\n'
+        + (f"printf '{body}' > \"$out\"\n" if body is not None else "")
+        + f"exit {rc}\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(export, "CHROME", str(script))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    return tmp_path / "out"
+
+
+GOOD_PDF = "%%PDF-1.4\\n1 0 obj\\n<<>>\\nendobj\\n%%%%EOF\\n"
+
+
+def test_a_pdf_chrome_wrote_is_kept_when_chrome_crashes_on_exit(sandbox, tmp_path, monkeypatch):
+    """Headless Chrome writes the PDF, then can crash on exit (crashpad,
+    exit 2). check=True turned that into a failed export, and each retry
+    left one more "name (n).pdf"."""
+    _mk_full(sandbox)
+    out_dir = _fake_chrome(tmp_path, monkeypatch, GOOD_PDF, rc=2)
+    out = export.to_pdf("Mtg 05212026")
+    assert out == out_dir / "Mtg 05212026.pdf"
+    assert out.read_bytes().startswith(b"%PDF")
+    assert sorted(p.name for p in out_dir.iterdir()) == ["Mtg 05212026.pdf"]
+    args = (tmp_path / "chrome.args").read_text().splitlines()
+    # its own throwaway profile: never the running Chrome's, which it can contend with
+    assert any(a.startswith("--user-data-dir=") for a in args)
+
+
+@pytest.mark.parametrize("body, rc", [(None, 2), ("", 0), ("%%PDF-1.4\\npartial", 0),
+                                      ("<html>not a pdf</html>", 0)])
+def test_a_missing_or_broken_pdf_fails_and_leaves_no_file(sandbox, tmp_path, monkeypatch, body, rc):
+    _mk_full(sandbox)
+    out_dir = _fake_chrome(tmp_path, monkeypatch, body, rc=rc)
+    with pytest.raises(RuntimeError, match="PDF"):
+        export.to_pdf("Mtg 05212026")
+    assert list(out_dir.iterdir()) == []

@@ -248,7 +248,9 @@ meeting page. Word and PDF copies land in `~/Downloads` and open in
 Finder. They leave the data home, so treat them as shared copies. Set
 `STT_EXPORT_DIR` (in `stt.env` or the environment) to send them elsewhere.
 A relative value is under your home folder. Under `STT_HOME` they land in
-`$STT_HOME/exports`. On disk, every meeting is a self-contained folder (audio,
+`$STT_HOME/exports`. PDF uses the installed Google Chrome, headless, on a
+throwaway profile; a PDF that Chrome finished counts even if Chrome then
+exits with an error, and a failed PDF leaves no file behind. On disk, every meeting is a self-contained folder (audio,
 readable `.txt`, structured `.json` with segment- and word-level timestamps,
 speakers, flags, and real confidence scores, caches, and edit history
 together), and renaming in the panel renames the folder and every file in
