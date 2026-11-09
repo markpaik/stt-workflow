@@ -420,3 +420,38 @@ def test_diarcache_channel_extras_roundtrip_and_backcompat(sandbox):
     diarcache.save(q, turns, [np.ones(8)], {"SPEAKER_00": np.ones(8)})
     mono = diarcache.load_channel(q)
     assert mono["mode"] is None and mono["spans"] == []
+
+
+def _corrupt_caches(tmp_path):
+    import numpy as np
+    good = tmp_path / "good.diar.npz"
+    diarcache.save(good, [{"start": 0.0, "end": 1.0, "cluster": "SPEAKER_00"}],
+                   [np.ones(4)], {"SPEAKER_00": np.ones(4)})
+    out = {}
+    out["truncated"] = tmp_path / "truncated.diar.npz"
+    out["truncated"].write_bytes(good.read_bytes()[:40])
+    out["garbage"] = tmp_path / "garbage.diar.npz"
+    out["garbage"].write_bytes(b"\x80\x04 not an archive at all" * 10)
+    out["empty"] = tmp_path / "empty.diar.npz"
+    out["empty"].write_bytes(b"")
+    wrong = tmp_path / "wrong.diar.npz"
+    np.savez(wrong, something=np.ones(3))
+    out["wrong shape"] = wrong
+    return out
+
+
+def test_an_unreadable_diar_cache_is_a_value_error_with_no_path(tmp_path):
+    """A truncated cache raised zipfile.BadZipFile and a garbage one
+    pickle.UnpicklingError. Neither is an OSError or a ValueError, so the
+    (OSError, ValueError, KeyError) guards at every call site missed them,
+    and the panel answered 500 with the server's absolute path."""
+    for kind, p in _corrupt_caches(tmp_path).items():
+        for fn in (diarcache.load, diarcache.load_channel):
+            if kind == "wrong shape" and fn is diarcache.load_channel:
+                continue   # no channel keys reads as a mono cache, by design
+            with pytest.raises(diarcache.Unreadable) as e:
+                fn(p)
+            assert isinstance(e.value, ValueError), kind
+            assert str(tmp_path) not in str(e.value) and "PosixPath" not in str(e.value)
+    with pytest.raises(FileNotFoundError):
+        diarcache.load(tmp_path / "missing.diar.npz")

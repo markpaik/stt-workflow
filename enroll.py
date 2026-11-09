@@ -85,7 +85,11 @@ def main():
         dpath = config.meeting_file(args.from_meeting, ".diar.npz")
         if dpath.exists():
             from stt import diarcache
-            raw_turns = diarcache.load(dpath)[0]
+            try:
+                raw_turns = diarcache.load(dpath)[0]
+            except diarcache.Unreadable as e:
+                raise SystemExit(f"'{args.from_meeting}': {e} -- Redo the "
+                                 "meeting to rebuild it")
             veto = unknowns.floor_violation(
                 unknowns.talk_stats(raw_turns).get(args.speaker))
             if veto:

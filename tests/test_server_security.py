@@ -2154,3 +2154,22 @@ def test_set_local_name_refuses_a_line_break(sandbox):
     r = summarize.set_local_name(base, "SPEAKER_00", "Zoe: <b>X</b>\nLine2")
     assert r == {"ok": False, "error": names.UNSAFE_NAME}
     assert "local_names" not in json.loads(mfile(base, ".json").read_text())
+
+
+@pytest.mark.parametrize("payload", [b"PK\x03\x04truncated", b"\x80\x04garbage" * 8])
+def test_a_corrupt_diar_cache_never_500s_the_naming_panel(running_server, payload):
+    """name_preview promises an empty preview on any failure. A truncated
+    cache answered 500 "File is not a zip file", and a garbage one 500 with
+    "Failed to interpret file PosixPath('/Users/...diar.npz') as a pickle"."""
+    _make_meeting("2026-04-15 Data Review")
+    mfile("2026-04-15 Data Review", ".diar.npz").write_bytes(payload)
+    st, body = _post(running_server, "/api/name_preview",
+                     {"meeting": "2026-04-15 Data Review", "speaker": "SPEAKER_00"})
+    assert st == 200 and body["looks_like"] == [] and body["here"] == \
+        "2026-04-15 Data Review"
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": "2026-04-15 Data Review", "speaker": "SPEAKER_00",
+                      "name": "Jordan Lee"})
+    assert st == 200 and body["ok"] is False
+    assert "changed while you were naming it" in body["error"]
+    assert str(config.PROJECT_DIR) not in json.dumps(body)
