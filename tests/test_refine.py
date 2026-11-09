@@ -475,3 +475,34 @@ def test_unsandwiched_short_turn_still_flagged_in_strict(sandbox):
                                    voiceprints={}, strict=True)
     assert stats["flagged"] == 1
     assert [s["flag"] for s in stats["spans"]] == ["short_low_confidence"]
+
+
+def _junk_in_big_cluster(monkeypatch, cap):
+    """The junk-repair fragment, but its cluster CJ also holds a 120 s turn:
+    a real unmatched person, not scattered echo."""
+    monkeypatch.setattr(refine.config, "REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", cap)
+
+    def _cent(c):
+        return np.array([c, np.sqrt(1.0 - c * c)])
+    turns = [{"start": 0.0, "end": 20.0, "cluster": "CA"},
+             {"start": 21.0, "end": 21.4, "cluster": "CJ"},
+             {"start": 23.0, "end": 43.0, "cluster": "CB"},
+             {"start": 50.0, "end": 170.0, "cluster": "CJ"}]
+    return refine.refine_turns(
+        turns, [None, TURN_EMB, None, None], {"CA": "Alice", "CB": "Bob", "CJ": None},
+        voiceprints={"Alice": _vp(0.40), "Bob": _vp(0.10)},
+        cluster_centroids={"CA": _cent(0.50), "CB": _cent(0.10)}, strict=False)
+
+
+def test_junk_repair_skips_turns_of_a_large_cluster(sandbox, monkeypatch):
+    """S2 shape: junk repair moved ~2000 s of unmatched 1239-3438 s clusters
+    into one enrolled name. A cluster with over 100 s of talk keeps its turns."""
+    merged, stats = _junk_in_big_cluster(monkeypatch, 100.0)
+    assert stats["reassigned"] == 0
+    assert merged[1]["speaker"] == "CJ"
+
+
+def test_junk_repair_cluster_cap_off_restores_old_behavior(sandbox, monkeypatch):
+    merged, stats = _junk_in_big_cluster(monkeypatch, 1e9)
+    assert stats["reassigned"] == 1
+    assert merged[0]["speaker"] == "Alice" and merged[0]["end"] == 21.4

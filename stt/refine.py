@@ -247,10 +247,17 @@ def refine_turns(turns, turn_embeddings, cluster_names, voiceprints,
             cv = cluster_centroids.get(c)
             if nm and cv is not None:
                 cent_by_name.setdefault(nm, []).append(cv)
+        cluster_talk = {}
+        for t in turns:
+            cluster_talk[t["cluster"]] = cluster_talk.get(t["cluster"], 0.0) + (t["end"] - t["start"])
         for i, t in enumerate(turns):
             if not cent_by_name:
                 break
             if out[i]["speaker"] in voiceprints:
+                continue
+            # a fragment cluster is small; a cluster with this much talk is a
+            # real (un-enrolled or unmatched) person, not scattered echo
+            if cluster_talk.get(t["cluster"], 0.0) > config.REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS:
                 continue
             e = turn_embeddings[i]
             if not _usable(e):
