@@ -349,3 +349,17 @@ def test_queue_deletes_need_a_real_true_too(running_server):
         st, out = _post(running_server, route, {**body, "confirm": "false"})
         assert (st, out) == (400, {"error": "'confirm' must be true or false"})
     assert (src / "take one.m4a").exists()
+
+
+def test_the_insert_route_refuses_a_time_outside_the_recording(running_server):
+    _make_meeting(B)                # 21 s long
+    st, out = _post(running_server, "/api/review",
+                    {"base": B, "action": "insert", "start": 9999, "end": 10001,
+                     "speaker": "SPEAKER_00", "text": "way past end"})
+    assert st == 200 and out == {
+        "ok": False,
+        "error": "that time is outside the recording, which runs 00:00 to 00:21"}
+    st, out = _raw(running_server, "POST", "/api/review",
+                   b'{"base": "%s", "action": "insert", "start": NaN, "end": 2,'
+                   b' "speaker": "SPEAKER_00", "text": "x"}' % B.encode())
+    assert (st, out) == (400, {"error": "the request body is not valid JSON"})
