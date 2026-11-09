@@ -26,6 +26,35 @@ def test_txt_marks_fragile_segments(sandbox):
     assert not (sandbox / "t.txt.tmp").exists()  # atomic write cleaned up
 
 
+def test_a_header_under_a_minute_gives_seconds(sandbox):
+    """round(2 / 60, 1) printed '0.0 min' for a 2 s clip and '0.1 min' for
+    5 s. Under a minute the header gives whole seconds, and both header
+    readers take that form."""
+    from stt import summarize
+    h = output.txt_header("2026-11-08 Clip", 2.4, [])
+    assert h == "2026-11-08 Clip  |  2 sec  |  0 speaker(s)"
+    assert output.txt_header("x", 59.4, []).startswith("x  |  59 sec  |")
+    assert output.txt_header("x", 59.6, []).startswith("x  |  1.0 min  |")   # never '60 sec'
+    assert output.txt_header("x", 60.0, []).startswith("x  |  1.0 min  |")
+    p = sandbox / "t.txt"
+    p.write_text(h + "\n\n[00:00] Voice 1: hi\n")
+    assert output.refresh_txt_header(p, "2026-11-09 Clip")
+    assert p.read_text().startswith("2026-11-09 Clip  |  2 sec  |  0 speaker(s)\n")
+    assert summarize._TXT_HEADER.sub("", p.read_text(), count=1) == "[00:00] Voice 1: hi\n"
+
+
+def test_a_transcript_with_no_speech_says_so(sandbox):
+    """A silent file wrote a header and an empty body, with no word on why."""
+    p = sandbox / "t.txt"
+    output.write_txt(p, [], header="h")
+    assert p.read_text() == "h\n\n\n\n(no speech detected)\n"
+    output.write_txt(p, [{"start": 0, "end": 1, "speaker": None, "text": "  "}], header="h")
+    assert p.read_text().endswith("(no speech detected)\n")
+    output.write_txt(p, [{"start": 0, "end": 1, "speaker": "S0", "name": "A",
+                          "text": "hi", "flags": []}], header="h")
+    assert "no speech" not in p.read_text()
+
+
 def test_txt_no_legend_when_all_clean(sandbox):
     p = sandbox / "t.txt"
     output.write_txt(p, [{"start": 0, "end": 1, "speaker": "S0", "name": "A",

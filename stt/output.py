@@ -69,8 +69,10 @@ def header_name(base: str, data: dict = None) -> str:
     return dates.stamp(title, iso) if iso else title
 
 
-# the header line's shape (txt_header): '<name>  |  N min  |  N speaker(s)...'
-_HEADER_LINE = re.compile(r"^([^\n]*?)(  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*)$")
+# the header line's shape (txt_header): '<name>  |  N min  |  N speaker(s)...',
+# with 'N sec' for a recording under a minute
+_HEADER_LINE = re.compile(r"^([^\n]*?)(  \|  [\d.]+ (?:min|sec)  \|  \d+ speaker\(s\)[^\n]*)$")
+NO_SPEECH_LINE = "(no speech detected)"
 
 
 def refresh_txt_header(path, name: str) -> bool:
@@ -96,7 +98,10 @@ def txt_header(source_file, duration_sec, speakers, strict=False,
     regenerate the .txt and must agree). `source_file` is what the line
     opens with: callers pass header_name(), the meeting's date and title."""
     named = [s["name"] for s in speakers if s.get("name")]
-    h = (f"{source_file}  |  {round((duration_sec or 0) / 60, 1)} min  |  "
+    # under a minute, whole seconds: '0.0 min' said nothing about a 2 s clip
+    secs = float(duration_sec or 0)
+    length = f"{round(secs)} sec" if round(secs) < 60 else f"{round(secs / 60, 1)} min"
+    h = (f"{source_file}  |  {length}  |  "
          f"{len(speakers)} speaker(s)")
     if named:
         h += "  |  identified: " + ", ".join(named)
@@ -136,6 +141,9 @@ def write_txt(path, segments, header=None):
             mark = " [*]"
             any_flag = True
         lines.append(f"[{_fmt_ts(seg['start'])}] {who}{mark}: {text}")
+    if len(lines) == (2 if header else 0):
+        # nothing was said: a header over an empty body gave no reason
+        lines.append(NO_SPEECH_LINE)
     if any_flag:
         lines.append("")
         lines.append("[*] = uncertain attribution (overlapping/very short speech; "

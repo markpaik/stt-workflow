@@ -413,7 +413,7 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
 # the .txt header line (output.txt_header): '<source file>  |  N min  |  N
 # speaker(s) ...'. It leads with the SOURCE FILE NAME, which the model copied
 # into titles, and a Voice Memos name can be a street address.
-_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*\n+")
+_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ (?:min|sec)  \|  \d+ speaker\(s\)[^\n]*\n+")
 
 
 def _model_text(base: str) -> str:
