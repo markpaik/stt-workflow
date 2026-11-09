@@ -349,3 +349,46 @@ def test_redo_of_an_unreadable_meeting_json_fails_private(sandbox, monkeypatch, 
     with pytest.raises(_Stop):
         pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
     assert seen["strict"] is True
+
+
+@pytest.mark.parametrize("stored", ["[1, 2]", '"text"', "7", "null"])
+def test_redo_of_a_meeting_json_that_is_not_an_object(sandbox, monkeypatch, stored):
+    """A meeting json that parses to a list, a string or a number holds no
+    meeting. A Redo treats it like an unreadable json: it runs, stays
+    local (strict), and writes a fresh transcript. It never stops on an
+    AttributeError from the channel, date, owner or carry-forward reads."""
+    import json
+    monkeypatch.setattr(config, "STRICT", False)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    seen = {}
+
+    def _asr(strict=False):
+        seen["strict"] = strict
+        return _fake_asr()
+    monkeypatch.setattr(pipeline, "_load_asr", _asr)
+    base = "2026-01-05 Mtg"
+    config.meeting_dir(base, config.MEETINGS_DIR).mkdir(parents=True, exist_ok=True)
+    src = config.meeting_file(base, ".m4a", config.MEETINGS_DIR)
+    src.write_bytes(b"x")
+    jp = config.meeting_file(base, ".json", config.MEETINGS_DIR)
+    jp.write_text(stored)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert seen["strict"] is True
+    assert res["base"] == base
+    d = json.loads(jp.read_text())
+    assert isinstance(d, dict) and d["source_file"] == src.name and d["strict"] is True
+
+
+@pytest.mark.parametrize("bad", [[1, 2], "mic_left_system_right", 3])
+def test_resolve_channel_ignores_a_non_object(sandbox, bad, tmp_path):
+    """input_opts or a sidecar that is not an object has no layout."""
+    import json
+    src = tmp_path / "a.m4a"
+    src.write_bytes(b"x")
+    side = tmp_path / "a.opts.json"
+    side.write_text(json.dumps(bad))
+    stored = tmp_path / "a.json"
+    stored.write_text(json.dumps(bad))
+    assert pipeline._resolve_channel(src, stored, bad) == (None, None)

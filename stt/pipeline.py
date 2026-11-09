@@ -59,7 +59,8 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     from . import provenance
     if existing_json is not None and existing_json.exists():
         try:
-            kept = _json.loads(existing_json.read_text()).get("date")
+            d = _json.loads(existing_json.read_text())
+            kept = d.get("date") if isinstance(d, dict) else None
             if kept:
                 return kept
         except (OSError, ValueError):
@@ -173,7 +174,7 @@ def _owns_meeting(base: str, src: Path, dest_dir) -> bool:
         d = _json.loads(config.meeting_file(base, ".json", dest_dir).read_text())
     except (OSError, ValueError):
         return False
-    if d.get("source_file") != src.name:
+    if not isinstance(d, dict) or d.get("source_file") != src.name:
         return False
     sm = d.get("source_mtime")
     if sm is None:
@@ -272,7 +273,9 @@ def _resolve_channel(src: Path, existing_json: Path, input_opts):
     import json as _json
 
     def _pick(d):
-        return (d or {}).get("channel_layout"), (d or {}).get("mic_speaker")
+        # a json that parses to a list, a string or a number holds no layout
+        d = d if isinstance(d, dict) else {}
+        return d.get("channel_layout"), d.get("mic_speaker")
 
     cl, ms = _pick(input_opts)
     if cl:
@@ -522,6 +525,10 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         try:
             import json as _json
             prev = _json.loads(json_path.read_text())
+            if not isinstance(prev, dict):
+                # a json that parses to a list or a number holds no meeting:
+                # the Redo treats it like one that cannot be read
+                raise ValueError("the meeting json is not an object")
             category = prev.get("category")
             reviewed = prev.get("reviewed", True)  # an existing meeting stays put
             # a Redo re-transcribes the SAME meeting: it keeps its id, or every
@@ -529,7 +536,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # would be orphaned by a reprocess
             meeting_id = prev.get("meeting_id") or meeting_id
         except (OSError, ValueError):
-            pass
+            prev = None
         meta = {
             # immutable identity: minted once, never rewritten, and FIRST in
             # the file so config.id_of finds it in a bounded read of a
