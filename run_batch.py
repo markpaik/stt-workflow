@@ -646,6 +646,55 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "diarizer": res.get("diarizer")}
 
 
+def _descendants(pid: int) -> list:
+    """Every live descendant of `pid` (children, their children, ...), from
+    one pass over the process table. Empty when ps cannot run."""
+    try:
+        out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids = {}
+    for ln in out.splitlines():
+        try:
+            child, parent = (int(x) for x in ln.split())
+        except ValueError:
+            continue
+        kids.setdefault(parent, []).append(child)
+    found, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            if c not in found:
+                found.append(c)
+                todo.append(c)
+    return found
+
+
+def _stop_own_processes():
+    """SIGTERM every process this batch started (the --parallel workers,
+    ffmpeg, the speakrs helper), so none survives as a multi-GB orphan.
+
+    When the batch leads its process group (launchd starts it so), the
+    whole group goes, ourselves included. When it does NOT lead it, the
+    group belongs to whoever started it: a shell or script that ran the
+    batch as a background job, or caffeinate for a panel run. A group kill
+    then also ended that caller, so only our own descendants are signalled,
+    and the caller sees the batch exit."""
+    me = os.getpid()
+    try:
+        pgid = os.getpgid(0)
+    except OSError:
+        pgid = None
+    if pgid == me:
+        os.killpg(pgid, signal.SIGTERM)  # includes ourselves
+        return
+    for pid in _descendants(me):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _trace(e):
     """Print the traceback of a failed file, except for a source ffmpeg
     cannot read: its one-line reason (audio.UnreadableAudio) says it all."""
@@ -721,8 +770,9 @@ def main():
     claimed_job = None
 
     # graceful stop: abandon in-flight work safely and record a clean status.
-    # CRITICAL: take the whole process group down with us — --parallel workers
-    # are separate processes that would otherwise survive as multi-GB orphans.
+    # CRITICAL: take every process we started down with us — --parallel
+    # workers are separate processes that would otherwise survive as multi-GB
+    # orphans — but never the shell that started us (_stop_own_processes).
     def _terminate(signum, frame):
         print("Stop requested — aborting current file(s); originals preserved.",
               flush=True)
@@ -731,7 +781,7 @@ def main():
         status.end_run()
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         try:
-            os.killpg(os.getpgid(0), signal.SIGTERM)  # includes ourselves
+            _stop_own_processes()
         except (ProcessLookupError, PermissionError):
             pass
         os._exit(130)
