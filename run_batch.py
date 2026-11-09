@@ -801,6 +801,14 @@ def main():
         if not args.force and manifest.is_processed(m, src.name, mtime):
             skipped += 1
             continue
+        # a file that keeps failing is set aside until it changes
+        # (manifest.record_failure). Naming it (Retry, --files) or --force
+        # still runs it.
+        if wanted is None and not args.force and manifest.is_parked(m, src.name, src):
+            print(f"   set aside after failing, skipping: {src.name} (it runs again "
+                  "once the file changes, or on Retry)", flush=True)
+            skipped += 1
+            continue
         todo.append(src)
 
     # shortest first: a short recording never waits behind multi-hour board
@@ -839,6 +847,7 @@ def main():
         return base_opts
 
     processed = failed = 0
+    started = {}    # name -> the source path, for every file this run started
     succeeded = []  # keys of files that fully processed (for auto-summary)
     failed_names = set()  # files that failed THIS run — never retried in rescan
     _overridden_holds = set()   # parks the caller overrode by naming the file
@@ -903,6 +912,7 @@ def main():
             status.finish_file(res["key"], False, "failed")
             failed_names.add(res["key"])
             failed += 1
+            note_failure(res["key"], "failed")
 
     queue = list(todo)       # files still to start, re-sorted before every pick
     in_flight = set()        # names started and not yet finished (--parallel)
@@ -943,6 +953,8 @@ def main():
             try:
                 if manifest.is_processed(cur, src.name, src.stat().st_mtime):
                     continue
+                if manifest.is_parked(cur, src.name, src):
+                    continue    # set aside after failing: an automatic sweep skips it
             except OSError:
                 continue
             out.append(src)
@@ -971,6 +983,7 @@ def main():
             if hold_skips(src):
                 announce_hold(src.name)
                 continue
+            started[src.name] = src
             return src
 
     def run_one_at_a_time():
@@ -1064,6 +1077,21 @@ def main():
         failed_names.add(name)
         print(f"   FAILED: {name}: {e}  (original preserved)", file=sys.stderr, flush=True)
         status.finish_file(name, False, str(e))
+        note_failure(name, str(e), unreadable=isinstance(e, audio.UnreadableAudio))
+
+    def note_failure(name, why, unreadable=False):
+        """Count the failure against the unchanged file, and say so when it
+        sets the file aside. Never fails the run."""
+        src = started.get(name)
+        if src is None:
+            return
+        try:
+            rec = manifest.record_failure(name, src, why, unreadable=unreadable)
+        except Exception:
+            return
+        if rec.get("parked"):
+            print(f"   set aside: automatic runs skip {name} until the file changes "
+                  "(Retry runs it now)", file=sys.stderr, flush=True)
 
     if args.parallel > 1:
         run_in_parallel()

@@ -307,6 +307,40 @@ def test_failed_state_for_a_still_queued_source(sandbox):
     assert "watched folder" in r["retry_note"]
 
 
+def test_a_parked_source_says_it_is_set_aside(sandbox):
+    """A source the batch set aside after failing does not re-run on the
+    next batch: the note says what does run it."""
+    p = _source("Corrupt Clip.wav")
+    manifest.record_failure(p.name, p, "ffmpeg could not decode", unreadable=True)
+    _history({"name": p.name, "ok": False,
+              "summary": "ffmpeg could not decode Corrupt Clip.wav: x",
+              "at": "2026-07-09T02:41:55"})
+    r = _row(srv.gather_state(), id="src:Corrupt Clip.wav")
+    assert r["state"] == "failed" and r.get("parked") is True
+    assert "set aside" in r["retry_note"] and "Retry" in r["retry_note"]
+    assert "next batch" not in r["retry_note"]
+
+
+def test_a_dismissed_parked_source_never_reads_as_waiting(sandbox):
+    """Dismiss hides a parked failure. The file must not fall through to
+    "waiting": no automatic run will pick it."""
+    p = _source("Corrupt Clip.wav")
+    manifest.record_failure(p.name, p, "x", unreadable=True)
+    _history({"name": p.name, "ok": False, "summary": "x",
+              "at": "2026-07-09T02:41:55"})
+    assert srv.dismiss_failure(p.name) is True
+    st = srv.gather_state()
+    assert not [r for r in st["timeline"] if r.get("id") == "src:Corrupt Clip.wav"]
+
+
+def test_the_menu_bar_does_not_count_a_parked_source_as_queued(sandbox):
+    from gui import menubar
+    p = _source("Corrupt Clip.wav")
+    _source("Fine.m4a")
+    manifest.record_failure(p.name, p, "x", unreadable=True)
+    assert menubar.gather()["queued"] == ["Fine.m4a"]
+
+
 def test_a_recovered_source_is_not_failed(sandbox):
     """Most-recent result wins: a source that failed once then succeeded must
     not linger as failed (mirrors status.history's newest-wins merge)."""

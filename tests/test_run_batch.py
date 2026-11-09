@@ -1322,3 +1322,50 @@ def test_a_corrupt_source_fails_with_ffmpegs_reason_and_no_traceback(sandbox, mo
     assert str(config.ICLOUD_DIR) not in err
     row = status.read()["recent"][0]
     assert row["name"] == "Corrupt Clip.wav" and row["summary"] == want
+
+
+def _history(name):
+    import json as _json
+
+    from stt import status
+    try:
+        rows = [_json.loads(x) for x in status.HISTORY_LOG.read_text().splitlines()]
+    except OSError:
+        return []
+    return [r for r in rows if r.get("name") == name]
+
+
+def test_a_corrupt_source_is_set_aside_after_it_fails(sandbox, monkeypatch, capsys):
+    """A file ffmpeg cannot read failed, and added a history line, on every
+    automatic run. It is now set aside after its first failure. Retry (the
+    file named by --files) still runs it, and a changed file runs again."""
+    import os as _os
+
+    from stt import config
+    bad = config.ICLOUD_DIR / "Corrupt Clip.wav"
+    bad.write_bytes(b"garbage")
+    assert _run_main(monkeypatch) == 1
+    assert _run_main(monkeypatch) == 0
+    assert _run_main(monkeypatch) == 0
+    assert len(_history(bad.name)) == 1
+    assert "set aside" in capsys.readouterr().out
+    assert _run_main(monkeypatch, "--files", bad.name) == 1   # Retry runs it
+    assert len(_history(bad.name)) == 2
+    bad.write_bytes(b"garbage, re-exported")
+    _os.utime(bad, (bad.stat().st_mtime + 60,) * 2)
+    assert _run_main(monkeypatch) == 1                       # changed: runs again
+    assert len(_history(bad.name)) == 3
+
+
+def test_a_file_that_keeps_failing_is_set_aside_after_three_runs(sandbox, monkeypatch):
+    from stt import config, manifest
+    (config.ICLOUD_DIR / "flaky.m4a").write_bytes(b"\x00" * 64)
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        seen.append(src_str)
+        raise RuntimeError("the model crashed")
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    for _ in range(manifest.FAIL_PARK_AFTER + 2):
+        _run_main(monkeypatch)
+    assert len(seen) == manifest.FAIL_PARK_AFTER

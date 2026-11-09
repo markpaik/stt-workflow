@@ -84,7 +84,8 @@ def gather():
             for p in sorted(folder.iterdir()):
                 if (config.is_source_audio(p) and p.name not in active
                         and p.name not in queued
-                        and not manifest.is_processed(m, p.name, p.stat().st_mtime)):
+                        and not manifest.is_processed(m, p.name, p.stat().st_mtime)
+                        and not manifest.is_parked(m, p.name, p)):
                     queued.append(p.name)
         except Exception:
             pass

@@ -895,7 +895,8 @@ def _run_order(queue, pending, sweep):
         if not sweep and f["name"] in at:
             return (0, at[f["name"]], by_length)
         return (1, 0, by_length)
-    waiting = [f for f in queue if not f.get("processed") and not f.get("held")]
+    waiting = [f for f in queue if not f.get("processed") and not f.get("held")
+               and not f.get("parked")]
     return {f["name"]: i for i, f in enumerate(sorted(waiting, key=key))}
 
 
@@ -1024,7 +1025,15 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
         elif name in failed_map:
             row.update({"state": "failed", "error": failed_map[name],
                         "retry_note": "still in the watched folder — it re-runs on the next batch"})
+            if f.get("parked"):
+                row.update({"parked": True,
+                            "retry_note": "set aside after failing — automatic runs skip it "
+                                          "until the file changes; Retry runs it now"})
             failed_entries.append(row)
+        elif f.get("parked"):
+            # a set-aside failure the user dismissed: no automatic run picks
+            # it, so it must not read as waiting
+            continue
         else:
             row["state"] = "waiting"
             if order and name in order:
@@ -1283,7 +1292,9 @@ def _queue_and_dupes():
                               # the length the batch orders its picks by
                               # (shortest first): the run order below
                               "dur_sec": dur,
-                              "held": p.name in _held, "est_detail": est_detail})
+                              "held": p.name in _held, "est_detail": est_detail,
+                              # set aside after failing: automatic runs skip it
+                              "parked": (not done) and manifest.is_parked(m, p.name, p)})
                 if not done:
                     _qpaths[p.name] = p    # for the duplicate check below
     except Exception:
