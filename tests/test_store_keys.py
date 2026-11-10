@@ -274,6 +274,22 @@ def test_the_backfill_undo_removes_only_what_it_wrote(store):
         assert new == old, b
 
 
+def test_a_torn_last_journal_line_never_stops_the_undo(store, capsys):
+    """A crash inside one journal write leaves a torn last line. entries()
+    called json.loads on it, so every undo of the run failed with a
+    JSONDecodeError and restored nothing, not even the whole entries
+    before it. The line is skipped now, as tools/iso_rename.py does."""
+    before = {b: _load(b) for b in config.meeting_bases()}
+    r = backfill_keys.apply()
+    jp = store / "migration" / f"{r['run']}.jsonl"
+    with open(jp, "a") as fh:
+        fh.write('[1, 2]\n{"run": "' + r["run"] + '", "mee')
+    assert backfill_keys.main(["--undo", r["run"], "--apply"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+    for b, old in before.items():
+        assert _load(b) == old, b
+
+
 def test_the_backfill_undo_by_one_field(store):
     r = backfill_keys.apply()
     backfill_keys.undo(r["run"], fields=["audio_fp"], dry_run=False)

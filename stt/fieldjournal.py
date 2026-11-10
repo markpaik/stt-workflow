@@ -102,15 +102,28 @@ def journal_path(run_id: str, journal_dir=None) -> Path:
 
 
 def entries(run_id: str, journal_dir=None) -> list:
-    """The journal of one run. NoSuchRun when there is none."""
+    """The journal of one run. NoSuchRun when there is none.
+
+    A line that is not a JSON object is skipped. A crash inside one write
+    leaves a torn last line, and that entry's change was never made: the
+    journal line is written before the json it describes. A torn line made
+    every undo of the run fail with a traceback, and nothing was restored,
+    even for the whole entries before it. tools/iso_rename.py and
+    tools/retitle_all.py skip such a line the same way."""
     try:
         text = journal_path(run_id, journal_dir).read_text()
     except FileNotFoundError:
         raise NoSuchRun(f"no such run: {run_id}") from None
     out = []
     for ln in text.splitlines():
-        if ln.strip():
-            out.append(json.loads(ln))
+        if not ln.strip():
+            continue
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            out.append(e)
     return out
 
 
