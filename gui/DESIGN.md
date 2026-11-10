@@ -116,8 +116,9 @@ reported stages: `Downloading`, `Preparing`, `Transcribing`, `Speakers`,
 ## Pages
 
 **Home.** Running now (active rows with progress, then one line for the
-waiting files, shortest first). Needs attention (recorder stalls, failures,
-duplicates) when there is any. Needs you, the computed list from
+waiting files, shortest first). Needs attention (recorder stalls, a failed
+last recording, failures, duplicates) when there is any. A failed recording
+stays there until the next capture starts, as in the menu bar. Needs you, the computed list from
 `/api/state` (unified plan row 10): a needs-title card with the title field
 prefilled and Keep title, a voice card with Name (opens the voice sheet on
 that voice, with its meeting as context), a no-speech card with Archive, and

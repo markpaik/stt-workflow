@@ -1114,6 +1114,14 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                      "detail": "no audio is being captured — check microphone access",
                      "target": f"rec:{Path(rec.get('caf', 'recording')).stem or 'recording'}",
                      "count": 1})
+    # the last recording FAILED ("captured NO audio ..."): the classic page
+    # showed it with Fix permissions. It stays until the next capture
+    # starts, as in the menu bar.
+    note = status.recorder_note()
+    if isinstance(note, dict) and note.get("ok") is False:
+        tray.append({"kind": "recorder_note", "title": "Last recording",
+                     "detail": str(note.get("text") or "the recording failed"),
+                     "target": f"note:{note.get('at') or ''}", "count": 1})
     for row in failed_entries:
         # `gone` rides the tray entry too: the timeline row uses it to swap
         # Retry for a dismiss, and a tray line that kept offering Retry posted

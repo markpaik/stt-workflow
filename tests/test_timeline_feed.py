@@ -540,6 +540,22 @@ def test_tray_ranks_stall_failed_unknown(sandbox, monkeypatch, tmp_path):
     assert kinds == ["recorder_stall", "failed", "unknown_voice"]
 
 
+def test_a_failed_recording_note_is_a_tray_item_until_the_next_capture(sandbox):
+    """The classic page showed a failed recording ("captured NO audio")
+    with Fix permissions. Its removal left the note in /api/state with no
+    reader, so only the menu bar showed it. A success expires on its own
+    and adds no entry."""
+    text = ("The recording captured NO audio. Check microphone access "
+            "in System Settings.")
+    status.set_recorder_note(False, text)
+    t = [x for x in srv.gather_state()["tray"] if x["kind"] == "recorder_note"]
+    assert len(t) == 1 and t[0]["detail"] == text and t[0]["target"].startswith("note:")
+    status.set_recorder_note(True, "Saved Recording 1814.m4a")
+    assert not [x for x in srv.gather_state()["tray"] if x["kind"] == "recorder_note"]
+    status.clear_recorder_note()
+    assert srv.gather_state()["tray"] == []
+
+
 def test_tray_failed_carries_error_and_target(sandbox):
     _history({"name": "Broken.mp4", "ok": False,
               "summary": "moov atom not found", "at": "2026-07-09T02:41:55"})

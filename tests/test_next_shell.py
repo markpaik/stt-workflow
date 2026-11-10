@@ -810,3 +810,23 @@ console.log(JSON.stringify({html:speakersView()}));
     assert ".rail-slot{display:block;width:32px;flex:none}" in hover
     assert re.search(r"\.icon-btn\{[^}]*width:32px", css)
     assert len(ends) == 3
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_failed_recording_shows_under_needs_attention_with_the_reset():
+    """The classic page was the only display of a failed recording in the
+    panel. Home and Activity now list it under Needs attention, and a
+    text that names the microphone or audio offers Reset permission."""
+    out = _run_node("""
+S={meetings:[{base:'m1',title:'Weekly Sync',date:'2026-10-01',minutes:9,named:[],ask_clusters:{}}],
+ needs_you:[],timeline:[],queue:[],recent:[],queued_jobs:[],
+ tray:[{kind:'recorder_note',title:'Last recording',detail:'The recording captured NO audio.',target:'note:x',count:1},
+       {kind:'unknown_voice',title:'U001',detail:'',target:'U001',count:1}]};
+const home=homeView(),act=activityView();
+S.tray[0].detail='Could not start: the helper is missing';
+const other=activityView();
+console.log(JSON.stringify({home:home.includes('The recording captured NO audio.'),
+ n:urgent().length,reset:act.includes('data-act="rec-fix"'),
+ noReset:!other.includes('data-act="rec-fix"'),text:other.includes('the helper is missing')}));
+""")
+    assert out == {"home": True, "n": 1, "reset": True, "noReset": True, "text": True}

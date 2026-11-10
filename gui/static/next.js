@@ -85,7 +85,9 @@ const activeRows=()=>((S&&S.timeline)||[]).filter(r=>r.state==='processing'||r.s
 const waitingRows=()=>((S&&S.timeline)||[]).filter(r=>r.state==='waiting'||r.state==='held');
 const failedRows=()=>((S&&S.timeline)||[]).filter(r=>r.state==='failed');
 const needsYou=()=>(S&&S.needs_you)||[];
-const urgent=()=>((S&&S.tray)||[]).filter(t=>['recorder_stall','failed','dupe_files','dupe_meetings'].includes(t.kind));
+const urgent=()=>((S&&S.tray)||[]).filter(t=>['recorder_stall','recorder_note','failed','dupe_files','dupe_meetings'].includes(t.kind));
+// a recorder row whose text names the microphone or audio offers the permission reset
+const recFixable=t=>(t.kind==='recorder_stall'||t.kind==='recorder_note')&&/[Mm]icrophone|audio/.test(t.detail||'');
 
 /* --------------------------------------------------------------- frame ---- */
 const NAV=[['home','Home','home'],['recordings','Recordings','list'],['groups','Groups','groups'],['ask','Ask','ask'],['speakers','Speakers','voice']];
@@ -294,7 +296,9 @@ function activityView(){
  const attention=urg.length?`<section><div class="eyebrow">Needs attention <span class="n">${urg.length}</span></div><div class="stack">${urg.map(t=>{
    let a='';if(t.kind==='dupe_files'&&t.exact){const c=UI.confirm==='dupes-del';a=`<button class="btn ${c?'danger':'quiet'}" type="button" data-act="dupes-del">${c?`Confirm: delete ${t.exact} copies`:`Delete ${t.exact} exact copies`}</button>`;}
    if(t.kind==='dupe_meetings')a=`<button class="btn quiet" type="button" data-act="acttab" data-k="dupes">Review</button>`;
-   return `<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(t.title)}</div><div class="meta attn-t">${esc(t.detail||'')}</div>${errLine('dupes')}</div><div class="rail">${a}</div></div>`;}).join('')}</div></section>`:'';
+   if(recFixable(t))a=`<button class="btn quiet" type="button" data-act="rec-fix">Reset permission</button>`;
+   const e=t.kind.startsWith('recorder')?errLine('recfix'):errLine('dupes');
+   return `<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(t.title)}</div><div class="meta attn-t">${esc(t.detail||'')}</div>${e}</div><div class="rail">${a}</div></div>`;}).join('')}</div></section>`:'';
  const runSec=`<section><div class="eyebrow">Running now</div><div class="stack">${act.map(activeRowHTML).join('')||'<div class="none-line sub">Nothing is running.</div>'}</div></section>`;
  const jobSec=jobs.length?`<section><div class="eyebrow">Queued runs <span class="n">${jobs.length}</span></div><div class="stack">${jobs.map(j=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(j.label)}</div><div class="meta">${j.strict?'Strict · ':''}${j.verify?'Verify · ':''}Starts when the current run ends</div></div><div class="rail"><button class="btn plain" type="button" data-act="unqueue" data-at="${esc(j.at)}">Cancel</button></div></div>`).join('')}</div></section>`:'';
  const waitSec=`<section><div class="eyebrow">Waiting <span class="n">${wait.length||''}</span></div><div class="stack">${wait.map(waitingRowHTML).join('')||'<div class="none-line sub">No files are waiting.</div>'}</div></section>`;
