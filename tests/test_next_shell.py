@@ -262,6 +262,53 @@ def test_screen_names_for_routes_with_a_slash():
     assert next_screens._name("home") == "home"
 
 
+
+def _screens_run(monkeypatch, tmp_path, writes_png, probe):
+    """next_screens.main for one shot, with Chrome replaced: the fake
+    writes the PNG or not, and --dump-dom returns `probe` or a page with
+    no probe (Chrome's own error page)."""
+    import subprocess as sp
+    from tools import next_screens as n
+    monkeypatch.setattr(n, "ROUTES", ("home",))
+    monkeypatch.setattr(n, "WIDTHS", (700,))
+    monkeypatch.setattr(n, "THEMES", ("light",))
+    monkeypatch.setattr(n, "meeting_routes", lambda port: ())
+
+    def fake_run(cmd, **kw):
+        shot = [c for c in cmd if c.startswith("--screenshot=")]
+        if shot and writes_png:
+            Path(shot[0].split("=", 1)[1]).write_bytes(b"\x89PNG synthetic")
+        dom = (f"<body data-probe='{probe}'></body>".replace("'", '"')
+               if probe else "<body>This site can't be reached</body>")
+        return sp.CompletedProcess(cmd, 0, stdout=dom, stderr="")
+    monkeypatch.setattr(n.subprocess, "run", fake_run)
+    return n.main(["--port", "8899", "--out", str(tmp_path)])
+
+
+def test_screens_fail_when_the_panel_page_did_not_load(monkeypatch, tmp_path, capsys):
+    """With the panel down, Chrome shot its own error page and exited 0.
+    The probe was empty, the shot printed "ok" and the run returned 0, so
+    error pages could replace the README screenshots unnoticed."""
+    (tmp_path / "home-700-light.png").write_bytes(b"an old shot")
+    assert _screens_run(monkeypatch, tmp_path, writes_png=False, probe=None) == 1
+    out = capsys.readouterr()
+    assert "FAIL home-700-light.png" in out.out and "ok " not in out.out
+    assert "did not load the panel" in out.err
+    assert not (tmp_path / "home-700-light.png").exists(), "the old shot passed for new"
+    # a probe with no PNG is no shot either
+    assert _screens_run(monkeypatch, tmp_path, writes_png=False,
+                        probe='{&quot;sw&quot;: 700, &quot;iw&quot;: 700}') == 1
+
+
+def test_screens_pass_when_the_page_loaded(monkeypatch, tmp_path, capsys):
+    probe = '{&quot;sw&quot;: 700, &quot;iw&quot;: 700, &quot;route&quot;: &quot;home&quot;}'
+    assert _screens_run(monkeypatch, tmp_path, writes_png=True, probe=probe) == 0
+    assert capsys.readouterr().out.startswith("ok   home-700-light.png")
+    wide = probe.replace("&quot;sw&quot;: 700", "&quot;sw&quot;: 900")
+    assert _screens_run(monkeypatch, tmp_path, writes_png=True, probe=wide) == 1
+    assert "WIDE home-700-light.png" in capsys.readouterr().out
+
+
 # ------------------------------------------------------------------- fonts ---
 # The vendored UI face. Figtree (OFL) is served by the panel itself from
 # gui/static/fonts/, never a CDN, behind a strict basename allowlist.

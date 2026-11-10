@@ -40,6 +40,8 @@ THEMES = ("light", "dark")
 def shot(port, route, width, theme, out: Path, profile: Path, height=1000) -> Path:
     url = f"http://127.0.0.1:{port}/?theme={theme}#{route}"
     png = out / f"{_name(route)}-{width}-{theme}.png"
+    # a PNG left by an earlier run must not pass for this one
+    png.unlink(missing_ok=True)
     subprocess.run([CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
                     f"--user-data-dir={profile}", "--no-first-run",
                     *NO_KEYCHAIN,
@@ -93,21 +95,30 @@ def main(argv=None) -> int:
         print("refusing: that is the live panel's port", file=sys.stderr)
         return 2
     a.out.mkdir(parents=True, exist_ok=True)
-    bad = []
+    bad, failed = [], []
     with tempfile.TemporaryDirectory(prefix="next-shots-") as prof:
         for route in ROUTES + meeting_routes(a.port):
             for width in WIDTHS:
                 for theme in THEMES:
                     png = shot(a.port, route, width, theme, a.out, Path(prof))
                     m = overflow(a.port, route, width, theme, Path(prof))
-                    wide = m and m.get("sw", 0) > m.get("iw", width)
+                    # The probe is the only proof the panel's page loaded:
+                    # Chrome exits 0 on its own error page too. A shot with
+                    # no probe or no PNG printed "ok" and the run exited 0.
+                    if not m or "sw" not in m or not (png.exists() and png.stat().st_size):
+                        failed.append((route, width, theme))
+                        print(f"FAIL {png.name} the panel page did not load {m}")
+                        continue
+                    wide = m["sw"] > m.get("iw", width)
                     if wide:
                         bad.append((route, width, theme, m))
                     print(f"{'WIDE' if wide else 'ok  '} {png.name} {m}")
+    if failed:
+        print(f"\n{len(failed)} shot(s) did not load the panel. Is it running "
+              f"on port {a.port}?", file=sys.stderr)
     if bad:
         print(f"\n{len(bad)} shot(s) scroll sideways", file=sys.stderr)
-        return 1
-    return 0
+    return 1 if failed or bad else 0
 
 
 if __name__ == "__main__":
