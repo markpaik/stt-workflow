@@ -660,6 +660,12 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
                            mark_spans=mark.get("spans"), mark_embs=mark.get("embs"),
                            channel_mode=channel_mode if channel_layout else None,
                            mic_speaker=mic_speaker)
+        else:
+            # a Redo that saves no embeddings (no speech found, or run
+            # without diarization) must not leave the last run's caches:
+            # relabel would rebuild speaker turns from its old clusters
+            emb_path.unlink(missing_ok=True)
+            diar_path.unlink(missing_ok=True)
 
     return {
         "base": base, "txt": txt_path, "json": json_path, "emb": saved_emb,
