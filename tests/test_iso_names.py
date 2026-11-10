@@ -225,6 +225,24 @@ def test_a_long_typed_title_fits_a_folder_name(sandbox):
                 if f.kind == "name_mismatch" and f.subject.startswith("2026-07-04 会議")]
 
 
+def test_a_rename_leaves_no_orphan_lock(sandbox):
+    """The rename locked its destination by name, since the new name had no
+    id yet. The meeting locks by its id afterward, so 'doctor check' listed
+    the new name's lock file as registry_orphan_lock after every rename."""
+    from stt import registry_doctor
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly", mid="mid-1")
+    r = summarize.rename_meeting("2026-07-04 Weekly", "Plain Title")
+    assert r["base"] == "2026-07-04 Plain Title"
+    assert config.orphan_lock_files() == []
+    assert not [f for f in registry_doctor.check() if f.kind == "orphan_lock"]
+    locks = sorted(p.name for p in (config.meetings_dir() / ".locks").iterdir())
+    assert locks == ["mid-1.lock"]
+    # a meeting with no id yet still locks on its (new) name, and keeps it
+    _m("2026-07-05 Legacy", date="2026-07-05", title="Legacy")
+    r = summarize.rename_meeting("2026-07-05 Legacy", "Older")
+    assert config.orphan_lock_files() == []
+
+
 def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
     """The keep-the-number rule kept '(3)' even after the plain name was
     deleted, so a twin could never drop its number. The number now stays

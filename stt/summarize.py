@@ -1610,6 +1610,11 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 continue      # the meeting moved under us: re-plan and re-lock
             _write_json(j, d)
             renamed = _move_folder(base, want)
+        # the destination was locked by its NAME (it had no id yet). The
+        # meeting locks by its id from now on, so that file is dead, and so
+        # is a base-named lock left under the old name: the doctor listed
+        # them as orphans after every rename. Locks someone holds stay.
+        config.drop_meeting_locks([want, base])
         return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
                 "category": d.get("category"), "reviewed": d.get("reviewed"),
                 "title_state": d.get("title_state")}
