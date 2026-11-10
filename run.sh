@@ -13,8 +13,13 @@ export PYTHONPATH="$BASE"
 # as stt/config.py says: the checkout's file names the REAL library folders.
 # The rules are stt/envfile.py's: keys and values trimmed, one pair of
 # matching quotes around a value removed, a key that is not a shell name
-# skipped (export would abort the script under set -e).
+# skipped (export would abort the script under set -e). A variable already
+# set in the shell wins over the file, as in run_batch.py (os.environ.
+# setdefault): `STT_X=1 ./run.sh batch` ran with the file's value before,
+# while the same run through python used 1. Within the file a later line
+# still wins, so the check is against the keys this loop set, not $key.
 ENVDIR="${STT_PROJECT_DIR:-${STT_HOME:-$BASE}}"
+_from_file=" "
 _trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 _unquote() {
   local v; v="$(_trim "$1")"
@@ -30,6 +35,11 @@ if [ -f "$ENVDIR/stt.env" ]; then
     [ "${line#*=}" = "$line" ] && continue  # no '=' -> not an assignment
     key="$(_trim "${line%%=*}")"
     case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+    case "$_from_file" in
+      *" $key "*) ;;                                  # an earlier line set it
+      *) printenv "$key" >/dev/null && continue       # the shell set it: keep
+         _from_file="$_from_file$key " ;;
+    esac
     export "$key=$(_unquote "${line#*=}")"
   done < "$ENVDIR/stt.env"
 fi

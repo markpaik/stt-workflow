@@ -112,3 +112,36 @@ def test_run_sh_test_says_how_to_install_pytest(tmp_path):
     r = subprocess.run([str(script), "test"], capture_output=True, text=True, env=env)
     assert r.returncode == 1
     assert "requirements-dev.txt" in r.stderr and "ran-pytest" not in r.stdout
+
+
+def _env_echo_copy(tmp_path):
+    """run.sh beside a fake .venv python that prints three STT_ZZ_* values,
+    so the test needs no real interpreter."""
+    script = _bare_copy(tmp_path)
+    fake = tmp_path / ".venv" / "bin" / "python"
+    fake.parent.mkdir(parents=True)
+    fake.write_text("#!/bin/bash\n"
+                    "printf '%s|%s|%s' \"${STT_ZZ_A-unset}\" \"${STT_ZZ_B-unset}\""
+                    " \"${STT_ZZ_C-unset}\"\n")
+    fake.chmod(0o755)
+    return script
+
+
+def test_a_shell_variable_wins_over_stt_env_as_in_run_batch(tmp_path):
+    """run_batch.py loads stt.env with os.environ.setdefault, so a variable
+    set in the shell wins. run.sh exported every file line, so
+    `STT_X=shell ./run.sh batch` ran with the file's value. A later line in
+    the file still wins over an earlier one."""
+    script = _env_echo_copy(tmp_path)
+    (tmp_path / "stt.env").write_text(
+        "STT_ZZ_A=file\nSTT_ZZ_B=first\nSTT_ZZ_B=second\nSTT_ZZ_C=1\r\n")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("STT_HOME", "STT_PROJECT_DIR")
+           and not k.startswith("STT_ZZ_")}
+    env["STT_ZZ_A"] = "shell"
+    r = subprocess.run([str(script), "py"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "shell|second|1"
+    del env["STT_ZZ_A"]
+    r = subprocess.run([str(script), "py"], capture_output=True, text=True, env=env)
+    assert r.stdout == "file|second|1"
