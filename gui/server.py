@@ -3220,7 +3220,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "no such queued file"})
                     return
                 f = found[0]
-                if name in status.read().get("active", {}):
+                if name in status.active_now():
                     self._json({"ok": False,
                                 "error": "this file is being processed right now"})
                     return
@@ -3298,7 +3298,7 @@ class Handler(BaseHTTPRequestHandler):
                     # a run can start at any moment (another poll's kick), and a
                     # snapshot taken before the loop would happily delete a
                     # source mid-transcode
-                    if f["name"] in (status.read().get("active") or {}):
+                    if f["name"] in status.active_now():
                         _skip(f["name"], "it is being processed right now")
                         continue
                     # the matched meeting is re-checked too: a concurrent

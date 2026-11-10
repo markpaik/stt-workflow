@@ -185,14 +185,63 @@ def recording():
     return read().get("recording")
 
 
+def _exists(fn, ident) -> bool:
+    """False only when the system says no such process (or group) exists.
+    Anything it cannot tell (a bad id, a process of another user, a group
+    of zombies, which macOS answers with EPERM) counts as alive, so the
+    guards below keep refusing."""
+    try:
+        ident = int(ident)
+    except (TypeError, ValueError):
+        return True
+    if ident <= 0:
+        return True
+    try:
+        fn(ident, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        return True
+
+
+def _owner_gone(d) -> bool:
+    """True when status.json names the batch that wrote it and no process
+    of that batch is left: not its pid, and not its process group (a
+    --parallel worker can outlive a killed parent and still be writing).
+    No pid (an older file, or a stage set outside a run) is not proof the
+    owner is gone."""
+    pid = d.get("pid")
+    if not pid or _exists(os.kill, pid):
+        return False
+    pgid = d.get("pgid")
+    return not (pgid and _exists(os.killpg, pgid))
+
+
+def active_now() -> dict:
+    """The files a batch is processing right now: status.json's active
+    entries, or {} when the batch that wrote them is gone. Only end_run
+    clears them, so a batch killed by SIGKILL, a crash, a power loss or a
+    reboot left them behind. Every move of that meeting (archive, rename,
+    summarize) and the queue's delete of that file then refused with 'being
+    processed right now' until the next batch started, while the panel,
+    which checks the processes, showed nothing running."""
+    d = read()
+    act = d.get("active") or {}
+    if not isinstance(act, dict) or (act and _owner_gone(d)):
+        return {}
+    return act
+
+
 def meeting_active(base: str) -> bool:
     """Is the batch writing meeting `base` RIGHT NOW? Guards every folder move
     (rename/archive/delete) against racing a run. Active entries are keyed by
     SOURCE file name, but the meeting folder can be date-stamped ('LT Weekly
     Meeting' -> 'LT Weekly Meeting 06042026'), so the stem alone stopped
     matching new meetings — each entry also carries the resolved `base` the run
-    announced via set_stage."""
-    for k, v in read().get("active", {}).items():
+    announced via set_stage. Entries a dead batch left behind do not count
+    (active_now)."""
+    for k, v in active_now().items():
         if os.path.splitext(os.path.basename(k))[0] == base:
             return True
         if isinstance(v, dict) and v.get("base") == base:

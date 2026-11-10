@@ -605,6 +605,31 @@ def test_queue_delete_gates_confirm_membership_and_active(running_server):
     assert not (src / "Bad Take.opts.json").exists()  # sidecar went with it
 
 
+def test_queue_delete_is_not_refused_by_a_killed_batchs_entry(running_server):
+    """Only end_run clears status.json's active map: a batch killed by
+    SIGKILL left its entry, and the queue refused the delete as 'being
+    processed right now' until the next batch started."""
+    import json
+    import subprocess
+    import sys
+
+    from stt import config, status as st
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "Bad Take.m4a"
+    f.write_bytes(b"audio")
+    p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    p.wait()                                   # exited and reaped: nobody owns the entry
+    d = st.read()
+    d.update(running=True, pid=p.pid, pgid=p.pid,
+             active={"Bad Take.m4a": {"stage": "transcribing"}})
+    st.STATUS_PATH.write_text(json.dumps(d))
+    status, body = _post(running_server, "/api/queue_delete",
+                         {"name": "Bad Take.m4a", "confirm": True})
+    assert status == 200 and body["ok"], body
+    assert not f.exists()
+
+
 def test_queue_endpoints_are_origin_gated(running_server):
     status, _ = _get(running_server, "/api/queue_audio?name=x.m4a",
                      headers={"Origin": "https://evil.example.com"})

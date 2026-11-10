@@ -505,3 +505,65 @@ def test_the_summarizing_stage_counts_down_from_recent_summaries(sandbox):
         status.note_summary(10.0)
     assert status.summary_estimate() == 10.0
     assert len(status.read()["summary_secs"]) == status.SUMMARY_KEEP
+
+
+# ---- active entries a dead batch left behind ----
+
+def _dead_pid():
+    """The pid and group of a process that has exited and been reaped."""
+    import subprocess
+    import sys
+    p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    p.wait()
+    return p.pid
+
+
+def _leave_active(pid, pgid, base="Weekly Sync 05012026"):
+    import json
+    d = status.read()
+    d.update(running=True, pid=pid, pgid=pgid,
+             active={f"{base}.m4a": {"stage": "transcribing", "base": base}})
+    status.STATUS_PATH.write_text(json.dumps(d))
+    return base
+
+
+def test_a_killed_batchs_active_entries_lock_nothing(sandbox):
+    """Only end_run clears active, so a SIGKILL, a crash or a reboot left
+    the entry behind and archive refused the meeting 'being processed right
+    now' until the next batch started."""
+    import json
+
+    from conftest import mfile
+    from stt import archive, config
+    gone = _dead_pid()
+    base = _leave_active(gone, gone)
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": f"{base}.m4a", "duration_sec": 600.0, "date": "2026-05-01",
+         "speakers": [], "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    assert status.active_now() == {} and not status.meeting_active(base)
+    r = archive.archive_meeting(base)
+    assert r["ok"], r
+    assert base not in config.meeting_bases()
+
+
+def test_a_live_batch_or_a_surviving_worker_still_locks_its_meeting(sandbox):
+    import os
+    gone = _dead_pid()
+    base = _leave_active(os.getpid(), gone)
+    assert status.meeting_active(base)                   # the batch itself is alive
+    base = _leave_active(gone, os.getpgid(0))
+    assert status.meeting_active(base)                   # a worker in its group is alive
+    assert status.active_now()
+
+
+def test_entries_with_no_owner_recorded_still_lock(sandbox):
+    """No pid (an older file, or set_stage outside a run) is no proof the
+    owner is gone: the guard keeps refusing."""
+    base = _leave_active(None, None)
+    assert status.meeting_active(base)
+    status.set_stage("Other.m4a", "transcribing", base="Other 05012026")
+    assert status.meeting_active("Other 05012026")
+    for bad in ("x", -1, 0):
+        base = _leave_active(bad, None)
+        assert status.meeting_active(base), bad
