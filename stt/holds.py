@@ -7,13 +7,15 @@ watch, nightly, login catch-up) skip it.
 
 An EXPLICIT request always wins: naming the file in a run (--files / the panel's
 "Run selected") processes it regardless, because that is you asking for it by
-name. The hold clears itself once the file is processed, so it can never leave a
-stale entry pinning a name forever.
+name. The hold clears itself once the file is processed, and an automatic sweep
+clears it once the file is gone from every watched folder (release_missing), so
+it can never leave a stale entry pinning a name forever.
 """
 import fcntl
 import json
 import os
 import threading
+from pathlib import Path
 
 from . import config
 
@@ -65,6 +67,42 @@ def hold(name: str) -> bool:
 
 def release(name: str) -> bool:
     return _mutate(lambda cur: (cur - {name}, name in cur))
+
+
+def release_missing(dirs) -> list:
+    """Release every hold whose file is in none of `dirs`, the watched
+    folders. Returns the released names, sorted.
+
+    A hold is a name, so a hold on a file binned outside the panel stayed,
+    and the next recording under that name started held and every sweep
+    skipped it. Nothing is released unless every folder answers: the first
+    one (the primary source) must list, and any other must list or be
+    missing. An unmounted drive or iCloud Drive turned off must never read
+    as "every held file was deleted"."""
+    cur = items()
+    if not cur:
+        return []
+    dirs = [Path(d) for d in dirs]
+    for i, d in enumerate(dirs):
+        try:
+            os.listdir(d)
+        except FileNotFoundError:
+            if i == 0:
+                return []
+        except OSError:
+            return []
+    if not dirs:
+        return []
+
+    def _gone(n):
+        return not any(os.path.lexists(d / n) for d in dirs)
+    if not any(_gone(n) for n in cur):
+        return []
+
+    def _f(now):
+        gone = sorted(n for n in now if _gone(n))
+        return now - set(gone), gone
+    return _mutate(_f)
 
 
 def toggle(name: str) -> bool:

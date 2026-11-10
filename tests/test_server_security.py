@@ -1580,6 +1580,29 @@ def test_deleting_a_queued_file_reports_the_twin_in_the_other_folder(running_ser
     assert not (rec / "Weekly Sync.m4a").exists()
 
 
+def test_deleting_the_last_queued_copy_releases_its_hold(running_server):
+    """A hold is a name. It stayed after the panel binned the file, so the
+    next recording under that name started held and every sweep skipped it.
+    A twin in the other folder keeps the hold: it takes the row's place."""
+    from stt import holds
+    src, rec = config.source_dir(), config.recordings_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
+    (src / "Weekly Sync.m4a").write_bytes(b"FIRST" + b"\x01" * 900)
+    (rec / "Weekly Sync.m4a").write_bytes(b"SECOND" + b"\x02" * 4000)
+    holds.hold("Weekly Sync.m4a")
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body.get("shadowed") is True
+    assert holds.is_held("Weekly Sync.m4a"), "the twin keeps the hold"
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert holds.items() == set()
+
+
 def test_the_sweep_spares_a_file_whose_meeting_dropped_its_audio(running_server):
     """R2: drop_audio removes a meeting's stored audio and keeps the transcript,
     but the manifest's recorded fingerprint goes on matching the source. The

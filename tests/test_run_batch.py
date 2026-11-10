@@ -800,6 +800,67 @@ def test_naming_a_held_file_overrides_the_park_and_clears_it(sandbox, monkeypatc
     assert holds.items() == set()
 
 
+def test_a_sweep_releases_the_hold_of_a_file_that_left_the_folders(sandbox, monkeypatch, capsys):
+    """A hold is a name. A held file binned in Finder left its name in
+    holds.json, and the next recording under that name started held and
+    every sweep skipped it. A dry run and a run of another --source leave
+    the hold alone: neither one says what the watched folders hold."""
+    from stt import config, holds
+    config.ICLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    (config.ICLOUD_DIR / "kept.m4a").write_bytes(b"\x00" * 64)
+    holds.hold("kept.m4a")
+    holds.hold("Weekly Sync 09012026.m4a")      # its file was binned in Finder
+    monkeypatch.setattr(run_batch, "process_one", lambda *a, **k: pytest.fail(
+        "a held file was processed"))
+
+    assert _run_main(monkeypatch, "--dry-run") == 0
+    assert holds.items() == {"kept.m4a", "Weekly Sync 09012026.m4a"}
+    other = config.PROJECT_DIR / "elsewhere"
+    other.mkdir()
+    monkeypatch.setattr(run_batch, "preflight_source", lambda *_: True)
+    import sys
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(other),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    import signal
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert holds.items() == {"kept.m4a", "Weekly Sync 09012026.m4a"}
+
+    assert _run_main(monkeypatch) == 0
+    assert holds.items() == {"kept.m4a"}
+    out = capsys.readouterr().out
+    assert "hold released: Weekly Sync 09012026.m4a" in out
+    assert "on hold, skipping: kept.m4a" in out
+
+
+def test_a_missing_or_unreadable_folder_releases_no_hold(sandbox):
+    """An unmounted drive or iCloud Drive turned off must never read as
+    "every held file was deleted": the drafts would all be transcribed."""
+    from stt import config, holds
+    holds.hold("Draft Memo.m4a")
+    root = config.PROJECT_DIR / "folders"
+    primary, extra = root / "primary", root / "extra"
+    assert holds.release_missing([primary, extra]) == []     # primary missing
+    primary.mkdir(parents=True)
+    extra.mkdir()
+    extra.chmod(0)
+    try:
+        assert holds.release_missing([primary, extra]) == []  # cannot list
+    finally:
+        extra.chmod(0o700)
+    (extra / "Draft Memo.m4a").write_bytes(b"\x00")
+    assert holds.release_missing([primary, extra]) == []     # still there
+    assert holds.items() == {"Draft Memo.m4a"}
+    (extra / "Draft Memo.m4a").unlink()
+    extra.rmdir()                                             # missing extra
+    assert holds.release_missing([primary, extra]) == ["Draft Memo.m4a"]
+    assert holds.items() == set()
+
+
 # ---------- the order the queue runs in: shortest first, re-picked per file ----------
 
 def _lengths(monkeypatch, secs):

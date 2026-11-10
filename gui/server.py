@@ -3243,6 +3243,12 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"ok": True, "freed_mb": mb}
                 if was_failed and dismiss_failure(f.name):
                     out["dismissed_failure"] = True
+                if len(found) == 1:
+                    # the last file under this name is gone, and its hold
+                    # goes with it: the next recording under the name is a
+                    # new file that nobody parked
+                    from stt import holds
+                    holds.release(f.name)
                 if len(found) > 1:
                     # the same name in the OTHER watched folder is a DIFFERENT
                     # recording. It takes this row's place immediately, and it

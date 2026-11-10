@@ -520,6 +520,14 @@ def iter_audio(folder: Path):
             yield p
 
 
+def _is_watched_source(source: Path) -> bool:
+    """True when `source` is the primary watched folder the panel lists."""
+    try:
+        return Path(source).resolve() == config.source_dir().resolve()
+    except OSError:
+        return False
+
+
 def iter_sources(source: Path):
     """Sweep the primary source folder AND the local recordings staging folder
     (the meeting recorder's output). Dot-prefixed in-progress captures are
@@ -944,6 +952,15 @@ def main():
             else:
                 print(f"   skip (not a file): {p}", file=sys.stderr)
     from stt import holds
+    # a hold on a file that left every watched folder (binned in Finder, moved
+    # away) ends here, before a later recording under the same name arrives
+    # and starts held. Only an automatic sweep of the real watched folders:
+    # another --source cannot say what the panel's folders hold.
+    if (wanted is None and not args.paths and not args.dry_run
+            and _is_watched_source(source)):
+        for n in holds.release_missing(config.source_dirs(source)):
+            print(f"   hold released: {n} (the file left the watched folders)",
+                  flush=True)
     held = holds.items()
     found = set()          # the --files names a source file carries
     for src in iter_sources(source):
