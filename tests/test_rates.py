@@ -283,3 +283,22 @@ def test_the_large_v3_turbo_alias_is_estimated_and_learned_as_turbo(sandbox):
     _env("STT_ASR_BACKEND=mlxwhisper\n")
     assert rates.current_asr_key() == "mlxwhisper:large-v3"
     assert rates.whisper_variant("large-v3") == "large-v3"
+
+
+def test_the_backend_setting_is_read_through_its_own_check(sandbox):
+    """pipeline._load_asr ignores case and spaces and runs Parakeet for a
+    typo. The raw value keyed 'MLXWhisper' (a Whisper run) at the 30x
+    default and filed a typo's Parakeet runs under the typo."""
+    _env("STT_ASR_BACKEND=mlxwhisper\n")
+    whisper = rates.stage_secs("transcribing", 3600, 1)
+    for raw, key in (("MLXWhisper", "mlxwhisper:large-v3"),
+                     (" mlxwhisper ", "mlxwhisper:large-v3"),
+                     ('"mlxwhisper"', "mlxwhisper:large-v3"),
+                     ("mlx-whisper", "parakeet"), ("whisperx", "parakeet"),
+                     ("", "parakeet"), ("CLOUD:Scribe", "cloud:scribe")):
+        _env(f"STT_ASR_BACKEND={raw}\n")
+        assert rates.current_asr_key() == key, raw
+    _env("STT_ASR_BACKEND=MLXWhisper\n")
+    assert rates.stage_secs("transcribing", 3600, 1) == whisper
+    _env("STT_ASR_BACKEND=mlx-whisper\n")
+    assert rates.stage_secs("transcribing", 3600, 1) == 3600 / config.EST_RATES["asr"]["parakeet"]

@@ -65,7 +65,11 @@ def whisper_variant(v) -> str:
 
 def current_asr_key() -> str:
     kv = config._env_file()
-    backend = kv.get("STT_ASR_BACKEND", "parakeet")
+    # the setting's own check, as pipeline._load_asr reads it: case and
+    # spaces are ignored and a typo runs Parakeet. The raw value ran Whisper
+    # for "MLXWhisper" but keyed it "MLXWhisper" (the 30x default, 120 s for
+    # an hour, not 857 s), and filed a typo's Parakeet runs under the typo.
+    backend, _ = config._asr_problem(kv.get("STT_ASR_BACKEND"))
     if backend == "mlxwhisper":
         return f"mlxwhisper:{whisper_variant(kv.get('STT_WHISPER_MLX_MODEL'))}"
     return backend
