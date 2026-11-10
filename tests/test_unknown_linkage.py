@@ -245,3 +245,44 @@ def test_a_new_meeting_still_cannot_link_to_a_drifted_stack(sandbox):
     out = unknowns.assign({"S0": b}, {"S0": None}, "M3", stats={"S0": GOOD_STATS})
     assert out["S0"] == "U051"
     assert unknowns.load()["speakers"]["U050"]["meetings"] == ["M1", "M2"]
+
+
+# ---------- a damaged registry ----------
+
+@pytest.mark.parametrize("damage", ["{ not json", "[]", "null"])
+def test_a_damaged_registry_is_never_written_over(sandbox, capsys, damage):
+    """load() reads a damaged unknowns.json as empty. assign() ran on that
+    empty registry, minted U001 again, saved the new voice over the old
+    U001.npy and saved a one-voice registry over the damaged file. Every
+    global number restarted and the old samples were gone. A list or a null
+    at the top raised AttributeError in load(). Now nothing writes at all:
+    the clusters keep their meeting-local labels until the file is fixed."""
+    e = _basis(seed=41)
+    assert unknowns.assign({"S0": e[0]}, {"S0": None}, "M1",
+                           stats={"S0": GOOD_STATS}) == {"S0": "U001"}
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    old = npy.read_bytes()
+    reg_path = config.VOICEPRINTS_DIR / "unknowns.json"
+    reg_path.write_text(damage)
+
+    assert unknowns.load() == {"next": 1, "speakers": {}}
+    assert "corrupt" in capsys.readouterr().err
+    assert unknowns.assign({"S0": e[1]}, {"S0": None}, "M2",
+                           stats={"S0": GOOD_STATS}) == {}
+    assert not unknowns.promote("U001", "Zed Quill")
+    assert not unknowns.merge("U001", "U002")
+    assert not unknowns.archive("U001")
+    assert not unknowns.restore("U001")
+    assert not unknowns.drop("U001")
+    assert unknowns.rename_meeting_refs("M1", "M1 renamed") == 0
+    assert unknowns.forget_meeting_refs("M1") == 0
+    with pytest.raises(unknowns.UnknownsUnreadable):
+        unknowns.save({"next": 1, "speakers": {}})
+    # the doctor reports it and its --fix leaves it alone
+    found = registry_doctor.check()
+    assert ("corrupt", "unknowns.json") in [(f.kind, f.subject) for f in found]
+    registry_doctor.fix(found)
+
+    assert reg_path.read_text() == damage
+    assert npy.read_bytes() == old
+    assert sorted(p.name for p in config.VOICEPRINTS_DIR.glob("*.npy")) == ["U001.npy"]

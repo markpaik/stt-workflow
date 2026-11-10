@@ -47,6 +47,7 @@ from datetime import datetime
 import numpy as np
 
 from . import config
+from .errors import UserError
 from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
                        lock_registry, score_against)
 
@@ -107,18 +108,60 @@ def heal_next(reg: dict) -> dict:
     return reg
 
 
-def load() -> dict:
+UNKNOWNS_UNREADABLE = (
+    "The unknown-voice registry (unknowns.json) cannot be read, so nothing "
+    "was saved. Fix it or restore it from a backup first.")
+
+
+class UnknownsUnreadable(UserError):
+    """unknowns.json is there and cannot be read. Nothing writes over it:
+    assign() on the empty registry a damaged file read as minted U001 again,
+    saved the new voice over the old U001.npy, and saved a one-voice
+    registry over the damaged file. Every global number restarted, and the
+    old samples were gone."""
+
+
+def _read(p):
+    """The registry in the file at `p`, or None when it is not a readable
+    JSON object (bad JSON, a list, a null, a file that cannot be read)."""
+    try:
+        reg = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return reg if isinstance(reg, dict) else None
+
+
+def _load_checked():
+    """(registry, readable). A damaged file reads as an empty registry and
+    says so, loudly."""
     p = _path()
-    if p.exists():
-        try:
-            return heal_next(json.loads(p.read_text()))
-        except json.JSONDecodeError as e:
-            # loud, not a silent reset — every "Speaker N" would otherwise
-            # renumber from scratch with no warning that it just happened
-            print(f"WARNING: {p} is corrupt ({e}) — treating as empty. "
-                  "Sample files on disk are untouched; fix or restore before "
-                  "naming any unknown speaker.", file=sys.stderr)
-    return {"next": 1, "speakers": {}}
+    if not p.exists():
+        return {"next": 1, "speakers": {}}, True
+    reg = _read(p)
+    if reg is None:
+        # loud, not a silent reset — every "Speaker N" would otherwise
+        # renumber from scratch with no warning that it just happened
+        print(f"WARNING: {p} is corrupt — treating as empty. Sample files "
+              "on disk are untouched, and nothing writes the registry until "
+              "it is fixed or restored. New meetings keep meeting-only "
+              "labels until then.", file=sys.stderr)
+        return {"next": 1, "speakers": {}}, False
+    return heal_next(reg), True
+
+
+def load() -> dict:
+    """The registry for reading. A damaged file reads as empty: use
+    load_for_write() for a read-modify-write."""
+    return _load_checked()[0]
+
+
+def load_for_write():
+    """The registry for a read-modify-write, or None when unknowns.json is
+    there and cannot be read. The caller then writes nothing at all: not
+    the registry, and not a sample file, because an empty registry hands
+    out U001 again and U001.npy may still hold the first voice."""
+    reg, ok = _load_checked()
+    return reg if ok else None
 
 
 def mint_uid(reg: dict) -> str:
@@ -178,8 +221,14 @@ def near_misses(reg: dict, scored, exclude=None) -> list:
 
 
 def save(reg: dict):
+    """Write the registry. Raises UnknownsUnreadable, and writes nothing,
+    when the file on disk is damaged: whatever `reg` holds was not read
+    from it."""
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(_path(), json.dumps(reg, indent=2))
+    p = _path()
+    if p.exists() and _read(p) is None:
+        raise UnknownsUnreadable(UNKNOWNS_UNREADABLE)
+    _atomic_write(p, json.dumps(reg, indent=2))
 
 
 def aligned_meeting_ids(meta: dict) -> list:
@@ -217,7 +266,9 @@ def rename_meeting_refs(old_base: str, new_base: str) -> int:
     n = 0
     new_id = config.id_of(new_base)
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            return 0
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             touched = False
@@ -255,7 +306,9 @@ def forget_meeting_refs(base: str) -> int:
     dropped/archived tombstones above. Returns speakers touched."""
     n = 0
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            return 0
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             touched = False
@@ -401,7 +454,12 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
     are not people. Matching an EXISTING unknown stays unrestricted."""
     meeting_id = config.id_of(meeting)   # resolved once, outside the cluster loop
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            # a damaged registry is never written over. Every cluster keeps
+            # its meeting-local label, and a relabel after the fix gives
+            # each one its global number.
+            return {}
         out = {}
         claimed = {}  # uid -> centroid of the first cluster that claimed it this pass
         enrolled = load_voiceprints()  # gate below: enrolled voices never mint
@@ -610,8 +668,8 @@ def promote(uid: str, name: str) -> bool:
     retry starts from exactly the state the user can see."""
     from . import identify
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         if reg["speakers"][uid].get("dropped"):
             # a tombstone, as merge() says: naming it deleted the tombstone,
@@ -661,8 +719,9 @@ def merge(uid_src: str, uid_dst: str) -> bool:
     """Two unknown numbers that are really one person: fold src's samples and
     meeting history into dst, retire src."""
     with lock_registry():
-        reg = load()
-        if uid_src not in reg["speakers"] or uid_dst not in reg["speakers"] or uid_src == uid_dst:
+        reg = load_for_write()
+        if (reg is None or uid_src not in reg["speakers"]
+                or uid_dst not in reg["speakers"] or uid_src == uid_dst):
             return False
         # a DROPPED voice is a tombstone and may be neither side of a merge.
         # Merging a dropped voice INTO a live one deletes the tombstone and
@@ -705,8 +764,8 @@ def archive(uid: str) -> bool:
     matching keeps working (their number never gets reassigned to someone
     else) and a later Restore brings them back for naming."""
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         reg["speakers"][uid]["archived"] = True
         save(reg)
@@ -715,8 +774,8 @@ def archive(uid: str) -> bool:
 
 def restore(uid: str) -> bool:
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         reg["speakers"][uid].pop("archived", None)
         save(reg)
@@ -731,8 +790,9 @@ def drop(uid: str) -> bool:
     it. A dropped voice keeps matching its tombstone in assign() and is simply
     never surfaced or given a global label again."""
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"] or reg["speakers"][uid].get("dropped"):
+        reg = load_for_write()
+        if (reg is None or uid not in reg["speakers"]
+                or reg["speakers"][uid].get("dropped")):
             return False
         reg["speakers"][uid]["dropped"] = datetime.now().isoformat(timespec="seconds")
         save(reg)

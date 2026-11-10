@@ -549,9 +549,13 @@ def _fix(findings, meetings_dir) -> list:
         done.append(f"pruned {n} orphan lock file(s)")
 
     with identify.lock_registry():
-        reg = unknowns.load()          # load() heals `next` in memory
-        before = _read_json(config.VOICEPRINTS_DIR / "unknowns.json", {}).get("next")
-        if before != reg["next"]:
-            unknowns.save(reg)
-            done.append(f"healed unknowns.json next: {before} -> {reg['next']}")
+        # load() heals `next` in memory. A damaged file is None here and is
+        # never written: the check already reported it as corrupt, and a
+        # save would put an empty registry over every unknown voice.
+        reg = unknowns.load_for_write()
+        if reg is not None:
+            before = _read_json(config.VOICEPRINTS_DIR / "unknowns.json", {}).get("next")
+            if before != reg["next"]:
+                unknowns.save(reg)
+                done.append(f"healed unknowns.json next: {before} -> {reg['next']}")
     return done

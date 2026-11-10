@@ -130,6 +130,22 @@ def test_a_leaked_memo_leaves_every_store(sandbox, monkeypatch, tmp_path):
     assert json.loads(config.meeting_file(KEEP, ".json").read_text())["meeting_id"] == "mid-keep"
 
 
+def test_a_purge_never_writes_over_a_damaged_unknowns_registry(sandbox, monkeypatch,
+                                                                tmp_path):
+    """A damaged unknowns.json read as empty, and the purge saved that
+    empty registry over it: every unknown voice was gone. Now the purge
+    drops nothing from it, leaves it as it is, and finishes the rest."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    src = _world()
+    reg_path = config.VOICEPRINTS_DIR / "unknowns.json"
+    reg_path.write_text("{ not json")
+    r = purge.apply(LEAK)
+    assert r["done"]
+    assert reg_path.read_text() == "{ not json"
+    assert (config.VOICEPRINTS_DIR / "U001.npy").exists()
+    assert LEAK not in config.meeting_bases() and not src.exists()
+
+
 def test_purge_clears_threads_and_overrides_when_they_exist(sandbox, monkeypatch, tmp_path):
     monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
     _world()

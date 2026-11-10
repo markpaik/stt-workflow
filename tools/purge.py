@@ -280,7 +280,13 @@ def _drop_enrolled(rows_by_person: dict) -> dict:
 def _drop_unknowns(base: str, mid, only: list) -> int:
     from stt import unknowns
     with unknowns.lock_registry():
-        reg = unknowns.load()
+        reg = unknowns.load_for_write()
+        if reg is None:
+            # damaged: nothing in it can be read, so nothing in it can be
+            # dropped, and a save would put an empty registry over it
+            print("   unknowns.json cannot be read: no unknown voice was "
+                  "dropped from it.", file=sys.stderr)
+            return 0
         for uid in only:
             meta = reg["speakers"].pop(uid, None)
             if meta and meta.get("file"):
