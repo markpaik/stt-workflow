@@ -160,7 +160,9 @@ console.log(JSON.stringify({a,b,c}));
     assert "Recorded at Harbor Street Library" in out["a"]
     assert "The audio is 3 minutes shorter than the transcript: audio may be lost." in out["a"]
     assert "Strict" in out["a"]
-    assert "Date uncertain" not in out["b"] and "Date from typed in the name" in out["b"]
+    # the whole label per source: 'Date from typed in the name' read badly
+    assert "Date uncertain" not in out["b"] and "<span>Date from the name</span>" in out["b"]
+    assert "typed in the name" not in out["b"]
     # a meeting from before the keys shows neither
     assert "Date from" not in out["c"] and "Recorded at" not in out["c"]
 

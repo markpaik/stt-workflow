@@ -78,8 +78,10 @@ function mVoiceOf(speaker){return MP&&(MP.voices||[]).find(v=>v.ids.includes(spe
 function mVoiceIds(speaker){const v=mVoiceOf(speaker);return v?v.ids.slice():[speaker];}
 
 /* ------------------------------------------------------------- header ---- */
-const DATE_FROM={typed:'typed in the name',recorder:'the recorder',short_typed:'a short date in the name',
- mtime:'the file time',manual:'set by hand',voice_memo:'Voice Memos'};
+// the whole label per source: 'Date from typed in the name' and 'Date from
+// set by hand' read badly as 'Date from ' + a phrase
+const DATE_FROM={typed:'Date from the name',recorder:'Date from the recorder',short_typed:'Date from a short date in the name',
+ mtime:'Date from the file time',manual:'Date set by hand',voice_memo:'Date from Voice Memos'};
 function audioNoteText(mins){return mins?`The audio is ${plural(mins,'minute')} shorter than the transcript: audio may be lost.`:'';}
 function mPeopleBits(m){
  const named=m.named||[];let s=named.slice(0,3).join(', ');if(named.length>3)s+=` +${named.length-3}`;
@@ -100,7 +102,7 @@ function mHeadHTML(m){
  const sub=[`<button class="chip catbtn" type="button" data-act="m-cat" title="Change the tag">${cat||'No tag'}</button>`];
  if(m.date_source){
   if(dateUncertain(m))sub.push('<span class="chip attn" title="This date may be the transfer day. Change it from the menu if it is wrong">Date uncertain</span>');
-  sub.push(`<span>Date from ${esc(DATE_FROM[m.date_source]||m.date_source)}</span>`);
+  sub.push(`<span>${esc(DATE_FROM[m.date_source]||'Date from '+m.date_source)}</span>`);
  }
  if(m.location_note)sub.push(`<span title="The place Voice Memos named">Recorded at ${esc(m.location_note)}</span>`);
  if(m.strict)sub.push('<span>Strict: stays on this Mac</span>');
