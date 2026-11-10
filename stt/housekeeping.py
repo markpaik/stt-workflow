@@ -24,10 +24,9 @@ from pathlib import Path
 
 from . import config
 
-LOG_MAX_BYTES = int(os.environ.get("STT_LOG_MAX_BYTES", str(10 * 1000 * 1000)))
+LOG_MAX_BYTES = config.env_int("STT_LOG_MAX_BYTES", 10 * 1000 * 1000)
 LOG_KEEP = 3
-CALIBRATION_MAX_BYTES = int(os.environ.get("STT_CALIBRATION_MAX_BYTES",
-                                           str(10 * 1000 * 1000)))
+CALIBRATION_MAX_BYTES = config.env_int("STT_CALIBRATION_MAX_BYTES", 10 * 1000 * 1000)
 
 
 def _gz_copy(src: Path, dst: Path) -> None:

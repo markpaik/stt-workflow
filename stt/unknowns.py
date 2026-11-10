@@ -50,16 +50,16 @@ from . import config
 from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
                        lock_registry, score_against)
 
-MATCH_MIN = float(os.environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
-MATCH_MARGIN = float(os.environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
+MATCH_MIN = config.env_float("STT_UNKNOWN_MATCH_MIN", 0.6)
+MATCH_MARGIN = config.env_float("STT_UNKNOWN_MATCH_MARGIN", 0.1)
 # the bar a RETURNING unknown must clear to claim an existing global number.
 # Higher than MATCH_MIN on purpose: MATCH_MIN is now only the bar for being
 # WORTH SUGGESTING, and a 0.60-0.70 match is exactly the band that drifted
 # U050's stack across two people one appended centroid at a time.
-LINK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_MIN", "0.70"))
+LINK_MIN = config.env_float("STT_UNKNOWN_LINK_MIN", 0.7)
 # after the append, every pair inside the stack must still be this close. A
 # stack that no longer agrees with itself is not one voice.
-LINK_STACK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_STACK_MIN", "0.60"))
+LINK_STACK_MIN = config.env_float("STT_UNKNOWN_LINK_STACK_MIN", 0.6)
 # how many near misses a freshly minted unknown carries for the panel
 MAX_SUGGESTED = 3
 MAX_SAMPLES = 5

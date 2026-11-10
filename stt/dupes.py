@@ -210,7 +210,7 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
 # Jaccard over word shingles. Two ASR passes over the same audio agree far above
 # this; genuinely different meetings by the same people, on the same agenda,
 # land well below it. The threshold only decides what gets REVIEWED.
-THRESHOLD = float(os.environ.get("STT_DUPE_THRESHOLD", "0.72"))
+THRESHOLD = config.env_float("STT_DUPE_THRESHOLD", 0.72)
 SHINGLE = 5           # words per shingle
 SKETCH_K = 256        # bottom-k hashes kept per meeting
 DUR_TOL = 0.20        # candidate pair durations within 20% of each other

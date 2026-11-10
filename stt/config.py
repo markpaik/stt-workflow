@@ -193,6 +193,19 @@ def _env_number(name, default, cast, valid, rule):
     return default
 
 
+def env_float(name, default):
+    """A number setting read at import, by _env_number's rules. Any number
+    but nan. inf is allowed, since some floors are turned off by a value no
+    score reaches."""
+    return _env_number(name, float(default), float,
+                       lambda v: not math.isnan(v), "a number")
+
+
+def env_int(name, default):
+    """A whole-number setting read at import, by _env_number's rules."""
+    return _env_number(name, int(default), int, lambda v: True, "a whole number")
+
+
 # --- Models ---
 # Parakeet TDT 0.6B v3 (Nov 2026 swap from v2): closer to Scribe v2 in a shadow test, keeps fillers, ~15% slower.
 PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
@@ -267,11 +280,11 @@ SPEAKRS_TIMEOUT_SEC = _env_number("STT_SPEAKRS_TIMEOUT_SEC", 3600, int,
 # under ~2 min (no cluster reaches the floor). speakrs engine only: the
 # pyannote fallback was not measured. STT_RECLUSTER=0 turns it off.
 RECLUSTER = os.environ.get("STT_RECLUSTER", "1") == "1"
-RECLUSTER_MARGIN = float(os.environ.get("STT_RECLUSTER_MARGIN", "0.02"))
-RECLUSTER_CENTROID_MIN_DUR = float(os.environ.get("STT_RECLUSTER_CENTROID_MIN_DUR", "5.0"))
-RECLUSTER_MOVE_MIN_DUR = float(os.environ.get("STT_RECLUSTER_MOVE_MIN_DUR", "0.3"))
-RECLUSTER_DST_MIN_SECS = float(os.environ.get("STT_RECLUSTER_DST_MIN_SECS", "120"))
-RECLUSTER_ITERS = int(os.environ.get("STT_RECLUSTER_ITERS", "2"))
+RECLUSTER_MARGIN = env_float("STT_RECLUSTER_MARGIN", 0.02)
+RECLUSTER_CENTROID_MIN_DUR = env_float("STT_RECLUSTER_CENTROID_MIN_DUR", 5.0)
+RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
+RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
+RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
 # ASR backend: "parakeet" (default, native MLX), "mlxwhisper" (Whisper on the
 # GPU, the variant in STT_WHISPER_MLX_MODEL), or "cloud:<provider>".
@@ -328,23 +341,23 @@ def is_source_audio(p) -> bool:
 
 # --- Speaker naming (cosine similarity of pyannote embeddings) ---
 # Start ~0.5-0.65 and tune on real audio. Higher = stricter (fewer false names).
-NAMING_THRESHOLD = float(os.environ.get("STT_NAMING_THRESHOLD", "0.60"))
+NAMING_THRESHOLD = env_float("STT_NAMING_THRESHOLD", 0.6)
 
 # Cluster naming also requires this margin over the 2nd-best voiceprint (open-set
 # guard: a stranger near one enrolled voice must not inherit that person's name).
-NAMING_MARGIN = float(os.environ.get("STT_NAMING_MARGIN", "0.15"))
+NAMING_MARGIN = env_float("STT_NAMING_MARGIN", 0.15)
 
 # --- Identity-first refinement (uses enrolled voiceprints to correct attribution) ---
 REFINE = os.environ.get("STT_REFINE", "1") == "1"
 # Only turns at least this long are trusted for per-turn identity (short ones are noisy).
-REFINE_MIN_RELIABLE_DUR = float(os.environ.get("STT_REFINE_MIN_DUR", "1.5"))
+REFINE_MIN_RELIABLE_DUR = env_float("STT_REFINE_MIN_DUR", 1.5)
 # A reliable turn is reassigned to an enrolled voice only above this cosine AND margin.
 # Correct matches sit ~0.9; cross-speaker confusions ~0.5, so 0.6/0.15 is safe.
-REFINE_ID_MIN = float(os.environ.get("STT_REFINE_ID_MIN", "0.60"))
-REFINE_ID_MARGIN = float(os.environ.get("STT_REFINE_ID_MARGIN", "0.15"))
+REFINE_ID_MIN = env_float("STT_REFINE_ID_MIN", 0.6)
+REFINE_ID_MARGIN = env_float("STT_REFINE_ID_MARGIN", 0.15)
 # Reassigning a turn AWAY from an unnamed (anonymous) cluster is an open-set claim
 # about a possibly-unknown person and needs stronger evidence.
-REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"))
+REFINE_ID_MIN_OPENSET = env_float("STT_REFINE_ID_MIN_OPENSET", 0.7)
 # Turns shorter than this are *candidates* for smoothing into neighbours — but only
 # with evidence (unusable/contrary embedding) and never for bare yes/no answers.
 # Widened 0.3 -> 0.6 (07/2026 audit): the 0.3–0.6s band sits squarely in the
@@ -352,14 +365,13 @@ REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"
 # evidence-gated sandwich there produced 637 evidence-backed label changes on
 # the real library. Flips stay evidence-gated — unconditional inheritance was
 # measured and REJECTED.
-REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.6"))
+REFINE_SHORT_DUR = env_float("STT_REFINE_SHORT_DUR", 0.6)
 # A protected one-word answer ("yeah", "okay", …) sandwiched in another
 # speaker's context may re-attribute ONLY when the context speaker beats the
 # assigned one by MORE than this margin on the turn's own embedding — strong,
 # turn-local evidence, not context inheritance (audit: releases 45 of 538
 # protected blocks on the real library).
-REFINE_PROTECTED_OVERRIDE_MARGIN = float(
-    os.environ.get("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", "0.15"))
+REFINE_PROTECTED_OVERRIDE_MARGIN = env_float("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", 0.15)
 # Mid-band open-set rescue (exp1-band-gap, 07/2026 eval): a 0.6-1.5s turn
 # stranded in an UNNAMED cluster is reassigned to an enrolled speaker who is
 # roster rank-1 on the turn's OWN embedding by >= RESCUE_MARGIN over the
@@ -372,12 +384,9 @@ REFINE_PROTECTED_OVERRIDE_MARGIN = float(
 # the swept variants that allowed them regressed real human corrections
 # (correct mid-band own-scores have median ~0.32-0.37, so a rival clearing a
 # low bar is noise, not identity — see qa/eval/experiments.md, run D).
-REFINE_MIDBAND_RESCUE_MIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MIN", "0.70"))
-REFINE_MIDBAND_RESCUE_MARGIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MARGIN", "0.10"))
-REFINE_MIDBAND_NEIGHBOR_MIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_NEIGHBOR_MIN", "0.35"))
+REFINE_MIDBAND_RESCUE_MIN = env_float("STT_REFINE_MIDBAND_RESCUE_MIN", 0.7)
+REFINE_MIDBAND_RESCUE_MARGIN = env_float("STT_REFINE_MIDBAND_RESCUE_MARGIN", 0.1)
+REFINE_MIDBAND_NEIGHBOR_MIN = env_float("STT_REFINE_MIDBAND_NEIGHBOR_MIN", 0.35)
 
 # Junk-fragment repair (exp2-cluster-repair, 07/2026 eval): the diarizer
 # scatters echo/system-audio fragments of the REAL attendees into small
@@ -401,10 +410,8 @@ REFINE_MIDBAND_NEIGHBOR_MIN = float(
 # fragments (the Weekly Anthropic junk cluster) top out ~0.35 vs named
 # centroids, so 0.40 keeps clearance. Set the floor above 1.0 to disable.
 # Strict mode never runs this step.
-REFINE_JUNK_REPAIR_MIN = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MIN", "0.40"))
-REFINE_JUNK_REPAIR_MARGIN = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MARGIN", "0.10"))
+REFINE_JUNK_REPAIR_MIN = env_float("STT_REFINE_JUNK_REPAIR_MIN", 0.4)
+REFINE_JUNK_REPAIR_MARGIN = env_float("STT_REFINE_JUNK_REPAIR_MARGIN", 0.1)
 # Junk repair skips a turn whose own cluster holds more than this much talk:
 # a fragment cluster is small, a large one is a real unmatched person. On S2
 # junk repair moved ~2000 s of three unmatched clusters (1239-3438 s each)
@@ -412,8 +419,7 @@ REFINE_JUNK_REPAIR_MARGIN = float(
 # 90.8 -> 93.0-93.3 at 100 s, 92.0 at 150-300 s, 93.4 at 80 s; none lower.
 # 100 s, not 80: S3 has a dense band of 70-85 s clusters, so a cut at 80 is
 # chance. Without the recluster the guard cost S6 0.5. 1e9 turns it off.
-REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", "100"))
+REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = env_float("STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", 100.0)
 
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
@@ -423,14 +429,14 @@ REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = float(
 # enrolled voice must score >= OTHER_MIN and beat the owner by >= MARGIN.
 # Own-score < OWN_MAX remains the precondition; strict mode and meetings with an
 # unnamed cluster (open roster) keep the old unconditional flag.
-REFINE_MISMATCH_OWN_MAX = float(os.environ.get("STT_REFINE_MISMATCH_OWN_MAX", "0.40"))
-REFINE_MISMATCH_OTHER_MIN = float(os.environ.get("STT_REFINE_MISMATCH_OTHER_MIN", "0.50"))
-REFINE_MISMATCH_MARGIN = float(os.environ.get("STT_REFINE_MISMATCH_MARGIN", "0.15"))
+REFINE_MISMATCH_OWN_MAX = env_float("STT_REFINE_MISMATCH_OWN_MAX", 0.4)
+REFINE_MISMATCH_OTHER_MIN = env_float("STT_REFINE_MISMATCH_OTHER_MIN", 0.5)
+REFINE_MISMATCH_MARGIN = env_float("STT_REFINE_MISMATCH_MARGIN", 0.15)
 # A segment earns the "overlap" review flag only when the crosstalk inside it
 # SUMS to at least this long — sub-second brushes (backchannels, breaths) keep
 # their word-level provenance but don't demand human review of the whole turn.
 # Strict-mode callers pass 0.0 (any crosstalk at all flags, as before).
-OVERLAP_FLAG_MIN_SEC = float(os.environ.get("STT_OVERLAP_FLAG_MIN_SEC", "1.0"))
+OVERLAP_FLAG_MIN_SEC = env_float("STT_OVERLAP_FLAG_MIN_SEC", 1.0)
 # Words that are never smoothed away into a neighbouring speaker: one-word answers
 # carry meaning ("yes" in a confidential conversation), even when the voice evidence is thin.
 PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agreed",
@@ -443,14 +449,14 @@ PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agre
 # becoming nameable registry entries. Matching an EXISTING unknown is never
 # restricted — a returning stranger heard briefly still keeps their number.
 # The same floor gates enrolling a cluster as a named person.
-UNKNOWN_MIN_TALK_SECS = float(os.environ.get("STT_UNKNOWN_MIN_TALK_SECS", "30"))
-UNKNOWN_MIN_RELIABLE_TURNS = int(os.environ.get("STT_UNKNOWN_MIN_RELIABLE_TURNS", "10"))
+UNKNOWN_MIN_TALK_SECS = env_float("STT_UNKNOWN_MIN_TALK_SECS", 30.0)
+UNKNOWN_MIN_RELIABLE_TURNS = env_int("STT_UNKNOWN_MIN_RELIABLE_TURNS", 10)
 
 # Adding a NEW sample to a person's EXISTING voiceprint stack: below this
 # cosine against their own stack (or matching some other profile better than
 # their own) the enrollment is suspect — the API/CLI demand an explicit
 # confirm instead of silently poisoning the profile.
-ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
+ENROLL_STACK_MIN = env_float("STT_ENROLL_STACK_MIN", 0.45)
 
 # --- Absorption splitting (exp2-cluster-repair, 07/2026 eval) ---
 # pyannote's exclusive diarization can hand back one long "turn" spanning
@@ -473,12 +479,12 @@ ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
 # untouched until a meeting is reprocessed). Dip <= 0 disables. Strict mode
 # and meetings with no enrolled voiceprints never split (identity evidence IS
 # the gate).
-SPLIT_DIP_MAX = float(os.environ.get("STT_SPLIT_DIP_MAX", "0.65"))
-SPLIT_HALF_MARGIN = float(os.environ.get("STT_SPLIT_HALF_MARGIN", "0.10"))
-SPLIT_MIN_DUR = float(os.environ.get("STT_SPLIT_MIN_DUR", "2.4"))
-SPLIT_WIN = float(os.environ.get("STT_SPLIT_WIN", "1.2"))
-SPLIT_HOP = float(os.environ.get("STT_SPLIT_HOP", "0.3"))
-SPLIT_MAX_DEPTH = int(os.environ.get("STT_SPLIT_MAX_DEPTH", "3"))
+SPLIT_DIP_MAX = env_float("STT_SPLIT_DIP_MAX", 0.65)
+SPLIT_HALF_MARGIN = env_float("STT_SPLIT_HALF_MARGIN", 0.1)
+SPLIT_MIN_DUR = env_float("STT_SPLIT_MIN_DUR", 2.4)
+SPLIT_WIN = env_float("STT_SPLIT_WIN", 1.2)
+SPLIT_HOP = env_float("STT_SPLIT_HOP", 0.3)
+SPLIT_MAX_DEPTH = env_int("STT_SPLIT_MAX_DEPTH", 3)
 
 # STRICT mode (confidential conversations): no smoothing, no open-set
 # reassignment — fragile attributions are flagged for human review instead of guessed.
@@ -500,14 +506,14 @@ PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
 # the voiceprint safety net + mono fallback keep a mis-tuned day from being
 # worse than plain mono. See stt/channels.py.
 MIC_SPEAKER = os.environ.get("STT_MIC_SPEAKER") or None  # who "me" is; None = feature off
-CHANNEL_FLOOR_DBFS = float(os.environ.get("STT_CHANNEL_FLOOR_DBFS", "-45"))   # mic noise gate
-CHANNEL_DOMINANCE_DB = float(os.environ.get("STT_CHANNEL_DOMINANCE_DB", "8")) # mic must beat system by this
-CHANNEL_ENTER_MS = float(os.environ.get("STT_CHANNEL_ENTER_MS", "200"))       # hysteresis: enter me-active
-CHANNEL_EXIT_MS = float(os.environ.get("STT_CHANNEL_EXIT_MS", "250"))         # hysteresis: leave me-active
-CHANNEL_BRIDGE_MS = float(os.environ.get("STT_CHANNEL_BRIDGE_MS", "200"))     # merge me-spans closer than this
-CHANNEL_MIN_SPAN_MS = float(os.environ.get("STT_CHANNEL_MIN_SPAN_MS", "300")) # drop me-spans shorter than this
-CHANNEL_FORCE_MIN = float(os.environ.get("STT_CHANNEL_FORCE_MIN", "0.55"))    # cosine gate: span really the mic speaker
-CHANNEL_PASS_FRACTION = float(os.environ.get("STT_CHANNEL_PASS_FRACTION", "0.5"))  # below this -> abandon, use mono
+CHANNEL_FLOOR_DBFS = env_float("STT_CHANNEL_FLOOR_DBFS", -45.0)   # mic noise gate
+CHANNEL_DOMINANCE_DB = env_float("STT_CHANNEL_DOMINANCE_DB", 8.0) # mic must beat system by this
+CHANNEL_ENTER_MS = env_float("STT_CHANNEL_ENTER_MS", 200.0)       # hysteresis: enter me-active
+CHANNEL_EXIT_MS = env_float("STT_CHANNEL_EXIT_MS", 250.0)         # hysteresis: leave me-active
+CHANNEL_BRIDGE_MS = env_float("STT_CHANNEL_BRIDGE_MS", 200.0)     # merge me-spans closer than this
+CHANNEL_MIN_SPAN_MS = env_float("STT_CHANNEL_MIN_SPAN_MS", 300.0) # drop me-spans shorter than this
+CHANNEL_FORCE_MIN = env_float("STT_CHANNEL_FORCE_MIN", 0.55)    # cosine gate: span really the mic speaker
+CHANNEL_PASS_FRACTION = env_float("STT_CHANNEL_PASS_FRACTION", 0.5)  # below this -> abandon, use mono
 
 # Append accepted/rejected identity-match scores here to build a real calibration
 # picture (enrolled-vs-stranger score distributions) over time.
@@ -515,7 +521,7 @@ CALIBRATION_LOG = PROJECT_DIR / "calibration.jsonl"
 
 # Nightly runs abort early on battery below this % (caffeinate -s is ignored on
 # battery; a run at 2% kills the machine). The next trigger retries.
-BATTERY_FLOOR = int(os.environ.get("STT_BATTERY_FLOOR", "20"))
+BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 
 # --- Progress/ETA model: measured realtime multiples on this M5 Pro ---
 # (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)

@@ -64,7 +64,8 @@ def _default(var: str) -> str:
     """The default stt/config.py gives `var`, read from its source, so a
     value set in the environment or stt.env cannot move the test."""
     src = Path(config.__file__).read_text(encoding="utf-8")
-    m = re.search(rf'os\.environ\.get\("{var}", "([^"]+)"\)', src)
+    m = (re.search(rf'os\.environ\.get\("{var}", "([^"]+)"\)', src)
+         or re.search(rf'env_(?:float|int)\("{var}", (-?[\d.]+)\)', src))
     assert m, var
     return f"{float(m.group(1)):g}"
 

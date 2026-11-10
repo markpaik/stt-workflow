@@ -21,7 +21,7 @@ from . import config
 from .audio import FFMPEG
 
 IS_CLOUD = True  # pipeline checks this to know a local fallback applies
-TIMEOUT = int(os.environ.get("STT_CLOUD_TIMEOUT", "900"))
+TIMEOUT = config.env_int("STT_CLOUD_TIMEOUT", 900)
 
 PROVIDERS = {
     "scribe": {"label": "ElevenLabs Scribe", "key_env": "STT_ELEVENLABS_KEY"},

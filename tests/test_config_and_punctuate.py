@@ -407,6 +407,63 @@ def test_an_empty_or_good_speakrs_number_is_quiet(tmp_path):
     assert (rc, out) == (0, "0.6 900 speakrs") and "warning" not in err
 
 
+
+_TYPO_PRINT = ("from stt import config as c, unknowns as u, housekeeping as h; "
+               "print(c.NAMING_THRESHOLD, c.REFINE_ID_MIN, c.RECLUSTER_ITERS, "
+               "c.BATTERY_FLOOR, c.CHANNEL_FLOOR_DBFS, u.MATCH_MIN, h.LOG_MAX_BYTES)")
+_TYPO_DEFAULTS = "0.6 0.6 2 20 -45.0 0.6 10000000"
+
+
+@pytest.mark.parametrize("name, raw", [
+    ("STT_NAMING_THRESHOLD", "abc"), ("STT_NAMING_THRESHOLD", "nan"),
+    ("STT_REFINE_ID_MIN", ""), ("STT_RECLUSTER_ITERS", "2.5"),
+    ("STT_BATTERY_FLOOR", "20%"), ("STT_CHANNEL_FLOOR_DBFS", "-45dB"),
+    ("STT_UNKNOWN_MATCH_MIN", "O.6"), ("STT_LOG_MAX_BYTES", "10MB")])
+def test_a_typo_in_any_number_setting_warns_and_keeps_the_default(tmp_path, name, raw):
+    """Every other number setting parsed with a bare float() or int() at
+    import. STT_NAMING_THRESHOLD=abc, an empty STT_REFINE_ID_MIN=, or
+    STT_BATTERY_FLOOR=20% raised ValueError, and the batch, the panel and
+    every tool that imports stt.config stopped."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), name: raw})
+    r = subprocess.run([sys.executable, "-c", _TYPO_PRINT], capture_output=True,
+                       text=True, env=e, cwd=str(repo), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == _TYPO_DEFAULTS
+    if raw:
+        assert name in r.stderr and "using" in r.stderr
+    else:
+        assert "warning" not in r.stderr
+
+
+def test_a_good_number_setting_still_wins(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo),
+              "STT_NAMING_THRESHOLD": " 0.7 ", "STT_RECLUSTER_ITERS": "4",
+              "STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS": "1e9",
+              "STT_UNKNOWN_MATCH_MIN": "0.65"})
+    r = subprocess.run([sys.executable, "-c",
+                        "from stt import config as c, unknowns as u; "
+                        "print(c.NAMING_THRESHOLD, c.RECLUSTER_ITERS, "
+                        "c.REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS, u.MATCH_MIN)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    assert (r.returncode, r.stdout.strip()) == (0, "0.7 4 1000000000.0 0.65"), r.stderr
+    assert "warning" not in r.stderr
+
+
+def test_the_doctor_names_a_number_typo(sandbox, monkeypatch):
+    (sandbox / "stt.env").write_text("STT_BATTERY_FLOOR=20%\n")
+    monkeypatch.delenv("STT_BATTERY_FLOOR", raising=False)
+    assert [p[0] for p in config.setting_problems()] == ["STT_BATTERY_FLOOR"]
+
 @pytest.mark.parametrize("raw, want, warns", [
     ("speakr", "speakrs", True), ("pyanote", "speakrs", True), ("cuda", "speakrs", True),
     ("pyannote", "pyannote", False), (" PyAnnote ", "pyannote", False),

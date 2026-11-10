@@ -36,7 +36,7 @@ from .identify import cosine
 # two entries this close are the same voice. Well under the 0.999 the old
 # hygiene checker used: 0.999 only ever caught a byte-identical twin, and the
 # U028/U040 pair was found by hand, not by the checker.
-DUPLICATE_SIM = float(os.environ.get("STT_DOCTOR_DUPLICATE_SIM", "0.95"))
+DUPLICATE_SIM = config.env_float("STT_DOCTOR_DUPLICATE_SIM", 0.95)
 # two rows INSIDE one stack this close add nothing to max-cosine matching and
 # squeeze out a diverse sample at the cap
 STACK_DUP_SIM = 0.999
