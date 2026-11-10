@@ -530,3 +530,22 @@ def test_a_meeting_json_of_the_wrong_shape_never_stops_the_scan(sandbox):
     assert dupes.cache_is_current(d), "a scan that ends saves its answer"
     assert dupes.transcript_text("Odd List 05032026", d) == ""
     assert dupes.transcript_text("Odd Null 05032026", d) == "a b"
+
+
+def test_two_different_meetings_that_hold_one_asr_loop_are_not_a_match(sandbox):
+    """A silent recording that ASR turns into "thank you" over and over holds
+    2 distinct shingles. Two such meetings of one length had the same sketch
+    and read as a 1.0 duplicate. A transcript too thin to judge is not
+    paired. Short real speech still is."""
+    _meeting("Alpha 05012026", "a.m4a", text="thank you " * 200, dur=600.0)
+    _meeting("Beta 05022026", "b.m4a", text="thank you " * 300, dur=600.0)
+    phrase = "please remember to subscribe to the channel for more videos like this "
+    _meeting("Gamma 05032026", "c.m4a", text=phrase * 40, dur=900.0)
+    _meeting("Delta 05042026", "d.m4a", text=phrase * 45, dur=900.0)
+    d = config.meetings_dir()
+    assert dupes.similar_meetings(dest_dir=d) == []
+    # forty words of speech that does not repeat are enough to compare
+    _meeting("Clip 05052026", "e.m4a", text=_words(40), dur=30.0)
+    _meeting("Clip Redo 05052026", "f.m4a", text=_words(40), dur=30.0)
+    assert [(p["a"], p["b"]) for p in dupes.similar_meetings(dest_dir=d)] == \
+        [("Clip 05052026", "Clip Redo 05052026")]

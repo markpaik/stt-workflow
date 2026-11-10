@@ -213,6 +213,12 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
 THRESHOLD = config.env_float("STT_DUPE_THRESHOLD", 0.72)
 SHINGLE = 5           # words per shingle
 SKETCH_K = 256        # bottom-k hashes kept per meeting
+# fewest distinct shingles a transcript needs before it is compared at all.
+# A silent recording that ASR turned into "thank you" two hundred times holds
+# 2 distinct shingles, so two such meetings of one length had the same sketch
+# and read as a 1.0 match. Bottom-k Jaccard on a handful of hashes measures
+# nothing. 32 is about 36 words of speech that does not repeat itself.
+MIN_SHINGLES = 32
 DUR_TOL = 0.20        # candidate pair durations within 20% of each other
 MAX_PAIRS = 20000     # hard bound on the comparison loop
 _WORD = re.compile(r"[a-z0-9']+")
@@ -481,7 +487,9 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     cache["sketches"] = {b: v for b, v in old.items() if b in sketches}
 
     skip = ignored_pairs()
-    bases = sorted(sketches)
+    # a transcript too thin to judge (a loop, a one-line clip) is never
+    # paired: it stays cached, and it pairs once it holds enough words
+    bases = sorted(b for b in sketches if len(sketches[b]) >= MIN_SHINGLES)
     # gather every duration-eligible pair FIRST, then compare the closest
     # lengths first: same recording means same length, so when the budget
     # cannot cover everything it is the far-apart pairs that go unchecked
