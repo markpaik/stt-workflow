@@ -145,20 +145,32 @@ def migration_dir() -> Path:
         return _HOME / "migration"
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
+# the import-time number settings _env_number reads, by name: (default,
+# cast, valid, rule). setting_problems() checks the same rules for the doctor.
+_NUMBER_SETTINGS = {}
+
+
+def _number_ok(raw, cast, valid) -> bool:
+    """True when `raw` is empty (the default) or parses and keeps the rule."""
+    if raw is None or not str(raw).strip():
+        return True
+    try:
+        return bool(valid(cast(str(raw).strip())))
+    except ValueError:
+        return False
+
+
 def _env_number(name, default, cast, valid, rule):
     """An import-time number setting from the environment. An empty value
     means the default. A value that does not parse, or that breaks `rule`,
     prints a warning that names the setting and keeps the default: a typo
     in stt.env must never stop every command that imports this module."""
+    _NUMBER_SETTINGS[name] = (default, cast, valid, rule)
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
-    try:
-        v = cast(raw.strip())
-        if valid(v):
-            return v
-    except ValueError:
-        pass
+    if _number_ok(raw, cast, valid):
+        return cast(raw.strip())
     print(f"warning: {name}={raw!r} is not {rule}; using {default}",
           file=sys.stderr, flush=True)
     return default
@@ -183,20 +195,26 @@ DIARIZATION_MODEL = os.environ.get(
 DIARIZERS = ("speakrs", "pyannote")
 
 
+def _diarizer_problem(raw):
+    """(engine, None) for a usable STT_DIARIZER value, else (speakrs, why).
+    Case and spaces are ignored, and an empty value is the default."""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return DIARIZERS[0], None
+    if v not in DIARIZERS:
+        return DIARIZERS[0], (f"{raw!r} is not one of {' or '.join(DIARIZERS)}; "
+                              f"using {DIARIZERS[0]}")
+    return v, None
+
+
 def _diarizer_setting() -> str:
     """STT_DIARIZER, checked: diarize() runs speakrs only on an exact
     "speakrs", so a typo ("speakr") used to switch every file to the slow
     CPU engine with no message. An unknown value warns and keeps the
     default; an empty one is the default."""
-    raw = os.environ.get("STT_DIARIZER", "")
-    v = raw.strip().lower()
-    if not v:
-        return DIARIZERS[0]
-    if v not in DIARIZERS:
-        print(f"warning: STT_DIARIZER={raw!r} is not one of "
-              f"{' or '.join(DIARIZERS)}; using {DIARIZERS[0]}",
-              file=sys.stderr, flush=True)
-        return DIARIZERS[0]
+    v, why = _diarizer_problem(os.environ.get("STT_DIARIZER", ""))
+    if why:
+        print(f"warning: STT_DIARIZER={why}", file=sys.stderr, flush=True)
     return v
 
 
@@ -667,6 +685,13 @@ def _quiet_raw():
     return _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
 
 
+def diarizer_now() -> str:
+    """The speaker engine a run started now would use: STT_DIARIZER from
+    stt.env (read fresh), then the environment, checked like DIARIZER."""
+    return _diarizer_problem(_env_file().get("STT_DIARIZER")
+                             or os.environ.get("STT_DIARIZER"))[0]
+
+
 def setting_problems() -> list:
     """[(setting, why)] for each stt.env value that cannot be read and is
     replaced by its default. The doctor lists them: a typo there used to
@@ -688,6 +713,14 @@ def setting_problems() -> list:
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:
         out.append(("STT_ASR_BACKEND", why))
+    _, why = _diarizer_problem(_env_file().get("STT_DIARIZER")
+                               or os.environ.get("STT_DIARIZER"))
+    if why:
+        out.append(("STT_DIARIZER", why))
+    for name, (default, cast, valid, rule) in _NUMBER_SETTINGS.items():
+        raw = _env_file().get(name) or os.environ.get(name)
+        if not _number_ok(raw, cast, valid):
+            out.append((name, f"{raw!r} is not {rule}; using {default}"))
     from . import voicememos
     why = voicememos.delete_setting_problem()
     if why:

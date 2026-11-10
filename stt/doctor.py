@@ -33,8 +33,10 @@ drops):
 What it only reports: a folder name that disagrees with its `title` and
 date, meetings missing the store keys (tools/backfill_keys.py adds them),
 scratch audio left in work/, an stt.env value that cannot be read and is
-replaced by its default (`bad_setting`), and (with deep=True) a stored
-duration longer than the audio.
+replaced by its default (`bad_setting`), a missing Hugging Face token
+(`diarizer_no_token`), a speakrs helper, model set or sandbox-exec that
+is missing so pyannote runs instead (`diarizer_fallback`), and (with
+deep=True) a stored duration longer than the audio.
 """
 import hashlib
 import json
@@ -344,6 +346,34 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
                            "over its cap", True))
     for name, why in config.setting_problems():
         out.append(Finding("bad_setting", name, why, False))
+    for kind, detail in diarizer_findings():
+        out.append(Finding(kind, "diarizer", detail, False))
+    return out
+
+
+def diarizer_findings() -> list:
+    """(kind, detail) pairs for the speaker engine. Reads only.
+
+    diarizer_no_token: no Hugging Face token. Both engines need the gated
+    pyannote embedder (naming and per-turn embeddings), so the batch stops
+    at its start until HF_TOKEN is set. diarizer_fallback: STT_DIARIZER is
+    speakrs, but its helper, its Core ML models or sandbox-exec is missing,
+    so every file takes the slower pyannote path. Before this, the only
+    trace of either was one log line per file."""
+    from . import speakrs_diar
+    out = []
+    if not (config._env_file().get("HF_TOKEN") or config.resolve_hf_token()):
+        out.append(("diarizer_no_token",
+                    "no Hugging Face token: the batch stops at its start until "
+                    "HF_TOKEN is set in stt.env (both speaker engines need the "
+                    "gated pyannote embedder)"))
+    if config.diarizer_now() == "speakrs":
+        ok, why = speakrs_diar.available()
+        if ok and not Path(speakrs_diar.SANDBOX_EXEC).exists():
+            ok, why = False, f"{speakrs_diar.SANDBOX_EXEC} missing"
+        if not ok:
+            out.append(("diarizer_fallback",
+                        f"{why}; every file uses the slower pyannote path"))
     return out
 
 
