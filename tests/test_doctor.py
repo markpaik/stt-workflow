@@ -333,6 +333,30 @@ def test_a_failed_copy_moves_no_generation_and_leaves_no_temp(sandbox, monkeypat
     assert not list(logs.glob("*.tmp"))
 
 
+def test_one_log_that_fails_never_stops_the_others(sandbox, monkeypatch, capsys):
+    """rotate_logs had no per-file try: the first failure ended the loop,
+    rotate_all swallowed it, and every later log went unrotated with no
+    sign."""
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 10)
+    logs = sandbox / "logs"
+    logs.mkdir()
+    for n in ("a.log", "b.log", "c.log"):
+        (logs / n).write_bytes(b"Z" * 50)
+    real = housekeeping.rotate
+
+    def stuck(path, *a, **k):
+        if path.name == "a.log":
+            raise PermissionError(13, "Permission denied")
+        return real(path, *a, **k)
+    monkeypatch.setattr(housekeeping, "rotate", stuck)
+    assert housekeeping.rotate_logs(logs) == ["b.log", "c.log"]
+    assert (logs / "b.log").stat().st_size == 0 and (logs / "c.log").stat().st_size == 0
+    assert "could not rotate logs/a.log" in capsys.readouterr().err
+    monkeypatch.setattr(config, "LOG_DIR", logs)
+    (logs / "c.log").write_bytes(b"Z" * 50)
+    assert housekeeping.rotate_all()["logs"] == ["c.log"]
+
+
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
     monkeypatch.setattr(housekeeping, "CALIBRATION_MAX_BYTES", 50)
     cal = config.CALIBRATION_LOG

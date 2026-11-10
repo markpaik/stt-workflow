@@ -20,6 +20,7 @@ Each function takes a dry_run flag and then only reports.
 import gzip
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from . import config
@@ -81,10 +82,22 @@ def log_files(log_dir=None) -> list:
         return []
 
 
+def _warn(what, e) -> None:
+    print(f"warning: could not rotate {what}: {e}", file=sys.stderr, flush=True)
+
+
 def rotate_logs(log_dir=None, dry_run=False) -> list:
-    """The logs that rotated (or would)."""
-    return [f.name for f in log_files(log_dir)
-            if rotate(f, LOG_MAX_BYTES, LOG_KEEP, dry_run=dry_run)]
+    """The logs that rotated (or would). One log that fails is reported
+    and skipped. The first failure ended the loop, rotate_all swallowed it,
+    and every later log in sorted order went unrotated with no sign."""
+    out = []
+    for f in log_files(log_dir):
+        try:
+            if rotate(f, LOG_MAX_BYTES, LOG_KEEP, dry_run=dry_run):
+                out.append(f.name)
+        except Exception as e:
+            _warn(f"logs/{f.name}", e)
+    return out
 
 
 def cap_calibration(path=None, dry_run=False) -> bool:
@@ -97,10 +110,10 @@ def rotate_all(dry_run=False) -> dict:
     out = {"logs": [], "calibration": False}
     try:
         out["logs"] = rotate_logs(dry_run=dry_run)
-    except Exception:
-        pass
+    except Exception as e:
+        _warn("logs/", e)
     try:
         out["calibration"] = cap_calibration(dry_run=dry_run)
-    except Exception:
-        pass
+    except Exception as e:
+        _warn("calibration.jsonl", e)
     return out
