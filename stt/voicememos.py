@@ -375,10 +375,13 @@ def eligible(row: dict, now: float, since: str, container: Path):
 def _staged_name(row, start, typed, stage: Path) -> str:
     stem = _safe(row.get("title")) if typed else ""
     stem = stem or "Voice Memo"
-    # a typed title often carries its own date. The name holds ONE date,
-    # the true start, in front ('YYYY-MM-DD <title>'): a typed stamp (either
-    # form) or a date inside the title is removed, and the start goes in
-    # front. So the folder name and the stored date always agree.
+    # a typed title often carries its own date. The start goes in front
+    # ('YYYY-MM-DD <title>'), so the folder name and the stored date always
+    # agree. dates.restamp removes the typed stamps it knows: a leading ISO
+    # date, a trailing 8-digit date, or else the first 8-digit date that
+    # stands as its own word. Any other date in the title stays, because it
+    # is part of what the person typed ('Notes 2026-10-05 sync' becomes
+    # '2026-11-07 Notes 2026-10-05 sync').
     name = dates.restamp(stem, start.date().isoformat())
     cand, i = name, 2
     while ((stage / f"{cand}.m4a").exists()

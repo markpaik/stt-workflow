@@ -223,6 +223,25 @@ def test_a_typed_date_in_the_title_is_not_doubled(sandbox):
         assert dates.meeting_date(n) == "2026-11-03"
 
 
+def test_a_typed_date_restamp_does_not_know_stays_in_the_title(sandbox):
+    """_staged_name's comment said any date inside a title is removed. Only
+    the stamps dates.restamp knows go (a leading ISO date, a trailing or
+    standalone 8-digit date). An ISO date in the middle is part of what the
+    person typed, so it stays, and the start still leads. A slashed date
+    loses its slashes (no file name holds one) and then reads as a trailing
+    8-digit stamp, so it goes."""
+    _lib([{"start": "2026-11-07 09:00:00", "title": "Notes 2026-10-05 sync"},
+          {"start": "2026-11-07 10:00:00", "title": "Standup 10/05/2026"},
+          {"start": "2026-11-07 11:00:00", "title": "2026-10-05 Planning"}])
+    voicememos.sync(now=NOW)
+    assert _staged() == ["2026-11-07 Notes 2026-10-05 sync.m4a",
+                         "2026-11-07 Planning.m4a",
+                         "2026-11-07 Standup.m4a"]
+    from stt import dates
+    for n in _staged():
+        assert dates.meeting_date(n) == "2026-11-07"
+
+
 def test_a_denied_stat_on_the_database_is_recorded(sandbox, monkeypatch):
     """Path.exists() re-raises PermissionError: the sync must record it for
     the doctor, never raise."""
