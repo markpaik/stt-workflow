@@ -121,6 +121,38 @@ def test_from_meeting_suspect_sample_requires_confirm(sandbox, monkeypatch):
     assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
 
 
+
+@pytest.mark.parametrize("typed", ["priya shah", "PRIYA SHAH", "  Priya   Shah "])
+def test_a_name_in_another_case_still_needs_confirm(sandbox, monkeypatch, typed):
+    """sample_check looked the typed name up case for case. 'priya shah'
+    found no stack, so the guard passed, and identify.enroll then mapped the
+    name to 'Priya Shah' and added the wrong voice to her stack."""
+    rng = np.random.default_rng(5)
+    priya = rng.normal(size=256)
+    priya /= np.linalg.norm(priya)
+    other = rng.normal(size=256)
+    other -= (other @ priya) * priya
+    other /= np.linalg.norm(other)
+    spans = [(i * 4.0, i * 4.0 + 3.0) for i in range(12)]
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": spans,
+                                 "SPEAKER_01": [(s + 60, e + 60) for s, e in spans]},
+                         {"SPEAKER_00": priya, "SPEAKER_01": other})
+    identify.enroll("Priya Shah", priya, source="Mtg")
+
+    argv = ["enroll", "--from-meeting", "Mtg", "--speaker", "SPEAKER_01",
+            "--name", typed]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert "--confirm" in str(ei.value) and "Priya Shah's" in str(ei.value)
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 1
+    assert identify.sample_check(typed, other) is not None
+
+    monkeypatch.setattr(sys, "argv", argv + ["--confirm"])
+    assert enroll.main() == 0
+    assert list(identify.load_registry()) == ["Priya Shah"]
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
+
 BAD_NAMES = ["", "   ", "\t", "Bad\nName", "Bad\rName", "A‮B", "Zed​Q",
              "Line Two", "Nul\x00l", "C1\x85x", "﻿Lead"]
 

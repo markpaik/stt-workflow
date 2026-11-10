@@ -84,9 +84,12 @@ def main():
     if identify.reserved_name(args.name):
         raise SystemExit(f"--name: {identify.RESERVED_ERROR}")
     try:
-        identify.load_registry_for_write()
+        reg = identify.load_registry_for_write()
     except identify.RegistryUnreadable as e:
         raise SystemExit(str(e))
+    # 'jordan lee' for an enrolled 'Jordan Lee' is her: the check below and
+    # every message name the stack the sample would join
+    args.name = identify.canonical_name(args.name, reg)
 
     if args.from_meeting:
         embs = _meeting_embeddings(args.from_meeting)

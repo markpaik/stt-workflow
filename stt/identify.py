@@ -294,6 +294,11 @@ def sample_check(name, vector, exclude=(), prints=None):
     source best. `prints` (load_voiceprints()) lets a caller that checks
     many rows read the profiles from disk once."""
     prints = load_voiceprints() if prints is None else prints
+    if name not in prints:
+        # enroll() files 'jordan lee' under an enrolled 'Jordan Lee'
+        # (canonical_name), so the sample is checked against that stack too
+        key = _name_key(name)
+        name = next((nm for nm in prints if _name_key(nm) == key), name)
     own = prints.get(name)
     if own is None:
         return None
