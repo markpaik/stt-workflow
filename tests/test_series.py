@@ -139,3 +139,16 @@ def test_title_case_keeps_program_names_with_small_words():
     assert series.title_case("early on workflow UAT review") == "Early On Workflow UAT Review"
     assert series.title_case("transfer in workflow discovery") == "Transfer In Workflow Discovery"
     assert series.title_case("decisions made on the budget") == "Decisions Made on the Budget"
+
+
+def test_a_person_with_a_path_character_or_dash_never_reaches_the_title():
+    # the model's PERSON line matched nobody, so it arrives as written
+    t = series.build_title("weekly_checkin", "Budget", f"Robin {DASH} Sam")
+    assert t == f"Robin Sam Weekly Check-in {DASH} Budget"
+    assert series.split_title(t) == ("Robin Sam Weekly Check-in", "Budget")
+    t = series.build_title("weekly_checkin", "Budget", "Robin/Sam")
+    assert t == f"Robin Sam Weekly Check-in {DASH} Budget"
+    assert not any(c in series.build_title("weekly_checkin", "Budget", 'A:B"C?')
+                   for c in ':"?/')
+    # a person that is nothing but such characters drops the slot
+    assert series.build_title("weekly_checkin", "Budget", "/") == f"Weekly Check-in {DASH} Budget"

@@ -418,6 +418,10 @@ def build_title(series_id: str, topic: str, person: str = "") -> str:
     if s is None:
         t = clean_topic(topic, max_words=8)
         return t or "Untitled Meeting"
+    # the person is the model's PERSON line when it matched nobody, and the
+    # title is a folder name: no path character, and no dash that
+    # split_title would read as the topic separator ('Robin – Sam')
+    person = re.sub(r"\s+", " ", _TOPIC_BAD.sub(" ", str(person or ""))).strip()
     name = s.name(person)
     avoid = [s.template.replace("{person}", "").strip()] + (
         [person] + [_first(p) for p in re.split(r"\s+and\s+", person)] if person else [])
