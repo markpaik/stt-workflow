@@ -3,9 +3,14 @@
 #
 # Run this from inside the checkout to protect:  sh tools/install_precommit_hook.sh
 #
-# The hook refuses a staged *.npz, *.jsonl, *.db* or audio file anywhere in the
-# tree. Those files hold voiceprints, meeting history or recordings. Removing
-# such a file from git stays allowed. `git commit --no-verify` skips the hook.
+# The hook refuses a staged *.npz, *.jsonl or audio file anywhere in the tree,
+# and an SQLite file: *.db, its *.db-wal, *.db-shm and *.db-journal (the
+# stt/config.py root-state globs "*.db" and "*.db-*"), and a *.db.bak copy.
+# Those files hold voiceprints, meeting history or recordings. A name that
+# only starts with ".db", such as schema.dbml, is not refused: the old
+# '.db*' rule made such a file need --no-verify, which also skips the real
+# guard. Removing a data file from git stays allowed. `git commit
+# --no-verify` skips the hook.
 #
 # Git keeps one hooks folder for a repository and all its worktrees, so this
 # protects every worktree. The script refuses to replace a hook it did not write.
@@ -27,7 +32,7 @@ cat > "$tmp" <<'HOOK'
 # stt-workflow data-file guard. Installed by tools/install_precommit_hook.sh.
 bad=$(git diff --cached --name-only --diff-filter=ACMRT -z \
     | tr '\0' '\n' \
-    | grep -iE '(\.npz|\.jsonl|\.db[^/]*|\.(m4a|m4b|wav|mp3|aif|aiff|aac|caf|flac|ogg|opus|amr|mp4|mov|webm))$' \
+    | grep -iE '(\.npz|\.jsonl|\.db(-[^/]*|\.bak)?|\.(m4a|m4b|wav|mp3|aif|aiff|aac|caf|flac|ogg|opus|amr|mp4|mov|webm))$' \
     || true)
 if [ -n "$bad" ]; then
     echo "Commit refused. These staged files can hold private data:" >&2

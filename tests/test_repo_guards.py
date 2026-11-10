@@ -83,6 +83,7 @@ def test_installer_writes_an_executable_hook(hooked):
 
 @pytest.mark.parametrize("name", [
     "x.npz", "sub/x.npz", "x.jsonl", "x.db", "x.db-wal", "x.db-shm", "sub/x.sqlite.db",
+    "search.db-journal", "X.DB", "search.db.bak",
     "x.m4a", "X.M4A", "x.wav", "x.mp3", "x.aiff", "x.aif", "x.mp4", "x.mov", "x.caf",
     "x.flac", "x.ogg", "x.aac", "x y.m4a",
 ])
@@ -93,8 +94,12 @@ def test_hook_refuses_data_files(hooked, name):
     assert _git(hooked, "rev-parse", "-q", "--verify", "HEAD", check=False).returncode != 0
 
 
-@pytest.mark.parametrize("name", ["x.py", "x.json", "sub/notes.md", "db/x.txt", "x.dmg"])
+@pytest.mark.parametrize("name", ["x.py", "x.json", "sub/notes.md", "db/x.txt", "x.dmg",
+                                  "schema.dbml", "docs/x.dbt.md", "x.db.d/notes.txt"])
 def test_hook_allows_other_files(hooked, name):
+    """A name with ".db" in it is not an SQLite file: the old '.db[^/]*' rule
+    refused schema.dbml, and the only way past was --no-verify, which also
+    skips the real guard."""
     assert _commit(hooked, name).returncode == 0
 
 
