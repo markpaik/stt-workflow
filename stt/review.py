@@ -369,8 +369,12 @@ def _apply_locked(base, index, action, start, text, speaker_id, end=None) -> dic
                                 "text": seg["text"], "speaker_id": seg["speaker"],
                                 "manual_id": seg["manual_id"]})
     else:
+        # the text as the live edit stored it: stripped, and None when it
+        # is blank. The raw text replayed '  padded text  \n' on the next
+        # relabel, and a blank one replaced the line's words with spaces
         _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
-                                "text": text if action == "edit" else None,
+                                "text": ((text or "").strip() or None)
+                                        if action == "edit" else None,
                                 "speaker_id": speaker_id if action == "edit" else None})
     merged_at, n_merged = index, 1
     if action == "edit" and speaker_id:
@@ -759,8 +763,11 @@ def reapply_decisions(base: str, data: dict) -> int:
             applied += 1
             continue
         if dec["action"] == "edit":
-            if dec.get("text"):
-                seg["text"] = dec["text"]
+            # stripped again: a sidecar written before the live edit and
+            # its decision agreed can still hold the raw text
+            t = str(dec.get("text") or "").strip()
+            if t:
+                seg["text"] = t
                 seg["text_edited"] = True
             sp = _resolve_speaker(data, dec.get("speaker_id") or "")
             if sp:

@@ -935,3 +935,35 @@ def test_an_insert_near_the_end_is_cut_at_the_end(sandbox):
     seg = d["segments"][r["index"]]
     assert (seg["start"], seg["end"]) == (8.0, 9.0)
     assert "NaN" not in (mfile("Mtg", ".json")).read_text()
+
+
+def test_an_edit_replays_the_text_the_live_edit_stored(sandbox):
+    """The live edit stored text.strip(), and the sidecar kept the raw text,
+    so the next relabel replayed '  padded text  \\n' into the transcript.
+    A blank text with a speaker change replaced the line's words with
+    spaces on replay."""
+    _make_meeting(sandbox)
+    assert review.apply("Mtg", 1, "edit", start=5.0, text="  padded text  \n")["ok"]
+    live = json.loads(mfile("Mtg", ".json").read_text())["segments"][1]["text"]
+    assert live == "padded text"
+    decs = json.loads(mfile("Mtg", ".reviews.json").read_text())
+    assert decs[-1]["text"] == "padded text"
+    data = _make_meeting(sandbox)          # simulate the relabel rebuild
+    review.reapply_decisions("Mtg", data)
+    assert data["segments"][1]["text"] == live
+
+    _make_meeting(sandbox, base="Two")
+    assert review.apply("Two", 1, "edit", start=5.0, text="   ",
+                        speaker_id="SPEAKER_01")["ok"]
+    assert json.loads(mfile("Two", ".reviews.json").read_text())[-1]["text"] is None
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "Uncertain bit here."
+
+    # a sidecar from before the fix still holds the raw text
+    mfile("Two", ".reviews.json").write_text(json.dumps([
+        {"start": 5.0, "end": 6.0, "action": "edit", "text": " old raw \n",
+         "speaker_id": None, "at": "2026-11-01T10:00:00"}]))
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "old raw"
