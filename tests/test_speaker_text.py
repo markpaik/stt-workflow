@@ -241,3 +241,19 @@ def test_a_first_name_that_is_a_word_at_a_sentence_start_stays_a_word():
     assert out["ai_gist"] == ("Will the board approve? Bill Jones asked. Bill asked again. "
                               "Mark the date: Will we hear back? Then Bill's plan wins.")
     assert out["ai_decisions"] == ["Will this hold?", "- Bill owns it."]
+
+
+def test_a_one_word_name_that_is_a_word_at_a_sentence_start_stays_a_word():
+    """The verb guard covered first-name tokens only. A speaker whose whole
+    name is 'Will' took the full-label path, so 'Will the board approve?'
+    became a token and a rename to 'Pat' read 'Pat the board approve?'.
+    The one-word label gets the same guard now. Used as a name, it still
+    follows the rename."""
+    d = {"speakers": [{"id": "S0", "name": "Will", "display": "Will"}], "segments": []}
+    tmpl = speaker_text.make({"gist": "Will the board approve the budget? Will said yes.",
+                              "decisions": ["- Will owns it."]}, d)
+    assert tmpl["fields"]["gist"] == "Will the board approve the budget? ⟦s:S0⟧ said yes."
+    d2 = {"speakers": [{"id": "S0", "name": "Pat", "display": "Pat"}], "segments": []}
+    out = speaker_text.render(tmpl, d2)
+    assert out["ai_gist"] == "Will the board approve the budget? Pat said yes."
+    assert out["ai_decisions"] == ["- Pat owns it."]

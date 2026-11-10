@@ -139,7 +139,8 @@ def templatize(text: str, data: dict, labels: dict) -> str:
     """`text` with every speaker label of `data`'s roster replaced by a
     token. Full labels first (longest first, so 'Speaker 12' wins over
     'Speaker 1'), then first names that only one named speaker carries. A
-    first name used as a verb at a sentence start stays text (_verb_use)."""
+    first name used as a verb at a sentence start stays text (_verb_use),
+    and so does a one-word name ('Will', 'Grant') used the same way."""
     if not text:
         return text
     disp = roster(data)
@@ -150,11 +151,17 @@ def templatize(text: str, data: dict, labels: dict) -> str:
     for k, rid in labels.items():
         key_of.setdefault(rid, k)
     pats = []
+    # a named speaker whose whole label is one word: the full-label path
+    # had no verb guard, so 'Will the board approve?' became a token, and a
+    # rename to Pat read 'Pat the board approve?'
+    one_word = set()
     for rid, d in disp.items():
         k = key_of.get(rid)
         if k is None or not d.strip():
             continue
         pats.append((d, _tok("s", k)))
+        if rid in named and len(d.split()) == 1:
+            one_word.add(d)
     firsts = {}
     for rid in named:
         d = disp.get(rid, "")
@@ -180,7 +187,8 @@ def templatize(text: str, data: dict, labels: dict) -> str:
 
     def sub(m):
         tok = table[m.group(1)]
-        if tok.startswith("⟦f:") and _verb_use(text, m):
+        if ((tok.startswith("⟦f:") or m.group(1) in one_word)
+                and _verb_use(text, m)):
             return m.group(0)
         return tok
     return rx.sub(sub, text)
