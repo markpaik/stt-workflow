@@ -264,6 +264,41 @@ def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     assert (d["date"], d["date_source"], d["title"]) == ("2026-07-09", "manual", "Board Prep")
 
 
+@pytest.mark.parametrize("typed", ["2025-09-10", "07102026", "20250910", " 2025-09-10 "])
+def test_a_title_that_is_only_a_date_is_refused(sandbox, typed):
+    """strip_stamp keeps a bare date whole, so a title of only a date put
+    the date in the folder name twice: '2025-09-10 2025-09-10' and
+    '2025-09-10 07102026'."""
+    _m("2025-09-10 Board Prep", date="2025-09-10", title="Board Prep")
+    r = summarize.rename_meeting("2025-09-10 Board Prep", typed)
+    assert r["ok"] is False and "Set date" in r["error"]
+    assert config.meeting_bases() == ["2025-09-10 Board Prep"]
+    r = summarize.apply_meeting_edits("2025-09-10 Board Prep", title=typed,
+                                      reviewed=True, title_state="confirmed")
+    assert r["ok"] is False
+    # a date with words is still a title, and its stamp is still the date
+    r = summarize.rename_meeting("2025-09-10 Board Prep", "2025-09-11 Board Prep")
+    assert r["ok"] and r["base"] == "2025-09-11 Board Prep" and "note" not in r
+
+
+def test_a_future_typed_date_kept_in_the_title_says_so(sandbox):
+    """A future stamp names an event, so canonical() keeps it in the title
+    and the meeting keeps its date. Nothing told the person why the date
+    they typed was not applied."""
+    from datetime import date as _d
+    future = f"{_d.today().year + 1}-03-14"
+    _m("2026-08-20 Planning", date="2026-08-20", title="Planning")
+    r = summarize.rename_meeting("2026-08-20 Planning", f"{future} Retreat")
+    assert r["ok"] and r["base"] == f"2026-08-20 {future} Retreat"
+    assert future in r["note"] and "Set date" in r["note"]
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["date"] == "2026-08-20"
+    # the date picker set too: the typed stamp is no date claim, so no note
+    r = summarize.apply_meeting_edits(r["base"], title="Board Prep",
+                                      date="2026-08-21")
+    assert r["ok"] and "note" not in r
+
+
 def test_the_date_picker_beats_a_typed_stamp(sandbox):
     _m("Voice Memo 9", date="2026-07-20")
     r = summarize.apply_meeting_edits("Voice Memo 9", title="Board Prep 07092026",

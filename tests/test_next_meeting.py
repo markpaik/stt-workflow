@@ -1371,3 +1371,25 @@ console.log(JSON.stringify({first,second}));
     assert "not two.”." not in out["first"]
     assert "where this says “The target was three percent, not two.” <button" in out["first"]
     assert "where this says “we agreed on it”. <button" in out["second"]
+
+
+@needs_node
+def test_a_title_save_toasts_the_note_the_server_sends():
+    """A future date typed in a title stays in the title, and the reply
+    says so in `note`. The toast said only 'Title saved.' or 'Saved.'."""
+    out = _run("""
+await openPage('2026-08-20 Planning',{},{title_state:'confirmed'});
+answer=(p,b)=>p==='/api/accept_meeting'?{ok:true,base:'2026-08-20 Planning',note:'NOTE-A'}:{};
+A['m-title']();__els['m-title-in']={value:'2027-03-14 Retreat'};
+A['m-title-save']();await flush();
+const a=toasts.slice(-1)[0];
+answer=(p,b)=>p==='/api/rename'?{ok:true,base:'2026-08-20 Planning',note:'NOTE-B'}:{};
+__els['pf-in']={value:'2027-03-14 Retreat',dataset:{kind:'rename',base:'2026-08-20 Planning'}};
+__els['pf-err']={hidden:true,textContent:''};
+await A['pf-save']();await flush();
+const b=toasts.slice(-1)[0];
+answer=(p,b)=>p==='/api/rename'?{ok:true,base:'2026-08-20 Planning'}:{};
+await A['pf-save']();await flush();
+console.log(JSON.stringify({a,b,c:toasts.slice(-1)[0]}));
+""")
+    assert out == {"a": "NOTE-A", "b": "NOTE-B", "c": "Saved."}

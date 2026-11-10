@@ -620,8 +620,9 @@ const A={
   else if(k==='bulk-rename'||k==='bulk-date'){r=await api('/api/bulk',{action:k==='bulk-rename'?'rename':'date',bases:[...UI.sel],value:v});}
   if(!r||r.error||r.ok===false){err.hidden=false;err.textContent=(r&&r.error)||((r&&r.results)||[]).filter(x=>!x.ok).map(x=>x.error).filter(Boolean)[0]||'That did not work.';return;}
   hidePop();if(k.startsWith('bulk'))UI.sel.clear();await refresh();
-  if(r.base&&r.base!==b&&UI.route==='meeting'&&UI.mbase===b){mFollow(b,r.base);toast('Saved.');return;}
-  render(true);toast('Saved.');},
+  // a note says what the save did not do as typed (a future date kept in the title)
+  if(r.base&&r.base!==b&&UI.route==='meeting'&&UI.mbase===b){mFollow(b,r.base);toast(r.note||'Saved.');return;}
+  render(true);toast(r.note||'Saved.');},
  async keep(el){const b=el.dataset.base;const i=document.getElementById('nt-'+b);const name=i?i.value.trim():'';
   await act('/api/accept_meeting',{base:b,name:name||undefined},'keep:'+b);toast('Title kept.');},
  async 'keep-all'(){if(UI.confirm!=='keep-all'){UI.confirm='keep-all';render(true);return;}UI.confirm=null;

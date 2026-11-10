@@ -742,7 +742,7 @@ async function mAccept(name){
  delete UI.err['m-title'];MP.editTitle=false;MP.titleDraft=null;
  await refresh();
  if(r.base&&r.base!==base)mFollow(base,r.base);else render(true);
- toast(name?'Title saved.':'Title kept.');
+ toast(r.note||(name?'Title saved.':'Title kept.'));
 }
 // the folder moved (a rename re-stamps it): carry the page state across
 function mFollow(oldBase,newBase){

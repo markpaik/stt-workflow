@@ -367,7 +367,10 @@ typed label or from the catalog appear in an optional Draft titles list for
 meeting page or use Rename in the row menu. Set date in the same menu
 changes the date, which must fall between 2000 and the end of next year.
 The folder follows the title and the date:
-`2026-04-08 LT Weekly Meeting – Reserve Target`.
+`2026-04-08 LT Weekly Meeting – Reserve Target`. A past date typed at the
+front of a title becomes the meeting's date. A future one names an event,
+so it stays in the title, and the save says so. A title that is only a
+date is refused: use Set date.
 
 A title stays on one line: a line break becomes a space, and a
 bidirectional control or a zero-width space is dropped. A colon or a slash
