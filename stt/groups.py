@@ -14,6 +14,11 @@ How a group forms:
    by average linkage while their mean word overlap (Jaccard) is 0.6 or
    more. Average linkage, not single linkage, because the audit's fuzzy
    match chained one group to 21 spellings.
+   A catalog series title ("LT Weekly Meeting – Budget Reallocation",
+   "Robin Weekly Check-in – Hiring Plan", see stt/series.py) counts its
+   series name only, because its topic changes every week. The person of a
+   person series is one word ("robin c"), so two people who share a first
+   name stay apart. Any other title counts all its words.
 2. People and hour. A meeting whose title has no strong word (a recorder
    default, a marker name) joins the title cluster whose members share its
    exact set of named people (the owner left out) at the same hour of day,
@@ -34,6 +39,10 @@ leaves the meeting out of that group, and a group that falls under two
 meetings leaves the list. Undo removes the key again. A group key is a hash
 of the cluster's most common word set (or its people and hour), so it holds
 while members come and go, and changes only when the dominant spelling does.
+A correction holds through that change: a title group answers to the key of
+each word set it holds, and to the key of each member's plain words() set
+(the key before series titles counted their series name only), so the key
+the correction stored still finds it.
 
 Use count: `group_usage.jsonl` in PROJECT_DIR gets one line per group open
 or group question, {at, event}, with no title and no key, for the one-month
@@ -47,6 +56,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -56,7 +66,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import config, dates
+from . import config, dates, series
 
 THRESHOLD = 0.6       # mean word overlap (Jaccard) to merge two clusters
 MIN_SIZE = 2          # a group needs two or more meetings
@@ -86,18 +96,41 @@ _lock = threading.RLock()
 
 # ------------------------------------------------------------------ words ---
 
+def _fold(text: str) -> str:
+    """Lower case, accents folded: "Réunion" is "reunion", not "r" and "union"."""
+    t = str(text or "").lower()
+    return "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+
+
 def words(title: str) -> frozenset:
     """The meeting's word set: lowercase words of its title, without stop
     words or bare numbers (dates and times say nothing about the series)."""
-    t = str(title or "").lower().replace("1-on-1", "1on1").replace("1:1", "1on1")
-    # fold accents so "Réunion" is "reunion", not "r" and "union"
-    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+    t = _fold(str(title or "").replace("1-on-1", "1on1").replace("1:1", "1on1"))
     out = set()
     for w in _WORD.findall(t):
         if w in _STOP or (_DIGITS.match(w) and w != "1"):
             continue
         out.add(w)
     out.discard("1")             # "1" only ever meant "1-on-1", handled above
+    return frozenset(out)
+
+
+def title_words(title: str) -> frozenset:
+    """The word set grouping reads off a title. A catalog series title,
+    with or without its topic, gives its series name's words, and a person
+    series adds the person as ONE word. Every meeting of the series then has
+    the same word set, whatever the week's topic. Any other title gives
+    words(title)."""
+    t = str(title or "").strip()
+    name = series.split_title(t)[0]
+    sid, person = series.exact_series(name if name is not None else t)
+    if sid is None:
+        return words(t)
+    sr = series.BY_ID[sid]
+    out = set(words(sr.template.replace("{person}", "")))
+    who = " ".join(_WORD.findall(_fold(person)))
+    if who:
+        out.add(who)
     return frozenset(out)
 
 
@@ -156,24 +189,39 @@ def row_hour(row: dict):
     return h
 
 
+def _text(v):
+    """A non-empty string value, else None."""
+    return v if isinstance(v, str) and v else None
+
+
+def _seconds(v) -> float:
+    """A duration in seconds: a finite number of zero or more, else 0.0."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0.0
+    v = float(v)
+    return v if math.isfinite(v) and v >= 0 else 0.0
+
+
 def row_from_json(base: str, d: dict) -> dict:
-    """The few keys grouping reads, from one meeting json."""
+    """The few keys grouping reads, from one meeting json. A value of the
+    wrong type (a hand-edited or damaged json) reads as absent: one such
+    meeting must never stop the groups of the whole library."""
     d = d if isinstance(d, dict) else {}
     named = []
-    for s in d.get("speakers") or []:
-        if isinstance(s, dict) and s.get("name"):
-            nm = s.get("display") or s.get("name")
+    speakers = d.get("speakers")
+    for s in speakers if isinstance(speakers, list) else []:
+        if isinstance(s, dict) and _text(s.get("name")):
+            nm = _text(s.get("display")) or s["name"]
             if nm not in named:
                 named.append(nm)
-    ra = d.get("recorded_at") if isinstance(d.get("recorded_at"), str) else None
     return {"base": base,
-            "meeting_id": d.get("meeting_id") or None,
-            "title": d.get("title") or dates.title_of(base),
+            "meeting_id": _text(d.get("meeting_id")),
+            "title": _text(d.get("title")) or dates.title_of(base),
             "named": named,
-            "recorded_at": ra,
-            "source_name": d.get("source_name") if isinstance(d.get("source_name"), str) else None,
-            "date": d.get("date") or dates.meeting_date(base),
-            "duration_sec": float(d.get("duration_sec") or 0.0)}
+            "recorded_at": _text(d.get("recorded_at")),
+            "source_name": _text(d.get("source_name")),
+            "date": _text(d.get("date")) or dates.meeting_date(base),
+            "duration_sec": _seconds(d.get("duration_sec"))}
 
 
 def load_rows() -> list:
@@ -387,11 +435,21 @@ def _near(h1, h2) -> bool:
     return min(d, 24 - d) <= HOUR_SLACK
 
 
+def _series_name(title: str) -> str:
+    """A catalog series title without its topic: 'LT Weekly Meeting –
+    Budget' is 'LT Weekly Meeting'. Any other title as it is."""
+    name = series.split_title(title)[0]
+    return name if name is not None and series.exact_series(name)[0] else title
+
+
 def _name_and_why(kind, members, sig):
-    titles = Counter(dates.title_of(m["base"]) or m.get("title") or "" for m in members)
+    # a series group is named for the series, not for one week's topic
+    def shown(m):
+        return _series_name(dates.title_of(m["base"]) or m.get("title") or "")
+    titles = Counter(shown(m) for m in members)
     newest = max(members, key=lambda m: (m.get("date") or "", m["base"]))
     top = max(titles.values())
-    name = (dates.title_of(newest["base"]) if titles[dates.title_of(newest["base"])] == top
+    name = (shown(newest) if titles[shown(newest)] == top
             else sorted(t for t, c in titles.items() if c == top)[0])
     if kind == "title":
         why = "Titles share the words " + ", ".join(sorted(sig))
@@ -411,7 +469,7 @@ def compute(rows: list, me=None, overrides=None) -> list:
         overrides = load_overrides()
     me = me if me is not None else config.mic_speaker()
     by_base = {r["base"]: r for r in rows}
-    ws = {r["base"]: words(r.get("title") or dates.title_of(r["base"])) for r in rows}
+    ws = {r["base"]: title_words(r.get("title") or dates.title_of(r["base"])) for r in rows}
     titled = [b for b in ws if strong(ws[b])]
     untitled = [b for b in ws if not strong(ws[b])]
 
@@ -427,7 +485,15 @@ def compute(rows: list, me=None, overrides=None) -> list:
         # the dominant spelling names the key: most members, then fewest words
         dom = max((sigs[i] for i in idx),
                   key=lambda s: (len(sig_members[s]), -len(s), sorted(s)))
-        out.append({"kind": "title", "sig": dom, "members": members})
+        # an override names the key it saw. It holds for every word set the
+        # cluster still holds, so a flip of the dominant spelling never
+        # brings an excluded meeting back. The plain words() set of each
+        # member counts too: a catalog series title read as words(title)
+        # before title_words, and a correction stored then names that key.
+        legacy = {_key("t", words(by_base[b].get("title") or dates.title_of(b)))
+                  for b in members}
+        out.append({"kind": "title", "sig": dom, "members": members,
+                    "keys": {_key("t", sigs[i]) for i in idx} | legacy})
 
     # 2. people and hour for meetings with no strong title word
     leftovers = []
@@ -459,8 +525,9 @@ def compute(rows: list, me=None, overrides=None) -> list:
     for g in out:
         key = (_key("t", g["sig"]) if g["kind"] == "title"
                else _key("p", g["sig"]))
+        keys = g.get("keys") or {key}
         members = [b for b in g["members"]
-                   if key not in overrides.get(meeting_key(by_base[b]), ())]
+                   if not keys & set(overrides.get(meeting_key(by_base[b]), ()))]
         if len(members) < MIN_SIZE:
             continue
         rs = sorted((by_base[b] for b in members),

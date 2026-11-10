@@ -7,8 +7,8 @@
    is #0A6C7E, and --personal is retired. Four hues: indigo acts, teal asks,
    green is done, red records or destroys.
 
-   tools/token_contrast.py audits this sheet with --css next (NEXT_PAIRS), and
-   tests/test_next_shell.py pins every text pair at or above 4.5:1.
+   tools/token_contrast.py audits this sheet (its PAIRS plus every pair a rule
+   paints), and tests/test_next_shell.py pins every text pair at or above 4.5:1.
    ============================================================================ */
 
 :root{
@@ -90,6 +90,10 @@ a{color:var(--accent-text)}
 .rec-t{color:var(--rec-text)}
 .nb{white-space:nowrap}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* the first Tab stop: the sidebar holds 14 before the page's own controls.
+   Off screen until it has focus. */
+.skip{position:fixed;left:var(--s3);top:-60px;z-index:90;background:var(--ink);color:var(--paper);padding:var(--s2) var(--s3);border-radius:var(--r);font-weight:600;text-decoration:none}
+.skip:focus{top:var(--s3)}
 ::placeholder{color:var(--sub);opacity:1}
 
 /* Controls: filled once per region, outlined rarely, text the rest of the time */
@@ -182,9 +186,11 @@ h2{font-size:var(--fs-sub);font-weight:600;line-height:1.3}
 .prog i{display:block;height:100%;background:var(--accent)}
 .row.static{cursor:default}
 .row.static:hover{background:transparent}
+.rail-slot{display:none}
 @media (hover:hover) and (min-width:900px){
   .row>.rail>.icon-btn{opacity:0}
   .row:hover>.rail>.icon-btn,.row:focus-within>.rail>.icon-btn{opacity:1}
+  .rail-slot{display:block;width:32px;flex:none}
 }
 .err{font-size:var(--fs-meta);color:var(--rec-text)}
 
@@ -258,6 +264,7 @@ kbd{font:500 var(--fs-meta) var(--sans);background:var(--inset);color:var(--ink)
 .m-head{display:grid;gap:var(--s1)}
 .back{justify-self:start;margin-left:calc(var(--s2) * -1)}
 .m-title-row{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s2);align-items:center}
+h1.m-h1{display:flex;min-width:0;font:inherit;margin:0}
 .m-title{border:0;background:transparent;padding:0 var(--s1);margin-left:calc(var(--s1) * -1);border-radius:4px;font-size:var(--fs-page);font-weight:600;line-height:1.25;cursor:text;min-width:0;text-align:left;overflow-wrap:anywhere}
 .m-title:hover{background:var(--inset)}
 input.m-title-input[type=text]{font-size:var(--fs-sub);font-weight:600;flex:1 1 260px}
@@ -384,6 +391,7 @@ input.name-input[type=text]{width:100%;font-size:var(--fs-title);min-height:40px
   button.chip,.nchip{min-height:40px}
   .h-desk{display:none!important}
   h1{display:none}
+  h1.m-h1{display:flex}  /* the page title is the meeting's own: it stays */
   .audio{padding:var(--s2) var(--s4)}
   .line{grid-template-columns:44px minmax(0,1fr) 44px}
   .line .who{grid-column:2;grid-row:1}

@@ -90,6 +90,29 @@ def _recorder_identity(pid):
     return "stt-recorder" in cmd
 
 
+def _caf_has_live_writer(caf) -> bool:
+    """True when a live stt-recorder names this CAF on its command line, or
+    when the check itself fails. Only an explicit "no recorder writes it"
+    is False: a stray CAF is finalized and DELETED on False, and a recorder
+    still writing to it would lose the rest of its audio."""
+    try:
+        # pgrep reads an extended regex: '[.]' is a literal dot
+        r = subprocess.run(["/usr/bin/pgrep", "-f", Path(caf).name.replace(".", "[.]")],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode not in (0, 1):   # 1 is "no match"; anything else failed
+        return True
+    for tok in r.stdout.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid != os.getpid() and _recorder_identity(pid) is not False:
+            return True
+    return False
+
+
 def _recorder_running(pid) -> bool:
     """True only when pid is live AND actually our recorder. A bare os.kill(pid,
     0) reads a RECYCLED pid as a live recording — which would refuse every new
@@ -355,9 +378,10 @@ def stop(name=None) -> dict:
     return finalize(caf, name)
 
 
-def finalize(caf: Path, name=None) -> dict:
+def finalize(caf: Path, name=None, now=None) -> dict:
     """Transcode a finished CAF to a named stereo m4a in the watched folder,
-    atomically (only a complete file ever becomes visible), then drop the CAF."""
+    atomically (only a complete file ever becomes visible), then drop the CAF.
+    `now` stamps a default name (final_name). None is this moment."""
     caf = Path(caf)
     _growth.pop(str(caf), None)   # this capture is over; its growth history is too
 
@@ -382,7 +406,10 @@ def finalize(caf: Path, name=None) -> dict:
                                  "permissions button).")
         return {"ok": False, "error": "nothing was captured (permission denied?)"}
     staging = staging_dir()
-    final = final_name(name)
+    # a default name carries the time the capture STARTED, as provenance
+    # reads it and the README says ('2026-04-08 Recording 1430'). A stop
+    # passed no time, so the name took the moment the capture ended.
+    final = final_name(name, now if now is not None else _start_time(caf))
     # keep stereo (L=mic, R=system): Phase 2 exploits the split; Phase 1's
     # to_wav16k downmixes it to mono anyway. Same -f ipod + .part + os.replace
     # idiom as audio.extract_audio, so the watcher never sees a partial file.
@@ -458,6 +485,26 @@ def _uniquify(base: str) -> str:
     return f"{base} ({i})"
 
 
+def _start_time(caf):
+    """When the capture in `caf` started: the recording state's started_at
+    when the state names this CAF, else the CAF's birth time (the helper
+    creates it at the start), else its modification time. A recovery at a
+    later menu-bar start took the recovery moment, so a capture from one
+    day was named and dated the next. None when nothing can be read: the
+    name then takes this moment."""
+    rec = status.recording() or {}
+    if rec.get("caf") == str(caf) and rec.get("started_at"):
+        try:
+            return datetime.fromisoformat(str(rec["started_at"]))
+        except ValueError:
+            pass
+    try:
+        st = Path(caf).stat()
+        return datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_mtime))
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 def recover_orphans() -> list:
     """Clean up after a crash/forced quit: a recorded CAF whose helper is gone.
     Called at menu-bar startup. Returns the names recovered."""
@@ -469,7 +516,8 @@ def recover_orphans() -> list:
     # the real recorder would keep writing to a file that no longer exists.
     if rec and not _recorder_running(rec.get("pid")):
         caf = Path(rec.get("caf", ""))
-        r = finalize(caf, None)  # default 'Recording ...' name; clears the state
+        # default 'Recording ...' name at the capture's start; clears the state
+        r = finalize(caf, None, now=_start_time(caf))
         if r.get("ok"):
             recovered.append(r["name"])
         else:
@@ -481,7 +529,11 @@ def recover_orphans() -> list:
         for caf in staging.glob(".rec-*.caf"):
             if str(caf) == active_caf:
                 continue
-            r = finalize(caf, None)
+            # status.json can lose the entry of a capture that is still
+            # running: its CAF is not a stray while a recorder writes it
+            if _caf_has_live_writer(caf):
+                continue
+            r = finalize(caf, None, now=_start_time(caf))
             if r.get("ok"):
                 recovered.append(r["name"])
     sweep_orphan_parts()

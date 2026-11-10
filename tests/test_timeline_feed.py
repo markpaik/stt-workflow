@@ -454,8 +454,7 @@ def test_archived_meeting_is_excluded(sandbox):
 # ranked `tray` key stays the data behind two sections: its urgent kinds
 # (recorder_stall, failed, dupe_files, dupe_meetings) render as Now rows, and
 # its chronic kinds (unknown_voice, review) are counted by the To finish
-# eyebrow's "Name N voices" and "Review flags". The client half is pinned in
-# tests/test_new_shell.py; these pin the data it reads.
+# eyebrow's "Name N voices" and "Review flags". These pin the data.
 
 def test_tray_empty_when_nothing_needs_attention(sandbox):
     _meeting("Clean Meeting 05012026")   # ready, no flags, no unknowns, no failures
@@ -539,6 +538,22 @@ def test_tray_ranks_stall_failed_unknown(sandbox, monkeypatch, tmp_path):
         "U007": {"file": "U007.npy", "meetings": ["m"]}}}))           # unknown_voice
     kinds = [t["kind"] for t in srv.gather_state()["tray"]]
     assert kinds == ["recorder_stall", "failed", "unknown_voice"]
+
+
+def test_a_failed_recording_note_is_a_tray_item_until_the_next_capture(sandbox):
+    """The classic page showed a failed recording ("captured NO audio")
+    with Fix permissions. Its removal left the note in /api/state with no
+    reader, so only the menu bar showed it. A success expires on its own
+    and adds no entry."""
+    text = ("The recording captured NO audio. Check microphone access "
+            "in System Settings.")
+    status.set_recorder_note(False, text)
+    t = [x for x in srv.gather_state()["tray"] if x["kind"] == "recorder_note"]
+    assert len(t) == 1 and t[0]["detail"] == text and t[0]["target"].startswith("note:")
+    status.set_recorder_note(True, "Saved Recording 1814.m4a")
+    assert not [x for x in srv.gather_state()["tray"] if x["kind"] == "recorder_note"]
+    status.clear_recorder_note()
+    assert srv.gather_state()["tray"] == []
 
 
 def test_tray_failed_carries_error_and_target(sandbox):
@@ -732,6 +747,23 @@ def test_a_gone_source_failure_is_honest_and_dismissible(sandbox, monkeypatch):
     # junk names are refused, nothing stored
     assert srv.dismiss_failure("../../etc/passwd") is False
     assert srv.dismiss_failure("") is False
+
+
+@pytest.mark.parametrize("raw", ["[]", "null", '"x"', '{"ghost.m4a": 5}'])
+def test_a_dismissal_file_of_the_wrong_shape_silences_nothing_and_never_raises(
+        sandbox, monkeypatch, raw):
+    """_dismissed_failures returned whatever the file held. A [], null or
+    string file made the failure list raise AttributeError and a dismiss
+    raise TypeError, and a time that is not text made the compare raise."""
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "ghost.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "failed"}])
+    p = config.PROJECT_DIR / "dismissed_failures.json"
+    p.write_text(raw)
+    assert srv._failed_sources({"recent": []}) == {"ghost.m4a": "failed"}
+    assert srv.dismiss_failure("ghost.m4a") is True
+    assert set(json.loads(p.read_text())) == {"ghost.m4a"}
+    assert srv._failed_sources({"recent": []}) == {}
 
 
 # ---------- fix pass 2 (2026-09-06) ----------
@@ -979,8 +1011,7 @@ def test_finish_counts_a_split_voice_once(sandbox, every_voice_asks):
     "Voices 21". The diarizer split one person into two clusters that carry
     one global id, so both display "Speaker 68", and naming that id names
     both: one voice. The row's count (finish.voices) is 21 voices in 22
-    unnamed clusters, the uid is listed once, and the strip's own count over
-    the same meeting is pinned to this number in tests/test_new_shell.py."""
+    unnamed clusters, and the uid is listed once."""
     clusters, _ = split_voice_meeting()
     d = json.loads(mfile(SPLIT_VOICE_BASE, ".json").read_text())
     assert len([s for s in d["speakers"] if not s.get("name")]) == clusters == 22

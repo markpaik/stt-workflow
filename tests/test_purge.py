@@ -130,6 +130,88 @@ def test_a_leaked_memo_leaves_every_store(sandbox, monkeypatch, tmp_path):
     assert json.loads(config.meeting_file(KEEP, ".json").read_text())["meeting_id"] == "mid-keep"
 
 
+def test_a_purge_leaves_the_migration_journals_and_status(sandbox, monkeypatch, tmp_path):
+    """The purge left the meeting's folder name, id, title and source name
+    in the undo journals and rename plans of config.migration_dir(), and
+    its row in status.json recent[]. It now drops each line and row that
+    names the meeting, by its id or by any name the journals give it, and
+    it lists any other file there that still names it."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    old = "Errand 11032026"          # a name the meeting had before a rename
+    mig = config.migration_dir()
+    mig.mkdir(mode=0o700)
+
+    def jl(name, *rows, tail=""):
+        (mig / name).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                                        for r in rows) + tail)
+        (mig / name).chmod(0o600)
+    jl("amnesty-1.jsonl",
+       {"run": "amnesty-1", "meeting_id": "mid-leak", "base": LEAK, "field": "route"},
+       {"run": "amnesty-1", "meeting_id": "mid-keep", "base": KEEP, "field": "route"},
+       tail='{"run": "amnesty-1", "mee')            # a torn last line is kept
+    jl("iso-rename-journal.jsonl",
+       {"event": "apply", "meeting_id": "mid-leak", "old_base": old, "new_base": LEAK},
+       {"event": "apply", "meeting_id": "mid-keep", "old_base": KEEP, "new_base": KEEP},
+       tail='{"event": "begin", "meeting_id": "mid-leak", "old_b')   # torn, names it
+    # a line from before the meeting had an id, under its older name
+    jl("backfill-1.jsonl", {"run": "backfill-1", "meeting_id": None, "base": old,
+                            "field": "source_name", "new": "Personal Errand.m4a"})
+    # another meeting that took the old name later: its id says it is not this one
+    jl("fixdates-1.jsonl", {"run": "fixdates-1", "meeting_id": "mid-keep", "base": old})
+    rows = [{"meeting_id": "mid-leak", "old_base": LEAK, "new_base": LEAK},
+            {"meeting_id": "mid-keep", "old_base": KEEP, "new_base": KEEP}]
+    (mig / "iso-rename-plan.json").write_text(json.dumps({"version": 1, "rows": rows}))
+    (mig / "iso-rename-plan.tsv").write_text(
+        f"old_base\tnew_base\trename\n{LEAK}\t{LEAK}\tFalse\n{KEEP}\t{KEEP}\tFalse\n")
+    run = mig / "doctor-1"
+    run.mkdir()
+    (run / "001-manifest.json").write_text(json.dumps({"processed": {"x": [LEAK]}}))
+    status.STATUS_PATH.write_text(json.dumps({"running": False, "recent": [
+        {"name": "Personal Errand.m4a", "ok": True, "summary": "1 speaker(s)"},
+        {"name": "Budget Review.m4a", "ok": True, "summary": "1 speaker(s)"}]}))
+
+    p = purge.plan(LEAK)
+    assert p["recent_rows"] == 1 and p["migration"]["lines"] == 5
+    assert old in p["migration"]["names"]
+    assert "Personal Errand" in status.STATUS_PATH.read_text()      # a dry run
+
+    r = purge.apply(LEAK)
+    assert r["done"] and r["scrubbed"]["recent"] == 1 and r["scrubbed"]["migration"] == 5
+    assert [x["name"] for x in status.read()["recent"]] == ["Budget Review.m4a"]
+    assert not (mig / "backfill-1.jsonl").exists()          # its only line was this meeting
+    amn = (mig / "amnesty-1.jsonl").read_text()
+    assert "mid-leak" not in amn and KEEP in amn and amn.endswith('"mee\n')
+    assert "mid-keep" in (mig / "fixdates-1.jsonl").read_text()
+    assert [x["meeting_id"] for x in
+            json.loads((mig / "iso-rename-plan.json").read_text())["rows"]] == ["mid-keep"]
+    assert LEAK not in (mig / "iso-rename-plan.tsv").read_text()
+    for f in ("amnesty-1.jsonl", "iso-rename-plan.json", "iso-rename-plan.tsv"):
+        assert (mig / f).stat().st_mode & 0o777 == 0o600
+    # the doctor's copy is not rewritten: it is listed for the owner
+    assert r["migration_left"] == [str(run / "001-manifest.json")]
+    named = [f for f in mig.rglob("*") if f.is_file() and f.parent == mig
+             and ("Personal Errand" in f.read_text() or "mid-leak" in f.read_text()
+                  or LEAK in f.read_text())]
+    assert named == []
+
+
+def test_a_purge_never_writes_over_a_damaged_unknowns_registry(sandbox, monkeypatch,
+                                                                tmp_path):
+    """A damaged unknowns.json read as empty, and the purge saved that
+    empty registry over it: every unknown voice was gone. Now the purge
+    drops nothing from it, leaves it as it is, and finishes the rest."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    src = _world()
+    reg_path = config.VOICEPRINTS_DIR / "unknowns.json"
+    reg_path.write_text("{ not json")
+    r = purge.apply(LEAK)
+    assert r["done"]
+    assert reg_path.read_text() == "{ not json"
+    assert (config.VOICEPRINTS_DIR / "U001.npy").exists()
+    assert LEAK not in config.meeting_bases() and not src.exists()
+
+
 def test_purge_clears_threads_and_overrides_when_they_exist(sandbox, monkeypatch, tmp_path):
     monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
     _world()
@@ -172,3 +254,108 @@ def test_a_legacy_meeting_without_source_name_finds_its_original(sandbox, monkey
     src.write_bytes(b"legacy source")
     p = purge.plan(LEAK)
     assert p["sources"] == [str(src)]
+
+
+def test_a_manifest_record_that_is_not_an_object_never_stops_the_purge(
+        sandbox, monkeypatch, tmp_path):
+    """The manifest keeps a record that is not an object, for a person to
+    repair (doctor: manifest_bad_record). The purge read every record with
+    rec.get("outputs") and raised AttributeError, even on a dry run."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"].update({"Bad Record.m4a": "x", "Odd Outputs.m4a": {"outputs": 7},
+                           "Personal Errand 2.m4a": {"outputs": [None, 3]}})
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    p = purge.plan(LEAK)
+    assert p["ok"] and p["manifest_keys"] == ["Personal Errand.m4a"]
+    assert purge.apply(LEAK)["done"]
+    left = json.loads(config.MANIFEST_PATH.read_text())["processed"]
+    assert sorted(left) == ["Bad Record.m4a", "Budget Review.m4a",
+                            "Odd Outputs.m4a", "Personal Errand 2.m4a"]
+    assert left["Bad Record.m4a"] == "x"   # kept for a person to repair
+
+
+def test_a_shared_old_name_never_takes_another_meetings_journal_lines(
+        sandbox, monkeypatch, tmp_path):
+    """Lines with no meeting id were matched by any name, and the name
+    chain followed a shared OLD name forward: a default "New Recording 3"
+    that two meetings once had led to the other meeting's new name, and
+    --apply dropped that meeting's rename lines. purge.py has no undo."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    other = "2026-11-07 Reading Partner Kickoff"
+    shared = "New Recording 3"
+    mig = config.migration_dir()
+    mig.mkdir(mode=0o700)
+    rows = [{"event": "apply", "old_base": shared, "new_base": LEAK},
+            {"event": "apply", "old_base": shared, "new_base": other},
+            {"run": "backfill-0", "base": other, "field": "date"}]
+    (mig / "legacy-rename-journal.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    plan_rows = [{"old_base": shared, "new_base": LEAK},
+                 {"old_base": shared, "new_base": other}]
+    (mig / "iso-rename-plan.json").write_text(json.dumps({"version": 1, "rows": plan_rows}))
+    (mig / "iso-rename-plan.tsv").write_text(
+        f"old_base\tnew_base\trename\n{shared}\t{LEAK}\tTrue\n{shared}\t{other}\tTrue\n")
+    p = purge.plan(LEAK)
+    assert shared in p["migration"]["names"] and other not in p["migration"]["names"]
+    assert p["migration"]["lines"] == 2
+    assert purge.apply(LEAK)["scrubbed"]["migration"] == 2
+    left = [json.loads(ln) for ln in
+            (mig / "legacy-rename-journal.jsonl").read_text().splitlines()]
+    assert left == rows[1:]
+    assert json.loads((mig / "iso-rename-plan.json").read_text())["rows"] == plan_rows[1:]
+    assert (mig / "iso-rename-plan.tsv").read_text() == (
+        f"old_base\tnew_base\trename\n{shared}\t{other}\tTrue\n")
+
+
+def test_a_purge_removes_the_retitle_scratch_for_the_meeting(sandbox, monkeypatch, tmp_path):
+    """tools/retitle_all.py keeps each model reply (title, gist, decisions)
+    in work/retitle/cache and a row per meeting in proposals.json and
+    proposals.tsv. The purge left all three, so the meeting's summary
+    stayed in the project after a purge that promised every store."""
+    import hashlib
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    rt = config.WORK_DIR / "retitle"
+    (rt / "cache").mkdir(parents=True)
+    by_id = rt / "cache" / "mid-leak.json"
+    by_name = rt / "cache" / ("b_" + hashlib.sha256(LEAK.encode()).hexdigest()[:16] + ".json")
+    other = rt / "cache" / "mid-keep.json"
+    for f in (by_id, by_name, other):
+        f.write_text(json.dumps({"desc": {"gist": "zebracakes" if f != other else "budget"}}))
+    rows = [{"meeting_id": "mid-leak", "old_base": LEAK, "gist": "zebracakes"},
+            {"meeting_id": "mid-keep", "old_base": KEEP, "gist": "budget"}]
+    (rt / "proposals.json").write_text(json.dumps({"version": 1, "proposals": rows}))
+    (rt / "proposals.tsv").write_text(
+        f"trust\told_base\tnew_base\n90\t{LEAK}\tx\n80\t{KEEP}\ty\n")
+    p = purge.plan(LEAK)
+    assert p["retitle"] == {"cache": sorted([str(by_id), str(by_name)]), "proposals": 1}
+    assert by_id.exists()                                   # a dry run
+    r = purge.apply(LEAK)
+    assert r["scrubbed"]["retitle"] == {"cache": 2, "proposals": 1}
+    assert not by_id.exists() and not by_name.exists() and other.exists()
+    assert json.loads((rt / "proposals.json").read_text())["proposals"] == rows[1:]
+    assert (rt / "proposals.tsv").read_text() == f"trust\told_base\tnew_base\n80\t{KEEP}\ty\n"
+    left = b"".join(f.read_bytes() for f in rt.rglob("*") if f.is_file())
+    assert b"zebracakes" not in left and LEAK.encode() not in left
+
+
+def test_a_run_history_with_bytes_that_are_not_utf8_never_stops_the_purge(
+        sandbox, monkeypatch, tmp_path):
+    """_scrub_names read results.jsonl with read_text(). A line of bytes
+    that are not UTF-8 raised UnicodeDecodeError after the meeting folder
+    was gone, so the stores after it (sources, threads, journals) kept the
+    meeting. The odd line now stays byte for byte."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    src = _world()
+    hp = Path(status.HISTORY_LOG)
+    odd = b'{"name": "Caf\xe9 Notes.m4a", "ok": true}'
+    hp.write_bytes(hp.read_bytes() + odd + b"\n\xff\xfe torn\n")
+    r = purge.apply(LEAK)
+    assert r["done"] and r["scrubbed"]["history"] == 1
+    assert not src.exists()                      # a store after the history
+    raw = hp.read_bytes()
+    assert b"Personal Errand" not in raw
+    assert odd in raw and b"\xff\xfe torn" in raw and b"Budget Review.m4a" in raw

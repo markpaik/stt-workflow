@@ -185,14 +185,73 @@ def recording():
     return read().get("recording")
 
 
+def _exists(fn, ident) -> bool:
+    """False only when the system says no such process (or group) exists.
+    Anything it cannot tell (a bad id, a process of another user, a group
+    of zombies, which macOS answers with EPERM) counts as alive, so the
+    guards below keep refusing."""
+    try:
+        ident = int(ident)
+    except (TypeError, ValueError):
+        return True
+    if ident <= 0:
+        return True
+    try:
+        fn(ident, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (OSError, OverflowError):
+        return True
+
+
+def _owner_gone(d) -> bool:
+    """True when status.json names the batch that wrote it and no process
+    of that batch is left: not its pid, and not its process group (a
+    --parallel worker can outlive a killed parent and still be writing).
+    No pid (an older file, or a stage set outside a run) is not proof the
+    owner is gone."""
+    pid = d.get("pid")
+    if not pid or _exists(os.kill, pid):
+        return False
+    pgid = d.get("pgid")
+    return not (pgid and _exists(os.killpg, pgid))
+
+
+def active_now() -> dict:
+    """The files a batch is processing right now: status.json's active
+    entries, or {} when the batch that wrote them is gone. Only end_run
+    clears them, so a batch killed by SIGKILL, a crash, a power loss or a
+    reboot left them behind. Every move of that meeting (archive, rename,
+    summarize) and the queue's delete of that file then refused with 'being
+    processed right now' until the next batch started, while the panel,
+    which checks the processes, showed nothing running."""
+    d = read()
+    act = d.get("active") or {}
+    if not isinstance(act, dict) or (act and _owner_gone(d)):
+        return {}
+    return act
+
+
+def batch_running(d=None) -> bool:
+    """Does status.json say a batch runs, and is that batch still alive?
+    Only end_run clears `running`, so a SIGKILL, a crash or a power loss
+    left it true, and every tool that refuses while a batch runs refused
+    until the next batch started. A flag with no pid, or one whose pid or
+    group cannot be checked, still counts as running (_owner_gone)."""
+    d = read() if d is None else d
+    return bool(d.get("running")) and not _owner_gone(d)
+
+
 def meeting_active(base: str) -> bool:
     """Is the batch writing meeting `base` RIGHT NOW? Guards every folder move
     (rename/archive/delete) against racing a run. Active entries are keyed by
     SOURCE file name, but the meeting folder can be date-stamped ('LT Weekly
     Meeting' -> 'LT Weekly Meeting 06042026'), so the stem alone stopped
     matching new meetings — each entry also carries the resolved `base` the run
-    announced via set_stage."""
-    for k, v in read().get("active", {}).items():
+    announced via set_stage. Entries a dead batch left behind do not count
+    (active_now)."""
+    for k, v in active_now().items():
         if os.path.splitext(os.path.basename(k))[0] == base:
             return True
         if isinstance(v, dict) and v.get("base") == base:
@@ -484,12 +543,38 @@ def _append_history(entry):
         with open(HISTORY_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
         if HISTORY_LOG.stat().st_size > HISTORY_MAX_BYTES:
-            lines = HISTORY_LOG.read_text().splitlines()[-HISTORY_KEEP_LINES:]
+            # surrogateescape: a byte that is not UTF-8 raised here, inside
+            # finish_file, and is kept as it was now
+            lines = HISTORY_LOG.read_text(
+                errors="surrogateescape").splitlines()[-HISTORY_KEEP_LINES:]
             tmp = HISTORY_LOG.with_suffix(".jsonl.tmp")
-            tmp.write_text("\n".join(lines) + "\n")
+            tmp.write_text("\n".join(lines) + "\n", errors="surrogateescape")
             os.replace(tmp, HISTORY_LOG)
     except OSError:
         pass
+
+
+def recent_naming(names) -> int:
+    """How many rows of the `recent` ring name one of `names`. Reads only."""
+    names = set(names)
+    return sum(1 for r in read().get("recent") or []
+               if isinstance(r, dict) and r.get("name") in names)
+
+
+def forget_recent(names) -> int:
+    """Drop the `recent` rows that name one of `names` (a purge). start_run
+    carries the ring forward, so a row stays until 20 newer results push it
+    out. Returns how many rows were dropped."""
+    names = set(names)
+    with _lock():
+        d = read()
+        rows = d.get("recent") or []
+        keep = [r for r in rows if not (isinstance(r, dict) and r.get("name") in names)]
+        if len(keep) == len(rows):
+            return 0
+        d["recent"] = keep
+        _write(d)
+        return len(rows) - len(keep)
 
 
 def finish_file(name, ok, summary=""):
@@ -504,23 +589,46 @@ def finish_file(name, ok, summary=""):
         _append_history(entry)  # the permanent, size-capped history log
 
 
+def is_result_row(r) -> bool:
+    """A result as finish_file writes it: an object whose name and time
+    are text (or absent). Anything else came from a hand edit or a disk
+    fault, and every reader skips it."""
+    return isinstance(r, dict) and all(
+        isinstance(r.get(k), (str, type(None))) for k in ("name", "at"))
+
+
+def history_rows() -> list:
+    """The permanent results log, oldest first: only its result rows. A
+    line that is valid JSON but not a result ('[1,2]', 'null') raised
+    AttributeError in every reader, and a byte that is not UTF-8 raised
+    UnicodeDecodeError, so one bad line crashed the doctor's check and the
+    panel's failure list. Such a line is skipped now, like a torn one."""
+    try:
+        text = HISTORY_LOG.read_text(errors="replace")
+    except OSError:
+        return []
+    rows = []
+    for ln in text.splitlines():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if is_result_row(r):
+            rows.append(r)
+    return rows
+
+
 def history():
     """Every result ever recorded, newest first: the permanent results.jsonl
     merged with the status ring (which covers results from before the log
     existed), deduplicated by (name, at)."""
-    rows = []
-    try:
-        if HISTORY_LOG.exists():
-            for ln in HISTORY_LOG.read_text().splitlines():
-                with contextlib.suppress(json.JSONDecodeError):
-                    rows.append(json.loads(ln))
-    except OSError:
-        pass
+    rows = history_rows()
     rows.reverse()  # newest-last on disk; the sort below is stable, so ties
     # (results finishing within the same second) must already be newest-first
     seen = {(r.get("name"), r.get("at")) for r in rows}
-    rows.extend(r for r in read().get("recent", [])
-                if (r.get("name"), r.get("at")) not in seen)
+    recent = read().get("recent")
+    rows.extend(r for r in (recent if isinstance(recent, list) else [])
+                if is_result_row(r) and (r.get("name"), r.get("at")) not in seen)
     rows.sort(key=lambda r: r.get("at") or "", reverse=True)
     return rows
 

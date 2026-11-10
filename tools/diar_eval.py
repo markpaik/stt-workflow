@@ -464,17 +464,15 @@ def run_stereo(dest_dir=None):
 # ======================================================= source 3: synth ====
 
 def _hf_token_from_env_file():
-    p = REPO / "stt.env"
-    if p.exists():
-        for ln in p.read_text().splitlines():
-            if ln.strip().startswith("HF_TOKEN="):
-                return ln.split("=", 1)[1].strip()
-    return None
+    from stt import envfile
+    return envfile.parse(REPO / "stt.env").get("HF_TOKEN") or None
 
 
 def panel_busy(port: int) -> bool:
     """Is a batch running? Ask the live panel first; fall back to the status
-    file when no panel is up."""
+    file when no panel is up. The fallback is status.batch_running: the
+    flag alone stayed true after a hard kill, and the wait ran its whole
+    two hours for a batch that was gone."""
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/state", timeout=5) as r:
@@ -483,7 +481,7 @@ def panel_busy(port: int) -> bool:
     except Exception:
         try:
             from stt import status
-            return bool(status.read().get("running"))
+            return status.batch_running()
         except Exception:
             return False
 
@@ -527,7 +525,13 @@ def frame_metrics(truth_turns, segments, duration, hop=0.01):
     """DER-style frame accounting with KNOWN identities (no permutation
     search): at each 10 ms frame, the predicted name must be one of the truth
     speakers active there. Returns miss / false-alarm / confusion rates over
-    truth speech time, plus their sum (der_like)."""
+    truth speech time, plus their sum (der_like).
+
+    An unnamed cluster ("name": None) is speech with no identity: on truth
+    speech it is a miss, not a wrong name, and on silence a false alarm.
+    _norm_name(None) is "", which is not None, so it read as confusion.
+    Every segment over a frame is read: the first one alone scored a frame
+    as confusion when a later overlapping segment named the speaker."""
     n = max(1, int(duration / hop))
     miss = fa = err = speech = 0
     # precompute sorted spans for scanning
@@ -536,14 +540,15 @@ def frame_metrics(truth_turns, segments, duration, hop=0.01):
     for i in range(n):
         t = (i + 0.5) * hop
         active = {nm for a, b, nm in t_idx if a <= t < b}
-        pred = next((nm for a, b, nm in s_idx if a <= t < b), None)
+        cover = [nm for a, b, nm in s_idx if a <= t < b]
+        named = {nm for nm in cover if nm}
         if active:
             speech += 1
-            if pred is None:
+            if not named:
                 miss += 1
-            elif pred not in active:
+            elif not named & active:
                 err += 1
-        elif pred is not None:
+        elif cover:
             fa += 1
     if not speech:
         return {"miss": None, "false_alarm": None, "confusion": None,
@@ -855,36 +860,48 @@ def load_current_baseline(out_root: Path):
     if not p.exists():
         return None, None
     try:
-        return name, json.loads(p.read_text())
-    except json.JSONDecodeError:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
         return None, None
+    # a baseline that parses but is no board ([1], "x") is no baseline
+    return (name, data) if isinstance(data, dict) else (None, None)
+
+
+def _obj(v) -> dict:
+    return v if isinstance(v, dict) else {}
 
 
 def compute_deltas(baseline: dict, board: dict, name: str):
-    """Headline + per-source + per-band accuracy movements vs the baseline."""
+    """Headline + per-source + per-band accuracy movements vs the baseline.
+
+    The baseline is read with .get chains: a hand-edited or partial file
+    with no "headline" or "run" raised KeyError after the whole scoring
+    run, before the scoreboard was written, and the run's work was lost.
+    A section it lacks gives no old value."""
     metrics = {}
 
     def _add(key, old, new):
         if old is not None or new is not None:
             metrics[key] = (old, new)
 
-    _add("overall", baseline["headline"]["turn_accuracy_overall"],
+    old_sources = _obj(baseline.get("sources"))
+    _add("overall", _obj(baseline.get("headline")).get("turn_accuracy_overall"),
          board["headline"]["turn_accuracy_overall"])
     for src in ("reviews", "stereo", "synth"):
-        b_old = (baseline["sources"].get(src) or {})
+        b_old = _obj(old_sources.get(src))
         b_new = (board["sources"].get(src) or {})
         _add(src, b_old.get("accuracy"), b_new.get("accuracy"))
         for label in BAND_LABELS:
-            ob = (b_old.get("by_band") or {}).get(label, {})
+            ob = _obj(_obj(b_old.get("by_band")).get(label))
             nb = (b_new.get("by_band") or {}).get(label, {})
             if ob.get("n") or nb.get("n"):
                 _add(f"{src} {label}", ob.get("accuracy"), nb.get("accuracy"))
-    if (baseline["sources"].get("synth") or {}).get("frame_der_like_mean") is not None:
-        _add("synth frame DER-like",
-             baseline["sources"]["synth"]["frame_der_like_mean"],
+    old_der = _obj(old_sources.get("synth")).get("frame_der_like_mean")
+    if old_der is not None:
+        _add("synth frame DER-like", old_der,
              (board["sources"].get("synth") or {}).get("frame_der_like_mean"))
     return {"baseline_name": name,
-            "baseline_date": baseline["run"]["date"],
+            "baseline_date": _obj(baseline.get("run")).get("date"),
             "metrics": metrics}
 
 

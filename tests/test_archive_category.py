@@ -10,6 +10,8 @@ The traps these lock down, in order of how much they'd hurt:
   - an archived meeting still answering on the live endpoints (search/Ask/export)
 """
 import json
+import os
+import stat
 
 import pytest
 
@@ -104,6 +106,27 @@ def test_restore_brings_it_back_intact(sandbox):
     assert d["category"] == "personal"  # byte-identical: nothing was rewritten
 
 
+def test_a_restored_meeting_with_an_out_of_date_description_is_due_again(sandbox):
+    """stale_bases reads the live store only. It dropped the entry of a
+    Redo'd meeting while it sat in the archive, and nothing listed it again
+    on restore: the batch never regenerated that description."""
+    base = "Vendor Demo 05012026"
+    _meeting(base, meeting_id="mid-v1", ai_stale=True)
+    config.index_set("mid-v1", base)
+    summarize.stale_mark("mid-v1", base)
+    assert summarize.stale_bases() == [base]
+    archive.archive_meeting(base)
+    assert summarize.stale_bases() == []
+    assert archive.restore_meeting(base)["ok"]
+    assert summarize.stale_bases() == [base]
+    # a meeting with an up-to-date description is not listed by a restore
+    _meeting("Fresh Demo 05012026", meeting_id="mid-v2")
+    config.index_set("mid-v2", "Fresh Demo 05012026")
+    archive.archive_meeting("Fresh Demo 05012026")
+    archive.restore_meeting("Fresh Demo 05012026")
+    assert summarize.stale_bases() == [base]
+
+
 def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
     """A pre-feature archived name can collide with a live meeting. Restore must
     not clobber it — and the speaker registries reference meetings BY NAME, so
@@ -122,6 +145,59 @@ def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
     assert config.meeting_file("Weekly 05012026 (2)", ".json").exists()
     assert config.meeting_file("Weekly 05012026 (2)", ".m4a").exists()
     assert unknowns.load()["speakers"]["U001"]["meetings"] == ["Weekly 05012026 (2)"]
+
+
+def test_two_restores_of_one_meeting_give_one_ok_and_one_clean_refusal(sandbox):
+    """The membership gate ran before the meeting lock, so the loser of
+    two parallel restores passed it, waited, then moved a folder the
+    winner had already moved. The panel got '[Errno 2] No such file or
+    directory: '<abs path>/.archive/...' -> '<abs path>/...''. The gate
+    runs again under the lock now, and a failed move is a plain message."""
+    import threading
+    from stt import review
+    _meeting("2026-01-22 Weekly Check-in")
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+    out = []
+    gate = threading.Barrier(2)
+    real = review.lock_meeting
+
+    calls = []
+
+    def slow_lock(base, *a, **k):
+        calls.append(base)
+        if len(calls) <= 2:
+            gate.wait(timeout=5)      # both callers are past the outer gate
+        return real(base, *a, **k)
+
+    review.lock_meeting = slow_lock
+    try:
+        ts = [threading.Thread(target=lambda: out.append(
+            archive.restore_meeting("2026-01-22 Weekly Check-in"))) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=10)
+    finally:
+        review.lock_meeting = real
+    assert sorted(r["ok"] for r in out) == [False, True]
+    bad = next(r for r in out if not r["ok"])
+    assert bad["error"] == "no archived meeting '2026-01-22 Weekly Check-in'"
+    assert str(config.meetings_dir()) not in bad["error"]
+    assert config.meeting_bases() == ["2026-01-22 Weekly Check-in"]
+
+    # a move the file system refuses is a plain message too
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+
+    def refuse(*a, **k):
+        raise PermissionError(13, "Permission denied", "/abs/path")
+    real_move = archive._move
+    archive._move = refuse
+    try:
+        r = archive.restore_meeting("2026-01-22 Weekly Check-in")
+    finally:
+        archive._move = real_move
+    assert r == {"ok": False, "error":
+                 "could not restore '2026-01-22 Weekly Check-in' (Permission denied)"}
 
 
 def test_a_new_name_can_never_collide_with_an_archived_one(sandbox):
@@ -186,6 +262,40 @@ def test_delete_removes_everything_and_scrubs_speaker_refs(sandbox):
     # survives — its embedding still identifies that voice in future meetings
     u = unknowns.load()["speakers"]["U001"]
     assert u["meetings"] == ["Other 05012026"]
+
+
+def test_delete_clears_the_sample_sources_it_fed_so_the_doctor_is_quiet(sandbox):
+    """A Delete keeps enrolled samples by design, but each sample still
+    named the deleted meeting, so the next doctor check listed one fixable
+    registry_dangling finding per person it fed. The source is now '?' (the
+    doctor fix's own value), the sample row stays, and a source that a
+    live twin of the name still answers to is left alone."""
+    import numpy as np
+    from stt import doctor, identify
+    _meeting("2026-05-01 Board Prep", meeting_id="aaaa000000000001")
+    _meeting("2026-05-02 Kept", meeting_id="aaaa000000000002")
+    config.backfill_meeting_ids()
+    rng = np.random.default_rng(3)
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-01 Board Prep")
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-02 Kept")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-01 Board Prep")
+    before = identify.load_registry()
+    assert before["Dana Fox"]["sources"] == ["2026-05-01 Board Prep", "2026-05-02 Kept"]
+
+    assert archive.delete_meeting("2026-05-01 Board Prep")["ok"]
+    reg = identify.load_registry()
+    assert reg["Dana Fox"]["sources"] == ["?", "2026-05-02 Kept"]
+    assert reg["Dana Fox"]["n_samples"] == 2 and reg["Sam Chen"]["sources"] == ["?"]
+    assert identify.aligned_source_ids(reg["Dana Fox"])[0] is None
+    assert not [f for f in doctor.check() if f.kind == "registry_dangling"]
+
+    # an archived twin of the name still answers to it: its samples stay put
+    _meeting("2026-05-03 Twin")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-03 Twin")
+    archive.archive_meeting("2026-05-03 Twin")
+    _meeting("2026-05-03 Twin")
+    assert archive.delete_meeting("2026-05-03 Twin")["ok"]
+    assert identify.load_registry()["Sam Chen"]["sources"] == ["?", "2026-05-03 Twin"]
 
 
 def test_delete_works_on_an_archived_meeting_too(sandbox):
@@ -257,6 +367,33 @@ def test_deleting_one_of_two_same_named_meetings_spares_the_others_record(sandbo
     assert archive.delete_meeting("Weekly 05012026")["ok"]
     assert sorted(manifest.load()["processed"]) == ["archived.m4a"], \
         "the archived meeting's processing history is not the deleted one's"
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs file flags (macOS)")
+def test_a_delete_that_fails_part_way_leaves_the_meeting_whole(sandbox):
+    """rmtree ran first and the scrubs after it. One file it could not
+    remove (here an immutable one) could take the json first: the meeting
+    left the list, its audio and .txt stayed where nothing could reach
+    them, its manifest record stayed, and the call raised."""
+    base = "Locked Audio 05012026"
+    _meeting(base)
+    manifest.save({"processed": {"locked.m4a": {
+        "mtime": 1.0, "outputs": [str(config.meeting_file(base, ".json"))]}}})
+    audio = config.meeting_file(base, ".m4a")
+    os.chflags(audio, stat.UF_IMMUTABLE)
+    try:
+        r = archive.delete_meeting(base)
+        assert r["ok"] is False and "could not delete" in r["error"]
+        assert "Operation not permitted" in r["error"] and str(sandbox) not in r["error"]
+        assert config.meeting_bases() == [base]           # still in the list
+        assert config.meeting_file(base, ".txt").read_text() == "stub"
+        assert list(manifest.load()["processed"]) == ["locked.m4a"]
+    finally:
+        os.chflags(audio, 0)
+    # the flag is off: the retry finishes and scrubs as a delete does
+    assert archive.delete_meeting(base)["ok"]
+    assert config.meeting_bases() == [] and not config.meeting_dir(base).exists()
+    assert manifest.load()["processed"] == {}
 
 
 def test_delete_reports_the_space_it_freed(sandbox):

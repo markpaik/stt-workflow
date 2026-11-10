@@ -101,16 +101,49 @@ def journal_path(run_id: str, journal_dir=None) -> Path:
     return Path(journal_dir or config.migration_dir()) / f"{run_id}.jsonl"
 
 
-def entries(run_id: str, journal_dir=None) -> list:
-    """The journal of one run. NoSuchRun when there is none."""
+def field_entry(e: dict) -> bool:
+    """An entry of a field journal (amnesty, backfill_keys): one field of
+    one meeting, with the meeting's name, the field and its new value."""
+    return all(k in e for k in ("base", "field", "new"))
+
+
+def date_entry(e: dict) -> bool:
+    """An entry of a fix_dates journal: the old and new date of one meeting."""
+    return ("base" in e and isinstance(e.get("old"), dict)
+            and isinstance(e.get("new"), dict) and "date" in e["new"]
+            and "date" in e["old"])
+
+
+def entries(run_id: str, journal_dir=None, valid=None, tool: str = "this tool") -> list:
+    """The journal of one run. NoSuchRun when there is none.
+
+    `valid` checks the shape of each entry. A journal of another tool (an
+    amnesty run given to fix_dates --undo) is NoSuchRun for this one: its
+    undo read keys the entries do not hold and raised KeyError or
+    TypeError.
+
+    A line that is not a JSON object is skipped. A crash inside one write
+    leaves a torn last line, and that entry's change was never made: the
+    journal line is written before the json it describes. A torn line made
+    every undo of the run fail with a traceback, and nothing was restored,
+    even for the whole entries before it. tools/iso_rename.py and
+    tools/retitle_all.py skip such a line the same way."""
     try:
         text = journal_path(run_id, journal_dir).read_text()
     except FileNotFoundError:
         raise NoSuchRun(f"no such run: {run_id}") from None
     out = []
     for ln in text.splitlines():
-        if ln.strip():
-            out.append(json.loads(ln))
+        if not ln.strip():
+            continue
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            out.append(e)
+    if valid is not None and out and not all(valid(e) for e in out):
+        raise NoSuchRun(f"no such run: {run_id} is not a journal of {tool}")
     return out
 
 

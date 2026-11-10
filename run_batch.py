@@ -52,16 +52,13 @@ def _env_file_dir(repo=None) -> Path:
 
 def _load_env_file(repo=None):
     """Load KEY=VALUE lines from stt.env BEFORE importing the package (config reads
-    env at import). launchd does not read ~/.zshrc."""
-    p = _env_file_dir(repo) / "stt.env"
-    if not p.exists():
-        return
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+    env at import). launchd does not read ~/.zshrc. The parsing rules are
+    stt/envfile.py's (it imports nothing from the package), so a quoted
+    value loses its quotes here as it does in config._env_file. A variable
+    already set in the environment wins."""
+    from stt import envfile
+    for k, v in envfile.parse(_env_file_dir(repo) / "stt.env").items():
+        os.environ.setdefault(k, v)
 
 
 _load_env_file()
@@ -180,7 +177,7 @@ def job_spec_from_args(args, todo) -> dict:
     # a run into other folders replays into the same ones: without them a
     # sandbox or test run's replay wrote into the real library. The default
     # folders are left out, so a panel job stays as the panel queued it.
-    for key, default in (("source", config.ICLOUD_DIR), ("dest", config.MEETINGS_DIR)):
+    for key, default in (("source", config.source_dir()), ("dest", config.meetings_dir())):
         v = getattr(args, key, None)
         if v and Path(v) != Path(default):
             spec[key] = str(v)
@@ -523,6 +520,14 @@ def iter_audio(folder: Path):
             yield p
 
 
+def _is_watched_source(source: Path) -> bool:
+    """True when `source` is the primary watched folder the panel lists."""
+    try:
+        return Path(source).resolve() == config.source_dir().resolve()
+    except OSError:
+        return False
+
+
 def iter_sources(source: Path):
     """Sweep the primary source folder AND the local recordings staging folder
     (the meeting recorder's output). Dot-prefixed in-progress captures are
@@ -716,7 +721,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
-            "diarizer": res.get("diarizer")}
+            "diarizer": res.get("diarizer"), "asr_engine": res.get("asr_engine")}
 
 
 def _descendants(pid: int) -> list:
@@ -800,8 +805,11 @@ def _requeue_if_unintended(claimed_job) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--source", default=str(config.ICLOUD_DIR))
-    ap.add_argument("--dest", default=str(config.MEETINGS_DIR),
+    # the folders as the panel and is_live_store read them: stt.env first.
+    # The import-time constants read the environment first, so a stale
+    # STT_MEETINGS_DIR wrote meetings beside the library, unindexed.
+    ap.add_argument("--source", default=str(config.source_dir()))
+    ap.add_argument("--dest", default=str(config.meetings_dir()),
                     help="the meetings folder to write into (default: the library). "
                          "A run into any other folder writes no descriptions or "
                          "automatic titles")
@@ -947,6 +955,15 @@ def main():
             else:
                 print(f"   skip (not a file): {p}", file=sys.stderr)
     from stt import holds
+    # a hold on a file that left every watched folder (binned in Finder, moved
+    # away) ends here, before a later recording under the same name arrives
+    # and starts held. Only an automatic sweep of the real watched folders:
+    # another --source cannot say what the panel's folders hold.
+    if (wanted is None and not args.paths and not args.dry_run
+            and _is_watched_source(source)):
+        for n in holds.release_missing(config.source_dirs(source)):
+            print(f"   hold released: {n} (the file left the watched folders)",
+                  flush=True)
     held = holds.items()
     found = set()          # the --files names a source file carries
     for src in iter_sources(source):
@@ -1087,8 +1104,11 @@ def main():
                 # now processed, so clearing it cannot pin a stale name. A hold
                 # placed DURING the run was never honored and must survive.
                 holds.release(res["key"])
+            # the engine that ran: stt.env is read fresh, so a model
+            # switched mid-run named a model this process never loaded
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
-                         rates.current_asr_key(), n_active=n_active,
+                         rates.engine_key(res.get("asr_engine"))
+                         or rates.current_asr_key(), n_active=n_active,
                          diarizer=res.get("diarizer"))
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))

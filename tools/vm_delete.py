@@ -88,6 +88,17 @@ def _setting_lines():
     return out
 
 
+def _batch_running() -> bool:
+    """True while status.json says a batch runs and that batch is alive:
+    its pid, or its process group (status.batch_running, as every other
+    tool reads it). A hard kill or a power loss skips end_run, so the flag
+    stayed true with a dead pid, and --apply refused until the next batch
+    ran. This copy checked only the pid, so a --parallel worker that
+    outlived a killed parent read as no batch here. A flag with no pid, or
+    a pid that cannot be checked, still counts."""
+    return status.batch_running()
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     g = ap.add_mutually_exclusive_group()
@@ -109,7 +120,7 @@ def main(argv=None) -> int:
         print(ln)
 
     if a.apply:
-        if status.read().get("running"):
+        if _batch_running():
             print("A batch is running. Try again when it ends.")
             return 2
         r = voicememos.delete_pass(force=True, log=print,

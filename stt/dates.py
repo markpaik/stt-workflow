@@ -117,6 +117,18 @@ def stamp(name: str, iso: str) -> str:
 _UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
 
 
+def is_only_date(name) -> bool:
+    """True when `name` holds a date and nothing else: '2026-07-10',
+    '07102026' or '20260710', with any twin suffix peeled. strip_stamp
+    keeps such a name whole, so as a title it put the date in the folder
+    name twice ('2025-09-10 2025-09-10')."""
+    stem = _UNIQ_SUFFIX.sub("", str(name or "")).strip()
+    lead = _leading_iso(stem)
+    if lead:
+        return not lead[1].strip()
+    return bool(_DIGITS8.fullmatch(stem)) and _run_date(stem) is not None
+
+
 def title_of(base: str) -> str:
     """The meeting's `title` key: its folder name with the twin suffix and
     the date stamp removed. stamp(title_of(b), date) + twin_suffix(b) gives
@@ -241,9 +253,20 @@ def short_date(name: str, ref_iso: str):
     return None
 
 
-def restamp(base: str, iso: str) -> str:
+# the title a name that is only a date gets: the native recorder's word, a
+# default name (titles.is_label is False for it), so the meeting still asks
+# for a real title
+UNTITLED = "Recording"
+
+
+def restamp(base: str, iso: str, untitled: str = UNTITLED) -> str:
     """The folder name this meeting SHOULD have: its title with `iso` in
     front as its one and only date, "YYYY-MM-DD <title>".
+
+    A name that is only a date ('2026-07-10', '07102026', '20260710') has
+    no title, so `untitled` stands in: '2026-07-11 Recording'. The old date
+    stood in as the title, and the folder name held two dates
+    ('2026-07-11 2026-07-10').
 
     The old date is removed wherever the older form put it: a leading ISO
     stamp, a trailing 8-digit stamp, or, failing both, the first real
@@ -260,6 +283,8 @@ def restamp(base: str, iso: str) -> str:
         new = date.fromisoformat(iso).isoformat()
     except (ValueError, TypeError):
         return stem
+    if is_only_date(stem):
+        return stamp(untitled, new)
     hit = _leading_iso(stem) or _trailing_stamp(stem)
     if hit:
         return stamp(hit[1].strip() or stem, new)
@@ -276,7 +301,7 @@ def restamp(base: str, iso: str) -> str:
     return stamp(stem, new)                      # no date yet: put one in front
 
 
-def canonical(name: str, iso: str, today: str = None) -> str:
+def canonical(name: str, iso: str, today: str = None, untitled: str = UNTITLED) -> str:
     """The ISO-form folder name for a TYPED or arriving name and the
     meeting's date `iso`.
 
@@ -295,7 +320,7 @@ def canonical(name: str, iso: str, today: str = None) -> str:
     except (ValueError, TypeError):
         iso = None
     if iso is None:
-        return restamp(stem, sd) if sd else stem
+        return restamp(stem, sd, untitled) if sd else stem
     if sd and sd != iso and sd > (today or date.today().isoformat()):
         return stamp(stem, iso)
-    return restamp(stem, iso)
+    return restamp(stem, iso, untitled)

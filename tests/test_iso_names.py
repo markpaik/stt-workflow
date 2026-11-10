@@ -86,6 +86,41 @@ def test_canonical_moves_a_typed_stamp_to_the_front():
     assert dates.canonical("Plain", None) == "Plain"
 
 
+@pytest.mark.parametrize("name", ["2026-07-10", "07102026", "20260710", "2026-07-10 (2)",
+                                  " 2026-07-10 "])
+def test_a_name_that_is_only_a_date_gets_one_date_and_a_default_title(name):
+    """restamp and canonical used the old date as the title when a name was
+    only a date: '2026-07-11 2026-07-10' and '2026-07-11 07102026'. The
+    name now holds one date and a default title, which still asks for a
+    real one (titles.is_label is False for it)."""
+    from stt import titles
+    for got in (dates.restamp(name.strip(), "2026-07-11"),
+                dates.canonical(name, "2026-07-11"),
+                dates.canonical(name, "2026-07-10")):
+        assert got.endswith(" Recording") and got.count("2026-07-1") == 1, got
+        assert dates.restamp(got, got[:10]) == got            # idempotent
+        assert not titles.is_label(got)
+    assert dates.restamp("2026-07-10", "2026-07-10") == "2026-07-10 Recording"
+    assert dates.restamp("07102026", "2026-07-11", untitled="Voice Memo") == \
+        "2026-07-11 Voice Memo"
+    # a date with words keeps its words, as before
+    assert dates.restamp("2026-07-10 Weekly", "2026-07-11") == "2026-07-11 Weekly"
+    assert dates.restamp("Recording 07112026 1814", "2026-07-11") == "2026-07-11 Recording 1814"
+
+
+def test_a_folder_named_only_a_date_moves_to_one_date(sandbox):
+    """A re-date of a folder named only a date ('2026-07-10', from before
+    the panel refused such a title) gave '2026-07-11 2026-07-10'."""
+    _m("2026-07-10", date="2026-07-10")
+    r = summarize.set_meeting_date("2026-07-10", "2026-07-11")
+    assert r["ok"], r
+    assert r["base"] == "2026-07-11 Recording"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == "Recording"
+    from stt import doctor
+    assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+
+
 def test_a_rename_keeps_title_equal_to_the_folder_without_its_date(sandbox):
     _m("Weekly Check-in 08032026", date="2026-08-03")
     r = summarize.rename_meeting("Weekly Check-in 08032026", "Kim Weekly Check-in – Plans")
@@ -225,6 +260,30 @@ def test_a_long_typed_title_fits_a_folder_name(sandbox):
                 if f.kind == "name_mismatch" and f.subject.startswith("2026-07-04 会議")]
 
 
+def test_a_long_title_is_cut_between_words_and_the_reply_says_so(sandbox):
+    """The cap was a hard slice, so a long title ended mid-word
+    ('Extraordinaril') in the folder, the header and the panel, and the
+    reply said only ok. It is cut at the last space before the cap now,
+    and the reply carries a note. A staged memo name is cut the same way."""
+    from stt import names, voicememos
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly")
+    typed = "Quarterly " + "Extraordinarily " * 20 + "Long"
+    r = summarize.rename_meeting("2026-07-04 Weekly", typed)
+    assert r["ok"], r
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"].endswith("Extraordinarily")
+    assert len(d["title"]) <= names.TITLE_MAX and typed.startswith(d["title"])
+    assert r["base"] == "2026-07-04 " + d["title"]
+    assert str(names.TITLE_MAX) in r["note"]
+    # one long word, or CJK, has no space to go back to: cut at the cap
+    assert names.clean_title("x" * 130) == "x" * names.TITLE_MAX
+    # a title under the cap says nothing
+    r = summarize.rename_meeting(r["base"], "Short Title")
+    assert r["ok"] and "note" not in r
+    staged = voicememos._safe("Notes " + "Wonderfully " * 12)
+    assert len(staged) <= 100 and staged.endswith("Wonderfully")
+
+
 def test_a_rename_leaves_no_orphan_lock(sandbox):
     """The rename locked its destination by name, since the new name had no
     id yet. The meeting locks by its id afterward, so 'doctor check' listed
@@ -255,6 +314,19 @@ def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
     assert r["base"] == "2026-05-05 Race Name"
 
 
+def test_a_twin_left_alone_keeps_its_number_until_its_next_edit(sandbox):
+    """The README and the store contract say a ' (2)' can stand alone after
+    its plain sibling moves to another date, and that its next title or
+    date edit drops the number. This pins both halves of that sentence."""
+    _m("2025-05-21 Team Sync", date="2025-05-21", title="Team Sync")
+    _m("2025-05-21 Team Sync (2)", date="2025-05-21", title="Team Sync")
+    r = summarize.set_meeting_date("2025-05-21 Team Sync", "2025-05-22")
+    assert r["ok"] and r["base"] == "2025-05-22 Team Sync"
+    assert "2025-05-21 Team Sync (2)" in config.meeting_bases()      # not renumbered
+    r = summarize.set_meeting_date("2025-05-21 Team Sync (2)", "2025-05-21")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync"
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")
@@ -262,6 +334,63 @@ def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     assert r["ok"] and r["base"] == "2026-07-09 Board Prep"
     d = json.loads(config.meeting_file(r["base"], ".json").read_text())
     assert (d["date"], d["date_source"], d["title"]) == ("2026-07-09", "manual", "Board Prep")
+
+
+@pytest.mark.parametrize("typed", ["2025-09-10", "07102026", "20250910", " 2025-09-10 "])
+def test_a_title_that_is_only_a_date_is_refused(sandbox, typed):
+    """strip_stamp keeps a bare date whole, so a title of only a date put
+    the date in the folder name twice: '2025-09-10 2025-09-10' and
+    '2025-09-10 07102026'."""
+    _m("2025-09-10 Board Prep", date="2025-09-10", title="Board Prep")
+    r = summarize.rename_meeting("2025-09-10 Board Prep", typed)
+    assert r["ok"] is False and "Set date" in r["error"]
+    assert config.meeting_bases() == ["2025-09-10 Board Prep"]
+    r = summarize.apply_meeting_edits("2025-09-10 Board Prep", title=typed,
+                                      reviewed=True, title_state="confirmed")
+    assert r["ok"] is False
+    # a date with words is still a title, and its stamp is still the date
+    r = summarize.rename_meeting("2025-09-10 Board Prep", "2025-09-11 Board Prep")
+    assert r["ok"] and r["base"] == "2025-09-11 Board Prep" and "note" not in r
+
+
+def test_a_future_typed_date_kept_in_the_title_says_so(sandbox):
+    """A future stamp names an event, so canonical() keeps it in the title
+    and the meeting keeps its date. Nothing told the person why the date
+    they typed was not applied."""
+    from datetime import date as _d
+    future = f"{_d.today().year + 1}-03-14"
+    _m("2026-08-20 Planning", date="2026-08-20", title="Planning")
+    r = summarize.rename_meeting("2026-08-20 Planning", f"{future} Retreat")
+    assert r["ok"] and r["base"] == f"2026-08-20 {future} Retreat"
+    assert future in r["note"] and "Set date" in r["note"]
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["date"] == "2026-08-20"
+    # the date picker set too: the typed stamp is no date claim, so no note
+    r = summarize.apply_meeting_edits(r["base"], title="Board Prep",
+                                      date="2026-08-21")
+    assert r["ok"] and "note" not in r
+
+
+@pytest.mark.parametrize("stamp_form", ["{t} {mmddyyyy}", "{iso} {t}"])
+def test_a_future_stamp_added_to_the_current_title_is_kept(sandbox, stamp_form):
+    """title_of() removes the stamp, so 'Assessment Platform Demo
+    12312027' on '... Assessment Platform Demo' read as the title the
+    folder already carries. The save moved nothing and stored the old
+    title, while the note said the date stays in the title."""
+    from datetime import date as _d
+    y = _d.today().year + 1
+    t = "Assessment Platform Demo"
+    typed = stamp_form.format(t=t, mmddyyyy=f"1231{y}", iso=f"{y}-12-31")
+    _m(f"2026-01-15 {t}", date="2026-01-15", title=t)
+    r = summarize.rename_meeting(f"2026-01-15 {t}", typed)
+    assert r["ok"] and r["base"] == f"2026-01-15 {typed}"
+    assert f"{y}-12-31 is in the future" in r["note"]
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert (d["date"], d["title"]) == ("2026-01-15", typed)
+    # the same title typed again is a no-op, and the folder stays
+    r = summarize.rename_meeting(r["base"], typed)
+    assert r["ok"] and r["base"] == f"2026-01-15 {typed}"
+    assert config.meeting_bases() == [f"2026-01-15 {typed}"]
 
 
 def test_the_date_picker_beats_a_typed_stamp(sandbox):
@@ -305,6 +434,20 @@ def test_the_doctor_reads_an_iso_folder_as_in_step(sandbox):
           if f.kind == "name_mismatch"}
     assert list(mm) == ["Old Form 08032026"]
     assert "iso_rename" in mm["Old Form 08032026"]
+
+
+def test_a_title_that_ends_in_its_own_number_is_no_doctor_finding(sandbox):
+    """'Sprint (2)' stamps to '2026-03-03 Sprint (2)', whose ' (2)' reads as
+    a twin suffix. The doctor added that suffix to the stamped title, so it
+    wanted '2026-03-03 Sprint (2) (2)' and reported a mismatch that was not
+    there. A real twin of it, and a real mismatch, are still read right."""
+    from stt import doctor
+    _m("2026-03-03 Sprint (2)", date="2026-03-03", title="Sprint (2)")
+    _m("2026-03-03 Sprint (2) (2)", date="2026-03-03", title="Sprint (2)")
+    _m("2026-03-04 Review (3)", date="2026-03-04", title="Review (3)")
+    _m("2026-03-05 Standup", date="2026-03-05", title="Standup (2)")
+    mm = [f.subject for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+    assert mm == ["2026-03-05 Standup"]
 
 
 # ---------- the .txt header ----------
@@ -438,6 +581,29 @@ def test_the_dry_run_flags_no_title_change_the_apply_step_keeps(sandbox,
     assert d["title"] == "Kim 1:1"
 
 
+@pytest.mark.parametrize("long", [" ".join(["alpha"] * 60), "会議" * 60, "Dana 1:1 " + "b" * 110])
+def test_the_dry_run_plans_no_header_rewrite_after_a_long_rename(sandbox, monkeypatch,
+                                                                tmp_path, long):
+    """A panel rename to a title past the folder byte limit writes the
+    header with the whole title, and the folder holds the cut form. The
+    planner built its header from the cut folder title, so the dry run
+    listed '1  header rewrite' for a meeting already in step."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("2026-07-04 Weekly", date="2026-07-04", mid="mid-w", title="Weekly",
+       header_name="2026-07-04 Weekly")
+    r = summarize.rename_meeting("2026-07-04 Weekly", long)
+    assert r["ok"], r
+    assert dates.title_of(r["base"]) != json.loads(
+        config.meeting_file(r["base"], ".json").read_text())["title"]   # cut by bytes
+    header = _first_line(r["base"])
+    assert ir.main([]) == 0
+    rows = {x["old_base"]: x for x in json.loads(ir.plan_path().read_text())["rows"]}
+    row = rows[r["base"]]
+    assert row["rename"] is False and row["header"] is False
+    assert ir.main(["--apply"]) == 0
+    assert _first_line(r["base"]) == header
+
+
 def test_a_collision_with_an_iso_name_gets_the_twin_suffix(lib):
     _m("2026-08-03 Kim Weekly Check-in – Plans (3)", date="2026-08-03")
     _m("2026-08-09 Standup", date="2026-08-09")
@@ -517,6 +683,22 @@ def test_apply_refuses_while_the_batch_or_a_relabel_runs(lib, monkeypatch):
     assert not ir.journal_path().exists()
 
 
+def test_apply_runs_after_a_batch_died_with_its_running_flag_set(lib):
+    """A hard kill or a power loss skips end_run, so status.json keeps
+    running true with a dead pid. --apply trusted the flag alone and
+    refused until the next batch ran."""
+    import subprocess
+
+    from stt import status
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()
+    ir.plan(log=lambda *_: None)
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert ir.busy_reason() is None
+    r = ir.apply(log=lambda *_: None)
+    assert r["ok"], r
+
+
 def test_apply_skips_a_meeting_renamed_since_the_dry_run(lib):
     ir.plan(log=lambda *_: None)
     assert summarize.rename_meeting("Drifted 08052026", "Someone Renamed It")["ok"]
@@ -590,12 +772,6 @@ def test_a_date_outside_2000_to_next_year_is_refused(sandbox):
     assert r["ok"] and r["base"] == f"{last}-12-31 Board Prep Session"
 
 
-def test_the_classic_date_inputs_carry_the_same_range():
-    js = (Path(__file__).resolve().parent.parent / "gui/static/app.js").read_text()
-    # summarize.apply_meeting_edits takes 2000 to next year
-    assert js.count('min="2000-01-01" max="${new Date().getFullYear()+1}-12-31"') == 3
-
-
 def test_a_title_loses_bidi_controls_and_zero_width_spaces(sandbox):
     """Rename accepted U+202E: the folder '2025-05-28 <U+202E>gnp.txt' showed
     in Finder as '2025-05-28 txt.png'. A title strips the same characters a
@@ -611,3 +787,47 @@ def test_a_title_loses_bidi_controls_and_zero_width_spaces(sandbox):
         assert not any(c in f.name for c in "‮​⁦⁩\n")
     # a joiner is part of real text and stays
     assert summarize._sanitize_name("Caf‍e") == "Caf‍e"
+
+
+def test_undo_without_apply_prints_the_undo_plan_and_writes_nothing(lib, capsys):
+    """--undo alone fell through to the forward plan: it printed 'name
+    already ISO' counts and the forward DRY RUN line, rewrote the plan
+    files, and never showed the undo. A meeting that only got a new
+    header read 'X  ->  X'."""
+    ir.plan(log=lambda *_: None)
+    ir.apply(log=lambda *_: None)
+    capsys.readouterr()
+    plan_before = ir.plan_path().read_bytes()
+    plan_mtime = ir.plan_path().stat().st_mtime_ns
+    tree = _tree()
+    assert ir.main(["--undo"]) == 0
+    out = capsys.readouterr().out
+    assert "would undo" in out and "--undo --apply runs this undo" in out
+    assert "name already ISO" not in out and "--apply renames from this plan" not in out
+    assert "  2026-08-03 Kim Weekly Check-in – Plans  ->  Kim Weekly Check-in – Plans 08032026" in out
+    assert "  2026-08-08 Header Only  (header only)" in out
+    assert "2026-08-08 Header Only  ->  2026-08-08 Header Only" not in out
+    assert _tree() == tree
+    assert ir.plan_path().read_bytes() == plan_before
+    assert ir.plan_path().stat().st_mtime_ns == plan_mtime
+
+
+def test_saving_the_title_a_meeting_has_moves_only_an_old_form_or_a_lone_twin(sandbox):
+    """The README says saving the title a meeting already has leaves its
+    folder alone, with two exceptions: an old '<title> MMDDYYYY' folder
+    moves to the date-first form, and a twin whose plain sibling is gone
+    drops its number. A twin whose sibling is there keeps its number."""
+    _m("2025-05-21 Team Sync", date="2025-05-21", title="Team Sync")
+    _m("2025-05-21 Team Sync (2)", date="2025-05-21", title="Team Sync")
+    _m("Board Prep 09102025", date="2025-09-10", title="Board Prep")
+    r = summarize.rename_meeting("2025-05-21 Team Sync", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync" and r["renamed"] == []
+    r = summarize.rename_meeting("2025-05-21 Team Sync (2)", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync (2)"
+    r = summarize.set_meeting_date("2025-05-21 Team Sync (2)", "2025-05-21")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync (2)"
+    r = summarize.rename_meeting("Board Prep 09102025", "Board Prep")
+    assert r["ok"] and r["base"] == "2025-09-10 Board Prep"
+    summarize.set_meeting_date("2025-05-21 Team Sync", "2025-05-22")
+    r = summarize.rename_meeting("2025-05-21 Team Sync (2)", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync"

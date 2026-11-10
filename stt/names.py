@@ -102,14 +102,39 @@ _TITLE_DROP = re.compile(r'[<>"\\|?*\x00-\x1f]')
 TITLE_MAX = 120
 
 
+def cut_words(s: str, n: int = TITLE_MAX) -> str:
+    """`s` cut to at most `n` characters. A cut that lands inside a word
+    goes back to the last space, when one falls in the second half, so a
+    long title never ends 'Extraordinaril'. A title with no such space
+    (CJK, one long word) is cut at `n`. A separator left at the end goes."""
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    if not s[n].isspace():
+        sp = cut.rfind(" ")
+        if sp >= n // 2:
+            cut = cut[:sp]
+    return cut.rstrip(" -\u2013\u2014,;:/")
+
+
+def _uncut_title(s) -> str:
+    s = _TITLE_DROP.sub("", strip_unsafe(s)).strip().lstrip(".")
+    return re.sub(r"\s+", " ", s)
+
+
 def clean_title(s) -> str:
     """A typed meeting title as it is shown: the unsafe characters stripped
     (strip_unsafe), the characters no file name can hold dropped apart from
     ':' and '/', leading dots removed (a bare '.' or '..' would name the
     parent folder), whitespace runs collapsed, at most TITLE_MAX
-    characters."""
-    s = _TITLE_DROP.sub("", strip_unsafe(s)).strip().lstrip(".")
-    return re.sub(r"\s+", " ", s)[:TITLE_MAX].strip()
+    characters, cut between words (cut_words)."""
+    return cut_words(_uncut_title(s)).strip()
+
+
+def title_was_cut(s) -> bool:
+    """True when clean_title(s) is shorter than TITLE_MAX allows for: the
+    typed title ran past it and lost its end."""
+    return len(_uncut_title(s).strip()) > TITLE_MAX
 
 
 def file_title(s) -> str:
@@ -122,4 +147,4 @@ def file_title(s) -> str:
     s = re.sub(r"^[\s:/]+|[\s:/]+$", "", clean_title(s)).lstrip(".")
     s = re.sub(r"(?<=\S)[:/]+(?=\S)", "-", s)
     s = re.sub(r"\s*[:/]+\s*", " - ", s)
-    return re.sub(r"\s+", " ", s)[:TITLE_MAX].strip()
+    return cut_words(re.sub(r"\s+", " ", s)).strip()

@@ -36,6 +36,9 @@ _MODEL_REPO = {
     "turbo": "mlx-community/whisper-large-v3-turbo",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
+# a second name for a model above, and the name its speed is learned under
+# (stt.rates.whisper_variant): the same repo is the same speed
+VARIANT_ALIASES = {"large-v3-turbo": "turbo"}
 
 # what Whisper writes when nothing is said, lower case and without punctuation
 PHANTOMS = frozenset({

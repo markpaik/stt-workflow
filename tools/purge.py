@@ -18,9 +18,16 @@ What it removes:
   references to it from voices also heard elsewhere;
 - its centroid-index rows (the index is refreshed without it);
 - its rows in the duplicate review stores, the queue holds, the failure
-  dismissals, and the run history;
+  dismissals, the run history, and the recent results in status.json;
+- its lines in the undo journals and its rows in the rename plans in
+  config.migration_dir() (backfill, amnesty, fix_dates, iso_rename,
+  retitle_all): an undo cannot act on a purged meeting, and a journal line
+  keeps its old names and titles;
 - saved Ask threads that cite it and group overrides keyed on it, when
   those stores exist;
+- the retitle dry run's scratch in work/retitle (tools/retitle_all.py): the
+  cached model reply for it (title, gist, decisions) and its row in
+  proposals.json and proposals.tsv;
 - the source file if it still sits in a watched folder (so the next run
   cannot bring it back), and, for a Voice Memos sync copy, a block on the
   memo's id so the sync never copies it again. The memo on the phone and
@@ -28,7 +35,9 @@ What it removes:
 
 What it only reports: pages and notes outside this project that name the
 meeting (STT_PURGE_SCAN_DIRS, colon-separated, default the folder above the
-meeting store), and that encrypted backups still hold it until they age out.
+meeting store), any other file in config.migration_dir() that still names
+it (a doctor fix run keeps whole copies of the files it changed), and that
+encrypted backups still hold it until they age out.
 
   ./run.sh py tools/purge.py "<meeting folder name>"           # dry run
   ./run.sh py tools/purge.py "<meeting folder name>" --apply
@@ -72,17 +81,27 @@ def _read_json(p: Path):
 
 # ---------- the plan ----------
 
+def _outputs(rec) -> list:
+    """The output paths of one manifest record. A record that is not an
+    object, or outputs that are not a list of names, give none: the
+    manifest keeps such a record for a person to repair (doctor names it
+    manifest_bad_record), and the purge raised AttributeError on it."""
+    outs = rec.get("outputs") if isinstance(rec, dict) else None
+    return [o for o in outs if isinstance(o, str)] if isinstance(outs, list) else []
+
+
 def _manifest_keys(folder: Path, base: str, meta: dict) -> list:
-    m = _read_json(config.MANIFEST_PATH) or {}
+    m = _read_json(config.MANIFEST_PATH)
+    processed = m.get("processed") if isinstance(m, dict) else None
+    if not isinstance(processed, dict):
+        processed = {}
     keys = []
-    for k, rec in (m.get("processed") or {}).items():
-        outs = rec.get("outputs") or []
-        if any(Path(o).parent == folder or Path(o).stem == base for o in outs):
+    for k, rec in processed.items():
+        if any(Path(o).parent == folder or Path(o).stem == base for o in _outputs(rec)):
             keys.append(k)
     for k in (meta.get("source_name"), meta.get("source_file")):
-        if k and k in (m.get("processed") or {}) and k not in keys:
-            rec = m["processed"][k]
-            if any(Path(o).parent == folder for o in rec.get("outputs") or []):
+        if isinstance(k, str) and k in processed and k not in keys:
+            if any(Path(o).parent == folder for o in _outputs(processed[k])):
                 keys.append(k)
     return keys
 
@@ -208,8 +227,264 @@ def _outside_mentions(base: str, mid) -> list:
     return hits
 
 
+# ---------- the migration folder ----------
+
+# the keys a journal entry or a plan row names its meeting by
+_NAME_KEYS = ("base", "old_base", "new_base", "planned_base", "renamed")
+# the keys that name the meeting after a rename entry ran
+_NEW_KEYS = ("new_base", "planned_base", "renamed")
+_PLAN_FILES = ("iso-rename-plan.json",)
+
+
+def _needles(mid, names: set) -> set:
+    """The meeting's names and id as bytes, raw and as JSON escapes them."""
+    out = set()
+    for n in set(names) | ({mid} if mid else set()):
+        out |= {n.encode(), json.dumps(n).strip('"').encode()}
+    return out
+
+
+def _names_meeting(e, mid, names: set, line: str = "") -> bool:
+    """An entry with a meeting id names the meeting only by that id: a name
+    an older meeting gave up can belong to another meeting now. A line that
+    is not JSON (a torn last line) names it when it holds one of its names."""
+    if e is None and line:
+        b = line.encode()
+        return any(x in b for x in _needles(mid, names))
+    if not isinstance(e, dict):
+        return False
+    if e.get("meeting_id"):
+        return bool(mid) and e["meeting_id"] == mid
+    return any(n in names for n in _later_names(e))
+
+
+def _later_names(e: dict) -> list:
+    """The names an entry with no meeting id gives the meeting once the
+    entry ran: its new name for a rename, else the name it ran on. The
+    old_base of a rename is left out. Two meetings can share an old name
+    (a default "New Recording 3"), and a match on it took the other
+    meeting's lines and, through the new name, its rename chain."""
+    later = [e[k] for k in _NEW_KEYS if isinstance(e.get(k), str) and e[k]]
+    if not later:
+        later = [e[k] for k in ("base", "old_base") if isinstance(e.get(k), str) and e[k]]
+    elif isinstance(e.get("base"), str) and e["base"]:
+        later.append(e["base"])
+    return later
+
+
+def _migration_docs() -> dict:
+    """{path: [(line, entry or None)]} for each journal (.jsonl) at the top
+    of config.migration_dir(), and {path: plan} for each rename plan."""
+    d = config.migration_dir()
+    out = {}
+    if not d.is_dir():
+        return out
+    for p in sorted(d.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix == ".jsonl":
+            try:
+                lines = p.read_text(encoding="utf-8").splitlines()
+            except (OSError, ValueError):
+                continue
+            rows = []
+            for ln in lines:
+                try:
+                    rows.append((ln, json.loads(ln)))
+                except ValueError:
+                    rows.append((ln, None))
+            out[p] = rows
+        elif p.name in _PLAN_FILES:
+            doc = _read_json(p)
+            if isinstance(doc, dict) and isinstance(doc.get("rows"), list):
+                out[p] = doc
+    return out
+
+
+def _all_names(docs: dict, mid, names: set) -> set:
+    """`names` plus every older name the journals give the meeting: an
+    entry that names it carries the name it had then. Repeated until no
+    new name turns up, so a chain of renames is followed to its start.
+    An entry with no meeting id matches only by a later name
+    (_later_names), so the chain runs backward and never forward from a
+    shared old name into another meeting."""
+    names = set(names)
+    entries = []
+    for v in docs.values():
+        entries += v["rows"] if isinstance(v, dict) else [e for _, e in v]
+    grew = True
+    while grew:
+        grew = False
+        for e in entries:
+            if _names_meeting(e, mid, names):
+                for k in _NAME_KEYS:
+                    if isinstance(e.get(k), str) and e[k] and e[k] not in names:
+                        names.add(e[k])
+                        grew = True
+    return names
+
+
+def _migration_plan(mid, names: set) -> dict:
+    docs = _migration_docs()
+    every = _all_names(docs, mid, names)
+    files, n = {}, 0
+    for p, v in docs.items():
+        rows = v["rows"] if isinstance(v, dict) else v
+        hit = sum(1 for r in rows if (_names_meeting(r, mid, every) if isinstance(v, dict)
+                                      else _names_meeting(r[1], mid, every, r[0])))
+        if hit:
+            files[str(p)] = hit
+            n += hit
+    return {"names": sorted(every), "files": files, "lines": n}
+
+
+# ---------- the retitle scratch (tools/retitle_all.py) ----------
+
+def _retitle_dir() -> Path:
+    return config.WORK_DIR / "retitle"
+
+
+def _retitle_cache_files(mid, names: set) -> list:
+    """The cached model replies for the meeting: retitle_all keys one by its
+    meeting id (unsafe characters as '_'), else 'b_' and a hash of its name."""
+    import hashlib
+    import re
+    keys = {"b_" + hashlib.sha256(n.encode()).hexdigest()[:16] for n in names}
+    if mid:
+        keys.add(re.sub(r"[^\w.-]", "_", str(mid)))
+    d = _retitle_dir() / "cache"
+    return sorted(str(d / f"{k}.json") for k in keys if (d / f"{k}.json").is_file())
+
+
+def _retitle_rows(mid, names: set):
+    """(doc, hit): proposals.json and a flag per proposal, True for the
+    meeting's own row (by its id, else by the name it had then)."""
+    doc = _read_json(_retitle_dir() / "proposals.json")
+    if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+        return None, []
+    hit = []
+    for r in doc["proposals"]:
+        if not isinstance(r, dict):
+            hit.append(False)
+        elif r.get("meeting_id"):
+            hit.append(bool(mid) and r["meeting_id"] == mid)
+        else:
+            hit.append(r.get("old_base") in names)
+    return doc, hit
+
+
+def _retitle_plan(mid, names: set) -> dict:
+    _, hit = _retitle_rows(mid, names)
+    return {"cache": _retitle_cache_files(mid, names), "proposals": sum(hit)}
+
+
+def _purge_retitle(mid, names: set) -> dict:
+    """Remove the meeting's cached model reply and its proposal rows. The
+    tsv beside proposals.json loses the same rows (old_base, its second
+    column, is one folder name per row)."""
+    gone = _retitle_cache_files(mid, names)
+    for f in gone:
+        Path(f).unlink(missing_ok=True)
+    doc, hit = _retitle_rows(mid, names)
+    n = sum(hit)
+    if n:
+        rows = doc["proposals"]
+        dropped = {r.get("old_base") for r, h in zip(rows, hit) if h}
+        doc["proposals"] = [r for r, h in zip(rows, hit) if not h]
+        pj = _retitle_dir() / "proposals.json"
+        _write_private(pj, json.dumps(doc, ensure_ascii=False, indent=1))
+        tsv = pj.with_suffix(".tsv")
+        try:
+            lines = tsv.read_text(encoding="utf-8").splitlines()
+        except (OSError, ValueError):
+            lines = None
+        if lines is not None:
+            keep = [ln for i, ln in enumerate(lines)
+                    if i == 0 or (ln.split("\t")[1:2] or [None])[0] not in dropped]
+            _write_private(tsv, "\n".join(keep) + "\n")
+    return {"cache": len(gone), "proposals": n}
+
+
+def _write_private(p: Path, text: str) -> None:
+    tmp = p.with_name(p.name + ".purge.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def _purge_migration(mid, names: set) -> int:
+    """Drop the meeting's journal lines and plan rows. A journal left with
+    no line is removed. The tsv beside a plan loses the same rows. Returns
+    the number of lines and rows dropped."""
+    docs = _migration_docs()
+    every = _all_names(docs, mid, names)
+    n = 0
+    for p, v in docs.items():
+        if isinstance(v, dict):
+            hit = [_names_meeting(r, mid, every) for r in v["rows"]]
+            if not any(hit):
+                continue
+            keep = [r for r, h in zip(v["rows"], hit) if not h]
+            gone = {(r.get("old_base"), r.get("new_base"))
+                    for r, h in zip(v["rows"], hit) if h}
+            n += len(v["rows"]) - len(keep)
+            _write_private(p, json.dumps({**v, "rows": keep}, ensure_ascii=False, indent=1))
+            tsv = p.with_suffix(".tsv")
+            try:
+                lines = tsv.read_text(encoding="utf-8").splitlines()
+            except (OSError, ValueError):
+                continue
+            # old_base and new_base are its first two columns. A row goes
+            # with its plan row, or when its new name is the meeting's: an
+            # old name alone can be another meeting's too.
+            def ours(ln):
+                cols = ln.split("\t")
+                return tuple(cols[:2]) in gone or (len(cols) > 1 and cols[1] in every)
+            lines = [ln for i, ln in enumerate(lines) if i == 0 or not ours(ln)]
+            _write_private(tsv, "\n".join(lines) + "\n")
+            continue
+        keep = [ln for ln, e in v if not _names_meeting(e, mid, every, ln)]
+        if len(keep) == len(v):
+            continue
+        n += len(v) - len(keep)
+        if any(ln.strip() for ln in keep):
+            _write_private(p, "\n".join(keep) + "\n")
+        else:
+            p.unlink(missing_ok=True)
+    return n
+
+
+def _migration_leftovers(mid, names: set) -> list:
+    """Files in config.migration_dir() that the purge does not rewrite (a
+    doctor run's whole-file copies, anything unknown) whose bytes still hold
+    one of the meeting's names or its id. The journals and plans it rewrote
+    are not listed: a line left in one belongs to another meeting."""
+    d = config.migration_dir()
+    if not d.is_dir():
+        return []
+    done = set()
+    for p in _migration_docs():
+        done |= {p, p.with_suffix(".tsv")} if p.name in _PLAN_FILES else {p}
+    needles = _needles(mid, names)
+    out = []
+    for p in sorted(d.rglob("*")):
+        try:
+            if (p.is_file() and p not in done
+                    and any(x in p.read_bytes() for x in needles)):
+                out.append(str(p))
+        except OSError:
+            continue
+    return out
+
+
+def _names(base: str, meta: dict, keys) -> set:
+    return ({base} | {n for n in (meta.get("source_name"), meta.get("source_file")) if n}
+            | set(keys))
+
+
 def plan(base: str) -> dict:
     """What a purge of `base` would remove. Reads only."""
+    from stt import status
     folder, archived = locate(base)
     if folder is None:
         return {"ok": False, "error": f"no meeting '{base}'"}
@@ -218,6 +493,7 @@ def plan(base: str) -> dict:
     from stt import centroids
     cmeta = _read_json(centroids.meta_path()) or {}
     keys = _manifest_keys(folder, base, meta)
+    names = _names(base, meta, keys)
     return {
         "ok": True, "base": base, "meeting_id": mid, "archived": archived,
         "folder": str(folder),
@@ -230,6 +506,9 @@ def plan(base: str) -> dict:
         "vm_uuid": meta.get("vm_uuid"),
         "threads": [str(p) for p in _threads(base, mid)],
         "overrides": _overrides(base, mid),
+        "recent_rows": status.recent_naming(names),
+        "migration": _migration_plan(mid, names),
+        "retitle": _retitle_plan(mid, names),
         "outside": _outside_mentions(base, mid),
         "note": BACKUP_NOTE,
     }
@@ -280,7 +559,13 @@ def _drop_enrolled(rows_by_person: dict) -> dict:
 def _drop_unknowns(base: str, mid, only: list) -> int:
     from stt import unknowns
     with unknowns.lock_registry():
-        reg = unknowns.load()
+        reg = unknowns.load_for_write()
+        if reg is None:
+            # damaged: nothing in it can be read, so nothing in it can be
+            # dropped, and a save would put an empty registry over it
+            print("   unknowns.json cannot be read: no unknown voice was "
+                  "dropped from it.", file=sys.stderr)
+            return 0
         for uid in only:
             meta = reg["speakers"].pop(uid, None)
             if meta and meta.get("file"):
@@ -356,7 +641,11 @@ def _scrub_names(names: set) -> dict:
     hp = Path(status.HISTORY_LOG)
     if hp.exists():
         kept, drop = [], 0
-        for line in hp.read_text().splitlines():
+        # bytes that are not UTF-8 (a torn write, a hand edit) stay as they
+        # are: read_text() raised UnicodeDecodeError here, after the meeting
+        # folder was gone, and every store after this one kept the meeting
+        text = hp.read_bytes().decode("utf-8", "surrogateescape")
+        for line in text.splitlines():
             try:
                 r = json.loads(line)
             except ValueError:
@@ -368,7 +657,8 @@ def _scrub_names(names: set) -> dict:
             kept.append(line)
         if drop:
             tmp = hp.with_suffix(".jsonl.tmp")
-            tmp.write_text("\n".join(kept) + ("\n" if kept else ""))
+            tmp.write_bytes(("\n".join(kept) + ("\n" if kept else ""))
+                            .encode("utf-8", "surrogateescape"))
             os.replace(tmp, hp)
             out["history"] = drop
     ip = dupes.ignored_path()
@@ -393,8 +683,7 @@ def apply(base: str) -> dict:
     folder = Path(p["folder"])
     meta = _read_json(folder / f"{base}.json") or {}
     mid = p["meeting_id"]
-    names = {base} | {n for n in (meta.get("source_name"), meta.get("source_file")) if n}
-    names |= set(p["manifest_keys"])
+    names = _names(base, meta, p["manifest_keys"])
 
     with review.lock_meeting(base):
         archive.purge_meeting_dir(folder)
@@ -423,9 +712,14 @@ def apply(base: str) -> dict:
         tmp.write_text(json.dumps(d, indent=2))
         os.chmod(tmp, 0o600)
         os.replace(tmp, op)
+    scrub["recent"] = status.forget_recent(names)
+    every = set(p["migration"]["names"]) | names
+    scrub["migration"] = _purge_migration(mid, every)
+    scrub["retitle"] = _purge_retitle(mid, every)
     p.update({"done": True, "enrolled_removed": enrolled,
               "unknowns_removed": n_unknowns, "scrubbed": scrub,
-              "vm_blocked": blocked})
+              "vm_blocked": blocked,
+              "migration_left": _migration_leftovers(mid, every)})
     return p
 
 
@@ -448,6 +742,17 @@ def _print(p: dict, applied: bool):
         print(f"{'blocked' if applied else 'would block'}: the Voice Memos id, so "
               "the sync never copies it again (the memo itself is not touched)")
     print(f"{verb}: {len(p['threads'])} saved thread(s), {len(p['overrides'])} override(s)")
+    print(f"{verb}: {p['recent_rows']} recent result(s) in status.json")
+    print(f"{verb}: {p['migration']['lines']} line(s) in "
+          f"{len(p['migration']['files'])} undo journal(s) and rename plan(s)")
+    rt = p.get("retitle") or {}
+    print(f"{verb}: {len(rt.get('cache') or [])} cached retitle reply(ies), "
+          f"{rt.get('proposals', 0)} retitle proposal row(s)")
+    if p.get("migration_left"):
+        print(f"in the migration folder, {len(p['migration_left'])} other file(s) "
+              "still name it; remove them by hand once their undo is not needed:")
+        for o in p["migration_left"]:
+            print("  " + o)
     if p["outside"]:
         print(f"outside this project, {len(p['outside'])} file(s) name it; remove "
               "them by hand:")

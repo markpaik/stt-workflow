@@ -342,12 +342,25 @@ def main():
     # say "applying names" for exactly as long as this is really happening. Only
     # a pass that WON the lock publishes it: the queue-a-follow-up path above
     # returned before this and must not claim to be running.
+    # A meeting typed on the command line that names no live meeting (a typo,
+    # an archived one) or that fails is an error for that caller: exit 1, so a
+    # script that chains this command can tell nothing was relabelled. A
+    # --bases-from list stays exit 0 for such a meeting: the panel wrote it,
+    # and a meeting renamed or removed since then is an expected skip.
+    typed = bases is not None and not args.bases_from
+    missed = []
     with control.relabel_marker():
         if bases is None:
             _pass_over_everything(strict=strict, allowed_names=allowed)
         else:
             for base in bases:
-                _safe_one(base, strict=strict, allowed_names=allowed)
+                known = config.meeting_file(base, ".json").exists()
+                err = _safe_one(base, strict=strict, allowed_names=allowed)
+                if not known or err is not None:
+                    missed.append(base)
+    if typed and missed:
+        print("not relabelled: " + ", ".join(missed), file=sys.stderr)
+        return 1
     return 0
 
 

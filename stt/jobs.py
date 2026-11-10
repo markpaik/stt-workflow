@@ -13,6 +13,7 @@ without touching the queue, so the job simply waits for the next kick.
 import fcntl
 import json
 import os
+import sys
 import threading
 import time
 
@@ -29,24 +30,65 @@ FIELD_SEP = "\x1e"
 
 
 def join_list(items) -> str:
-    return FIELD_SEP.join(items)
+    items = list(items)
+    s = FIELD_SEP.join(items)
+    # one item has no FIELD_SEP, so split_list would split it on its commas:
+    # 'Budget, Q3.m4a' alone became 'Budget' and ' Q3.m4a', which match no
+    # file. A FIELD_SEP at the end marks it as one name.
+    if len(items) == 1 and "," in s:
+        s += FIELD_SEP
+    return s
 
 
 def split_list(s: str) -> list:
     """Parse a --files/--paths value. Prefers FIELD_SEP (what spawn_args()
-    emits); falls back to a plain comma so a human typing the flag by hand
-    (per this project's documented CLI usage) still works."""
-    return s.split(FIELD_SEP) if FIELD_SEP in s else s.split(",")
+    emits; one at the end marks a single name); falls back to a plain comma
+    so a human typing the flag by hand (per this project's documented CLI
+    usage) still works. An empty value is no names: join_list([]) gave
+    '', and ''.split(',') is [''], one empty name."""
+    if not s:
+        return []
+    if FIELD_SEP not in s:
+        return s.split(",")
+    parts = s.split(FIELD_SEP)
+    return parts[:-1] if parts[-1] == "" else parts
 
 
 _lock_state = threading.local()
 
 
-def _apply(fn):
+def _load():
+    """(jobs, ok): the queued jobs on disk, and False when the file is there
+    but is not a JSON list (a torn write, outside damage, a hand edit). Only
+    the job objects are kept: a '{}' file made add() raise TypeError, so the
+    Run click failed instead of queueing."""
     try:
-        cur = json.loads(PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        cur = []
+        raw = json.loads(PATH.read_text())
+    except FileNotFoundError:
+        return [], True
+    except ValueError:  # bad JSON, or bytes that are not text
+        return [], False
+    if not isinstance(raw, list):
+        return [], False
+    return [j for j in raw if isinstance(j, dict)], True
+
+
+def _keep_aside():
+    """Move a damaged queue file to queued_jobs.json.bad before the next
+    write replaces it, so what it held can still be read back by hand."""
+    bad = PATH.with_suffix(".json.bad")
+    try:
+        os.replace(PATH, bad)
+        print(f"warning: {PATH.name} was not a list of jobs; kept it as "
+              f"{bad.name} and started an empty queue", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def _apply(fn):
+    cur, ok = _load()
+    if not ok:
+        _keep_aside()
     out, ret = fn(cur)
     # atomic: a kill mid-write (forced quit, the SIGKILL escalation in
     # stop_run itself) must never truncate this file — a truncated read
@@ -89,10 +131,7 @@ def add(job: dict) -> dict:
 
 
 def items() -> list:
-    try:
-        return json.loads(PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    return _load()[0]
 
 
 def remove(at: float) -> bool:

@@ -1,5 +1,7 @@
 """status: run lifecycle across states — start, stages, finish, end, recover."""
-from stt import status
+import pytest
+
+from stt import config, status
 
 
 def test_full_lifecycle(sandbox):
@@ -363,6 +365,46 @@ def test_history_survives_a_corrupt_log_line(sandbox):
     assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
 
 
+@pytest.mark.parametrize("bad", [b"[1, 2]\n", b'"str"\n', b"5\n", b"null\n",
+                                 b'{"name": ["x"], "at": "2026-01-01T00:00:00"}\n',
+                                 b'{"name": "c.m4a", "at": 5}\n',
+                                 b"\xff\xfe\x00bad\n"])
+def test_history_skips_a_line_of_the_wrong_shape_or_not_utf8(sandbox, bad):
+    """history() kept any JSON value, so a '[1,2]' line raised
+    AttributeError in every reader, and a 0xff byte raised
+    UnicodeDecodeError, which is no OSError. The doctor's check and the
+    panel's failure list crashed on either."""
+    import json
+
+    from stt import doctor
+    from gui import server as srv
+    status.start_run(["a.m4a"])
+    status.finish_file("a.m4a", False, "ffmpeg exploded")
+    with open(status.HISTORY_LOG, "ab") as f:
+        f.write(bad)
+    status.finish_file("b.m4a", True, "ok")
+    assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
+    (config.PROJECT_DIR / "dismissed_failures.json").write_text(
+        json.dumps({"b.m4a": "2026-01-01T00:00:00"}))
+    assert {f.kind for f in doctor.check(registry=False)} >= {"stale_dismissal"}
+    assert "error" not in doctor.run_check_at_batch_end()
+    srv._results_cache["key"] = None
+    assert srv._failed_sources(status.read()) == {"a.m4a": "ffmpeg exploded"}
+
+
+def test_the_history_trim_keeps_a_byte_that_is_not_utf8(sandbox, monkeypatch):
+    """The trim read the log as UTF-8 inside finish_file: a 0xff byte
+    raised there, and the batch's result write failed with it."""
+    monkeypatch.setattr(status, "HISTORY_MAX_BYTES", 50)
+    monkeypatch.setattr(status, "HISTORY_KEEP_LINES", 3)
+    status.HISTORY_LOG.write_bytes(b"\xff\xfe\x00bad\n")
+    status.finish_file("a.m4a", True, "x" * 40)
+    status.finish_file("b.m4a", True, "x" * 40)
+    raw = status.HISTORY_LOG.read_bytes()
+    assert raw.startswith(b"\xff\xfe\x00bad\n")
+    assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
+
+
 def test_recording_key_roundtrips_and_survives_a_run(sandbox):
     status.set_recording({"pid": 4242, "caf": "/x/.rec-a.caf", "started_at": "2026-07-09T10:00:00"})
     assert status.recording()["pid"] == 4242
@@ -505,3 +547,84 @@ def test_the_summarizing_stage_counts_down_from_recent_summaries(sandbox):
         status.note_summary(10.0)
     assert status.summary_estimate() == 10.0
     assert len(status.read()["summary_secs"]) == status.SUMMARY_KEEP
+
+
+# ---- active entries a dead batch left behind ----
+
+def _dead_pid():
+    """The pid and group of a process that has exited and been reaped."""
+    import subprocess
+    import sys
+    p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    p.wait()
+    return p.pid
+
+
+def _leave_active(pid, pgid, base="Weekly Sync 05012026"):
+    import json
+    d = status.read()
+    d.update(running=True, pid=pid, pgid=pgid,
+             active={f"{base}.m4a": {"stage": "transcribing", "base": base}})
+    status.STATUS_PATH.write_text(json.dumps(d))
+    return base
+
+
+def test_a_killed_batchs_active_entries_lock_nothing(sandbox):
+    """Only end_run clears active, so a SIGKILL, a crash or a reboot left
+    the entry behind and archive refused the meeting 'being processed right
+    now' until the next batch started."""
+    import json
+
+    from conftest import mfile
+    from stt import archive, config
+    gone = _dead_pid()
+    base = _leave_active(gone, gone)
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": f"{base}.m4a", "duration_sec": 600.0, "date": "2026-05-01",
+         "speakers": [], "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    assert status.active_now() == {} and not status.meeting_active(base)
+    r = archive.archive_meeting(base)
+    assert r["ok"], r
+    assert base not in config.meeting_bases()
+
+
+def test_a_live_batch_or_a_surviving_worker_still_locks_its_meeting(sandbox):
+    import os
+    gone = _dead_pid()
+    base = _leave_active(os.getpid(), gone)
+    assert status.meeting_active(base)                   # the batch itself is alive
+    base = _leave_active(gone, os.getpgid(0))
+    assert status.meeting_active(base)                   # a worker in its group is alive
+    assert status.active_now()
+
+
+def test_entries_with_no_owner_recorded_still_lock(sandbox):
+    """No pid (an older file, or set_stage outside a run) is no proof the
+    owner is gone: the guard keeps refusing."""
+    base = _leave_active(None, None)
+    assert status.meeting_active(base)
+    status.set_stage("Other.m4a", "transcribing", base="Other 05012026")
+    assert status.meeting_active("Other 05012026")
+    for bad in ("x", -1, 0):
+        base = _leave_active(bad, None)
+        assert status.meeting_active(base), bad
+
+
+def test_a_killed_batchs_running_flag_is_not_a_running_batch(sandbox):
+    """Only end_run clears `running`, so a hard kill or a power loss left
+    it true with a dead pid. retitle_all and iso_rename read the flag
+    alone and refused until the next batch started."""
+    import json
+    import os
+    gone = _dead_pid()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": gone, "pgid": gone}))
+    assert not status.batch_running()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": gone, "pgid": None}))
+    assert not status.batch_running()
+    # alive, a surviving worker in its group, or no proof either way: running
+    for pid, pgid in ((os.getpid(), None), (gone, os.getpgid(0)), (None, None), ("x", None)):
+        status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": pid, "pgid": pgid}))
+        assert status.batch_running(), (pid, pgid)
+    status.STATUS_PATH.write_text(json.dumps({"running": False, "pid": os.getpid()}))
+    assert not status.batch_running()

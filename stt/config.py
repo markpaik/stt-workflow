@@ -47,15 +47,6 @@ def _home_default(sub: str, hard_default) -> str:
 
 
 # --- Paths ---
-ICLOUD_DIR = Path(os.environ.get("STT_ICLOUD_DIR", _home_default(
-    "source", HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")))
-MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR",
-                                   _home_default("meetings", HOME / "Projects/brain/meetings")))
-# where the on-device meeting recorder drops finished captures — a LOCAL folder
-# (not iCloud): these calls are sensitive and the files are large, so they never
-# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
-RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
-    "recordings", HOME / "Library/Application Support/com.stt-workflow/recordings")))
 # The state root: manifest, status/history, holds, queue, voiceprints, stt.env,
 # work/, logs/ all hang off this. Defaults to STT_HOME when set (so all of that
 # state travels with the demo home), else this checkout. Code and static assets
@@ -63,6 +54,32 @@ RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
 # repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   _HOME or Path(__file__).resolve().parent.parent))
+# The transcripts folder when nothing names one: the same default init.sh
+# offers. It was the owner's own library path, so a fresh clone that skipped
+# init.sh wrote meetings there, and init.sh and the code disagreed.
+DEFAULT_MEETINGS_DIR = HOME / "Documents/Meeting Transcripts"
+
+
+def _folder(env_name: str, sub: str, hard_default) -> Path:
+    """An import-time folder setting: the environment, then stt.env, then
+    the STT_HOME or hard default. stt.env is read here too because a
+    process launchd starts (the menu bar and its panel) never has it in its
+    environment: config.MEETINGS_DIR there was the default, wherever the
+    library really is. The functions below (meetings_dir and the rest) read
+    stt.env fresh on every call."""
+    from . import envfile
+    v = os.environ.get(env_name) or envfile.parse(PROJECT_DIR / "stt.env").get(env_name)
+    return Path(v or _home_default(sub, hard_default))
+
+
+ICLOUD_DIR = _folder("STT_ICLOUD_DIR", "source",
+                     HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")
+MEETINGS_DIR = _folder("STT_MEETINGS_DIR", "meetings", DEFAULT_MEETINGS_DIR)
+# where the on-device meeting recorder drops finished captures — a LOCAL folder
+# (not iCloud): these calls are sensitive and the files are large, so they never
+# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
+RECORDINGS_DIR = _folder("STT_RECORDINGS_DIR", "recordings",
+                         HOME / "Library/Application Support/com.stt-workflow/recordings")
 # The checkout itself: run.sh, .venv and the code. A spawned command starts
 # from here, never from PROJECT_DIR, which under STT_HOME is a data home with
 # no run.sh in it: the panel's run sat queued while spawned.log said
@@ -145,23 +162,52 @@ def migration_dir() -> Path:
         return _HOME / "migration"
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
+# the import-time number settings _env_number reads, by name: (default,
+# cast, valid, rule). setting_problems() checks the same rules for the doctor.
+_NUMBER_SETTINGS = {}
+
+
+def _number_ok(raw, cast, valid) -> bool:
+    """True when `raw` is empty (the default) or parses and keeps the rule."""
+    if raw is None or not str(raw).strip():
+        return True
+    try:
+        return bool(valid(cast(str(raw).strip())))
+    except ValueError:
+        return False
+
+
 def _env_number(name, default, cast, valid, rule):
     """An import-time number setting from the environment. An empty value
     means the default. A value that does not parse, or that breaks `rule`,
     prints a warning that names the setting and keeps the default: a typo
     in stt.env must never stop every command that imports this module."""
+    _NUMBER_SETTINGS[name] = (default, cast, valid, rule)
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
-    try:
-        v = cast(raw.strip())
-        if valid(v):
-            return v
-    except ValueError:
-        pass
+    if _number_ok(raw, cast, valid):
+        return cast(raw.strip())
     print(f"warning: {name}={raw!r} is not {rule}; using {default}",
           file=sys.stderr, flush=True)
     return default
+
+
+def env_float(name, default):
+    """A number setting read at import, by _env_number's rules. Any number
+    but nan. inf is allowed, since some floors are turned off by a value no
+    score reaches."""
+    return _env_number(name, float(default), float,
+                       lambda v: not math.isnan(v), "a number")
+
+
+def env_int(name, default, minimum=None):
+    """A whole-number setting read at import, by _env_number's rules. With
+    `minimum`, a smaller value is refused like a typo."""
+    if minimum is None:
+        return _env_number(name, int(default), int, lambda v: True, "a whole number")
+    return _env_number(name, int(default), int, lambda v: v >= minimum,
+                       f"a whole number of {minimum} or more")
 
 
 # --- Models ---
@@ -183,20 +229,26 @@ DIARIZATION_MODEL = os.environ.get(
 DIARIZERS = ("speakrs", "pyannote")
 
 
+def _diarizer_problem(raw):
+    """(engine, None) for a usable STT_DIARIZER value, else (speakrs, why).
+    Case and spaces are ignored, and an empty value is the default."""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return DIARIZERS[0], None
+    if v not in DIARIZERS:
+        return DIARIZERS[0], (f"{raw!r} is not one of {' or '.join(DIARIZERS)}; "
+                              f"using {DIARIZERS[0]}")
+    return v, None
+
+
 def _diarizer_setting() -> str:
     """STT_DIARIZER, checked: diarize() runs speakrs only on an exact
     "speakrs", so a typo ("speakr") used to switch every file to the slow
     CPU engine with no message. An unknown value warns and keeps the
     default; an empty one is the default."""
-    raw = os.environ.get("STT_DIARIZER", "")
-    v = raw.strip().lower()
-    if not v:
-        return DIARIZERS[0]
-    if v not in DIARIZERS:
-        print(f"warning: STT_DIARIZER={raw!r} is not one of "
-              f"{' or '.join(DIARIZERS)}; using {DIARIZERS[0]}",
-              file=sys.stderr, flush=True)
-        return DIARIZERS[0]
+    v, why = _diarizer_problem(os.environ.get("STT_DIARIZER", ""))
+    if why:
+        print(f"warning: STT_DIARIZER={why}", file=sys.stderr, flush=True)
     return v
 
 
@@ -232,11 +284,11 @@ SPEAKRS_TIMEOUT_SEC = _env_number("STT_SPEAKRS_TIMEOUT_SEC", 3600, int,
 # under ~2 min (no cluster reaches the floor). speakrs engine only: the
 # pyannote fallback was not measured. STT_RECLUSTER=0 turns it off.
 RECLUSTER = os.environ.get("STT_RECLUSTER", "1") == "1"
-RECLUSTER_MARGIN = float(os.environ.get("STT_RECLUSTER_MARGIN", "0.02"))
-RECLUSTER_CENTROID_MIN_DUR = float(os.environ.get("STT_RECLUSTER_CENTROID_MIN_DUR", "5.0"))
-RECLUSTER_MOVE_MIN_DUR = float(os.environ.get("STT_RECLUSTER_MOVE_MIN_DUR", "0.3"))
-RECLUSTER_DST_MIN_SECS = float(os.environ.get("STT_RECLUSTER_DST_MIN_SECS", "120"))
-RECLUSTER_ITERS = int(os.environ.get("STT_RECLUSTER_ITERS", "2"))
+RECLUSTER_MARGIN = env_float("STT_RECLUSTER_MARGIN", 0.02)
+RECLUSTER_CENTROID_MIN_DUR = env_float("STT_RECLUSTER_CENTROID_MIN_DUR", 5.0)
+RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
+RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
+RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
 # ASR backend: "parakeet" (default, native MLX), "mlxwhisper" (Whisper on the
 # GPU, the variant in STT_WHISPER_MLX_MODEL), or "cloud:<provider>".
@@ -293,23 +345,23 @@ def is_source_audio(p) -> bool:
 
 # --- Speaker naming (cosine similarity of pyannote embeddings) ---
 # Start ~0.5-0.65 and tune on real audio. Higher = stricter (fewer false names).
-NAMING_THRESHOLD = float(os.environ.get("STT_NAMING_THRESHOLD", "0.60"))
+NAMING_THRESHOLD = env_float("STT_NAMING_THRESHOLD", 0.6)
 
 # Cluster naming also requires this margin over the 2nd-best voiceprint (open-set
 # guard: a stranger near one enrolled voice must not inherit that person's name).
-NAMING_MARGIN = float(os.environ.get("STT_NAMING_MARGIN", "0.15"))
+NAMING_MARGIN = env_float("STT_NAMING_MARGIN", 0.15)
 
 # --- Identity-first refinement (uses enrolled voiceprints to correct attribution) ---
 REFINE = os.environ.get("STT_REFINE", "1") == "1"
 # Only turns at least this long are trusted for per-turn identity (short ones are noisy).
-REFINE_MIN_RELIABLE_DUR = float(os.environ.get("STT_REFINE_MIN_DUR", "1.5"))
+REFINE_MIN_RELIABLE_DUR = env_float("STT_REFINE_MIN_DUR", 1.5)
 # A reliable turn is reassigned to an enrolled voice only above this cosine AND margin.
 # Correct matches sit ~0.9; cross-speaker confusions ~0.5, so 0.6/0.15 is safe.
-REFINE_ID_MIN = float(os.environ.get("STT_REFINE_ID_MIN", "0.60"))
-REFINE_ID_MARGIN = float(os.environ.get("STT_REFINE_ID_MARGIN", "0.15"))
+REFINE_ID_MIN = env_float("STT_REFINE_ID_MIN", 0.6)
+REFINE_ID_MARGIN = env_float("STT_REFINE_ID_MARGIN", 0.15)
 # Reassigning a turn AWAY from an unnamed (anonymous) cluster is an open-set claim
 # about a possibly-unknown person and needs stronger evidence.
-REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"))
+REFINE_ID_MIN_OPENSET = env_float("STT_REFINE_ID_MIN_OPENSET", 0.7)
 # Turns shorter than this are *candidates* for smoothing into neighbours — but only
 # with evidence (unusable/contrary embedding) and never for bare yes/no answers.
 # Widened 0.3 -> 0.6 (07/2026 audit): the 0.3–0.6s band sits squarely in the
@@ -317,14 +369,13 @@ REFINE_ID_MIN_OPENSET = float(os.environ.get("STT_REFINE_ID_MIN_OPENSET", "0.70"
 # evidence-gated sandwich there produced 637 evidence-backed label changes on
 # the real library. Flips stay evidence-gated — unconditional inheritance was
 # measured and REJECTED.
-REFINE_SHORT_DUR = float(os.environ.get("STT_REFINE_SHORT_DUR", "0.6"))
+REFINE_SHORT_DUR = env_float("STT_REFINE_SHORT_DUR", 0.6)
 # A protected one-word answer ("yeah", "okay", …) sandwiched in another
 # speaker's context may re-attribute ONLY when the context speaker beats the
 # assigned one by MORE than this margin on the turn's own embedding — strong,
 # turn-local evidence, not context inheritance (audit: releases 45 of 538
 # protected blocks on the real library).
-REFINE_PROTECTED_OVERRIDE_MARGIN = float(
-    os.environ.get("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", "0.15"))
+REFINE_PROTECTED_OVERRIDE_MARGIN = env_float("STT_REFINE_PROTECTED_OVERRIDE_MARGIN", 0.15)
 # Mid-band open-set rescue (exp1-band-gap, 07/2026 eval): a 0.6-1.5s turn
 # stranded in an UNNAMED cluster is reassigned to an enrolled speaker who is
 # roster rank-1 on the turn's OWN embedding by >= RESCUE_MARGIN over the
@@ -337,12 +388,9 @@ REFINE_PROTECTED_OVERRIDE_MARGIN = float(
 # the swept variants that allowed them regressed real human corrections
 # (correct mid-band own-scores have median ~0.32-0.37, so a rival clearing a
 # low bar is noise, not identity — see qa/eval/experiments.md, run D).
-REFINE_MIDBAND_RESCUE_MIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MIN", "0.70"))
-REFINE_MIDBAND_RESCUE_MARGIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_RESCUE_MARGIN", "0.10"))
-REFINE_MIDBAND_NEIGHBOR_MIN = float(
-    os.environ.get("STT_REFINE_MIDBAND_NEIGHBOR_MIN", "0.35"))
+REFINE_MIDBAND_RESCUE_MIN = env_float("STT_REFINE_MIDBAND_RESCUE_MIN", 0.7)
+REFINE_MIDBAND_RESCUE_MARGIN = env_float("STT_REFINE_MIDBAND_RESCUE_MARGIN", 0.1)
+REFINE_MIDBAND_NEIGHBOR_MIN = env_float("STT_REFINE_MIDBAND_NEIGHBOR_MIN", 0.35)
 
 # Junk-fragment repair (exp2-cluster-repair, 07/2026 eval): the diarizer
 # scatters echo/system-audio fragments of the REAL attendees into small
@@ -366,10 +414,8 @@ REFINE_MIDBAND_NEIGHBOR_MIN = float(
 # fragments (the Weekly Anthropic junk cluster) top out ~0.35 vs named
 # centroids, so 0.40 keeps clearance. Set the floor above 1.0 to disable.
 # Strict mode never runs this step.
-REFINE_JUNK_REPAIR_MIN = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MIN", "0.40"))
-REFINE_JUNK_REPAIR_MARGIN = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MARGIN", "0.10"))
+REFINE_JUNK_REPAIR_MIN = env_float("STT_REFINE_JUNK_REPAIR_MIN", 0.4)
+REFINE_JUNK_REPAIR_MARGIN = env_float("STT_REFINE_JUNK_REPAIR_MARGIN", 0.1)
 # Junk repair skips a turn whose own cluster holds more than this much talk:
 # a fragment cluster is small, a large one is a real unmatched person. On S2
 # junk repair moved ~2000 s of three unmatched clusters (1239-3438 s each)
@@ -377,8 +423,7 @@ REFINE_JUNK_REPAIR_MARGIN = float(
 # 90.8 -> 93.0-93.3 at 100 s, 92.0 at 150-300 s, 93.4 at 80 s; none lower.
 # 100 s, not 80: S3 has a dense band of 70-85 s clusters, so a cut at 80 is
 # chance. Without the recluster the guard cost S6 0.5. 1e9 turns it off.
-REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = float(
-    os.environ.get("STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", "100"))
+REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = env_float("STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS", 100.0)
 
 # Mid-length turns (short_dur..min_reliable_dur) on a NAMED speaker: the own-voice
 # score at these lengths is a DURATION artifact, not evidence — across the real
@@ -388,14 +433,14 @@ REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS = float(
 # enrolled voice must score >= OTHER_MIN and beat the owner by >= MARGIN.
 # Own-score < OWN_MAX remains the precondition; strict mode and meetings with an
 # unnamed cluster (open roster) keep the old unconditional flag.
-REFINE_MISMATCH_OWN_MAX = float(os.environ.get("STT_REFINE_MISMATCH_OWN_MAX", "0.40"))
-REFINE_MISMATCH_OTHER_MIN = float(os.environ.get("STT_REFINE_MISMATCH_OTHER_MIN", "0.50"))
-REFINE_MISMATCH_MARGIN = float(os.environ.get("STT_REFINE_MISMATCH_MARGIN", "0.15"))
+REFINE_MISMATCH_OWN_MAX = env_float("STT_REFINE_MISMATCH_OWN_MAX", 0.4)
+REFINE_MISMATCH_OTHER_MIN = env_float("STT_REFINE_MISMATCH_OTHER_MIN", 0.5)
+REFINE_MISMATCH_MARGIN = env_float("STT_REFINE_MISMATCH_MARGIN", 0.15)
 # A segment earns the "overlap" review flag only when the crosstalk inside it
 # SUMS to at least this long — sub-second brushes (backchannels, breaths) keep
 # their word-level provenance but don't demand human review of the whole turn.
 # Strict-mode callers pass 0.0 (any crosstalk at all flags, as before).
-OVERLAP_FLAG_MIN_SEC = float(os.environ.get("STT_OVERLAP_FLAG_MIN_SEC", "1.0"))
+OVERLAP_FLAG_MIN_SEC = env_float("STT_OVERLAP_FLAG_MIN_SEC", 1.0)
 # Words that are never smoothed away into a neighbouring speaker: one-word answers
 # carry meaning ("yes" in a confidential conversation), even when the voice evidence is thin.
 PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agreed",
@@ -408,14 +453,14 @@ PROTECTED_WORDS = {"yes", "no", "yeah", "yep", "nope", "right", "correct", "agre
 # becoming nameable registry entries. Matching an EXISTING unknown is never
 # restricted — a returning stranger heard briefly still keeps their number.
 # The same floor gates enrolling a cluster as a named person.
-UNKNOWN_MIN_TALK_SECS = float(os.environ.get("STT_UNKNOWN_MIN_TALK_SECS", "30"))
-UNKNOWN_MIN_RELIABLE_TURNS = int(os.environ.get("STT_UNKNOWN_MIN_RELIABLE_TURNS", "10"))
+UNKNOWN_MIN_TALK_SECS = env_float("STT_UNKNOWN_MIN_TALK_SECS", 30.0)
+UNKNOWN_MIN_RELIABLE_TURNS = env_int("STT_UNKNOWN_MIN_RELIABLE_TURNS", 10)
 
 # Adding a NEW sample to a person's EXISTING voiceprint stack: below this
 # cosine against their own stack (or matching some other profile better than
 # their own) the enrollment is suspect — the API/CLI demand an explicit
 # confirm instead of silently poisoning the profile.
-ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
+ENROLL_STACK_MIN = env_float("STT_ENROLL_STACK_MIN", 0.45)
 
 # --- Absorption splitting (exp2-cluster-repair, 07/2026 eval) ---
 # pyannote's exclusive diarization can hand back one long "turn" spanning
@@ -438,12 +483,12 @@ ENROLL_STACK_MIN = float(os.environ.get("STT_ENROLL_STACK_MIN", "0.45"))
 # untouched until a meeting is reprocessed). Dip <= 0 disables. Strict mode
 # and meetings with no enrolled voiceprints never split (identity evidence IS
 # the gate).
-SPLIT_DIP_MAX = float(os.environ.get("STT_SPLIT_DIP_MAX", "0.65"))
-SPLIT_HALF_MARGIN = float(os.environ.get("STT_SPLIT_HALF_MARGIN", "0.10"))
-SPLIT_MIN_DUR = float(os.environ.get("STT_SPLIT_MIN_DUR", "2.4"))
-SPLIT_WIN = float(os.environ.get("STT_SPLIT_WIN", "1.2"))
-SPLIT_HOP = float(os.environ.get("STT_SPLIT_HOP", "0.3"))
-SPLIT_MAX_DEPTH = int(os.environ.get("STT_SPLIT_MAX_DEPTH", "3"))
+SPLIT_DIP_MAX = env_float("STT_SPLIT_DIP_MAX", 0.65)
+SPLIT_HALF_MARGIN = env_float("STT_SPLIT_HALF_MARGIN", 0.1)
+SPLIT_MIN_DUR = env_float("STT_SPLIT_MIN_DUR", 2.4)
+SPLIT_WIN = env_float("STT_SPLIT_WIN", 1.2)
+SPLIT_HOP = env_float("STT_SPLIT_HOP", 0.3)
+SPLIT_MAX_DEPTH = env_int("STT_SPLIT_MAX_DEPTH", 3)
 
 # STRICT mode (confidential conversations): no smoothing, no open-set
 # reassignment — fragile attributions are flagged for human review instead of guessed.
@@ -465,14 +510,14 @@ PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
 # the voiceprint safety net + mono fallback keep a mis-tuned day from being
 # worse than plain mono. See stt/channels.py.
 MIC_SPEAKER = os.environ.get("STT_MIC_SPEAKER") or None  # who "me" is; None = feature off
-CHANNEL_FLOOR_DBFS = float(os.environ.get("STT_CHANNEL_FLOOR_DBFS", "-45"))   # mic noise gate
-CHANNEL_DOMINANCE_DB = float(os.environ.get("STT_CHANNEL_DOMINANCE_DB", "8")) # mic must beat system by this
-CHANNEL_ENTER_MS = float(os.environ.get("STT_CHANNEL_ENTER_MS", "200"))       # hysteresis: enter me-active
-CHANNEL_EXIT_MS = float(os.environ.get("STT_CHANNEL_EXIT_MS", "250"))         # hysteresis: leave me-active
-CHANNEL_BRIDGE_MS = float(os.environ.get("STT_CHANNEL_BRIDGE_MS", "200"))     # merge me-spans closer than this
-CHANNEL_MIN_SPAN_MS = float(os.environ.get("STT_CHANNEL_MIN_SPAN_MS", "300")) # drop me-spans shorter than this
-CHANNEL_FORCE_MIN = float(os.environ.get("STT_CHANNEL_FORCE_MIN", "0.55"))    # cosine gate: span really the mic speaker
-CHANNEL_PASS_FRACTION = float(os.environ.get("STT_CHANNEL_PASS_FRACTION", "0.5"))  # below this -> abandon, use mono
+CHANNEL_FLOOR_DBFS = env_float("STT_CHANNEL_FLOOR_DBFS", -45.0)   # mic noise gate
+CHANNEL_DOMINANCE_DB = env_float("STT_CHANNEL_DOMINANCE_DB", 8.0) # mic must beat system by this
+CHANNEL_ENTER_MS = env_float("STT_CHANNEL_ENTER_MS", 200.0)       # hysteresis: enter me-active
+CHANNEL_EXIT_MS = env_float("STT_CHANNEL_EXIT_MS", 250.0)         # hysteresis: leave me-active
+CHANNEL_BRIDGE_MS = env_float("STT_CHANNEL_BRIDGE_MS", 200.0)     # merge me-spans closer than this
+CHANNEL_MIN_SPAN_MS = env_float("STT_CHANNEL_MIN_SPAN_MS", 300.0) # drop me-spans shorter than this
+CHANNEL_FORCE_MIN = env_float("STT_CHANNEL_FORCE_MIN", 0.55)    # cosine gate: span really the mic speaker
+CHANNEL_PASS_FRACTION = env_float("STT_CHANNEL_PASS_FRACTION", 0.5)  # below this -> abandon, use mono
 
 # Append accepted/rejected identity-match scores here to build a real calibration
 # picture (enrolled-vs-stranger score distributions) over time.
@@ -480,7 +525,7 @@ CALIBRATION_LOG = PROJECT_DIR / "calibration.jsonl"
 
 # Nightly runs abort early on battery below this % (caffeinate -s is ignored on
 # battery; a run at 2% kills the machine). The next trigger retries.
-BATTERY_FLOOR = int(os.environ.get("STT_BATTERY_FLOOR", "20"))
+BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 
 # --- Progress/ETA model: measured realtime multiples on this M5 Pro ---
 # (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
@@ -501,16 +546,10 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"
 
 def _env_file() -> dict:
     """Parse stt.env (the persisted settings file) fresh — long-running processes
-    (the GUI) call these instead of the import-time constants above."""
-    p = PROJECT_DIR / "stt.env"
-    kv = {}
-    if p.exists():
-        for ln in p.read_text().splitlines():
-            s = ln.strip()
-            if s and not s.startswith("#") and "=" in s:
-                k, v = s.split("=", 1)
-                kv[k.strip()] = v.strip()
-    return kv
+    (the GUI) call these instead of the import-time constants above. The
+    rules (quotes, comments, repeats) are stt/envfile.py's."""
+    from . import envfile
+    return envfile.parse(PROJECT_DIR / "stt.env")
 
 
 def source_dir() -> Path:
@@ -667,11 +706,26 @@ def _quiet_raw():
     return _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
 
 
+def diarizer_now() -> str:
+    """The speaker engine a run started now would use: STT_DIARIZER from
+    stt.env (read fresh), then the environment, checked like DIARIZER."""
+    return _diarizer_problem(_env_file().get("STT_DIARIZER")
+                             or os.environ.get("STT_DIARIZER"))[0]
+
+
 def setting_problems() -> list:
     """[(setting, why)] for each stt.env value that cannot be read and is
     replaced by its default. The doctor lists them: a typo there used to
     change behavior with no word anywhere."""
     out = []
+    # a key that is not a shell name ('export STT_X', 'MY KEY') sets
+    # nothing: run.sh, setup.sh and init.sh skip the line, and no reader
+    # asks for it by that name, so a shell-style line was ignored unsaid
+    for key in _env_file():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            out.append((key, "is not a setting name, so every reader skips "
+                             "this line: write KEY=VALUE, with no 'export' "
+                             "and no space in the key"))
     raw = _quiet_raw()
     if raw:
         try:
@@ -688,6 +742,14 @@ def setting_problems() -> list:
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:
         out.append(("STT_ASR_BACKEND", why))
+    _, why = _diarizer_problem(_env_file().get("STT_DIARIZER")
+                               or os.environ.get("STT_DIARIZER"))
+    if why:
+        out.append(("STT_DIARIZER", why))
+    for name, (default, cast, valid, rule) in _NUMBER_SETTINGS.items():
+        raw = _env_file().get(name) or os.environ.get(name)
+        if not _number_ok(raw, cast, valid):
+            out.append((name, f"{raw!r} is not {rule}; using {default}"))
     from . import voicememos
     why = voicememos.delete_setting_problem()
     if why:
@@ -1172,6 +1234,7 @@ def backfill_meeting_ids(dest_dir=None) -> int:
     from . import review
     d = Path(dest_dir) if dest_dir else meetings_dir()
     n = 0
+    stamped = []
     for base in meeting_bases(d):
         j = meeting_file(base, ".json", d)
         if id_of(base, d):
@@ -1188,9 +1251,17 @@ def backfill_meeting_ids(dest_dir=None) -> int:
             tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False))
             os.replace(tmp, j)
             n += 1
+            stamped.append(base)
     if dest_dir is None or Path(dest_dir).resolve() == meetings_dir().resolve():
         rebuild_meetings_index(dest_dir)
         prune_lock_files(dest_dir)
+    elif stamped:
+        # the stamp above held each meeting's lock under its BASE (it had no
+        # id yet), and from now on it locks under the id. The live pass
+        # sweeps those, but an archive pass left one base-named lock per
+        # archived meeting, which the registry doctor reported as an
+        # orphan_lock on every fresh demo home. Drop just those.
+        drop_meeting_locks(stamped)
     return n
 
 

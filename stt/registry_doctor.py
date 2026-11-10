@@ -36,7 +36,7 @@ from .identify import cosine
 # two entries this close are the same voice. Well under the 0.999 the old
 # hygiene checker used: 0.999 only ever caught a byte-identical twin, and the
 # U028/U040 pair was found by hand, not by the checker.
-DUPLICATE_SIM = float(os.environ.get("STT_DOCTOR_DUPLICATE_SIM", "0.95"))
+DUPLICATE_SIM = config.env_float("STT_DOCTOR_DUPLICATE_SIM", 0.95)
 # two rows INSIDE one stack this close add nothing to max-cosine matching and
 # squeeze out a diverse sample at the cap
 STACK_DUP_SIM = 0.999
@@ -235,8 +235,10 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
             out.append(Finding("invalid", uid,
                                f"sample file {meta.get('file')} missing", False))
             continue
+        bad = False
         for i, row in enumerate(arr):
             if _bad_row(row):
+                bad = True
                 out.append(Finding("invalid", f"{uid}[{i}]",
                                    "not a finite unit vector", False))
         if lib.bases:
@@ -248,6 +250,13 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
                                        True))
         if meta.get("dropped"):
             continue        # a tombstone is not a speaker: never merged, never split
+        if bad:
+            # a NaN or non-unit row scores -1.0 against everything, so the
+            # stack also read as a "split" and as a "duplicate" of a healthy
+            # voice. --fix then merged the bad row INTO that voice, and a
+            # second run split it off again. The invalid finding is the one
+            # report: a person repairs it, and no merge or split touches it.
+            continue
         worst = unknowns.min_pairwise(arr)
         if worst < unknowns.LINK_STACK_MIN:
             out.append(Finding("split", uid,
@@ -540,9 +549,13 @@ def _fix(findings, meetings_dir) -> list:
         done.append(f"pruned {n} orphan lock file(s)")
 
     with identify.lock_registry():
-        reg = unknowns.load()          # load() heals `next` in memory
-        before = _read_json(config.VOICEPRINTS_DIR / "unknowns.json", {}).get("next")
-        if before != reg["next"]:
-            unknowns.save(reg)
-            done.append(f"healed unknowns.json next: {before} -> {reg['next']}")
+        # load() heals `next` in memory. A damaged file is None here and is
+        # never written: the check already reported it as corrupt, and a
+        # save would put an empty registry over every unknown voice.
+        reg = unknowns.load_for_write()
+        if reg is not None:
+            before = _read_json(config.VOICEPRINTS_DIR / "unknowns.json", {}).get("next")
+            if before != reg["next"]:
+                unknowns.save(reg)
+                done.append(f"healed unknowns.json next: {before} -> {reg['next']}")
     return done

@@ -11,27 +11,113 @@
 #   4. Folders          — where recordings arrive, where transcripts land
 #   5. Hugging Face     — token for the license-gated diarization model
 #   6. Models           — optional pre-download (~3 GB) so night one isn't slow
-#   7. Optional extras  — local LLM for summaries; automation (LaunchAgents)
+#   7. Optional extras  — the local model for descriptions and titles (the MLX
+#                         fallback and its ~4.5 GB of weights; Ollama is
+#                         preferred when present); automation (LaunchAgents)
 set -uo pipefail
-BASE="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVF="$BASE/stt.env"
 
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()    { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '  \033[33m!\033[0m %s\n' "$*"; }
 fail()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
-ask()   { local a; read -r -p "  → $1 " a </dev/tty; echo "$a"; }
-yes_no() { local a; a="$(ask "$1 [Y/n]")"; [[ ! "$a" =~ ^[Nn] ]]; }
+# Every answer is read from /dev/tty. With no terminal (ssh without -t, a
+# cron or CI run) the read failed, the empty answer read as the default
+# Yes, and every install ran unasked. A failed read is a No now, and the
+# script stops before step 1 when it has no terminal (has_tty below).
+ask()   { local a; read -r -p "  → $1 " a </dev/tty || return 1; echo "$a"; }
+yes_no() { local a; a="$(ask "$1 [Y/n]")" || return 1; [[ ! "$a" =~ ^[Nn] ]]; }
+has_tty() { { : </dev/tty; } 2>/dev/null; }
 
-env_get() { [ -f "$ENVF" ] && grep -E "^$1=" "$ENVF" | head -1 | cut -d= -f2- || true; }
+# stt.env is read by stt/envfile.py's rules: keys and values trimmed, one
+# pair of matching quotes around a value removed, a later line wins.
+_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+_unquote() {
+  local v; v="$(_trim "$1")"
+  if [ "${#v}" -ge 2 ]; then
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+  fi
+  printf '%s' "$v"
+}
+_env_key() {  # the key of one stt.env line, or nothing for a comment or a blank
+  local line; line="$(_trim "$1")"
+  case "$line" in ''|\#*) return 0 ;; esac
+  [ "${line#*=}" = "$line" ] && return 0
+  _trim "${line%%=*}"
+}
+env_get() {
+  local line out=""
+  [ -f "$ENVF" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(_env_key "$line")" = "$1" ] && out="$(_unquote "${line#*=}")"
+  done < "$ENVF"
+  printf '%s' "$out"
+}
 env_set() {  # env_set KEY VALUE — update-or-append, preserving other lines
+  # The value is written as given, byte for byte. A sed substitution read
+  # '&' as the matched text, a '|' as the end of its pattern and '\n' as a
+  # newline, so a folder named "R & D" corrupted the line.
+  local line tmp="$ENVF.tmp.$$" found=0
   touch "$ENVF"; chmod 600 "$ENVF"
-  if grep -qE "^$1=" "$ENVF"; then
-    /usr/bin/sed -i '' "s|^$1=.*|$1=$2|" "$ENVF"
+  : > "$tmp"; chmod 600 "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$(_env_key "$line")" = "$1" ]; then
+      printf '%s=%s\n' "$1" "$2" >> "$tmp"; found=1
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$ENVF"
+  [ "$found" = 1 ] || printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv -f "$tmp" "$ENVF"
+}
+
+# The local model for descriptions, title drafts and Ask (stt/summarize.py).
+# Ollama with OLLAMA_MODEL is preferred when it answers; the fallback is
+# LLM_REPO on MLX in its own .venv-llm. The weights are NOT part of the
+# mlx-lm install: without the download below, the first description fetches
+# them from Hugging Face, and the old prompt's offline promise was not true.
+LLM_REPO="mlx-community/Qwen3-8B-4bit"
+OLLAMA_MODEL="qwen3.8:27b-mlx"
+LLM_PY="$BASE/.venv-llm/bin/python"
+setup_local_llm() {
+  echo "  Descriptions, title drafts and Ask use a local model on this Mac."
+  echo "  Preferred: Qwen 3.8 (27B) on Ollama, about 29 GB in memory (a 48 GB Mac)."
+  echo "  Fallback:  Qwen3-8B on MLX, about 4.5 GB of weights, set up here."
+  if command -v ollama >/dev/null 2>&1; then
+    ok "Ollama found. If the model is not pulled yet: ollama pull $OLLAMA_MODEL"
   else
-    echo "$1=$2" >> "$ENVF"
+    echo "  (For the preferred model, install Ollama from https://ollama.com,"
+    echo "   then run: ollama pull $OLLAMA_MODEL)"
+  fi
+  if [ -x "$LLM_PY" ]; then
+    ok "MLX fallback environment already installed"
+  elif yes_no "Set up the MLX fallback (a small environment now; the weights next)?"; then
+    uv venv --python 3.12 "$BASE/.venv-llm" \
+      && uv pip install --python "$LLM_PY" mlx-lm 'transformers<5' \
+      && ok "MLX fallback environment installed" \
+      || { warn "MLX install failed — everything else still works"; return 0; }
+  else
+    return 0
+  fi
+  if "$LLM_PY" -c "from huggingface_hub import snapshot_download as d; d('$LLM_REPO', local_files_only=True)" \
+       >/dev/null 2>&1; then
+    ok "Qwen3-8B weights already downloaded (descriptions work offline)"
+  elif yes_no "Download the Qwen3-8B weights now (~4.5 GB)? If not, the first description downloads them."; then
+    "$LLM_PY" -c "from huggingface_hub import snapshot_download as d; d('$LLM_REPO')" \
+      && ok "Qwen3-8B weights downloaded (descriptions work offline)" \
+      || warn "download failed — the first description downloads the weights instead"
   fi
 }
+
+# sourced (the tests load the helpers above): stop before the setup steps
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+if ! has_tty; then
+  echo "init.sh asks before each install, so it needs a terminal." >&2
+  echo "Run it in Terminal, or over ssh with -t (ssh -t host ./init.sh)." >&2
+  exit 1
+fi
 
 bold "STT Workflow — first-run setup"
 echo "  Everything runs on this Mac; nothing is uploaded unless you later add a"
@@ -153,12 +239,12 @@ else
   echo "       https://huggingface.co/pyannote/speaker-diarization-community-1"
   echo "       → click 'Agree and access repository' (and any dependency repos listed)"
   echo "    2. Create a READ token: https://hf.co/settings/tokens"
-  TOK="$(ask "Paste your hf_… token (or Enter to skip — transcription-only until set):")"
+  TOK="$(ask "Paste your hf_… token (or Enter to skip — the batch does not run until it is set):")"
   if [ -n "$TOK" ]; then
     env_set HF_TOKEN "$TOK"
     ok "token saved to stt.env (git-ignored, chmod 600)"
   else
-    warn "skipped — transcripts will have no speaker labels until HF_TOKEN is set in stt.env"
+    warn "skipped — the batch stops at its start until HF_TOKEN is set in stt.env"
   fi
 fi
 
@@ -177,13 +263,7 @@ fi
 
 # ---------- 7. extras ----------
 bold "7/7  Optional extras"
-if [ -x "$BASE/.venv-llm/bin/python" ]; then
-  ok "local LLM for summaries already installed"
-elif yes_no "Install the local LLM for automatic summaries + smart renames? (~4.5 GB, fully offline)"; then
-  uv venv --python 3.12 "$BASE/.venv-llm" \
-    && uv pip install --python "$BASE/.venv-llm/bin/python" mlx-lm 'transformers<5' \
-    && ok "summaries enabled" || warn "LLM install failed — everything else still works"
-fi
+setup_local_llm
 
 if yes_no "Run automatically? (nightly batch + menu-bar app at login)"; then
   "$BASE/setup.sh" install-agent

@@ -47,19 +47,20 @@ from datetime import datetime
 import numpy as np
 
 from . import config
-from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
+from .errors import UserError
+from .identify import (_atomic_write, _l2, _save_npy, cosine, load_voiceprints,
                        lock_registry, score_against)
 
-MATCH_MIN = float(os.environ.get("STT_UNKNOWN_MATCH_MIN", "0.60"))
-MATCH_MARGIN = float(os.environ.get("STT_UNKNOWN_MATCH_MARGIN", "0.10"))
+MATCH_MIN = config.env_float("STT_UNKNOWN_MATCH_MIN", 0.6)
+MATCH_MARGIN = config.env_float("STT_UNKNOWN_MATCH_MARGIN", 0.1)
 # the bar a RETURNING unknown must clear to claim an existing global number.
 # Higher than MATCH_MIN on purpose: MATCH_MIN is now only the bar for being
 # WORTH SUGGESTING, and a 0.60-0.70 match is exactly the band that drifted
 # U050's stack across two people one appended centroid at a time.
-LINK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_MIN", "0.70"))
+LINK_MIN = config.env_float("STT_UNKNOWN_LINK_MIN", 0.7)
 # after the append, every pair inside the stack must still be this close. A
 # stack that no longer agrees with itself is not one voice.
-LINK_STACK_MIN = float(os.environ.get("STT_UNKNOWN_LINK_STACK_MIN", "0.60"))
+LINK_STACK_MIN = config.env_float("STT_UNKNOWN_LINK_STACK_MIN", 0.6)
 # how many near misses a freshly minted unknown carries for the panel
 MAX_SUGGESTED = 3
 MAX_SAMPLES = 5
@@ -104,21 +105,74 @@ def heal_next(reg: dict) -> dict:
     except (TypeError, ValueError):
         nxt = 1
     reg["next"] = max(nxt, next_floor(reg))
+    # an entry that is not an object (a hand edit: 5, null, a bare file
+    # name) holds no voice, and every reader takes an entry for a dict, so
+    # one such entry raised in assign() for every meeting. It leaves the
+    # registry here. Its number stays spent: `next` was measured with it.
+    reg["speakers"] = {u: m for u, m in reg["speakers"].items()
+                       if isinstance(m, dict)}
     return reg
 
 
-def load() -> dict:
+UNKNOWNS_UNREADABLE = (
+    "The unknown-voice registry (unknowns.json) cannot be read, so nothing "
+    "was saved. Fix it or restore it from a backup first.")
+
+
+class UnknownsUnreadable(UserError):
+    """unknowns.json is there and cannot be read. Nothing writes over it:
+    assign() on the empty registry a damaged file read as minted U001 again,
+    saved the new voice over the old U001.npy, and saved a one-voice
+    registry over the damaged file. Every global number restarted, and the
+    old samples were gone."""
+
+
+def _read(p):
+    """The registry in the file at `p`, or None when it is not a readable
+    JSON object (bad JSON, a list, a null, a file that cannot be read), or
+    when its `speakers` is not an object. heal_next read such a `speakers`
+    as empty, and the next save wrote the empty one over it. The doctor
+    calls both kinds corrupt."""
+    try:
+        reg = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(reg, dict) or not isinstance(reg.get("speakers", {}), dict):
+        return None
+    return reg
+
+
+def _load_checked():
+    """(registry, readable). A damaged file reads as an empty registry and
+    says so, loudly."""
     p = _path()
-    if p.exists():
-        try:
-            return heal_next(json.loads(p.read_text()))
-        except json.JSONDecodeError as e:
-            # loud, not a silent reset — every "Speaker N" would otherwise
-            # renumber from scratch with no warning that it just happened
-            print(f"WARNING: {p} is corrupt ({e}) — treating as empty. "
-                  "Sample files on disk are untouched; fix or restore before "
-                  "naming any unknown speaker.", file=sys.stderr)
-    return {"next": 1, "speakers": {}}
+    if not p.exists():
+        return {"next": 1, "speakers": {}}, True
+    reg = _read(p)
+    if reg is None:
+        # loud, not a silent reset — every "Speaker N" would otherwise
+        # renumber from scratch with no warning that it just happened
+        print(f"WARNING: {p} is corrupt — treating as empty. Sample files "
+              "on disk are untouched, and nothing writes the registry until "
+              "it is fixed or restored. New meetings keep meeting-only "
+              "labels until then.", file=sys.stderr)
+        return {"next": 1, "speakers": {}}, False
+    return heal_next(reg), True
+
+
+def load() -> dict:
+    """The registry for reading. A damaged file reads as empty: use
+    load_for_write() for a read-modify-write."""
+    return _load_checked()[0]
+
+
+def load_for_write():
+    """The registry for a read-modify-write, or None when unknowns.json is
+    there and cannot be read. The caller then writes nothing at all: not
+    the registry, and not a sample file, because an empty registry hands
+    out U001 again and U001.npy may still hold the first voice."""
+    reg, ok = _load_checked()
+    return reg if ok else None
 
 
 def mint_uid(reg: dict) -> str:
@@ -178,8 +232,14 @@ def near_misses(reg: dict, scored, exclude=None) -> list:
 
 
 def save(reg: dict):
+    """Write the registry. Raises UnknownsUnreadable, and writes nothing,
+    when the file on disk is damaged: whatever `reg` holds was not read
+    from it."""
     config.VOICEPRINTS_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(_path(), json.dumps(reg, indent=2))
+    p = _path()
+    if p.exists() and _read(p) is None:
+        raise UnknownsUnreadable(UNKNOWNS_UNREADABLE)
+    _atomic_write(p, json.dumps(reg, indent=2))
 
 
 def aligned_meeting_ids(meta: dict) -> list:
@@ -217,7 +277,9 @@ def rename_meeting_refs(old_base: str, new_base: str) -> int:
     n = 0
     new_id = config.id_of(new_base)
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            return 0
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             touched = False
@@ -255,7 +317,9 @@ def forget_meeting_refs(base: str) -> int:
     dropped/archived tombstones above. Returns speakers touched."""
     n = 0
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            return 0
         for meta in reg["speakers"].values():
             mts = meta.get("meetings", [])
             touched = False
@@ -275,11 +339,35 @@ def forget_meeting_refs(base: str) -> int:
     return n
 
 
+_unreadable_warned = set()
+
+
+def _sample_file(meta):
+    """The sample file an entry names, or None when it names none. A hand
+    edit can leave an entry with no 'file', which raised KeyError in
+    assign() for every meeting."""
+    f = meta.get("file") if isinstance(meta, dict) else None
+    return config.VOICEPRINTS_DIR / f if isinstance(f, str) and f else None
+
+
 def _samples(reg, uid):
-    f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
-    if not f.exists():
+    """This unknown's sample stack (n, dim), or None when its file is not
+    there or cannot be read. A damaged file reads as no samples: one
+    truncated U###.npy raised inside assign() for every meeting after it,
+    because each cluster is scored against every unknown."""
+    f = _sample_file(reg["speakers"][uid])
+    if f is None or not f.exists():
         return None
-    arr = np.load(f)
+    try:
+        arr = np.load(f, allow_pickle=False)
+    except (OSError, ValueError, EOFError):
+        arr = None
+    if arr is None or arr.ndim not in (1, 2):
+        if str(f) not in _unreadable_warned:
+            _unreadable_warned.add(str(f))
+            print(f"WARNING: {f.name} cannot be read — {display(uid)} is "
+                  "skipped until it is restored or removed.", file=sys.stderr)
+        return None
     return arr.reshape(1, -1) if arr.ndim == 1 else arr
 
 
@@ -351,6 +439,15 @@ def pooled_stats(label, cent_emb, stats, unnamed_labels):
     return total
 
 
+def _secs_below(secs) -> str:
+    """Seconds to one decimal, rounded DOWN, with no trailing zero: 0.3 is
+    '0.3' and 19.96 is '19.9'. A whole-second round said 'only 0s' for a
+    0.3 s clip, and a value just under the floor read as the floor itself."""
+    import math
+    v = math.floor(max(0.0, float(secs)) * 10) / 10
+    return f"{v:.1f}".rstrip("0").rstrip(".")
+
+
 def floor_violation(st) -> str:
     """Plain-language refusal when a cluster is below the evidence floor a
     voice needs before it can identify anyone — used both by assign()'s
@@ -359,7 +456,7 @@ def floor_violation(st) -> str:
     if st is None:
         return None
     if st["talk_secs"] < config.UNKNOWN_MIN_TALK_SECS:
-        return (f"This voice has only {st['talk_secs']:.0f}s of speech, "
+        return (f"This voice has only {_secs_below(st['talk_secs'])}s of speech, "
                 "too little to identify anyone reliably.")
     if st["reliable_turns"] < config.UNKNOWN_MIN_RELIABLE_TURNS:
         return (f"This voice has only {st['reliable_turns']} clear turn(s) of "
@@ -401,7 +498,12 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
     are not people. Matching an EXISTING unknown stays unrestricted."""
     meeting_id = config.id_of(meeting)   # resolved once, outside the cluster loop
     with lock_registry():
-        reg = load()
+        reg = load_for_write()
+        if reg is None:
+            # a damaged registry is never written over. Every cluster keeps
+            # its meeting-local label, and a relabel after the fix gives
+            # each one its global number.
+            return {}
         out = {}
         claimed = {}  # uid -> centroid of the first cluster that claimed it this pass
         enrolled = load_voiceprints()  # gate below: enrolled voices never mint
@@ -484,8 +586,8 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 # same meeting must not stack duplicate centroids)
                 mts = reg["speakers"][uid].setdefault("meetings", [])
                 if meeting not in mts:
-                    np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"],
-                            stack_after)
+                    _save_npy(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"],
+                              stack_after)
                     ids = aligned_meeting_ids(reg["speakers"][uid])
                     mts.append(meeting)
                     reg["speakers"][uid]["meeting_ids"] = ids + [meeting_id]
@@ -544,7 +646,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 near = near_misses(reg, scored)
                 uid = mint_uid(reg)
                 fname = f"{uid}.npy"
-                np.save(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
+                _save_npy(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
                                         "meeting_ids": [meeting_id],
                                         "created": datetime.now().isoformat(timespec="seconds")}
@@ -594,7 +696,7 @@ def _restore_profile(name: str, entry, rows):
         else:
             reg[name] = entry
             if rows is not None:
-                np.save(config.VOICEPRINTS_DIR / entry["file"], rows)
+                _save_npy(config.VOICEPRINTS_DIR / entry["file"], rows)
         identify.save_registry(reg)
 
 
@@ -610,8 +712,8 @@ def promote(uid: str, name: str) -> bool:
     retry starts from exactly the state the user can see."""
     from . import identify
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         if reg["speakers"][uid].get("dropped"):
             # a tombstone, as merge() says: naming it deleted the tombstone,
@@ -661,8 +763,9 @@ def merge(uid_src: str, uid_dst: str) -> bool:
     """Two unknown numbers that are really one person: fold src's samples and
     meeting history into dst, retire src."""
     with lock_registry():
-        reg = load()
-        if uid_src not in reg["speakers"] or uid_dst not in reg["speakers"] or uid_src == uid_dst:
+        reg = load_for_write()
+        if (reg is None or uid_src not in reg["speakers"]
+                or uid_dst not in reg["speakers"] or uid_src == uid_dst):
             return False
         # a DROPPED voice is a tombstone and may be neither side of a merge.
         # Merging a dropped voice INTO a live one deletes the tombstone and
@@ -675,9 +778,14 @@ def merge(uid_src: str, uid_dst: str) -> bool:
         s, d = _samples(reg, uid_src), _samples(reg, uid_dst)
         if d is None:
             return False
+        if s is not None and s.shape[1] != d.shape[1]:
+            # stacks from two embedding sizes (a model change) are not one
+            # voice's samples: np.vstack raised ValueError here. Refused, as
+            # promote() refuses the same case, with nothing changed.
+            return False
         if s is not None:
             arr = np.vstack([d, s])[-MAX_SAMPLES:]
-            np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)
+            _save_npy(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)
         mts = reg["speakers"][uid_dst].setdefault("meetings", [])
         ids = aligned_meeting_ids(reg["speakers"][uid_dst])
         src_ids = aligned_meeting_ids(reg["speakers"][uid_src])
@@ -693,7 +801,9 @@ def merge(uid_src: str, uid_dst: str) -> bool:
             record_link(reg["speakers"][uid_dst], ln.get("meeting"),
                         ln.get("meeting_id"), ln.get("cluster"),
                         ln.get("score") or 0.0)
-        (config.VOICEPRINTS_DIR / reg["speakers"][uid_src]["file"]).unlink(missing_ok=True)
+        sf = _sample_file(reg["speakers"][uid_src])
+        if sf is not None:
+            sf.unlink(missing_ok=True)
         del reg["speakers"][uid_src]
         save(reg)
         return True
@@ -705,8 +815,8 @@ def archive(uid: str) -> bool:
     matching keeps working (their number never gets reassigned to someone
     else) and a later Restore brings them back for naming."""
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         reg["speakers"][uid]["archived"] = True
         save(reg)
@@ -715,8 +825,8 @@ def archive(uid: str) -> bool:
 
 def restore(uid: str) -> bool:
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"]:
+        reg = load_for_write()
+        if reg is None or uid not in reg["speakers"]:
             return False
         reg["speakers"][uid].pop("archived", None)
         save(reg)
@@ -731,8 +841,9 @@ def drop(uid: str) -> bool:
     it. A dropped voice keeps matching its tombstone in assign() and is simply
     never surfaced or given a global label again."""
     with lock_registry():
-        reg = load()
-        if uid not in reg["speakers"] or reg["speakers"][uid].get("dropped"):
+        reg = load_for_write()
+        if (reg is None or uid not in reg["speakers"]
+                or reg["speakers"][uid].get("dropped")):
             return False
         reg["speakers"][uid]["dropped"] = datetime.now().isoformat(timespec="seconds")
         save(reg)

@@ -304,6 +304,59 @@ def test_recover_orphans_keeps_a_live_recording(sandbox, monkeypatch):
     assert status.recording() == live               # the live recording untouched
 
 
+@pytest.mark.parametrize("in_status", [False, True])
+def test_a_recovered_capture_takes_its_own_day_and_time(sandbox, in_status):
+    """recover_orphans called finalize(caf, None), and final_name stamped
+    the recovery moment. A capture from 9 days ago, recovered at the next
+    menu-bar start, was named and dated today."""
+    import os
+    caf = _stereo_caf(config.recordings_dir() / ".rec-old9.caf")
+    when = datetime(2026, 11, 1, 16, 5, 0)
+    os.utime(caf, (when.timestamp(), when.timestamp()))
+    if in_status:
+        status.set_recording({"pid": 999999, "caf": str(caf)})   # dead helper
+    names = recorder.recover_orphans()
+    assert names == ["2026-11-01 Recording 1605"]
+    assert dates.meeting_date(names[0]) == "2026-11-01"
+    assert (config.recordings_dir() / "2026-11-01 Recording 1605.m4a").exists()
+
+def test_a_stray_caf_a_live_recorder_writes_is_not_finalized(sandbox):
+    """status.json can lose the recording entry while a capture runs. The
+    stray-CAF sweep then skipped only the path status named, so it
+    transcoded a partial copy and deleted the CAF under a recorder that kept
+    writing to it. A CAF a live stt-recorder names is not a stray."""
+    import sys
+    import time
+    live = _stereo_caf(config.recordings_dir() / ".rec-live77.caf")
+    dead = _stereo_caf(config.recordings_dir() / ".rec-dead77.caf")
+    # a stand-in recorder: its command line names the binary and the CAF
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                             "/x/STT Recorder.app/Contents/MacOS/stt-recorder", str(live)])
+    try:
+        for _ in range(50):
+            if recorder._caf_has_live_writer(live):
+                break
+            time.sleep(0.1)
+        assert status.recording() is None
+        names = recorder.recover_orphans()
+        assert len(names) == 1 and not dead.exists()   # the true stray goes
+        assert live.exists(), "the live capture's CAF must stay"
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not recorder._caf_has_live_writer(live)
+    assert len(recorder.recover_orphans()) == 1 and not live.exists()
+
+
+def test_a_failed_writer_check_keeps_the_stray_caf(sandbox, monkeypatch):
+    caf = _stereo_caf(config.recordings_dir() / ".rec-unsure.caf")
+
+    def _fork_failed(*a, **k):
+        raise OSError("pgrep: fork failed")
+    monkeypatch.setattr(recorder.subprocess, "run", _fork_failed)
+    assert recorder._caf_has_live_writer(caf) is True
+    assert recorder.recover_orphans() == [] and caf.exists()
+
 def test_finalize_drops_caf_before_publishing_so_a_crash_cannot_duplicate(sandbox, monkeypatch):
     """C2: if the machine dies between the transcode and publishing the m4a, no
     CAF may survive for recover_orphans to re-finalize into a DUPLICATE meeting.
@@ -443,3 +496,21 @@ def test_final_name_strips_bidi_and_zero_width_characters(sandbox):
     assert recorder.final_name("‮gnp.txt", now=FIXED) == "2026-07-09 gnp.txt"
     assert recorder.final_name("Budget​Sync\nTwo", now=FIXED) == \
         "2026-07-09 BudgetSync Two"
+
+
+def test_a_stopped_capture_is_named_for_the_time_it_started(sandbox):
+    """The menu bar's stop calls finalize(caf, None), and final_name took
+    that moment: a capture from 14:30 to 15:10 was named 'Recording 1510'.
+    provenance reads the HHMM as the start time, and the README names a
+    recording by its start ('2026-04-08 Recording 1430')."""
+    caf = _stereo_caf(config.recordings_dir() / ".rec-start01.caf")
+    status.set_recording({"pid": None, "caf": str(caf),
+                          "started_at": "2026-07-09T14:30:05",
+                          "stopped_at": "2026-07-09T15:10:44"})
+    r = recorder.finalize(caf, None)
+    assert r["ok"] and r["name"] == "2026-07-09 Recording 1430"
+    # a typed name with no date takes the start day too
+    caf = _stereo_caf(config.recordings_dir() / ".rec-start02.caf")
+    status.set_recording({"pid": None, "caf": str(caf),
+                          "started_at": "2026-07-08T23:50:00"})
+    assert recorder.finalize(caf, "Late Call")["name"] == "2026-07-08 Late Call"

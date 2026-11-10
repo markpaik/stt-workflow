@@ -13,7 +13,9 @@ The write follows config.backfill_meeting_ids: the meeting's own lock, a
 re-read under it, one atomic replace, and `generated_at` left as it was, so
 an open panel page does not reload. A meeting the batch is writing is
 skipped and reported. Every added key goes to a journal first, and undo
-removes a key only where it still holds the value this run wrote.
+removes a key only where it still holds the value this run wrote. A write
+run first stamps a meeting_id on any meeting that lacks one, so undo can
+find a meeting renamed after the run.
 
   ./run.sh py tools/backfill_keys.py                       # dry run: counts only
   ./run.sh py tools/backfill_keys.py --apply               # write, print the run id
@@ -91,12 +93,21 @@ def summarize_plan(rows: list, total: int) -> dict:
 
 
 def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> dict:
+    """Add the missing keys, journaling each one first. The journal opens
+    on the first key a run adds: a run with nothing to add returns run
+    None and leaves no file (it left an empty .jsonl and an undo hint for
+    it). A run id is the second it started, so opening the file early
+    could also have touched an earlier run's journal of the same second."""
     store = Path(store) if store else config.meetings_dir()
     run_id = run_id or datetime.now().strftime("backfill-%Y%m%dT%H%M%S")
     jpath = fj.journal_path(run_id, journal_dir)
+    # undo finds each meeting by its id: a meeting journaled with none could
+    # not be found again once its folder moved (tools/fix_dates.py does the same)
+    config.backfill_meeting_ids(store)
     names = _names()
     applied, skipped = [], []
-    with fj.Journal(jpath) as journal:
+    journal = None
+    try:
         for row in plan(store, probe=probe, today=today):
             base = row["base"]
             if row["skip"]:
@@ -114,6 +125,8 @@ def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> 
                 ch = provenance.derive(base, d, store, names, probe=probe, today=today)
                 if not ch:
                     continue
+                if journal is None:
+                    journal = fj.Journal(jpath)
                 at = datetime.now().isoformat(timespec="seconds")
                 for field, new in ch.items():
                     journal.write({"run": run_id, "meeting_id": d.get("meeting_id"),
@@ -123,6 +136,11 @@ def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> 
                     fj.put(d, field, new)
                 fj.atomic_json(j, d)          # generated_at stays as it was
                 applied.append(base)
+    finally:
+        if journal is not None:
+            journal.close()
+    if not applied:
+        return {"run": None, "journal": None, "applied": [], "skipped": skipped}
     return {"run": run_id, "journal": str(jpath), "applied": applied,
             "skipped": skipped}
 
@@ -131,7 +149,8 @@ def undo(run_id: str, fields=None, store=None, journal_dir=None, dry_run=True) -
     """Remove each journaled key whose current value still equals the value
     this run wrote. A key changed since keeps the change."""
     store = Path(store) if store else config.meetings_dir()
-    entries = [e for e in fj.entries(run_id, journal_dir)
+    entries = [e for e in fj.entries(run_id, journal_dir, valid=fj.field_entry,
+                                     tool="backfill_keys")
                if not fields or e["field"] in fields]
     by_id = fj.bases_by_id(store)
     live = set(config.meeting_bases(store))
@@ -224,6 +243,10 @@ def main(argv=None) -> int:
         _print_plan(summarize_plan(plan(probe=probe), len(config.meeting_bases())))
         return 0
     r = apply(journal_dir=a.journal_dir, probe=probe)
+    if r["run"] is None:
+        print(f"backfill: nothing to add, 0 meetings changed, "
+              f"{len(r['skipped'])} skipped")
+        return 0
     print(f"backfill applied: run {r['run']}, {len(r['applied'])} meetings changed, "
           f"{len(r['skipped'])} skipped")
     print(f"journal: {r['journal']}")

@@ -177,6 +177,25 @@ def test_span_speaker_majority_overlap():
     assert diar_eval.span_speaker(segs, 10.0, 11.0) is None    # no overlap at all
 
 
+def test_frame_metrics_reads_an_unnamed_cluster_as_miss_and_every_overlap():
+    """_norm_name(None) is "", which is not None, so an unnamed segment over
+    truth speech read as confusion 1.0 instead of miss 1.0. Only the first
+    covering segment was read, so a correct overlapping second segment
+    still scored the frame as confusion."""
+    truth = [{"start": 0, "end": 2, "speaker": "Ann"}]
+    unnamed = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": None}], 2)
+    assert unnamed == {"miss": 1.0, "false_alarm": 0.0, "confusion": 0.0,
+                       "der_like": 1.0}
+    both = [{"start": 0, "end": 2, "name": "Bob"}, {"start": 0, "end": 2, "name": "Ann"}]
+    assert diar_eval.frame_metrics(truth, both, 2)["der_like"] == 0.0
+    wrong = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": "Bob"}], 2)
+    assert wrong["confusion"] == 1.0 and wrong["miss"] == 0.0
+    # an unnamed segment over silence still claims speech: a false alarm
+    quiet = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": "Ann"},
+                                            {"start": 2, "end": 3, "name": None}], 3)
+    assert quiet["false_alarm"] == 0.5 and quiet["miss"] == 0.0
+
+
 def test_aggregate_rows_bands_and_confusions():
     rows = [
         {"meeting": "M", "dur": 0.2, "truth": "A", "predicted": "B", "correct": False},
@@ -307,3 +326,44 @@ def test_scoreboard_handles_empty_sources(tmp_path):
     assert board["headline"]["turn_accuracy_overall"] is None
     assert board["headline"]["n_labeled_turns"] == 0
     assert (run_dir / "scoreboard.md").exists()
+
+
+def test_a_partial_or_non_object_baseline_still_writes_the_scoreboard(tmp_path):
+    """compute_deltas indexed baseline["headline"] and baseline["run"], so a
+    partial baseline raised "KeyError: 'headline'" after the whole scoring
+    run, before scoreboard.json was written. A baseline that parses but is
+    not an object ([1]) is no baseline."""
+    deltas = diar_eval.compute_deltas(
+        {"sources": {"synth": {"by_band": [1]}}, "run": {"date": "x"}},
+        {"headline": {"turn_accuracy_overall": None}, "sources": {}, "run": {}}, "n")
+    assert deltas == {"baseline_name": "n", "baseline_date": "x", "metrics": {}}
+    out_root = tmp_path / "evalout"
+    bdir = out_root / "baselines"
+    bdir.mkdir(parents=True)
+    (bdir / "CURRENT").write_text("old\n")
+    empty = {"stereo": diar_eval.aggregate_rows([])}
+    for stored in ({"sources": {}}, {"headline": 3, "run": []}, [1], "x"):
+        (bdir / "old.json").write_text(json.dumps(stored))
+        run_dir, board, _ = diar_eval.write_scoreboard(out_root, "2026-07-15", empty)
+        assert (run_dir / "scoreboard.json").exists()
+        assert (run_dir / "scoreboard.md").exists()
+
+
+def test_the_idle_wait_reads_a_dead_batchs_flag_as_idle(sandbox):
+    """With no panel up, panel_busy read status.json's running flag alone.
+    A hard kill skips end_run, so the flag stayed true, and wait_for_idle
+    waited its whole two hours for a batch that was gone."""
+    import socket
+    import subprocess
+    from stt import status
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                    # nothing listens there now
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert diar_eval.panel_busy(port) is False
+    import os
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": os.getpid()}))
+    assert diar_eval.panel_busy(port) is True

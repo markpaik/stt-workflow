@@ -119,9 +119,15 @@ class RelabelQueue:
     def start(self):
         """Start the worker. Idempotent: a second call is a no-op, so the
         menu bar restarting the panel thread cannot end up with two workers
-        racing for the same lock."""
+        racing for the same lock.
+
+        A stop() that timed out leaves the worker alive, finishing its job
+        with _stopping set. A start() then has to clear it: the worker
+        exited after that job, and every later submit sat queued with no
+        thread to run it."""
         with self._cv:
             if self._thread is not None and self._thread.is_alive():
+                self._stopping = False
                 return self
             self._stopping = False
             self._thread = threading.Thread(target=self._work, name="relabel-queue",

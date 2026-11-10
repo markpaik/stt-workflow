@@ -16,14 +16,16 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
     """The clip's dominant voice already has a voiceprint, so its turns carry
     the enrolled NAME while embeddings stay keyed by SPEAKER_0N; a brief second
     cluster must not be enrolled in the dominant speaker's place."""
-    vec_a = np.ones(256, dtype=float)          # 30s dominant cluster
+    vec_a = np.ones(256, dtype=float)          # 36s dominant cluster
     vec_b = np.ones(256, dtype=float) * -1.0   # 2s minority/noise cluster
     fake = {
         # post-refine 'speaker' is the enrolled name for the matched cluster
-        "turns": [{"speaker": "Mark", "start": 0.0, "end": 30.0},
-                  {"speaker": "SPEAKER_01", "start": 30.0, "end": 32.0}],
-        "raw_turns": [{"cluster": "SPEAKER_00", "start": 0.0, "end": 30.0},
-                      {"cluster": "SPEAKER_01", "start": 30.0, "end": 32.0}],
+        "turns": [{"speaker": "Mark", "start": 0.0, "end": 36.0},
+                  {"speaker": "SPEAKER_01", "start": 36.0, "end": 38.0}],
+        # twelve 3 s turns clear the quality floor (30 s, 10 clear turns)
+        "raw_turns": [{"cluster": "SPEAKER_00", "start": 3.0 * i, "end": 3.0 * i + 3.0}
+                      for i in range(12)]
+                     + [{"cluster": "SPEAKER_01", "start": 36.0, "end": 38.0}],
         "embeddings": {"SPEAKER_00": vec_a, "SPEAKER_01": vec_b},
     }
     monkeypatch.setattr(audio, "to_wav16k", lambda src, dst: dst.write_bytes(b"wav"))
@@ -43,6 +45,31 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
     assert enroll.main() == 0
     # the 30s cluster (SPEAKER_00 -> vec_a) must win, not the 2s SPEAKER_01
     assert np.array_equal(captured["vec"], vec_a)
+
+
+@pytest.mark.parametrize("turns, msg", [
+    ([(0.0, 0.3)], "only 0.3s of speech"),
+    ([(2.0 * i, 2.0 * i + 1.0) for i in range(40)], "only 0 clear turn(s)"),
+])
+def test_audio_enroll_refuses_a_clip_below_the_quality_floor(sandbox, monkeypatch,
+                                                             turns, msg):
+    """--from-meeting refuses a cluster below the floor ("same bar as
+    /api/name"), but --audio had no check: a 0.3 s clip was enrolled as
+    'Blip Short' (dim=192, samples=1)."""
+    fake = {"turns": [],
+            "raw_turns": [{"cluster": "SPEAKER_00", "start": a, "end": b}
+                          for a, b in turns],
+            "embeddings": {"SPEAKER_00": np.ones(192)}}
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, dst: dst.write_bytes(b"wav"))
+    monkeypatch.setattr(diarize, "diarize", lambda wav: fake)
+    clip = sandbox / "blip.wav"
+    clip.write_bytes(b"audio")
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip),
+                                      "--name", "Blip Short"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value).startswith(f"{clip}: This voice has {msg}")
+    assert "Blip Short" not in identify.load_registry()
 
 
 def test_a_missing_or_unreadable_audio_file_is_one_line(sandbox, monkeypatch):
@@ -120,6 +147,83 @@ def test_from_meeting_suspect_sample_requires_confirm(sandbox, monkeypatch):
     assert enroll.main() == 0
     assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
 
+
+
+@pytest.mark.parametrize("bad", [np.zeros(192), np.full(192, np.nan),
+                                 np.r_[np.ones(191), np.inf]])
+def test_a_zero_or_nan_embedding_is_one_line(sandbox, monkeypatch, bad):
+    """identify.enroll raises "embedding has zero/non-finite norm", and the
+    CLI let it end in a traceback."""
+    np.savez(mfile("Mtg", ".emb.npz"), SPEAKER_00=bad)
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", "Zed Zero"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == (
+        "SPEAKER_00 in 'Mtg': the voice embedding is empty or damaged (zero or "
+        "not a number), so it cannot identify anyone. Redo the meeting to rebuild it.")
+    assert "Zed Zero" not in identify.load_registry()
+
+
+def test_a_sample_of_another_size_is_one_line_and_replace_notes_it(
+        sandbox, monkeypatch, capsys):
+    """--confirm with a 256-dim sample on a 192-dim stack ended in "all the
+    input array dimensions except for the concatenation axis must match",
+    and without --confirm the CLI asked for --confirm first. --replace
+    succeeded silently and left a mixed-size registry."""
+    rng = np.random.default_rng(9)
+    identify.enroll("Priya Shah", rng.normal(size=192), source="Old")
+    identify.enroll("Sam Chen", rng.normal(size=192), source="Old")
+    np.savez(mfile("Long256", ".emb.npz"), SPEAKER_00=rng.normal(size=256))
+    argv = ["enroll", "--from-meeting", "Long256", "--speaker", "SPEAKER_00",
+            "--name", "Priya Shah"]
+    for extra in ([], ["--confirm"]):
+        monkeypatch.setattr(sys, "argv", argv + extra)
+        with pytest.raises(SystemExit) as ei:
+            enroll.main()
+        assert str(ei.value) == (
+            "SPEAKER_00 in 'Long256': this sample has 256 dimensions and Priya "
+            "Shah's voiceprint has 192, so they come from different voice "
+            "models. Re-run with --replace to start the voiceprint over from "
+            "this sample.")
+        assert identify.load_registry()["Priya Shah"]["dim"] == 192
+    monkeypatch.setattr(sys, "argv", argv + ["--replace"])
+    assert enroll.main() == 0
+    assert identify.load_registry()["Priya Shah"]["dim"] == 256
+    assert ("Note: this sample has 256 dimensions and the other voiceprints "
+            "have 192.") in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("typed", ["priya shah", "PRIYA SHAH", "  Priya   Shah "])
+def test_a_name_in_another_case_still_needs_confirm(sandbox, monkeypatch, typed):
+    """sample_check looked the typed name up case for case. 'priya shah'
+    found no stack, so the guard passed, and identify.enroll then mapped the
+    name to 'Priya Shah' and added the wrong voice to her stack."""
+    rng = np.random.default_rng(5)
+    priya = rng.normal(size=256)
+    priya /= np.linalg.norm(priya)
+    other = rng.normal(size=256)
+    other -= (other @ priya) * priya
+    other /= np.linalg.norm(other)
+    spans = [(i * 4.0, i * 4.0 + 3.0) for i in range(12)]
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": spans,
+                                 "SPEAKER_01": [(s + 60, e + 60) for s, e in spans]},
+                         {"SPEAKER_00": priya, "SPEAKER_01": other})
+    identify.enroll("Priya Shah", priya, source="Mtg")
+
+    argv = ["enroll", "--from-meeting", "Mtg", "--speaker", "SPEAKER_01",
+            "--name", typed]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert "--confirm" in str(ei.value) and "Priya Shah's" in str(ei.value)
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 1
+    assert identify.sample_check(typed, other) is not None
+
+    monkeypatch.setattr(sys, "argv", argv + ["--confirm"])
+    assert enroll.main() == 0
+    assert list(identify.load_registry()) == ["Priya Shah"]
+    assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
 
 BAD_NAMES = ["", "   ", "\t", "Bad\nName", "Bad\rName", "A‮B", "Zed​Q",
              "Line Two", "Nul\x00l", "C1\x85x", "﻿Lead"]
@@ -219,3 +323,36 @@ def test_a_voiceprint_file_name_is_never_hidden_or_too_long(sandbox):
     files = sorted(os.listdir(sandbox / "voiceprints"))
     assert not [n for n in files if n.startswith(".") and n.endswith(".npy")]
     assert identify.load_voiceprints().keys() >= {".", "a/b", long}
+
+
+def test_a_reserved_name_or_a_damaged_registry_is_one_line(sandbox, monkeypatch):
+    """identify.enroll refuses 'U7' (an unknown voice's id, whose samples
+    live in U7.npy) and a registry.json it cannot read, and writes nothing.
+    The CLI let both end in a traceback, and an --audio clip was diarized
+    before the refusal."""
+    ran = []
+    monkeypatch.setattr(diarize, "diarize", lambda wav: ran.append(wav))
+    clip = sandbox / "clip.m4a"
+    clip.write_bytes(b"audio")
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip), "--name", "U7"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == f"--name: {identify.RESERVED_ERROR}"
+
+    reg = sandbox / "voiceprints" / "registry.json"
+    reg.write_text('{"broken')
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip), "--name", "Ana Ortiz"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == identify.REGISTRY_UNREADABLE
+    assert ran == [] and reg.read_text() == '{"broken'
+    assert sorted(p.name for p in (sandbox / "voiceprints").iterdir()) == ["registry.json"]
+
+
+def test_the_help_text_names_folders_in_the_date_first_form():
+    """The --help examples showed an old 'LT Meeting 05212026' folder, a
+    form the pipeline no longer writes."""
+    import re
+    from stt import dates
+    shown = re.findall(r'--from-meeting "([^"]+)"', enroll.__doc__)
+    assert shown and all(dates.is_iso_form(b) for b in shown), shown

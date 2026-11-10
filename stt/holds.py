@@ -7,13 +7,16 @@ watch, nightly, login catch-up) skip it.
 
 An EXPLICIT request always wins: naming the file in a run (--files / the panel's
 "Run selected") processes it regardless, because that is you asking for it by
-name. The hold clears itself once the file is processed, so it can never leave a
-stale entry pinning a name forever.
+name. The hold clears itself once the file is processed, and an automatic sweep
+clears it once the file is gone from every watched folder (release_missing), so
+it can never leave a stale entry pinning a name forever.
 """
 import fcntl
 import json
 import os
+import sys
 import threading
+from pathlib import Path
 
 from . import config
 
@@ -22,11 +25,39 @@ _LOCK = config.PROJECT_DIR / "holds.lock"
 _lock_state = threading.local()
 
 
-def _apply(fn):
+def _load():
+    """(names, ok): the held names on disk, and False when the file is there
+    but is not a JSON list (a torn write, outside damage, a hand edit). Only
+    the strings are names: set() of a JSON string "abc" held 'a', 'b' and
+    'c', and of an object held its keys."""
     try:
-        cur = set(json.loads(PATH.read_text()))
-    except (FileNotFoundError, json.JSONDecodeError, TypeError):
-        cur = set()
+        raw = json.loads(PATH.read_text())
+    except FileNotFoundError:
+        return set(), True
+    except ValueError:  # bad JSON, or bytes that are not text
+        return set(), False
+    if not isinstance(raw, list):
+        return set(), False
+    return {n for n in raw if isinstance(n, str)}, True
+
+
+def _keep_aside():
+    """Move a damaged holds file to holds.json.bad before the next write
+    replaces it. A truncated file read as no holds, and the next hold()
+    wrote over it: every other hold was gone with no message."""
+    bad = PATH.with_suffix(".json.bad")
+    try:
+        os.replace(PATH, bad)
+        print(f"warning: {PATH.name} was not a list of names; kept it as "
+              f"{bad.name} and started a new one", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def _apply(fn):
+    cur, ok = _load()
+    if not ok:
+        _keep_aside()
     out, ret = fn(cur)
     tmp = PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(sorted(out), indent=2))
@@ -49,10 +80,7 @@ def _mutate(fn):
 
 
 def items() -> set:
-    try:
-        return set(json.loads(PATH.read_text()))
-    except (FileNotFoundError, json.JSONDecodeError, TypeError):
-        return set()
+    return _load()[0]
 
 
 def is_held(name: str) -> bool:
@@ -65,6 +93,42 @@ def hold(name: str) -> bool:
 
 def release(name: str) -> bool:
     return _mutate(lambda cur: (cur - {name}, name in cur))
+
+
+def release_missing(dirs) -> list:
+    """Release every hold whose file is in none of `dirs`, the watched
+    folders. Returns the released names, sorted.
+
+    A hold is a name, so a hold on a file binned outside the panel stayed,
+    and the next recording under that name started held and every sweep
+    skipped it. Nothing is released unless every folder answers: the first
+    one (the primary source) must list, and any other must list or be
+    missing. An unmounted drive or iCloud Drive turned off must never read
+    as "every held file was deleted"."""
+    cur = items()
+    if not cur:
+        return []
+    dirs = [Path(d) for d in dirs]
+    for i, d in enumerate(dirs):
+        try:
+            os.listdir(d)
+        except FileNotFoundError:
+            if i == 0:
+                return []
+        except OSError:
+            return []
+    if not dirs:
+        return []
+
+    def _gone(n):
+        return not any(os.path.lexists(d / n) for d in dirs)
+    if not any(_gone(n) for n in cur):
+        return []
+
+    def _f(now):
+        gone = sorted(n for n in now if _gone(n))
+        return now - set(gone), gone
+    return _mutate(_f)
 
 
 def toggle(name: str) -> bool:

@@ -120,6 +120,107 @@ def test_docx_export_writes_valid_file(sandbox, tmp_path, monkeypatch):
     assert "Mtg 05212026" in text
 
 
+def test_export_labels_a_line_from_the_roster_never_the_raw_id(sandbox, tmp_path, monkeypatch):
+    """A voice below the minting floor has a roster entry ("Voice 9") while
+    its lines carry only the raw diarizer id. Word and PDF printed
+    "SPEAKER_08" under a header that read "Voice 9"; the panel and the
+    .txt read "Voice 9"."""
+    data = {"date": "2026-03-01", "duration_sec": 60,
+            "speakers": [{"id": "SPEAKER_08", "display": "Voice 9"}],
+            "segments": [{"start": 1.0, "end": 2.0, "speaker": "SPEAKER_08",
+                          "text": "hello"},
+                         {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_03",
+                          "text": "off the roster"}],
+            "words": []}
+    mfile("2026-03-01 Raw Label", ".json").write_text(json.dumps(data))
+    h = export.to_html("2026-03-01 Raw Label")
+    assert 'class="who">Voice 9 ' in h and 'class="who">Voice 4 ' in h
+    assert "SPEAKER_" not in h
+    monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / "Downloads").mkdir()
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-01 Raw Label"))).paragraphs]
+    assert "Voice 9  [00:01]" in text and "Voice 4  [00:02]" in text
+    assert not any("SPEAKER_" in t for t in text)
+
+
+def test_a_control_character_in_a_line_never_fails_the_word_export(sandbox, tmp_path, monkeypatch):
+    """python-docx refuses a string with a NUL or another XML-illegal
+    character. One such character from a paste or an ASR artifact failed the
+    Word export with a raw ValueError while the PDF of the same meeting
+    printed. Both formats now drop the character and keep the line."""
+    data = {"date": "2026-03-02", "duration_sec": 60,
+            "speakers": [{"id": "SPEAKER_00", "display": "Dana\x07 Fox"}],
+            "segments": [{"start": 1.0, "end": 2.0, "speaker": "SPEAKER_00",
+                          "text": "bad \x00\x0b char\ufffe here\ud800"},
+                         {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_00",
+                          "text": "\x00\x01"}],
+            "words": []}
+    mfile("2026-03-02 Ctrl\x1f Chars", ".json").write_text(json.dumps(data))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-02 Ctrl\x1f Chars"))).paragraphs]
+    assert "bad  char here" in text and "Dana Fox  [00:01]" in text
+    assert "2026-03-02 Ctrl Chars" in text
+    # a line that held nothing else is dropped like an empty line
+    assert sum(t.startswith("Dana Fox") for t in text) == 1
+    h = export.to_html("2026-03-02 Ctrl\x1f Chars")
+    assert "bad  char here" in h and "\x00" not in h and "\x0b" not in h
+    h.encode("utf-8")  # no lone surrogate left to fail the PDF page write
+
+
+def test_a_null_or_missing_field_never_fails_the_export(sandbox, tmp_path, monkeypatch):
+    """Export indexed d["display"], seg["start"] and duration_sec directly
+    and called .strip() on the text, so a hand-edited json with a null or
+    missing value failed with a raw TypeError, KeyError or ValueError. The
+    panel showed only its generic failure. Such a value now reads as
+    absent: the line, its timestamp or the meta part is left out."""
+    data = {"date": "Jan 5", "duration_sec": None,
+            "speakers": [{"id": "SPEAKER_00"}, {"display": None}, "Dana Fox",
+                         {"id": "SPEAKER_01", "display": "Sam Chen"}],
+            "segments": [{"text": "no start", "speaker": "SPEAKER_01"},
+                         {"start": None, "text": "null start", "speaker": "SPEAKER_01"},
+                         {"start": 1, "text": None, "speaker": "SPEAKER_01"},
+                         {"start": 2, "speaker": "SPEAKER_01"},
+                         "not a line",
+                         {"start": 3.0, "text": "kept", "speaker": "SPEAKER_01"}],
+            "words": []}
+    mfile("2026-03-03 Hand Edit", ".json").write_text(json.dumps(data))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-03 Hand Edit"))).paragraphs]
+    # the bad date falls back to the folder name's date, the null duration
+    # is left out, and only the speaker with a display is listed
+    assert "March 3, 2026  ·  Sam Chen" in text
+    assert text.count("Sam Chen") == 2       # two lines with no timestamp
+    assert "Sam Chen  [00:03]" in text
+    assert [t for t in text if t in ("no start", "null start", "kept")] == [
+        "no start", "null start", "kept"]
+    h = export.to_html("2026-03-03 Hand Edit")
+    assert h.count('<div class="seg">') == 3 and '<span class="ts">00:03</span>' in h
+
+    # nothing for the meta line at all: the Word file still writes
+    mfile("Bare Hand Edit", ".json").write_text(json.dumps(
+        {"duration_sec": "long", "speakers": None, "segments": None}))
+    assert export.to_docx("Bare Hand Edit").exists()
+
+
+@pytest.mark.parametrize("raw", ['{"segments": [{"start":', "[]", "null", "\udcff"])
+def test_an_unreadable_meeting_json_fails_the_export_with_its_own_message(sandbox, raw):
+    """A truncated json or one that is not an object failed with a raw
+    JSONDecodeError or AttributeError. It is a UserError now, and the panel
+    shows its text."""
+    from stt.errors import UserError
+    f = mfile("2026-03-04 Damaged", ".json")
+    if raw == "\udcff":
+        f.write_bytes(b"\xff\xfe{")
+    else:
+        f.write_text(raw)
+    for fn in (export.to_docx, export.to_html):
+        with pytest.raises(UserError, match="cannot be read"):
+            fn("2026-03-04 Damaged")
+
+
 def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     _mk_full(sandbox)
     monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))
@@ -127,6 +228,24 @@ def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     a = export.to_docx("Mtg 05212026")
     b = export.to_docx("Mtg 05212026")
     assert a != b and b.exists()  # second export gets " (1)" suffix
+
+
+@pytest.mark.parametrize("title", ["x" * 237, "é" * 118], ids=["ascii", "two-byte"])
+def test_a_second_export_of_a_name_near_the_limit_still_fits(sandbox, tmp_path, monkeypatch, title):
+    """A folder name of about 248 bytes fits its own .json, so the first
+    export fit too. The " (1)" of the second export pushed the file name
+    past 255 bytes, and the export failed with a raw OSError."""
+    base = "2026-01-07 " + title
+    mfile(base, ".json").write_text(json.dumps(
+        {"segments": [{"start": 1, "text": "hi", "speaker": "S1"}], "speakers": []}))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    outs = [export.to_docx(base) for _ in range(3)]
+    assert len(set(outs)) == 3 and all(o.exists() for o in outs)
+    assert outs[0].name == base + ".docx"
+    for n, o in enumerate(outs[1:], 1):
+        assert len(o.name.encode()) <= export.NAME_MAX
+        assert o.name.endswith(f" ({n}).docx") and o.name.startswith("2026-01-07 ")
+        o.name.encode("utf-8").decode("utf-8")  # never cut inside a character
 
 
 def test_export_lands_under_stt_home_not_the_real_downloads(sandbox, tmp_path, monkeypatch):

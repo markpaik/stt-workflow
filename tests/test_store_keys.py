@@ -274,6 +274,22 @@ def test_the_backfill_undo_removes_only_what_it_wrote(store):
         assert new == old, b
 
 
+def test_a_torn_last_journal_line_never_stops_the_undo(store, capsys):
+    """A crash inside one journal write leaves a torn last line. entries()
+    called json.loads on it, so every undo of the run failed with a
+    JSONDecodeError and restored nothing, not even the whole entries
+    before it. The line is skipped now, as tools/iso_rename.py does."""
+    before = {b: _load(b) for b in config.meeting_bases()}
+    r = backfill_keys.apply()
+    jp = store / "migration" / f"{r['run']}.jsonl"
+    with open(jp, "a") as fh:
+        fh.write('[1, 2]\n{"run": "' + r["run"] + '", "mee')
+    assert backfill_keys.main(["--undo", r["run"], "--apply"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+    for b, old in before.items():
+        assert _load(b) == old, b
+
+
 def test_the_backfill_undo_by_one_field(store):
     r = backfill_keys.apply()
     backfill_keys.undo(r["run"], fields=["audio_fp"], dry_run=False)
@@ -295,6 +311,22 @@ def test_a_second_backfill_changes_nothing(store):
     assert backfill_keys.plan() == []
 
 
+def test_a_backfill_with_nothing_to_add_writes_no_journal(store, capsys):
+    """A second --apply printed a run id, a journal path and an undo line,
+    and left a zero-byte .jsonl for each run that changed nothing."""
+    first = backfill_keys.apply()
+    mig = store / "migration"
+    journals = sorted(p.name for p in mig.glob("*.jsonl"))
+    assert journals == [f"{first['run']}.jsonl"]
+    assert backfill_keys.main(["--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing to add" in out and "undo with" not in out and "journal:" not in out
+    assert sorted(p.name for p in mig.glob("*.jsonl")) == journals
+    r = backfill_keys.apply(run_id="backfill-20261108T085555")
+    assert r == {"run": None, "journal": None, "applied": [], "skipped": []}
+    assert not (mig / "backfill-20261108T085555.jsonl").exists()
+
+
 def test_the_backfill_works_on_a_store_that_already_has_the_amnesty_keys(store):
     j = config.meeting_file("Budget Review 09292026", ".json")
     d = json.loads(j.read_text())
@@ -303,6 +335,30 @@ def test_the_backfill_works_on_a_store_that_already_has_the_amnesty_keys(store):
     backfill_keys.apply()
     d = _load("Budget Review 09292026")
     assert d["title_state"] == "provisional" and d["title"] == "Budget Review"
+
+
+def test_the_backfill_undo_finds_a_meeting_renamed_after_the_run(store):
+    """A store with no meeting ids journaled "meeting_id": null, so undo
+    looked a meeting up by its old folder name. A rename after the run made
+    it "no longer live", and its added keys stayed. apply() now stamps the
+    ids first, as tools/fix_dates.py does."""
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    r = backfill_keys.apply()
+    jp = store / "migration" / f"{r['run']}.jsonl"
+    assert all(json.loads(x)["meeting_id"] for x in jp.read_text().splitlines())
+    res = summarize.apply_meeting_edits("Team Huddle 09292026",
+                                        to_base="Team Huddle Renamed 09292026")
+    assert res.get("ok"), res
+    new = res["base"]
+    u = backfill_keys.undo(r["run"], dry_run=False)
+    assert not u["missing"], u["missing"]
+    d = _load(new)
+    for k in ("source_name", "audio_fp", "date_source", "recorded_at"):
+        assert k not in d, k
 
 
 # ---------- the date-correction tool ----------
@@ -367,6 +423,29 @@ def test_the_date_fix_restamps_the_folder_and_records_the_source(dated):
     assert fix_dates.plan() == []
 
 
+def test_an_undo_given_another_tools_journal_is_no_such_run(dated, capsys):
+    """Every journal sits in config.migration_dir() and every run id is a
+    plain name, so 'fix_dates --undo amnesty-1' read an amnesty journal:
+    e["new"]["date"] on a string raised TypeError, and 'backfill_keys
+    --undo fixdates-1' raised KeyError 'field'. Each undo now refuses a
+    journal of another shape, as it refuses an unknown run."""
+    from stt import fieldjournal as fj
+    mig = config.migration_dir()
+    mig.mkdir(parents=True, exist_ok=True)
+    base = config.meeting_bases()[0]
+    (mig / "amnesty-1.jsonl").write_text(json.dumps(
+        {"run": "amnesty-1", "meeting_id": None, "base": base, "field": "route",
+         "old": {"$missing": True}, "new": "native"}) + "\n")
+    r = fix_dates.apply()
+    for call in (lambda: fix_dates.undo("amnesty-1"),
+                 lambda: backfill_keys.undo(r["run"])):
+        with pytest.raises(fj.NoSuchRun, match="is not a journal of"):
+            call()
+    assert fix_dates.main(["--undo", "amnesty-1"]) == 1
+    assert "amnesty-1 is not a journal of fix_dates" in capsys.readouterr().err
+    assert fix_dates.undo(r["run"])["restored"]            # its own still undoes
+
+
 def test_the_date_fix_undo_puts_the_old_date_and_folder_back(dated):
     before = {b: _load(b) for b in config.meeting_bases()}
     r = fix_dates.apply()
@@ -394,6 +473,25 @@ def test_a_date_changed_after_the_fix_survives_undo(dated):
     assert (d["date"], d["date_source"]) == ("2026-09-16", "manual")
 
 
+def test_a_title_set_after_the_fix_survives_undo(dated, capsys):
+    """Undo renamed the folder to the journaled name, which carries the
+    title from before the run, so a title set after the run was lost. The
+    undo now puts the old date in front of the current title."""
+    r = fix_dates.apply()
+    e = summarize.apply_meeting_edits("2026-09-14 Weekly Sync 9.14", title="Offsite Prep 9.14")
+    assert e["ok"] and e["base"] == "2026-09-14 Offsite Prep 9.14"
+    dry = fix_dates.undo(r["run"])
+    assert {"base": "2026-09-14 Offsite Prep 9.14", "title_kept": True} in dry["restored"]
+    fix_dates.main(["--undo", r["run"], "--apply"])
+    assert "1 of those keep the title set after the run" in capsys.readouterr().out
+    d = _load("2026-09-29 Offsite Prep 9.14")
+    assert (d["title"], d["date"]) == ("Offsite Prep 9.14", "2026-09-29")
+    assert not any("Weekly Sync" in b for b in config.meeting_bases())
+    # the meetings nobody retitled come back under their journaled names
+    assert "2026-09-29 Site Visit 9.17" in config.meeting_bases()
+    assert "2026-10-29 Planning Talk" in config.meeting_bases()
+
+
 # ---------- apply_meeting_edits upkeep ----------
 
 def test_a_panel_date_edit_is_manual_and_keeps_the_title_key(sandbox):
@@ -411,6 +509,31 @@ def test_a_title_edit_updates_the_title_key(sandbox):
     d = _load(r["base"])
     assert d["title"] == "Q3 Budget"
     assert d["date_source"] == "mtime"            # the date did not move
+
+
+@pytest.mark.parametrize("typed", ["Dana 1:1", "Q3/Q4 Review", "a" * 300, "李" * 80,
+                                   "Planning Retreat 12312099"])
+def test_the_title_key_and_the_folder_follow_the_store_contract(sandbox, typed):
+    """docs/store-contract.md said `title` is the folder name without its
+    stamp, "always to match the folder". The code keeps the typed title:
+    'Dana 1:1' sits in '... Dana 1-1', and a long title is cut by bytes in
+    the folder only. The contract now states that, and invariant 1 is the
+    formula a reader can check."""
+    from stt import names
+    _m("Budget Review 09292026", title="Budget Review", date_source="mtime")
+    r = summarize.rename_meeting("Budget Review 09292026", typed)
+    b = r["base"]
+    d = _load(b)
+    assert d["title"] == names.clean_title(typed)          # the title as typed
+    assert b == config.cap_name(dates.stamp(names.file_title(d["title"]), d["date"]))
+    assert dates.shown_title(d["title"], b) == d["title"]
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "store-contract.md").read_text()
+    row = next(ln for ln in doc.splitlines() if ln.startswith("| `title` |"))
+    assert "always to match the folder" not in row
+    assert "`names.file_title`" in row and "`config.cap_name`" in row
+    assert ("`config.cap_name(dates.stamp(names.file_title(title), date))` plus the "
+            "twin suffix") in doc
 
 
 def test_a_repair_passes_its_own_source_and_start_time(sandbox):
@@ -468,26 +591,6 @@ def test_the_panel_meta_carries_the_date_source(sandbox):
     assert meta["date_source"] == "mtime" and meta["recorded_at"] is None
 
 
-def test_the_meeting_page_shows_every_date_source_and_flags_the_guesses():
-    from test_new_shell import NODE, _js_fn, _js_oneline, _run_node
-    if NODE is None:
-        pytest.skip("node not installed")
-    out = _run_node("\n".join([_js_oneline("esc"), _js_fn("dateSourceHTML")]) + """
-const r={};
-for(const s of ['typed','recorder','short_typed','mtime','manual','<b>',null])
-  r[String(s)]=dateSourceHTML({date_source:s});
-console.log(JSON.stringify(r));
-""")
-    for src in ("typed", "recorder", "manual"):
-        assert "Date from" in out[src] and "Date uncertain" not in out[src], src
-    for src in ("mtime", "short_typed"):
-        assert out[src].startswith('<span class="mchip dateunsure"'), src
-        assert "Date from" in out[src]
-    assert "Date from the file time" in out["mtime"]
-    assert "<b>" not in out["<b>"]
-    assert out["null"] == ""
-
-
 # ---------- QA fixes ----------
 
 def test_a_null_source_name_fills_once_a_manifest_record_links_the_meeting(store):
@@ -542,12 +645,6 @@ def test_an_accept_with_the_stored_date_keeps_the_date_source(sandbox):
     # a real change is still a person's choice
     r = summarize.apply_meeting_edits("2026-10-05 Guess Day", date="2026-10-04")
     assert _load(r["base"])["date_source"] == "manual"
-
-
-def test_the_finish_flow_sends_the_date_only_when_it_changed():
-    from test_new_shell import _js_fn
-    fn = _js_fn("fsAccept")
-    assert "picked!==stored" in fn and "FS.row.date" in fn
 
 
 def test_a_restore_keeps_the_date_source(sandbox):

@@ -29,6 +29,11 @@ from .errors import UserError
 MODEL = "mlx-community/Qwen3-8B-4bit"
 # mlx-lm lives in its OWN venv (.venv-llm): its transformers pin conflicts with the
 # audio stack's. We shell out rather than import.
+# This is the one code path that keys off PROJECT_DIR and not CODE_DIR, on
+# purpose. Without STT_HOME the two are the same checkout. Under STT_HOME (a
+# demo, a QA sandbox, a test) it points inside the scratch home, where no
+# .venv-llm exists, so a sandboxed run never starts the real 8B model: with
+# Ollama off too, its descriptions are skipped instead of loading ~5 GB.
 LLM_PY = config.PROJECT_DIR / ".venv-llm" / "bin" / "python"
 
 _RUNNER = r"""
@@ -1171,6 +1176,24 @@ def stale_mark(key: str, base: str):
         idx[key] = {"base": base, "fails": 0, "next_after": 0}
 
 
+def stale_relist(base: str) -> bool:
+    """List a meeting again whose json still says ai_stale. stale_bases
+    reads the live store only, so it dropped the entry of a meeting that
+    sat in the archive: a restore calls this, or the batch never
+    regenerates that description. True when the meeting is listed."""
+    try:
+        d = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not (isinstance(d, dict) and d.get("ai_stale")):
+        return False
+    with _stale_index() as idx:
+        key = _stale_key(base)
+        if key not in idx:
+            idx[key] = {"base": base, "fails": 0, "next_after": 0}
+    return True
+
+
 def stale_clear(key: str):
     try:
         with _stale_index() as idx:
@@ -1272,6 +1295,14 @@ def _unique_base(candidate: str, current: str) -> str:
 CATEGORIES = ("work", "personal")
 
 
+def _noted(r: dict, note) -> dict:
+    """`r` with `note`, a line for the person who made the edit, when
+    there is one."""
+    if note:
+        r["note"] = note
+    return r
+
+
 def _sanitize_name(s: str) -> str:
     """A safe folder/file name (names.file_title): drop path/wildcard/
     control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
@@ -1371,8 +1402,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     Work/Personal category, whether it still needs review, and the title's
     state.
 
-    Every title or date edit also keeps the `title` key equal to the folder
-    name it lands on, without the date stamp or twin suffix.
+    Every title or date edit also sets the `title` key to the title a
+    person sees for the folder it lands on (dates.shown_title): the typed
+    title, without a date stamp or twin suffix, when the folder carries its
+    filename-safe form, else the folder's own title. The two differ: a
+    typed '1:1' is '1-1' in the folder, and a long title is cut by bytes in
+    the folder (config.cap_name) but kept whole in `title`.
 
     A date edit records where the date came from. `date_source` defaults to
     `manual`, because the panel is a person. A repair passes the real
@@ -1454,10 +1489,30 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             return {"ok": False, "error": "recorded_at must fall on the meeting date"}
 
     new_title = None
+    note = None
     if title is not None:
         new_title = _sanitize_name(title)
         if not new_title:
             return {"ok": False, "error": "empty name"}
+        if dates.is_only_date(new_title):
+            # the folder would carry the date twice ('2025-09-10 2025-09-10'),
+            # and a person who types only a date most likely meant the date
+            return {"ok": False,
+                    "error": "A title needs a word besides the date. "
+                             "Set date in the row menu changes the date."}
+        if names.title_was_cut(title):
+            note = (f"The title is cut to {names.TITLE_MAX} characters, "
+                    "between two words.")
+        typed_stamp = dates.stamp_date(new_title)
+        from datetime import date as _today_d
+        if (typed_stamp and date is None and to_base is None
+                and typed_stamp > _today_d.today().isoformat()):
+            # canonical() keeps a future stamp in the title (it names an
+            # event): say so, or the typed date seems to be ignored
+            note = " ".join(x for x in (
+                note, f"{typed_stamp} is in the future, so it stays in the "
+                      "title and the meeting keeps its date. Set date changes "
+                      "the date.") if x)
 
     if to_base is not None:
         to_base = _sanitize_name(to_base)
@@ -1549,8 +1604,14 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             # the title this folder already carries, typed again on the
             # same date, moves nothing: an old folder that still holds a
             # colon keeps it until the title really changes. A twin whose
-            # plain name is free is the exception (above).
-            if (title is not None and not plain_free
+            # plain name is free is the exception (above). So is a typed
+            # future stamp: canonical() keeps it in the title, and
+            # title_of() removed it, so 'Demo 12312027' on '... Demo' read
+            # as the same title and the save dropped the typed date.
+            from datetime import date as _now
+            kept_stamp = bool(typed and typed != d.get("date")
+                              and typed > _now.today().isoformat())
+            if (title is not None and not plain_free and not kept_stamp
                     and d.get("date") == date_before
                     and dates.is_iso_form(base)
                     and dates.meeting_date(base) == d.get("date")
@@ -1601,10 +1662,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             want = _apply(d)
             if want == base:
                 _write_json(j, d)          # no move: the source lock is enough
-                return {"ok": True, "base": base, "renamed": [],
-                        "date": d.get("date"), "category": d.get("category"),
-                        "reviewed": d.get("reviewed"),
-                        "title_state": d.get("title_state")}
+                return _noted({"ok": True, "base": base, "renamed": [],
+                               "date": d.get("date"), "category": d.get("category"),
+                               "reviewed": d.get("reviewed"),
+                               "title_state": d.get("title_state")}, note)
 
         # NAME order, and case-folded to one lock when the move is only a
         # capitalization fix: APFS is case-insensitive, so 'board prep' and
@@ -1630,9 +1691,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         # is a base-named lock left under the old name: the doctor listed
         # them as orphans after every rename. Locks someone holds stay.
         config.drop_meeting_locks([want, base])
-        return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
-                "category": d.get("category"), "reviewed": d.get("reviewed"),
-                "title_state": d.get("title_state")}
+        return _noted({"ok": True, "base": want, "renamed": renamed,
+                       "date": d.get("date"), "category": d.get("category"),
+                       "reviewed": d.get("reviewed"),
+                       "title_state": d.get("title_state")}, note)
 
     return {"ok": False,
             "error": "another edit keeps taking that name -- try again in a moment"}
@@ -1648,7 +1710,8 @@ def rename_meeting(base: str, new_base: str) -> dict:
     r = apply_meeting_edits(base, title=new_base)
     if not r["ok"]:
         return r
-    return {"ok": True, "renamed": r["renamed"], "base": r["base"]}
+    return _noted({"ok": True, "renamed": r["renamed"], "base": r["base"]},
+                  r.get("note"))
 
 
 def set_meeting_date(base: str, date_str: str) -> dict:

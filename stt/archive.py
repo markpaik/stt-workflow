@@ -21,6 +21,36 @@ from pathlib import Path
 from . import config, manifest
 
 
+def _remove_json_last(path: Path):
+    """Remove a meeting folder so that a failure never strands it. The
+    json is what makes a folder a meeting (meeting_bases), so it goes last
+    of the meeting's own files: every other file first, then the json,
+    then the rest. An OSError before the json goes is raised with the json
+    and the .txt still in place, so the meeting stays in the list and a
+    retry can finish. A plain rmtree went in directory order: one locked
+    file could leave the audio and the .txt behind with no json, where no
+    surface could reach or retry them, and the scrubs never ran. Once the
+    json is gone the meeting is gone. A file left over after that is a
+    shell with no json, which the batch's shell sweep removes."""
+    js = path / f"{path.name}.json"
+    txt = path / f"{path.name}.txt"
+    for child in sorted(path.iterdir(), key=lambda p: p.name):
+        if child in (js, txt):
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    js.unlink(missing_ok=True)
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"   delete: files left in a meeting folder with no transcript "
+              f"json ({e.strerror or type(e).__name__})", file=sys.stderr)
+
+
 def purge_meeting_dir(path: Path):
     """The one shared exit for PERMANENTLY removing a meeting folder: rmtree
     plus a scrub of the unknowns registry's references to that base. Every
@@ -35,7 +65,7 @@ def purge_meeting_dir(path: Path):
     # and a stale index entry would resolve a live id to a folder that no
     # longer exists
     mid = config.id_of(path.name, path.parent)
-    shutil.rmtree(path)
+    _remove_json_last(path)
     config.index_drop(mid)
     # the transcript is gone, so its lines must not come back as hits.
     # touch() re-adds a live meeting of the same name (an archived twin).
@@ -47,6 +77,14 @@ def purge_meeting_dir(path: Path):
     except Exception as e:
         print(f"   delete: unknown-speaker references not scrubbed ({e})",
               file=sys.stderr)
+    # an enrolled person's samples stay (their embeddings still identify
+    # the person), but a sample no longer claims a meeting that is gone:
+    # the doctor listed each as a fixable registry_dangling finding
+    try:
+        from . import identify
+        identify.forget_source_refs(path.name, mid)
+    except Exception as e:
+        print(f"   delete: voice sample sources not cleared ({e})", file=sys.stderr)
     # the stores keyed on this meeting: its group override (by id, or by
     # name for a meeting without one) and its keep-both pairs. A name that a
     # live or archived twin still carries keeps its entries.
@@ -109,7 +147,11 @@ def archive_meeting(base: str) -> dict:
     with review.lock_meeting(base):  # serialize with relabel/review/rename
         if not old_dir.is_dir():
             return {"ok": False, "error": f"no meeting folder for '{base}'"}
-        new_base = _move(base, old_dir, config.archive_dir())
+        try:
+            new_base = _move(base, old_dir, config.archive_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not archive '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # the index maps LIVE meetings only: an archived one is not a relabel
     # target, and leaving it in would resolve its id to a folder the live
     # store no longer holds. restore_meeting puts it back.
@@ -146,7 +188,16 @@ def restore_meeting(base: str) -> dict:
         return {"ok": False, "error": f"no archived meeting '{base}'"}
     src_dir = config.archive_dir() / base
     with review.lock_meeting(base):
-        new_base = _move(base, src_dir, config.meetings_dir())
+        # again under the lock: two restores of one meeting (a double click)
+        # both passed the gate above, and the loser's move raised a raw
+        # OSError that carried both absolute paths to the panel
+        if base not in config.archived_bases():
+            return {"ok": False, "error": f"no archived meeting '{base}'"}
+        try:
+            new_base = _move(base, src_dir, config.meetings_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not restore '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # live again: the id resolves to this folder from here on (the meeting
     # kept its id through the archive — that is the whole point of stamping
     # the archive in the backfill)
@@ -174,6 +225,13 @@ def restore_meeting(base: str) -> dict:
             r = summarize.apply_meeting_edits(new_base, date=d["date"])
             if r.get("ok"):
                 new_base = r["base"]
+    except Exception:
+        pass
+    # a description a Redo left out of date lost its place in the batch's
+    # index while the meeting was archived. Best-effort, like the above.
+    try:
+        from . import summarize
+        summarize.stale_relist(new_base)
     except Exception:
         pass
     return {"ok": True, "base": new_base}
@@ -208,8 +266,8 @@ def delete_meeting(base: str) -> dict:
     """Permanently delete a meeting — live or archived. Scrubs the unknowns
     registry's references (the audio is gone; enrolled voiceprint samples are
     KEPT, their embeddings still identify people in future meetings — only the
-    clip playback for samples sourced here dies, and the clip endpoints skip
-    non-live meetings gracefully). Returns {ok, freed_mb, note?, error?}."""
+    clip playback for samples sourced here dies, and each such sample's
+    source reads '?' from here on). Returns {ok, freed_mb, note?, error?}."""
     from . import review
     if base in config.meeting_bases():
         if _is_active(base):
@@ -248,7 +306,15 @@ def delete_meeting(base: str) -> dict:
     with review.lock_meeting(base):
         # lock_meeting -> lock_registry is the established order (summarize's
         # rename path nests the same way), so the scrub inside is deadlock-free
-        purge_meeting_dir(target)
+        try:
+            purge_meeting_dir(target)
+        except OSError as e:
+            # raised while the json still stands: the meeting is still in the
+            # list, its records are its own, and a retry can finish
+            return {"ok": False,
+                    "error": f"could not delete '{base}' "
+                             f"({e.strerror or type(e).__name__}). It is still "
+                             "in the list, so try again."}
     # the meeting's own lock files outlive it. Remove only those (it is
     # released now). The whole-library sweep stays with the doctor: its
     # residual race must not run on every Delete while a batch works.
@@ -275,7 +341,8 @@ def delete_meeting(base: str) -> dict:
         with manifest.locked():
             m = manifest.load()
             stale = [k for k, rec in m.get("processed", {}).items()
-                     if any(str(o).endswith(".json") and Path(o).stem == base
+                     if isinstance(rec, dict)
+                     and any(str(o).endswith(".json") and Path(o).stem == base
                             and Path(o).parent == target
                             for o in rec.get("outputs") or [])]
             src_names += [k for k in stale if k not in src_names]

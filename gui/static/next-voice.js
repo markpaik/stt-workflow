@@ -14,8 +14,8 @@
    8. Footer: Save and next, Skip, Not a real speaker (Clear name for a voice
       named for this meeting only).
 
-   Saves go through vsSave, the port of the classic saveName: the identity
-   is captured before the await, one naming request runs at a time (VBUSY),
+   Saves go through vsSave: the identity is captured before the await, one
+   naming request runs at a time (VBUSY),
    the floor refusal offers the meeting-only save, the quality warning offers
    Save anyway, and the toast says what the server applied. The walk asks
    about each voice once per run: most talk time first, and never a voice the
@@ -170,7 +170,7 @@ function vsHTML(){
  const busy=VBUSY;
  const W=VS.warn;
  const confirm=W?`<div class="confirm" id="vs-confirm"><span>${esc(W.text)}</span><span class="tools"><button class="btn plain" type="button" data-act="vs-unconfirm" ${busy?'disabled':''}>Cancel</button><button class="btn primary" type="button" data-act="${W.kind==='floor'?'vs-local':'vs-force'}" ${busy?'disabled':''}>${W.kind==='floor'?'Name for this meeting':'Save anyway'}</button></span></div>`:'';
- const clip=VS.clip?`<div class="clip"><button class="playbtn q" type="button" data-act="vs-play" aria-label="Play their longest turn">${ic('play')}</button><div style="min-width:0"><div style="font-weight:500">Longest turn · <span class="mono">${fmtT(VS.clip.start)}</span></div><div class="meta">${VS.talk?fmtTalk(VS.talk)+' of talk':''}${vsClipWhere()?(VS.talk?' · ':'')+esc(vsClipWhere()):''}</div></div></div>`
+ const clip=VS.clip?`<div class="clip"><button class="playbtn q" type="button" data-act="vs-play" aria-label="Play their longest turn">${ic('play')}</button><div style="min-width:0"><div style="font-weight:500">Longest turn at <span class="mono">${fmtT(VS.clip.start)}</span></div><div class="meta">${VS.talk?fmtTalk(VS.talk)+' of talk':''}${vsClipWhere()?(VS.talk?' · ':'')+esc(vsClipWhere()):''}</div></div></div>`
   :VS.clipNote?`<div class="meta">${esc(VS.clipNote)}</div>`:'';
  const lines=VS.lines==null?'':VS.lines.length
   ?`<div class="samples"><div class="eyebrow">What this voice said</div>${VS.lines.slice(0,3).sort((a,b)=>a.start-b.start).map(l=>`<div class="sample"><span class="mono sub">${fmtT(l.start)}</span><span>${esc(l.text)}</span></div>`).join('')}</div>`

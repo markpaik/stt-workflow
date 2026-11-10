@@ -59,3 +59,39 @@ def test_shortest_first_breaks_ties_by_name_and_puts_unknown_last(sandbox, monke
     got = [p.name for p in queue_order.shortest_first([config.source_dir() / n
                                                        for n in names])]
     assert got == ["short.m4a", "a.m4a", "b.m4a", "long.m4a", "unknown.m4a"]
+
+
+def test_the_exact_length_replaces_the_estimate_once_the_download_ends(
+        sandbox, monkeypatch):
+    """An iCloud download keeps the mtime. The estimate was cached by path
+    and mtime, so the long-lived panel never read the exact length."""
+    p = _file("cloud.m4a", size=30_000_000)
+    monkeypatch.setattr(icloud, "_fully_present", lambda q: False)
+    monkeypatch.setattr(audio, "duration_sec", lambda q: 1500.0)
+    assert abs(queue_order.duration(p) - 1800.0) < 1          # the estimate
+    monkeypatch.setattr(icloud, "_fully_present", lambda q: True)
+    assert queue_order.duration(p) == 1500.0                  # the exact one
+
+
+def test_a_failed_probe_is_tried_again_after_a_while(sandbox, monkeypatch):
+    """A cached None sorted the file last for the life of the panel. Inside
+    the retry window a garbage file is not probed on every poll."""
+    p = _file("busy.m4a")
+    now = [1000.0]
+    monkeypatch.setattr(queue_order.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(icloud, "_fully_present", lambda q: True)
+    calls = []
+
+    def flaky(q):
+        calls.append(q)
+        if len(calls) == 1:
+            raise RuntimeError("ffprobe busy")
+        return 180.0
+    monkeypatch.setattr(audio, "duration_sec", flaky)
+    assert queue_order.duration(p) is None
+    now[0] += 5
+    assert queue_order.duration(p) is None and len(calls) == 1
+    now[0] += queue_order._RETRY_SEC
+    assert queue_order.duration(p) == 180.0 and len(calls) == 2
+    now[0] += 10 * queue_order._RETRY_SEC
+    assert queue_order.duration(p) == 180.0 and len(calls) == 2

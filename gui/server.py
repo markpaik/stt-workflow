@@ -271,7 +271,7 @@ def write_schedule(hh, mm):
 def _est_duration(p: Path):
     """Audio seconds for a queued file: stt.queue_order.duration, the same
     helper run_batch orders its picks by (exact when local, size-based for
-    dataless iCloud files, cached by path and mtime)."""
+    dataless iCloud files, cached by path, mtime, size and presence)."""
     return queue_order.duration(p)
 
 
@@ -769,15 +769,9 @@ def _results_rows():
         return []
     if _results_cache["key"] == key:
         return _results_cache["rows"]
-    rows = []
-    try:
-        for ln in p.read_text().splitlines():
-            try:
-                rows.append(json.loads(ln))
-            except json.JSONDecodeError:
-                pass
-    except OSError:
-        rows = []
+    # status' own reader: a line of the wrong shape, or a byte that is not
+    # UTF-8, is skipped (the failure list raised on either)
+    rows = status.history_rows()
     _results_cache["key"], _results_cache["rows"] = key, rows
     return rows
 
@@ -791,8 +785,9 @@ def _failed_sources(st):
     removed."""
     rows = list(_results_rows())  # oldest-first on disk
     seen = {(r.get("name"), r.get("at")) for r in rows}
-    rows += [r for r in st.get("recent", [])
-             if (r.get("name"), r.get("at")) not in seen]
+    recent = st.get("recent")
+    rows += [r for r in (recent if isinstance(recent, list) else [])
+             if status.is_result_row(r) and (r.get("name"), r.get("at")) not in seen]
     latest = {}
     for r in rows:
         nm = r.get("name")
@@ -808,11 +803,18 @@ def _failed_sources(st):
 
 
 def _dismissed_failures() -> dict:
-    """{source_file: dismissed_at} — failures a human said to stop showing."""
+    """{source_file: dismissed_at} — failures a human said to stop showing.
+    A file of another shape ([], null, a string) or a time that is not text
+    silences nothing: the failure list raised AttributeError on it, and a
+    dismiss raised TypeError. The doctor's _stale_dismissals checks the
+    same way."""
     try:
-        return json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
+        d = json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
     except (OSError, ValueError):
         return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, str)}
 
 
 def _voice_ids(b):
@@ -1112,6 +1114,14 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                      "detail": "no audio is being captured — check microphone access",
                      "target": f"rec:{Path(rec.get('caf', 'recording')).stem or 'recording'}",
                      "count": 1})
+    # the last recording FAILED ("captured NO audio ..."): the classic page
+    # showed it with Fix permissions. It stays until the next capture
+    # starts, as in the menu bar.
+    note = status.recorder_note()
+    if isinstance(note, dict) and note.get("ok") is False:
+        tray.append({"kind": "recorder_note", "title": "Last recording",
+                     "detail": str(note.get("text") or "the recording failed"),
+                     "target": f"note:{note.get('at') or ''}", "count": 1})
     for row in failed_entries:
         # `gone` rides the tray entry too: the timeline row uses it to swap
         # Retry for a dismiss, and a tray line that kept offering Retry posted
@@ -1587,7 +1597,8 @@ def gather_state():
             "schedule": read_schedule(), "model": current_model(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
-            "paths": {"source": str(src_dir), "dest": str(dst_dir)},
+            "paths": {"source": str(src_dir), "dest": str(dst_dir),
+                      "source_exists": _dir_present(src_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
             "recorder_ready": recorder.available(),
@@ -1690,8 +1701,10 @@ def set_folder(which: str, path: str, confirm: bool = False):
             return {"need_confirm": True, "which": which, "path": str(p), "warn": warn}
     key = "STT_ICLOUD_DIR" if which == "source" else "STT_MEETINGS_DIR"
     _env_file_set({key: str(p)})
-    import os
-    os.environ[key] = str(p)  # children (batch runs) inherit immediately
+    # No os.environ write: every child reads stt.env (run.sh, and the
+    # batch's --source and --dest defaults). run.sh keeps a variable the
+    # shell already set, so a value written here went stale when stt.env
+    # changed later, and a spawned batch wrote into the old folder.
     if which == "source":
         config.ICLOUD_DIR = p
         # the agent's WatchPaths must follow the new source folder
@@ -2318,20 +2331,33 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
-            if u.path in ("/", "/next", "/classic"):
-                # The 4D swap: `/` serves the new shell, and `/classic` keeps
-                # the old page for 30 days (a temporary route the owner
-                # approved; a later commit deletes it with app.js). `/next`,
-                # the 4C preview address, still answers with the new shell so
-                # a bookmark to it keeps working until that same commit. The
-                # retired `ui` query param is ignored. Every page reads the
-                # same API, and no GET here writes anything.
-                body = (_page_html() if u.path == "/classic" else _next_html()).encode()
+            if u.path in ("/", "/next"):
+                # `/` serves the panel. `/next`, the Phase 4C preview address,
+                # serves the same page, so a bookmark to it keeps working. The
+                # retired `ui` query param is ignored, and no GET here writes
+                # anything.
+                body = _next_html().encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif u.path == "/favicon.ico":
+                # the page names its own icon (an inline SVG in next.html).
+                # A client that asks here anyway gets an empty answer, not
+                # the 404 that was the only console error on every load
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif u.path == "/classic":
+                # The old page is deleted. A bookmark to it lands on the panel
+                # instead of a 404. The Location is relative, and a browser
+                # keeps the #m/<base> fragment across the redirect, which the
+                # panel reads as the same deep link.
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             elif u.path == "/api/state":
                 self._json(gather_state())
             elif u.path == "/api/dupes":
@@ -2561,10 +2587,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(q.get("base")):
                     return
                 self._json(review.list_flagged(q["base"]))
-            elif u.path == "/api/edits":
-                if not self._require_base(q.get("base")):
-                    return
-                self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
                 # Generating a title and summary WRITES the meeting .json, so
                 # it is a POST (plan Phase 4C: GET no longer writes). A stale
@@ -3210,7 +3232,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "no such queued file"})
                     return
                 f = found[0]
-                if name in status.read().get("active", {}):
+                if name in status.active_now():
                     self._json({"ok": False,
                                 "error": "this file is being processed right now"})
                     return
@@ -3233,6 +3255,12 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"ok": True, "freed_mb": mb}
                 if was_failed and dismiss_failure(f.name):
                     out["dismissed_failure"] = True
+                if len(found) == 1:
+                    # the last file under this name is gone, and its hold
+                    # goes with it: the next recording under the name is a
+                    # new file that nobody parked
+                    from stt import holds
+                    holds.release(f.name)
                 if len(found) > 1:
                     # the same name in the OTHER watched folder is a DIFFERENT
                     # recording. It takes this row's place immediately, and it
@@ -3282,7 +3310,7 @@ class Handler(BaseHTTPRequestHandler):
                     # a run can start at any moment (another poll's kick), and a
                     # snapshot taken before the loop would happily delete a
                     # source mid-transcode
-                    if f["name"] in (status.read().get("active") or {}):
+                    if f["name"] in status.active_now():
                         _skip(f["name"], "it is being processed right now")
                         continue
                     # the matched meeting is re-checked too: a concurrent
@@ -3297,7 +3325,8 @@ class Handler(BaseHTTPRequestHandler):
                     # fingerprint keeps matching after drop_audio removed the
                     # meeting's own copy, so the base reads live while the only
                     # remaining bytes of that recording are the file below.
-                    if not _stored_audio(f.get("dup_of")):
+                    stored = _stored_audio(f.get("dup_of"))
+                    if not stored:
                         _skip(f["name"],
                               "this is the last copy of that recording")
                         continue
@@ -3316,6 +3345,16 @@ class Handler(BaseHTTPRequestHandler):
                     if not snap or dupes.fingerprint(p) != snap:
                         _skip(f["name"],
                               "the file changed since it was flagged")
+                        continue
+                    # the fingerprint samples three megabytes, so a same-size
+                    # edit between them still matched. When the meeting holds
+                    # a copy of the same size, every byte is compared first.
+                    # A video's stored audio is an extracted track of another
+                    # size, and the original's bytes exist nowhere else: there
+                    # the sampled fingerprint is the only proof there is.
+                    if dupes.same_bytes(p, stored) is False:
+                        _skip(f["name"],
+                              "its bytes differ from the meeting's copy")
                         continue
                     try:
                         freed += p.stat().st_size / 1e6
@@ -3354,10 +3393,6 @@ class Handler(BaseHTTPRequestHandler):
                 # the X on a failed row whose source file no longer exists:
                 # nothing to delete, just stop showing that old failure
                 self._json({"ok": dismiss_failure(b.text("name", ""))})
-            elif u.path == "/api/recorder_note":
-                # dismiss the last-recording outcome strip
-                status.clear_recorder_note()
-                self._json({"ok": True})
             elif u.path == "/api/fix_recorder_permissions":
                 # Reset THIS APP's TCC entries so macOS re-prompts on the next
                 # Start. Needed because the recorder is ad-hoc signed: a rebuild
@@ -3652,6 +3687,25 @@ def check_updates():
     return {"models": out}
 
 
+class PortInUse(RuntimeError):
+    """The panel's port is taken: another panel, or another program, is
+    listening on 127.0.0.1:PORT. The message is one line for a person."""
+
+
+def _bind(port):
+    """The panel's HTTP server on 127.0.0.1:`port`. A port in use raises
+    PortInUse (one line) instead of the OSError traceback that ended a
+    second panel, and that the menu-bar app did not catch at all."""
+    import errno
+    try:
+        return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise PortInUse(f"port {port} is in use: another control panel (or another "
+                        f"program) already listens on 127.0.0.1:{port}") from None
+
+
 def start_server():
     global RELABEL_QUEUE
     try:
@@ -3668,13 +3722,15 @@ def start_server():
         config.backfill_meeting_ids(config.archive_dir())
     except Exception:
         pass  # same contract: never block the panel on a migration
+    # bind first: with the port taken, no relabel worker starts for a panel
+    # that cannot serve a request
+    srv = _bind(PORT)
     # the one relabel worker for this process. Every naming, rename, merge and
     # queued follow-up goes through it from here on, instead of spawning a
     # child that reloads the models this process already has warm.
     if RELABEL_QUEUE is None:
         RELABEL_QUEUE = jobqueue.RelabelQueue()
     RELABEL_QUEUE.start()
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
@@ -3682,14 +3738,10 @@ def start_server():
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _FONT_DIR = _STATIC_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
-# The classic page, served at /classic for 30 days after the 4D swap.
-_PAGE_PARTS = ("page.html", "app.css", "app.js")
-_page_cache: dict = {"mtimes": None, "html": None}
-# The new shell (plan Phases 4C and 4D), served at /: a second parts tuple,
-# composed the same way, with its own markers. Its script is several small
-# plain files joined in this fixed order, with no import lines and no build
-# step: the frame, then the meeting page, then the voice sheet, then the
-# library views (Groups and Ask).
+# The panel (plan Phases 4C and 4D), served at /: a skeleton, a stylesheet,
+# and several small plain scripts joined in this fixed order, with no import
+# lines and no build step: the frame, then the meeting page, then the voice
+# sheet, then the library views (Groups and Ask).
 _NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js",
                "next-library.js")
 _next_cache: dict = {"mtimes": None, "html": None}
@@ -3702,10 +3754,6 @@ def _compose(parts, css_marker, js_marker):
     str.replace -- never .format()/f-strings."""
     page, css, *js = ((_STATIC_DIR / f).read_text(encoding="utf-8") for f in parts)
     return page.replace(css_marker, css).replace(js_marker, "\n".join(js))
-
-
-def _compose_page():
-    return _compose(_PAGE_PARTS, "/*@APP_CSS@*/", "//@APP_JS@")
 
 
 def _compose_next():
@@ -3722,8 +3770,16 @@ def _cached(parts, cache, compose):
     return cache["html"]
 
 
-def _page_html():
-    return _cached(_PAGE_PARTS, _page_cache, _compose_page)
+def _dir_present(p) -> bool:
+    """Is the folder there? The first-run card checks the watched folder
+    with it: a path that is set but missing showed a green check. A denied
+    stat (a folder macOS privacy guards) counts as there."""
+    try:
+        return Path(p).is_dir()
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _next_html():
@@ -3738,7 +3794,12 @@ if __name__ == "__main__":
     # module for the menu bar or the tests is unaffected.
     config.private_umask()
     PORT = int(os.environ.get("STT_PANEL_PORT", str(PORT)))
-    start_server()
+    try:
+        start_server()
+    except PortInUse as e:
+        print(f"STT control panel not started: {e}. Stop the other one, or set "
+              "STT_PANEL_PORT to a free port.", file=sys.stderr)
+        sys.exit(1)
     print(f"STT control panel: http://127.0.0.1:{PORT}/   "
           f"(STT_HOME={config.STT_HOME or '(real data — none set)'})")
     print("Ctrl-C to stop.")

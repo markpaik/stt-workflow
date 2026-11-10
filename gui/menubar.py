@@ -33,9 +33,17 @@ STAGE_LABEL = {
 }
 
 
+def _clip(text, n):
+    """Free text cut to n characters, with an ellipsis when it is cut."""
+    text = str(text or "")
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 def _short(name, n=34):
-    name = name.rsplit(".", 1)[0]
-    return name if len(name) <= n else name[: n - 1] + "…"
+    """A file name without its extension, cut to n characters. For file
+    names only: free text goes through _clip, since a dot inside a note
+    ('STT Recorder.app') is no extension."""
+    return _clip(name.rsplit(".", 1)[0], n)
 
 
 def _pid_alive(pid):
@@ -131,6 +139,20 @@ def _fmt_hms(secs):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def start_panel():
+    """Start the control panel. None when it serves, else the one-line
+    reason it could not (its port is taken). The menu-bar app keeps
+    running without it: a port in use raised out of __init__, and launchd
+    (KeepAlive on a crash) restarted the app into the same error."""
+    import sys
+    try:
+        panel.start_server()
+        return None
+    except panel.PortInUse as e:
+        print(f"control panel not started: {e}", file=sys.stderr, flush=True)
+        return str(e)
+
+
 class STTMenuBar(rumps.App):
     def __init__(self):
         super().__init__("STT", icon=ICON, template=True, quit_button=None)
@@ -139,7 +161,7 @@ class STTMenuBar(rumps.App):
         self._stall_warned = None  # caf path already warned about (once per capture)
         self._rec_cache = None     # last known live recording, for the 1s clock tick
         self._busy_cache = ""      # spinner suffix while a batch runs alongside
-        panel.start_server()  # local control panel at http://127.0.0.1:8737
+        self._panel_error = start_panel()  # local control panel at http://127.0.0.1:8737
         try:  # a recording orphaned by a crash/forced quit: salvage its audio
             saved = recorder.recover_orphans()
             if saved:
@@ -258,7 +280,9 @@ class STTMenuBar(rumps.App):
         qj = s.get("queued_jobs", [])
         qj_status = "starts after current run" if active else "starting…"
         for j in qj[:8]:
-            items.append(_disabled(f"↻  {_short(j.get('label') or 'run', 30)}  —  {qj_status}"))
+            # a job label is free text ('Budget.m4a +2 more'): _short took
+            # everything after its last dot for an extension
+            items.append(_disabled(f"↻  {_clip(j.get('label') or 'run', 30)}  —  {qj_status}"))
         for f in s["queued"][:8]:
             items.append(_disabled(f"○  {_short(f)}  —  queued"))
         if len(s["queued"]) > 8:
@@ -303,11 +327,13 @@ class STTMenuBar(rumps.App):
         note = s.get("recorder_note")
         if note:  # the last recording's outcome, until the next start supersedes it
             items.append(_disabled(("✓  " if note.get("ok") else "⚠  ")
-                                   + _short(note.get("text", ""), 64)))
+                                   + _clip(note.get("text", ""), 64)))
 
         # --- controls ---
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open Control Panel…", callback=self.open_panel))
+        if getattr(self, "_panel_error", None):
+            items.append(_disabled(f"⚠  Panel not started: port {panel.PORT} is in use"))
         if s["running"]:
             items.append(rumps.MenuItem("Stop processing", callback=self.stop_run))
         else:
@@ -404,7 +430,7 @@ class STTMenuBar(rumps.App):
         subprocess.Popen(["open", str(txt if txt.exists() else config.meetings_dir())])
 
     def open_meetings(self, _):
-        subprocess.Popen(["open", str(config.MEETINGS_DIR)])
+        subprocess.Popen(["open", str(config.meetings_dir())])   # stt.env, read fresh
 
     def open_logs(self, _):
         log = config.LOG_DIR / "stt.err.log"

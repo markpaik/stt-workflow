@@ -8,38 +8,113 @@ headless mode — no extra Python dependencies. Everything stays on-device.
 """
 import html
 import json
+import math
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import config, dates
+from . import config, dates, output
 from .errors import UserError
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
+# A line's speaker label is output.line_label over the roster, the label the
+# panel and the .txt show. The roster names a voice below the minting floor
+# ("Voice 9") while its lines carry only the raw diarizer id, which must
+# never reach a shared file.
+
+
+# what XML 1.0 forbids: C0 controls but tab, newline and return, lone
+# surrogates, and the two noncharacters. python-docx refuses a string that
+# holds one (ValueError), so one stray NUL from a paste or an ASR artifact
+# failed the whole Word export while the PDF of the same meeting printed.
+# Both formats drop them, so the two files agree.
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _clean(s: str) -> str:
+    return _XML_ILLEGAL.sub("", s)
+
+
+class MeetingUnreadable(UserError):
+    """The meeting's json is not a readable JSON object (bad JSON, a list,
+    a null): a hand edit or a damaged file. Its text is the panel's."""
+
+
 def _load(base: str) -> dict:
-    return json.loads(config.meeting_file(base, ".json").read_text())
+    try:
+        d = json.loads(config.meeting_file(base, ".json").read_text())
+    except ValueError:
+        d = None
+    if not isinstance(d, dict):
+        raise MeetingUnreadable("This meeting's transcript file cannot be read, "
+                                "so it cannot be exported.")
+    return d
+
+
+# A hand-edited json can hold null, the wrong type, or nothing where the
+# pipeline always writes a value: a null start, a null text, a speaker with
+# no display, a date that is not ISO. Each one failed the whole export with
+# a raw TypeError, KeyError or ValueError. Each reader below takes such a
+# value as absent: the line, the timestamp or the meta part is left out.
+
+def _text(v) -> str:
+    return _clean(v if isinstance(v, str) else "" if v is None else str(v))
+
+
+def _num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _day(v):
+    try:
+        return datetime.fromisoformat(v) if isinstance(v, str) else None
+    except ValueError:
+        return None
+
+
+def _list(v) -> list:
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _lines(d: dict):
+    """(speaker label, timestamp or None, flagged, text) for each line with
+    text, in order. The label is output.line_label over the roster."""
+    roster = output.roster_labels(_list(d.get("speakers")))
+    for seg in _list(d.get("segments")):
+        text = _text(seg.get("text")).strip()
+        if not text:
+            continue
+        start = _num(seg.get("start"))
+        yield (_text(output.line_label(seg, roster)),
+               None if start is None else _fmt_ts(start),
+               bool(seg.get("flags")), text)
 
 
 def _fmt_ts(sec: float) -> str:
-    sec = int(round(sec))
+    sec = max(0, int(round(sec)))
     h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 def _meta_line(base: str, d: dict) -> str:
     parts = []
-    iso = d.get("date") or dates.meeting_date(base)
-    if iso:
-        parts.append(datetime.fromisoformat(iso).strftime("%B %-d, %Y"))
-    parts.append(f"{round(d.get('duration_sec', 0) / 60)} min")
-    who = [s["display"] for s in d.get("speakers", [])]
+    day = _day(d.get("date")) or _day(dates.meeting_date(base))
+    if day:
+        parts.append(day.strftime("%B %-d, %Y"))
+    dur = _num(d.get("duration_sec", 0))
+    if dur is not None:
+        parts.append(f"{round(dur / 60)} min")
+    who = [w for w in (_text(s.get("display")) for s in _list(d.get("speakers"))) if w]
     if who:
         parts.append(", ".join(who))
-    return "  ·  ".join(parts)
+    return _clean("  ·  ".join(parts))
 
 
 def export_dir() -> Path:
@@ -58,15 +133,23 @@ def export_dir() -> Path:
     return Path.home() / "Downloads"
 
 
+NAME_MAX = 255   # bytes in one file name on macOS
+
+
 def _out_path(base: str, ext: str) -> Path:
+    """A new file in export_dir(): "<base>.<ext>", else "<base> (n).<ext>".
+    The name is cut to fit NAME_MAX bytes with its suffix: a folder name
+    near the limit fits its own "<base>.json", and the " (1)" of a second
+    export pushed it past, which raised a raw OSError."""
     d = export_dir()
     d.mkdir(parents=True, exist_ok=True)
-    out = d / f"{base}.{ext}"
-    n = 1
-    while out.exists():
-        out = d / f"{base} ({n}).{ext}"
+    n = 0
+    while True:
+        tail = f" ({n}).{ext}" if n else f".{ext}"
+        out = d / (config.cap_name(base, NAME_MAX - len(tail.encode())) + tail)
+        if not out.exists():
+            return out
         n += 1
-    return out
 
 
 def to_docx(base: str) -> Path:
@@ -75,19 +158,15 @@ def to_docx(base: str) -> Path:
 
     d = _load(base)
     doc = Document()
-    doc.add_heading(base, level=1)
+    doc.add_heading(_clean(base), level=1)
     meta = doc.add_paragraph(_meta_line(base, d))
-    meta.runs[0].font.color.rgb = RGBColor(0x6E, 0x6E, 0x73)
-    meta.runs[0].font.size = Pt(10)
+    for run in meta.runs:   # none when the json gives no meta part at all
+        run.font.color.rgb = RGBColor(0x6E, 0x6E, 0x73)
+        run.font.size = Pt(10)
 
-    for seg in d.get("segments", []):
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-        who = seg.get("display") or seg.get("name") or seg.get("speaker") or "?"
+    for who, ts, flagged, text in _lines(d):
         p = doc.add_paragraph()
-        r = p.add_run(f"{who}  [{_fmt_ts(seg['start'])}]"
-                      + ("  ⚠" if seg.get("flags") else ""))
+        r = p.add_run(who + (f"  [{ts}]" if ts else "") + ("  ⚠" if flagged else ""))
         r.bold = True
         r.font.size = Pt(10)
         doc.add_paragraph(text)
@@ -99,15 +178,12 @@ def to_docx(base: str) -> Path:
 def to_html(base: str) -> str:
     d = _load(base)
     rows = []
-    for seg in d.get("segments", []):
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-        who = seg.get("display") or seg.get("name") or seg.get("speaker") or "?"
-        warn = ' <span class="warn">uncertain</span>' if seg.get("flags") else ""
+    for who, ts, flagged, text in _lines(d):
+        warn = ' <span class="warn">uncertain</span>' if flagged else ""
+        stamp = f' <span class="ts">{ts}</span>' if ts else ""
         rows.append(
             f'<div class="seg"><div class="who">{html.escape(who)}'
-            f' <span class="ts">{_fmt_ts(seg["start"])}</span>{warn}</div>'
+            f'{stamp}{warn}</div>'
             f'<div class="txt">{html.escape(text)}</div></div>')
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 body{{font:11pt -apple-system,'Helvetica Neue',sans-serif;color:#1d1d1f;
@@ -119,7 +195,7 @@ h1{{font-size:17pt;margin:0 0 4px}}
 .ts{{color:#86868b;font-weight:400}}
 .warn{{color:#c93400;font-weight:400;font-size:8pt}}
 .txt{{margin-top:1px}}
-</style></head><body><h1>{html.escape(base)}</h1>
+</style></head><body><h1>{html.escape(_clean(base))}</h1>
 <div class="meta">{html.escape(_meta_line(base, d))}</div>
 {''.join(rows)}</body></html>"""
 

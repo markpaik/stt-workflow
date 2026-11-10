@@ -83,6 +83,10 @@ def main(argv=None) -> int:
     word = "would restore" if r["dry_run"] else "restored"
     print(f"undo {a.run}: {word} {len(r['restored'])} file(s), "
           f"kept {len(r['kept'])} changed since")
+    for f in r.get("skipped") or []:
+        print(f"  not restored: {Path(f).name} (a stop request is never put back)")
+    for line in r.get("not_undone") or []:
+        print(f"  not undone: {line}")
     return 0
 
 

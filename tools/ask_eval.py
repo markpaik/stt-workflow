@@ -166,12 +166,45 @@ def _guard():
     if not home:
         sys.exit("refused: set STT_HOME to a scratch home")
     h = Path(home).expanduser().resolve()
-    real = [Path.home() / "Projects/brain/meetings",
-            Path(__file__).resolve().parent.parent]
+    # the real library: the checkout's own stt.env names it, else the
+    # default transcripts folder, and the checkout's voiceprints (and the
+    # same folders of the other checkouts, below). Read
+    # straight from the file: under STT_HOME, config resolves every folder
+    # inside the scratch home.
+    from stt import config, envfile
+    repo = Path(__file__).resolve().parent.parent
+    lib = envfile.parse(repo / "stt.env").get("STT_MEETINGS_DIR")
+    real = [config.DEFAULT_MEETINGS_DIR, repo / "voiceprints"] + (
+        [Path(lib).expanduser()] if lib else [])
+    # demo_seed's compare folds letter case as APFS does: a home typed as
+    # ~/projects/... passed this check while ~/Projects/... was refused
+    tools = str(Path(__file__).resolve().parent)
+    if tools not in sys.path:
+        sys.path.append(tools)
+    from demo_seed import _fold, _other_checkout_dirs, _overlaps
+    # a worktree has no stt.env: the main checkout's and the batch agent's
+    # checkout name the real library
+    real += _other_checkout_dirs(repo)
+    # The checkout is refused only as the home itself or a folder that
+    # holds it. Its scratch folders (qa/, work/) are where demo_seed and
+    # the QA runs put a sandbox home, and the overlap test refused them.
+    r = repo.resolve()
+    if _fold(h) == _fold(r) or _fold(r).is_relative_to(_fold(h)):
+        sys.exit(f"refused: STT_HOME is or holds the checkout ({r})")
     for r in real:
         r = r.resolve()
-        if h == r or r in h.parents or h in r.parents:
+        if _overlaps(h, r):
             sys.exit(f"refused: STT_HOME overlaps a real folder ({r})")
+    # build() writes into config.meetings_dir() and rebuilds config.SEARCH_DB.
+    # STT_MEETINGS_DIR or STT_PROJECT_DIR, in the shell or in the home's
+    # stt.env, moves them out of STT_HOME, and the check above saw only
+    # STT_HOME: a marked home wrote its 12 meetings into a foreign folder.
+    for label, p in (("meetings folder", config.meetings_dir()),
+                     ("search index", config.SEARCH_DB),
+                     ("settings folder", config.PROJECT_DIR)):
+        rp = Path(p).expanduser().resolve()
+        if not (rp == h or rp.is_relative_to(h)):
+            sys.exit(f"refused: the {label} {rp} is outside STT_HOME {h}")
     return h
 
 

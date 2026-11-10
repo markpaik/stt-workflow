@@ -17,7 +17,9 @@ source.
 
 Each correction is journaled before it is applied. Undo puts the old date,
 source, and start time back through the same function, and only where the
-meeting still holds the corrected date: a date changed since is kept.
+meeting still holds the corrected date: a date changed since is kept. A
+title changed since is kept too: the folder takes the old date in front of
+the current title, and the journaled name is not used.
 
   ./run.sh py tools/fix_dates.py                    # dry run: counts only
   ./run.sh py tools/fix_dates.py --apply            # write, print the run id
@@ -133,11 +135,21 @@ def _old_name(base: str, iso):
     return dates.restamp(base, iso) + (m.group(0) if m else "")
 
 
+def _title_changed(e: dict, base: str) -> bool:
+    """True when `base` no longer carries the title the run gave the
+    meeting: someone retitled it after the run. The run only re-stamped the
+    journaled name with the new date."""
+    from stt import dates
+    ran = config.cap_name(dates.restamp(e["base"], e["new"]["date"]))
+    return dates.title_of(ran).lower() != dates.title_of(base).lower()
+
+
 def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
     by_id = fj.bases_by_id(store)
     live = set(config.meeting_bases(store))
     restored, kept, missing, skipped = [], [], [], []
-    for e in reversed(fj.entries(run_id, journal_dir)):
+    for e in reversed(fj.entries(run_id, journal_dir, valid=fj.date_entry,
+                                 tool="fix_dates")):
         base = by_id.get(e.get("meeting_id")) or (e["base"] if e["base"] in live else None)
         if base is None:
             missing.append({"base": e["base"]})
@@ -147,8 +159,9 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
                 or d.get("date_source") != e["new"]["date_source"]):
             kept.append({"base": base})
             continue
+        retitled = _title_changed(e, base)
         if dry_run:
-            restored.append({"base": base})
+            restored.append({"base": base, "title_kept": retitled})
             continue
         old = e["old"]
         src = None if fj.is_missing(old["date_source"]) else old["date_source"]
@@ -158,7 +171,9 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
         # rule alone swapped two same-name twins: undo walks the journal in
         # reverse, so the meeting that was ' (2)' came back first and took
         # the plain name. A name someone else holds now falls back to it.
-        want = _old_name(e["base"], old["date"])
+        # The journaled name carries the title from before the run: a title
+        # set since would be lost, so then the current name is re-stamped.
+        want = None if retitled else _old_name(e["base"], old["date"])
         res = summarize.apply_meeting_edits(base, to_base=want, **kw) if want else None
         if res is None or not res.get("ok"):
             res = summarize.apply_meeting_edits(base, **kw)
@@ -168,7 +183,10 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
         # the meeting had no date_source before the run: take it off again.
         # The re-stamp also wrote renamed_from: put the journaled value back
         # (a journal from before it was recorded carries none, so it stays).
-        if src is None or "renamed_from" in old:
+        # After a retitle since the run, renamed_from no longer holds the
+        # run's value: the re-stamp's own value stays.
+        put_rf = "renamed_from" in old and not retitled
+        if src is None or put_rf:
             from stt import review
             nb = res["base"]
             with review.lock_meeting(nb):
@@ -177,10 +195,10 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
                 if dd is not None:
                     if src is None and dd.get("date_source") == "manual":
                         dd.pop("date_source", None)
-                    if "renamed_from" in old:
+                    if put_rf:
                         fj.put(dd, "renamed_from", old["renamed_from"])
                     fj.atomic_json(j, dd)
-        restored.append({"base": res["base"]})
+        restored.append({"base": res["base"], "title_kept": retitled})
     return {"run": run_id, "restored": restored, "kept": kept,
             "missing": missing, "skipped": skipped, "dry_run": dry_run}
 
@@ -202,6 +220,9 @@ def main(argv=None) -> int:
         print(f"undo {a.undo}: {word} {len(r['restored'])} dates, "
               f"kept {len(r['kept'])} changed since, {len(r['missing'])} gone, "
               f"skipped {len(r['skipped'])}")
+        n = sum(1 for x in r["restored"] if x.get("title_kept"))
+        if n:
+            print(f"  {n} of those keep the title set after the run")
         return 0
     probe = not a.no_probe
     if not a.apply:

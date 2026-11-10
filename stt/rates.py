@@ -53,11 +53,47 @@ CONTENTION = 1.4       # measured diarize slowdown at 2 workers, when unmeasured
 _cache = {"sig": None, "learned": None}
 
 
+def whisper_variant(v) -> str:
+    """The name a Whisper variant's speed is learned and estimated under.
+    An alias of a known model is that model: large-v3-turbo runs the turbo
+    repo, but as its own key it had no default (the 30x Parakeet rate, an
+    ETA about 3.5 times too short) and its samples never taught turbo."""
+    from .asr_mlxwhisper import VARIANT_ALIASES
+    v = v or "large-v3"
+    return VARIANT_ALIASES.get(v, v)
+
+
+# the engine prefix of each cloud provider's transcripts (stt/asr_cloud.py
+# writes "elevenlabs/<model>"), and the provider it names
+_CLOUD_ENGINES = {"elevenlabs": "scribe", "openai": "openai", "mistral": "voxtral"}
+
+
+def engine_key(engine):
+    """The model key of the engine that wrote a transcript (the "engine" an
+    ASR module returns, such as "mlx-whisper/turbo"), or None when none is
+    named. A finished file's seconds are learned under this. The setting
+    read at the end of the file named a model that did not run when the
+    model was switched in the panel mid-run, when a strict file ran locally
+    under a cloud setting, and when a cloud run fell back to Parakeet."""
+    if not isinstance(engine, str) or not engine:
+        return None
+    head, _, tail = engine.partition("/")
+    if head == "mlx-whisper":
+        return f"mlxwhisper:{whisper_variant(tail)}"
+    if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
+        return f"cloud:{_CLOUD_ENGINES[head]}"
+    return "parakeet"
+
+
 def current_asr_key() -> str:
     kv = config._env_file()
-    backend = kv.get("STT_ASR_BACKEND", "parakeet")
+    # the setting's own check, as pipeline._load_asr reads it: case and
+    # spaces are ignored and a typo runs Parakeet. The raw value ran Whisper
+    # for "MLXWhisper" but keyed it "MLXWhisper" (the 30x default, 120 s for
+    # an hour, not 857 s), and filed a typo's Parakeet runs under the typo.
+    backend, _ = config._asr_problem(kv.get("STT_ASR_BACKEND"))
     if backend == "mlxwhisper":
-        return f"mlxwhisper:{kv.get('STT_WHISPER_MLX_MODEL', 'large-v3')}"
+        return f"mlxwhisper:{whisper_variant(kv.get('STT_WHISPER_MLX_MODEL'))}"
     return backend
 
 
@@ -105,16 +141,61 @@ def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
         pass  # calibration must never break the pipeline
 
 
-def _rows():
-    if not RATES_LOG.exists():
-        return []
+def _num(v):
+    """v as a float when it is a finite number above zero, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    return v if math.isfinite(v) and v > 0 else None
+
+
+def _clean_row(r):
+    """The row with only the values the model can use, or None. A line that
+    is JSON but not a row (123, null, a list) or a value of the wrong type
+    ("secs": null, a string duration) raised in _samples, so every ETA and
+    the panel's /api/state failed until newer rows pushed the line out.
+    record() writes only good rows: this guards a hand edit or a damaged
+    file."""
+    if not isinstance(r, dict):
+        return None
+    d, secs = _num(r.get("duration")), r.get("secs")
+    if not d or not isinstance(secs, dict):
+        return None
+    secs = {k: v for k, v in ((k, _num(v)) for k, v in secs.items())
+            if isinstance(k, str) and v}
+    if not secs:
+        return None
+    out = {**r, "duration": d, "secs": secs}
+    for key in ("asr", "diar", "at"):
+        if key in out and not isinstance(out[key], str):
+            del out[key]  # the readers' own default (parakeet, pyannote) applies
+    n = r.get("n", 1)
+    out["n"] = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
+    return out
+
+
+def parse_rows(lines) -> list:
+    """The usable rows among rates.jsonl `lines`, in file order. A line that
+    does not parse, or is not a usable row (_clean_row), is skipped.
+    tools/eta_backtest.py reads the log through this too."""
     rows = []
-    for ln in RATES_LOG.read_text().splitlines()[-400:]:
+    for ln in lines:
         try:
-            rows.append(json.loads(ln))
-        except json.JSONDecodeError:
+            r = _clean_row(json.loads(ln))
+        except ValueError:
             continue
+        if r is not None:
+            rows.append(r)
     return rows
+
+
+def _rows():
+    try:
+        # bytes that are not text spoil only their own line
+        text = RATES_LOG.read_text(errors="replace")
+    except OSError:
+        return []
+    return parse_rows(text.splitlines()[-400:])
 
 
 def _samples(rows, diarizer: str = None) -> dict:

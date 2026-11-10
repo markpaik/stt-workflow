@@ -592,6 +592,34 @@ def test_a_filename_that_differs_only_in_case_is_a_collision(sandbox):
     assert identify._unique_filename("alex rivera", reg) == "alex rivera_2.npy"
 
 
+def test_a_name_in_another_unicode_form_joins_the_existing_person(sandbox):
+    """APFS ignores Unicode normalization too. 'Jose' + U+0301 (pasted from
+    Finder) and 'Jos' + U+00E9 (typed) are one file there. The registry held
+    two entries on that one file, so the second enrollment replaced the
+    first one's samples. The second spelling is the same person now."""
+    from stt import config, unknowns
+    nfd, nfc = "José Perez", "José Perez"
+    identify.enroll(nfd, _near(0, 0))
+    identify.enroll(nfc, _near(0, 1))
+    reg = identify.load_registry()
+    assert list(reg) == [nfd]
+    assert reg[nfd]["n_samples"] == 2
+    assert identify.load_voiceprints()[nfd].shape[0] == 2
+    assert identify.canonical_name(nfc) == nfd
+    # a different name whose file stem is that same file is a collision
+    assert identify._unique_filename(nfc, {"X": {"file": f"{nfd}.npy"}}) == \
+        f"{nfc}_2.npy"
+    # naming an unknown voice with the other spelling joins the person too
+    v = _near(0, 2)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(
+        '{"next": 2, "speakers": {"U001": {"file": "U001.npy", "meetings": ["m"]}}}')
+    assert unknowns.promote("U001", nfc) is True
+    reg = identify.load_registry()
+    assert list(reg) == [nfd]
+    assert identify.load_voiceprints()[nfd].shape[0] == 3
+
+
 def test_a_case_only_rename_keeps_the_samples(sandbox):
     """Renaming 'alex rivera' to 'Alex Rivera' is a spelling fix. On a
     case-insensitive disk the copy-then-unlink rename would delete the only
@@ -630,10 +658,13 @@ def _seed_unknown(uid, vec):
         {"next": 8, "speakers": {uid: {"file": f"{uid}.npy", "meetings": ["m"]}}}))
 
 
-@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 "])
+@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 ", "Speaker 7",
+                                      "speaker  7", "VOICE 3", " Voice 12 "])
 def test_an_unknown_id_is_never_a_person_name(sandbox, reserved):
     """People and unknown voices share one folder. A person named 'U007'
-    took the unknown's U007.npy, and promoting the unknown later deleted it."""
+    took the unknown's U007.npy, and promoting the unknown later deleted it.
+    'Speaker 7' and 'Voice 3' are the labels an unknown and a meeting-only
+    cluster show: a person by that name looked like unknown U007."""
     from stt import config
     _seed_unknown("U007", _near(1, 0))
     before = np.load(config.VOICEPRINTS_DIR / "U007.npy").copy()
@@ -730,3 +761,35 @@ def test_doctor_finds_and_tightens_files_from_before_the_umask(sandbox):
         assert stat.S_IMODE(p.stat().st_mode) == 0o600, p.name
     assert stat.S_IMODE(example.stat().st_mode) == 0o644
     assert config.loose_private_paths() == []
+
+
+@pytest.mark.parametrize("ok", ["Speaker", "Speaker Seven", "Voice of Reason",
+                                "Speaker 7 Jr", "Uma 7"])
+def test_a_name_that_only_starts_like_a_label_is_allowed(sandbox, ok):
+    assert identify.reserved_name(ok) is False
+    identify.enroll(ok, _near(0, 0))
+    assert ok in identify.load_registry()
+
+
+def test_a_damaged_enrolled_sample_file_leaves_that_person_out(sandbox, capsys):
+    """np.load raised on a damaged person .npy, and unknowns.assign() fell
+    for every meeting: "ValueError This file contains pickled (object)
+    data". The batch's naming and the panel's voice pages read the same
+    file. The person is now left out, with one warning."""
+    from stt import config, unknowns
+    rng = np.random.default_rng(1)
+    np.save(config.VOICEPRINTS_DIR / "Pat Quill.npy", rng.normal(size=(2, 8)))
+    np.save(config.VOICEPRINTS_DIR / "Rae Lind.npy", rng.normal(size=(1, 8)))
+    identify.save_registry({
+        "Pat Quill": {"file": "Pat Quill.npy", "n_samples": 2, "sources": ["A", "B"]},
+        "Rae Lind": {"file": "Rae Lind.npy", "n_samples": 1, "sources": ["A"]}})
+    assert set(identify.load_voiceprints()) == {"Pat Quill", "Rae Lind"}
+    for junk in (b"junk", np.array(["a", "b"])):
+        f = config.VOICEPRINTS_DIR / "Pat Quill.npy"
+        if isinstance(junk, bytes):
+            f.write_bytes(junk)
+        else:
+            np.save(f, junk)
+        assert set(identify.load_voiceprints()) == {"Rae Lind"}
+    assert capsys.readouterr().err.count("Pat Quill.npy cannot be read") == 1
+    unknowns.assign({"c": rng.normal(size=8)}, {}, "2026-01-01 M")   # no raise

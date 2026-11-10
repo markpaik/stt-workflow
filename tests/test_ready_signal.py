@@ -95,6 +95,37 @@ def test_no_banner_is_posted_and_the_written_rule_stands():
     root = Path(srv.__file__).resolve().parent
     assert "rumps.notification" not in (root / "menubar.py").read_text()
     assert "No notification banners." in (root / "menubar.py").read_text()
-    js = (root / "static" / "app.js").read_text()
-    fn = re.search(r"function markSeen\(now\)\{.*?\n\}", js, re.S).group(0)
-    assert "document.hidden" in fn and "/api/seen" in fn
+    # the page marks the look only while it is visible: on load when the tab
+    # is not hidden, and when a hidden tab comes back
+    js = (root / "static" / "next.js").read_text()
+    vis = re.search(r"addEventListener\('visibilitychange',\(\)=>\{.*?\n\}\);", js, re.S).group(0)
+    shown = vis[vis.index("else{"):]
+    assert "api('/api/seen',{})" in shown and "api('/api/seen'" not in vis[:vis.index("else{")]
+    assert "if(!document.hidden)api('/api/seen',{})" in js
+
+
+def test_a_look_while_the_library_is_missing_keeps_the_last_look(sandbox, tmp_path):
+    """At login a library on another volume may not be mounted yet. A look
+    then wrote ids [] and the time, so the next Redo of an old meeting
+    counted it as new, and any meeting still waiting was cleared unseen.
+    The last look stands now, and nothing is written."""
+    d = _m("Budget Review 10012026", "2026-10-01T10:00:00", mid="id-budget")
+    ready.mark_seen(now=datetime(2026, 10, 1, 12, 0, 0))
+    _m("Team Sync 10022026", "2026-10-02T09:00:00", mid="id-sync")
+    p = config.PROJECT_DIR / "panel_seen.json"
+    before = p.read_text()
+    r = ready.mark_seen(dest_dir=tmp_path / "not-mounted",
+                        now=datetime(2026, 10, 2, 10, 0, 0))
+    assert r["seen_at"] == "2026-10-01T12:00:00"
+    assert p.read_text() == before
+    # the library is back: the waiting meeting still counts, a Redo does not
+    _m("Budget Review 10012026", "2026-10-03T08:00:00", mid=d["meeting_id"])
+    assert ready.new_since_seen() == ["Team Sync 10022026"]
+
+
+def test_a_first_look_while_the_library_is_missing_writes_nothing(sandbox, tmp_path):
+    r = ready.mark_seen(dest_dir=tmp_path / "not-mounted",
+                        now=datetime(2026, 10, 2, 10, 0, 0))
+    assert r["seen_at"] == "2026-10-02T10:00:00"
+    assert not (config.PROJECT_DIR / "panel_seen.json").exists()
+    assert ready.new_count() == 0

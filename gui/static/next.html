@@ -2,15 +2,17 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Meetings</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232F4BD6'/%3E%3Cpath d='M8 13v6M12.5 9v14M17 11v10M21.5 14v4M26 12v8' stroke='%23fff' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 /*@NEXT_CSS@*/</style>
 <script>
-// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint, with
-// the same stt_theme key as the classic page. Storage can throw, so wrapped.
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint,
+// under the stt_theme key. Storage can throw, so wrapped.
 (function(){try{var q=new URLSearchParams(location.search).get("theme");
 var t=q||localStorage.getItem("stt_theme");
 if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();
 </script></head><body>
+<a class="skip" href="#view" data-act="skip">Skip to content</a>
 <div class="app">
   <aside class="side" id="side" aria-label="Main navigation"></aside>
   <div class="main">

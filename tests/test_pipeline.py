@@ -67,6 +67,7 @@ def test_diarized_run_writes_a_loadable_embeddings_cache(sandbox, monkeypatch):
 
     emb_path = config.meeting_file("2026-05-01 Diarized Meeting", ".emb.npz")
     assert res["emb"] == emb_path and emb_path.exists()
+    assert res["asr_engine"] == "fake-asr"  # rates files the seconds under it
     with np.load(emb_path) as z:  # a truncated/mis-suffixed write would not load
         assert sorted(z.files) == ["SPEAKER_00", "SPEAKER_01"]
     # the diar cache landed too, and no temp artifact was left behind
@@ -75,6 +76,37 @@ def test_diarized_run_writes_a_loadable_embeddings_cache(sandbox, monkeypatch):
               + list(config.meeting_dir("2026-05-01 Diarized Meeting").glob("*.tmp.npz")))
     assert strays == [], f"atomic-write temp left behind: {strays}"
 
+
+
+@pytest.mark.parametrize("redo", ["no_speech", "no_diarize"])
+def test_a_redo_that_saves_no_embeddings_leaves_no_old_speaker_cache(
+        sandbox, monkeypatch, redo):
+    """The caches were written only when the run had embeddings, and never
+    removed. A Redo that found no speech, or ran without diarization, kept
+    the last run's .diar.npz and .emb.npz next to the new transcript, and a
+    later relabel rebuilt speaker turns from the old run's clusters."""
+    from stt import diarcache, diarize
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(diarize, "diarize", lambda *a, **k: _fake_diar())
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    src = config.PROJECT_DIR / "Redo Meeting 05012026.m4a"
+    src.write_bytes(b"x")
+    run = dict(dest_dir=config.MEETINGS_DIR, do_verify=False, track_unknowns=False)
+    pipeline.process_file(src, do_diarize=True, **run)
+    base = "2026-05-01 Redo Meeting"
+    dp, ep = (config.meeting_file(base, s) for s in (".diar.npz", ".emb.npz"))
+    assert dp.exists() and ep.exists() and diarcache.load(dp)[0]
+    if redo == "no_speech":
+        empty = {"turns": [], "labels": [], "names": {}, "overlaps": [], "embeddings": {},
+                 "cluster_names": {}, "raw_turns": [], "turn_embeddings": [],
+                 "refine_stats": {"spans": []}}
+        monkeypatch.setattr(diarize, "diarize", lambda *a, **k: empty)
+    res = pipeline.process_file(src, do_diarize=redo != "no_diarize", **run)
+    assert res["base"] == base and res["emb"] is None
+    assert not dp.exists() and not ep.exists()
+    assert config.meeting_file(base, ".json").exists()
 
 def _fake_asr():
     import types

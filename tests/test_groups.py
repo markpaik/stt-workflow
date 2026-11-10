@@ -105,6 +105,48 @@ def test_average_linkage_stops_a_chain(sandbox):
     assert a and e and a != e
 
 
+
+def test_one_series_groups_whatever_the_week_s_topic(sandbox):
+    """A series title is '<series> – <topic>', and the topic changes every
+    week. Word overlap over the whole title kept three LT Weekly meetings,
+    and two check-ins with one person, out of any group."""
+    _mk("2026-10-01 LT Weekly Meeting – Budget Reallocation", mid="m1")
+    _mk("2026-10-08 LT Weekly Meeting – Attendance Trends", mid="m2")
+    _mk("2026-10-15 LT Weekly Meeting – Hiring Plan", mid="m3")
+    _mk("2026-10-02 Robin Weekly Check-in – Budget", mid="m4")
+    _mk("2026-10-09 Robin Weekly Check-in – Hiring Plan", mid="m5")
+    # apart: another series with the same person, two people who share a
+    # first name, and a hand-typed title that only looks like the form
+    _mk("2026-10-03 Robin Thrive Check-in – Goals", mid="m6")
+    _mk("2026-10-04 Sam C. Weekly Check-in – Budget", mid="m7")
+    _mk("2026-10-11 Sam D. Weekly Check-in – Hiring Plan", mid="m8")
+    _mk("2026-10-05 Roof Repair – Bids", mid="m9")
+    _mk("2026-10-12 Roof Repair – Schedule", mid="m10")
+    by_name = {g["name"]: g for g in groups.current()}
+    assert set(by_name) == {"LT Weekly Meeting", "Robin Weekly Check-in"}, by_name
+    assert by_name["LT Weekly Meeting"]["count"] == 3
+    assert set(by_name["Robin Weekly Check-in"]["bases"]) == {
+        "2026-10-02 Robin Weekly Check-in – Budget",
+        "2026-10-09 Robin Weekly Check-in – Hiring Plan"}
+    # a series title with no topic, and the person as one word
+    assert groups.title_words("LT Weekly Meeting") == {"lt", "weekly"}
+    assert groups.title_words("Sam C. Weekly Check-in – Budget") == {
+        "sam c", "weekly", "check"}
+    assert groups.title_words("Roof Repair – Bids") == {"roof", "repair", "bids"}
+
+def test_two_people_s_check_ins_on_one_topic_stay_apart(sandbox):
+    """Each 1:1 series is its own group. A topic both weeks share ('Goals
+    Review') once gave the pair a word overlap of 0.67, and one group held
+    two people's meetings."""
+    _mk("2026-01-01 Robin Weekly Check-in – Goals Review", mid="m1")
+    _mk("2026-01-08 Sam Weekly Check-in – Goals Review", mid="m2")
+    assert groups.current() == []
+    _mk("2026-01-15 Robin Weekly Check-in – Hiring", mid="m3")
+    (g,) = groups.current()
+    assert g["name"] == "Robin Weekly Check-in" and g["count"] == 2
+    assert "2026-01-08 Sam Weekly Check-in – Goals Review" not in g["bases"]
+
+
 def test_a_single_meeting_has_no_group_and_nothing_moves(sandbox):
     _mk("Science Fair 10012026")
     _mk("Snow Day 10022026")
@@ -186,6 +228,24 @@ def test_meetings_without_amnesty_keys_still_group(sandbox):
     assert g["count"] == 2
 
 
+def test_one_damaged_meeting_json_never_stops_the_groups(sandbox):
+    """float() on duration_sec ran outside any guard: one json with a
+    string or NaN there, or a number for its date, raised for the whole
+    library."""
+    _mk("Zed Budget Sync 09012026", mid="m1")
+    _mk("Zed Budget Sync 09022026", mid="m2", dur="abc")
+    _mk("Zed Budget Sync 09032026", mid="m3", dur=float("nan"), date=20260101)
+    _mk("Zed Budget Sync 09042026", meeting_id=["m4"], dur=-5,
+        speakers=[{"name": ["Robin"]}, "x"], title=7)
+    (g,) = groups.current()
+    assert g["count"] == 4 and g["seconds"] == 1800
+    r = groups.row_from_json("Zed Budget Sync 09042026",
+                             {"meeting_id": ["m4"], "date": 5, "duration_sec": True,
+                              "speakers": "Robin", "recorded_at": 1})
+    assert r["meeting_id"] is None and r["named"] == [] and r["recorded_at"] is None
+    assert r["date"] == "2026-09-04" and r["duration_sec"] == 0.0
+
+
 # --------------------------------------------------------- overrides ---
 
 def test_not_part_of_this_group_with_undo(sandbox):
@@ -215,6 +275,47 @@ def test_an_override_survives_a_rename_and_a_group_under_two_leaves(sandbox):
     assert r["ok"]
     # the folder moved; the override is keyed on the id, so it holds
     assert groups.current() == []
+
+
+def test_an_override_holds_when_the_dominant_spelling_changes(sandbox):
+    """The key hashes the most common word set. Two new meetings in the
+    other spelling flipped it, the stored key matched no group, and the
+    excluded meeting came back with no notice."""
+    _mk("Budget Alpha 01012026", mid="m1")
+    _mk("Budget Alpha 01022026", mid="m2")
+    _mk("Budget Alpha Beta 01032026", mid="m3")
+    key = _group_of("Budget Alpha 01012026")
+    groups.set_override("m3", key)
+    assert _group_of("Budget Alpha Beta 01032026") is None
+    _mk("Budget Alpha Beta 01042026", mid="m4")
+    _mk("Budget Alpha Beta 01052026", mid="m5")
+    (g,) = groups.current()
+    assert g["key"] != key                      # the dominant spelling moved
+    assert g["count"] == 4 and "Budget Alpha Beta 01032026" not in g["bases"]
+    # the undo names the key it stored, and brings the meeting back
+    groups.set_override("m3", key, exclude=False)
+    assert "Budget Alpha Beta 01032026" in groups.current()[0]["bases"]
+
+
+def test_an_override_stored_under_the_plain_words_key_still_holds(sandbox):
+    """Series titles now group by their series name (title_words), so the
+    key of 'Jordan Weekly Check-in – Hiring Plan' changed. A "Not part of
+    this group" stored under the old words(title) key matched no group, and
+    the excluded meeting came back."""
+    t = "Jordan Weekly Check-in – Hiring Plan"
+    _mk(f"2026-10-01 {t}", mid="m1", title=t)
+    _mk(f"2026-10-08 {t}", mid="m2", title=t)
+    _mk(f"2026-10-15 {t}", mid="m3", title=t)
+    (g,) = groups.current()
+    old_key = groups._key("t", groups.words(t))
+    assert g["key"] != old_key and g["count"] == 3
+    groups.set_override("m3", old_key)
+    (g,) = groups.current()
+    assert g["count"] == 2 and f"2026-10-15 {t}" not in g["bases"]
+    # a key of no group the meeting is in excludes nothing
+    groups.set_override("m3", old_key, exclude=False)
+    groups.set_override("m3", groups._key("t", groups.words("Board Study Session")))
+    assert groups.current()[0]["count"] == 3
 
 
 def test_purge_scope_reads_the_override_shape(sandbox):
@@ -335,6 +436,21 @@ def test_group_filter_on_search(sandbox):
                                              "Grant Writing 10082026"}
     assert search.query(f"match rate in:{key}")["total"] == 2
     assert search.query("match rate in:gnothere")["total"] == 0
+
+
+def test_an_unknown_group_filter_says_so(sandbox):
+    """in:<key> for no group answered total 0 with no error, while a bad
+    route: or after: value said what was wrong. A typo or a stale key now
+    answers with an error, as the other filters do."""
+    _mk("Grant Writing 10012026", mid="g1", texts=("The match rate is set.",))
+    _mk("Grant Writing 10082026", mid="g2", texts=("The match rate moves.",))
+    for r in (search.query("match rate in:gnothere"),
+              search.query("match rate", filters={"in": "gnothere"})):
+        assert r["hits"] == [] and r["total"] == 0
+        assert "gnothere" in r["error"] and "not a group" in r["error"]
+    assert search.meetings("grant in:gnothere") == []
+    key = _group_of("Grant Writing 10012026")
+    assert "error" not in search.query(f"match rate in:{key}")
 
 
 def test_api_search_passes_filters(running_server):

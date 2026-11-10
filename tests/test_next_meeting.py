@@ -1,11 +1,11 @@
 """The new shell's meeting page and voice sheet (plan Phase 4D).
 
 The plan forbids dropping the naming, review, and hostile-name tests of the
-classic page when its reader is replaced: they encode bugs already found
-once. Each test here ports one or more of them to the new files
-(gui/static/next-meeting.js and next-voice.js) and names the classic test it
-ports. The classic tests stay in tests/test_new_shell.py while /classic
-serves the old page.
+old page when its reader was replaced: they encode bugs already found once.
+Each test here ports one or more of them to the new files
+(gui/static/next-meeting.js and next-voice.js) and names the old test it
+ports. The old page and its tests (tests/test_new_shell.py) are deleted, so
+those names are a record of what each port covers.
 
 The behavior runs in Node against the joined script (next.js, then
 next-meeting.js, then next-voice.js, the server's order) with a stub DOM, a
@@ -93,8 +93,9 @@ def _run(body, timeout=30, pre=""):
 # ================================================================ routing ===
 
 @needs_node
-def test_meeting_hash_reads_the_classic_deep_links():
-    # ports test_classic_parse_hash_reads_the_seek_form: the same two forms
+def test_meeting_hash_reads_both_deep_link_forms():
+    # ports test_classic_parse_hash_reads_the_seek_form: #m/<base> and
+    # #m/<base>/t/<secs>, which /classic bookmarks carry across the redirect
     out = _run("""
 console.log(JSON.stringify({a:parseMeetingHash('m/'+encodeURIComponent('Orchard 1')+'/t/61'),
  b:parseMeetingHash('m/'+encodeURIComponent('Orchard 1')),c:parseMeetingHash('home'),
@@ -159,7 +160,9 @@ console.log(JSON.stringify({a,b,c}));
     assert "Recorded at Harbor Street Library" in out["a"]
     assert "The audio is 3 minutes shorter than the transcript: audio may be lost." in out["a"]
     assert "Strict" in out["a"]
-    assert "Date uncertain" not in out["b"] and "Date from typed in the name" in out["b"]
+    # the whole label per source: 'Date from typed in the name' read badly
+    assert "Date uncertain" not in out["b"] and "<span>Date from the name</span>" in out["b"]
+    assert "typed in the name" not in out["b"]
     # a meeting from before the keys shows neither
     assert "Date from" not in out["c"] and "Recorded at" not in out["c"]
 
@@ -369,6 +372,9 @@ console.log(JSON.stringify({h:vsHTML()}));
                                   'data-act="vs-save"')]
     assert order == sorted(order)
     assert "Who is Speaker 68?" in h
+    # the clip's start reads as where the turn is, beside the talk time:
+    # 'Longest turn · 0:01' read as a length next to '1m 42s of talk'
+    assert 'Longest turn at <span class="mono">0:04</span>' in h
 
 
 @needs_node
@@ -1154,9 +1160,66 @@ def test_meeting_rows_carry_the_location_note(running_server):
     assert rows["Library Walk 11022026"]["location_note"] == "Harbor Street Library"
 
 
+def _below_floor_meeting(base):
+    """A meeting shaped like the real one that showed "SPEAKER_08": every
+    segment's speaker is on the roster, but the voices below the minting
+    floor (no uid) carry no `display` on their segments, because the
+    pipeline stamps a segment's display only from a name or a uid. The
+    roster reads "Voice 9" (build_speakers' fallback). Beside it: a named
+    person, a registry voice, a dismissed below-floor voice, and a
+    meeting-local name."""
+    from conftest import mfile
+    roster = [
+        {"id": "SPEAKER_00", "name": "Grace Lindqvist", "global_id": None,
+         "display": "Grace Lindqvist"},
+        {"id": "SPEAKER_01", "name": None, "global_id": "U070", "display": "Speaker 70"},
+        {"id": "SPEAKER_03", "name": None, "global_id": None, "display": "Voice 4"},
+        {"id": "SPEAKER_05", "name": "Elena Ruiz", "global_id": None,
+         "display": "Elena Ruiz", "local": True},
+        {"id": "SPEAKER_08", "name": None, "global_id": None, "display": "Voice 9"},
+    ]
+    stamped = {"SPEAKER_00", "SPEAKER_01", "SPEAKER_05"}
+    segs = []
+    for i, s in enumerate(roster):
+        seg = {"start": i * 10.0, "end": i * 10.0 + 4.0, "speaker": s["id"],
+               "name": s["name"], "text": f"budget line number {i} spoken"}
+        if s["id"] in stamped:
+            seg["display"] = s["display"]
+        segs.append(seg)
+    segs.append({"start": 60.0, "end": 62.0, "speaker": "SPEAKER_08", "name": None,
+                 "text": "one more from nine"})
+    d = {"source_file": f"{base}.m4a", "duration_sec": 70.0, "date": "2026-09-23",
+         "speakers": roster, "segments": segs, "words": [],
+         "dismissed_voices": ["SPEAKER_03"], "local_names": {"SPEAKER_05": "Elena Ruiz"}}
+    mfile(base, ".json").write_text(json.dumps(d))
+    mfile(base, ".txt").write_text("stub")
+
+
+def test_transcript_and_search_label_a_below_floor_voice_by_its_roster_display(running_server):
+    """The server half of the raw-id fix (the page half is
+    test_no_line_renders_a_raw_diarizer_id). On a real meeting one line read
+    "SPEAKER_08" while the legend showed "Voice 9": /api/transcript labelled a
+    line by the segment's own display, else its name, else the RAW id, and a
+    voice below the minting floor never gets a display on its segments. A
+    line now carries its roster display in `who`, and a search hit too."""
+    from urllib.parse import quote
+    base = "Below Floor Mtg 09232026"
+    _below_floor_meeting(base)
+    status, body = _get(running_server, "/api/transcript?base=" + quote(base))
+    assert status == 200
+    tr = json.loads(body)
+    assert [g["who"] for g in tr["segments"]] == [
+        "Grace Lindqvist", "Speaker 70", "Voice 4", "Elena Ruiz", "Voice 9", "Voice 9"]
+    assert not any(re.fullmatch(r"SPEAKER_\d+", g["who"]) for g in tr["segments"])
+    assert "Voice 9" in tr["speakers"]
+    status, body = _get(running_server, "/api/search?q=" + quote("from nine"))
+    assert status == 200
+    assert [h["who"] for h in json.loads(body)["hits"]] == ["Voice 9"]
+
+
 def test_every_page_route_is_origin_gated(running_server):
-    for path in ("/", "/next", "/classic"):
-        assert _get(running_server, path)[0] == 200, path
+    for path, ok in (("/", 200), ("/next", 200), ("/classic", 302)):
+        assert _get(running_server, path)[0] == ok, path
         assert _get(running_server, path, {"Origin": "https://evil.example.com"})[0] == 403, path
 
 
@@ -1288,3 +1351,70 @@ def test_long_unbroken_text_wraps_inside_the_meeting_page():
     rule = re.search(r"^\.reading\{([^}]*)\}", css, re.M).group(1)
     assert "overflow-wrap:anywhere" in rule and "min-width:0" in rule
     assert re.search(r"^\.steps>li\{[^}]*min-width:0", css, re.M)
+
+
+@needs_node
+def test_the_second_engine_hint_ends_its_sentence_once():
+    """The card wrote a period after the closing quote, so a line that
+    already ended in one read 'two.”.'."""
+    out = _run("""
+await openPage('R2',{segments:[seg(0,0,4,'S1','Speaker 1','The target was three percent, not two.',['possible:engine_disagreement']),
+ seg(1,4,8,'S1','Speaker 1','we agreed on it',['possible:engine_disagreement'])],
+ speaker_options:[opt('S1','Ana Ortiz',{named:true})]},{flagged:2});
+const items=[{index:0,start:0,end:4,text:'The target was three percent, not two.',flags:['possible:engine_disagreement'],speaker:'S1',
+  alt:[{ours:'The target was three percent, not two.',theirs:'The target was two percent.'}]},
+ {index:1,start:4,end:8,text:'we agreed on it',flags:['possible:engine_disagreement'],speaker:'S1',
+  alt:[{ours:'we agreed on it',theirs:'we agreed on that'}]}];
+answer=(p,b)=>p.startsWith('/api/review?')?{items:items.map(x=>Object.assign({},x))}:{};
+const made=[];const oc=document.createElement;document.createElement=()=>{const e=oc();made.push(e);return e;};
+await mRevStart(null);
+const first=made.map(e=>e.innerHTML).filter(h=>h.includes('second engine')).pop();
+mRevGo(1);await flush();
+const second=made.map(e=>e.innerHTML).filter(h=>h.includes('second engine')).pop();
+console.log(JSON.stringify({first,second}));
+""")
+    assert "not two.”." not in out["first"]
+    assert "where this says “The target was three percent, not two.” <button" in out["first"]
+    assert "where this says “we agreed on it”. <button" in out["second"]
+
+
+@needs_node
+def test_a_title_save_toasts_the_note_the_server_sends():
+    """A future date typed in a title stays in the title, and the reply
+    says so in `note`. The toast said only 'Title saved.' or 'Saved.'."""
+    out = _run("""
+await openPage('2026-08-20 Planning',{},{title_state:'confirmed'});
+answer=(p,b)=>p==='/api/accept_meeting'?{ok:true,base:'2026-08-20 Planning',note:'NOTE-A'}:{};
+A['m-title']();__els['m-title-in']={value:'2027-03-14 Retreat'};
+A['m-title-save']();await flush();
+const a=toasts.slice(-1)[0];
+answer=(p,b)=>p==='/api/rename'?{ok:true,base:'2026-08-20 Planning',note:'NOTE-B'}:{};
+__els['pf-in']={value:'2027-03-14 Retreat',dataset:{kind:'rename',base:'2026-08-20 Planning'}};
+__els['pf-err']={hidden:true,textContent:''};
+await A['pf-save']();await flush();
+const b=toasts.slice(-1)[0];
+answer=(p,b)=>p==='/api/rename'?{ok:true,base:'2026-08-20 Planning'}:{};
+await A['pf-save']();await flush();
+console.log(JSON.stringify({a,b,c:toasts.slice(-1)[0]}));
+""")
+    assert out == {"a": "NOTE-A", "b": "NOTE-B", "c": "Saved."}
+
+
+@needs_node
+def test_the_meeting_page_has_one_h1_and_it_stays_on_a_phone():
+    """Every route had an h1 but the meeting page, whose title was a bare
+    button. The title button now sits in an h1, and the phone rule that
+    hides a route's h1 (the top bar names the route there) keeps this one."""
+    out = _run("""
+await openPage('2026-10-20 Board Prep',{},{title:'Board Prep'});
+const h=mHeadHTML(mRow());
+MP.editTitle=true;const e=mHeadHTML(mRow());MP.editTitle=false;
+console.log(JSON.stringify({h,e}));
+""")
+    assert out["h"].count("<h1") == 1
+    assert re.search(r'<h1 class="m-h1"><button class="m-title"[^>]*>Board Prep</button></h1>', out["h"])
+    assert 'id="m-title-in"' in out["e"]
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    phone = css[css.index("@media (max-width:899px)"):]
+    phone = phone[:phone.index("\n}\n")]
+    assert "h1{display:none}" in phone and "h1.m-h1{display:flex}" in phone

@@ -22,7 +22,9 @@ invented colleagues), and so is every title, number, and line. Titles follow
 the series catalog (stt/series.py), and each described meeting carries the
 current description fields: a gist, Decisions, Open questions, and topic
 tags. Three meetings are dated relative to the day the home is built, so Home
-shows a title to set, draft titles, and a voice to name. The tool
+shows a title to set, draft titles, and a voice to name. Each meeting
+carries its meeting_id and the store keys a real first write gives it, so a
+fresh home is doctor-clean (`tools/doctor.py check`). The tool
 REFUSES to run without --dir, and REFUSES any --dir that overlaps a real,
 configured data folder — it can only ever write inside its own target.
 """
@@ -33,6 +35,7 @@ import os
 import plistlib
 import shutil
 import sys
+import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from wave import open as wave_open
@@ -42,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np  # a core repo dependency (identify.py); the real loaders need it
 
-from stt import config, dates, output, speaker_text  # real writers/helpers — never invent a schema
+from stt import config, dates, output, speaker_text, unknowns  # real writers/helpers — never invent a schema
 
 # --- synthetic cast (the ONLY person names that may appear) ---
 OWNER = "Morgan Ellis"
@@ -91,6 +94,42 @@ def _words_for(text: str, start: float, end: float, speaker_id: str):
         we = round(min(end, ws + step * 0.9), 2)
         out.append({"start": ws, "end": we, "word": tok, "speaker": speaker_id})
     return out
+
+
+def _store_keys(base: str, iso: str, meta: dict, wav: Path, spec: dict) -> dict:
+    """The store keys the pipeline writes at a meeting's first write
+    (provenance.KEYS, docs/store-contract.md). Without them a fresh demo
+    home failed `tools/doctor.py check` with one missing_keys finding per
+    meeting, so every screenshot and QA run started from findings.
+
+    A source name that carries the meeting's date is a typed date. Any
+    other arrived as a synced memo, whose recorder start time is the true
+    start: the clip's length before it was processed, on the same day.
+
+    A recorder name ('YYYY-MM-DD Recording HHMM', recorder.final_name)
+    says when the capture started: provenance dates it 'recorder' at that
+    time, and so does the seed. Derived from the processing time instead,
+    Home showed 'Recording 1430' at 3:01 PM, and 'Recording 0915' read as
+    a typed date with no time."""
+    from stt import dupes, provenance
+    src = meta["source_file"]
+    stem = Path(src).stem
+    native = provenance._NATIVE.match(stem)
+    ds = spec.get("date_source") or (
+        "recorder" if native else
+        "typed" if dates.meeting_date(stem) == iso else "recorder")
+    rec = None
+    if ds == "recorder":
+        done = datetime.fromisoformat(meta["processed_at"])
+        start = done - timedelta(seconds=float(meta["duration_sec"]) + 120)
+        if native:
+            start = datetime.fromisoformat(f"{iso}T{native[1]}:{native[2]}:00")
+        if start.date().isoformat() != iso:
+            start = datetime.fromisoformat(f"{iso}T09:00:00")
+        rec = start.astimezone().isoformat(timespec="seconds")
+    return {"title": dates.title_of(base), "source_name": src,
+            "audio_fp": dupes.fingerprint(wav), "date_source": ds,
+            "recorded_at": rec}
 
 
 def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
@@ -147,6 +186,9 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
     src_mtime = round(os.path.getmtime(wav), 3)
 
     meta = {
+        # first key, as config.backfill_meeting_ids writes it (id_of reads
+        # a bounded head of the file)
+        "meeting_id": config.new_meeting_id(),
         "source_file": spec.get("source_file", f"{title}.m4a"),
         "source_mtime": src_mtime,
         "date": iso,
@@ -162,10 +204,11 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "overlap_spans": [[s["start"], s["end"]] for s in segments if s["overlap"]],
         "refine_stats": {"reassigned": 0, "smoothed": 0, "flagged": sum(1 for s in segments if s["flags"])},
     }
+    meta.update(_store_keys(base, iso, meta, wav, spec))
     if spec.get("category"):
         meta["category"] = spec["category"]
     meta["reviewed"] = bool(reviewed)
-    for k in ("title_state", "title_source", "arrived_at", "date_source"):
+    for k in ("title_state", "title_source", "arrived_at"):
         if spec.get(k):
             meta[k] = spec[k]
     for k in ("ai_title", "ai_summary"):
@@ -242,7 +285,12 @@ def write_voiceprints(home: Path, sources_seen: dict, unknown_meetings: dict):
         if info.get("archived"):
             entry["archived"] = True
         speakers[uid] = entry
-    (vp / "unknowns.json").write_text(json.dumps({"speakers": speakers}, indent=2))
+    # "next" is the monotonic counter the real store keeps (unknowns.
+    # heal_next, past the highest id as mint_uid keeps it): without it the
+    # doctor reported registry_stale_next and registry_doctor reported
+    # stale_next and exited 1 on every fresh demo home
+    reg = {"next": unknowns.next_floor({"speakers": speakers}), "speakers": speakers}
+    (vp / "unknowns.json").write_text(json.dumps(reg, indent=2))
     return registry, speakers
 
 
@@ -647,25 +695,135 @@ def build(home: Path) -> dict:
 
 # ------------------------------------------------------------- CLI / safety -
 
+# The folders the batch and the panel use, as config resolves them in a
+# fresh interpreter with no STT_HOME, no STT_PROJECT_DIR and no STT_<X>_DIR
+# override: launchd sets none of them, so this is the live configuration
+# (the checkout's stt.env, else the defaults). This process's config cannot
+# say it: under STT_HOME every path it holds is inside the scratch home.
+# The Voice Memos library is left out on purpose: resolve() would stat a
+# path inside another app's container, and the seeder never reads it.
+_LIVE_DIRS_CODE = """
+import json
+from stt import config, voicememos
+print(json.dumps([str(p) for p in (
+    config.meetings_dir(), config.source_dir(), config.recordings_dir(),
+    config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
+    config.VOICEPRINTS_DIR, voicememos.staging_dir())]))
+"""
+
+
+def _live_data_dirs():
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("STT_HOME", "STT_PROJECT_DIR", "STT_VOICEMEMOS_STAGING")
+           and not (k.startswith("STT_") and k.endswith("_DIR"))}
+    repo = Path(__file__).resolve().parent.parent
+    env["PYTHONPATH"] = str(repo)
+    try:
+        r = subprocess.run([sys.executable, "-c", _LIVE_DIRS_CODE], env=env,
+                           cwd=str(repo), capture_output=True, text=True, timeout=60)
+        return [Path(p) for p in json.loads(r.stdout.strip().splitlines()[-1])]
+    except Exception as e:
+        # no list means no guard: refuse rather than write blind
+        sys.exit(f"refusing: could not read the live data folders ({e!r}).")
+
+
+# the batch agent setup.sh installs: its WorkingDirectory is the checkout
+# the live batch runs from
+BATCH_PLIST_NAME = "Library/LaunchAgents/com.stt-workflow.batch.plist"
+# the stt.env settings that name a data folder, and the folder each one
+# defaults to inside its checkout (None: the default is outside it)
+_CHECKOUT_FOLDERS = (("STT_MEETINGS_DIR", None), ("STT_ICLOUD_DIR", None),
+                     ("STT_RECORDINGS_DIR", None),
+                     ("STT_VOICEPRINTS_DIR", "voiceprints"),
+                     ("STT_VOICEMEMOS_STAGING", "voicememos"))
+
+
+def _other_checkouts(repo: Path) -> list:
+    """The checkouts other than `repo` that can hold the live settings: the
+    main checkout of this git repository, and the folder the batch agent
+    runs from. A worktree has no stt.env of its own, so a guard that read
+    only its own checkout saw the defaults and not the real library."""
+    import subprocess
+    found = []
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=30)
+        common = r.stdout.strip()
+        if r.returncode == 0 and common:
+            common = (repo / common).resolve()
+            found.append(common.parent if common.name == ".git" else common)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        with open(Path.home() / BATCH_PLIST_NAME, "rb") as f:
+            wd = plistlib.load(f).get("WorkingDirectory")
+        if isinstance(wd, str) and wd.strip():
+            found.append(Path(wd).expanduser().resolve())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        pass
+    out, seen = [], {_fold(repo.resolve())}
+    for co in found:   # one folder on APFS, whatever its letter case
+        if _fold(co) not in seen:
+            seen.add(_fold(co))
+            out.append(co)
+    return out
+
+
+def _other_checkout_dirs(repo: Path) -> list:
+    """The data folders that the stt.env of each other checkout names
+    (_other_checkouts), and the folders inside it that hold real state."""
+    from stt import envfile
+    dirs = []
+    for co in _other_checkouts(repo):
+        env = envfile.parse(co / "stt.env")
+        for key, inside in _CHECKOUT_FOLDERS:
+            for v in (env.get(key), inside and str(co / inside)):
+                if v:
+                    p = Path(v).expanduser()
+                    dirs.append(p if p.is_absolute() else co / p)
+    return dirs
+
+
 def _real_data_dirs():
-    """The real, currently-configured folders the seeder must never write into
-    or under. Read WITHOUT STT_HOME, so these are the operator's live paths."""
+    """The real folders the seeder must never write into or under: the live
+    ones (_live_data_dirs), the ones this process's config names, and the
+    ones the other checkouts name (_other_checkout_dirs).
+
+    The live list used to be this process's config alone, and the comment
+    said it was read without STT_HOME. Nothing cleared STT_HOME, so with it
+    exported every folder was inside the scratch home, and --dir inside the
+    real library passed."""
     dirs = []
     for fn in (config.meetings_dir, config.source_dir, config.recordings_dir):
         try:
             dirs.append(Path(fn()).expanduser().resolve())
         except Exception:
             pass
+    repo = Path(__file__).resolve().parent.parent
     for p in (config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
-              config.VOICEPRINTS_DIR):
+              config.VOICEPRINTS_DIR, *_live_data_dirs(),
+              *_other_checkout_dirs(repo)):
         try:
-            dirs.append(Path(p).expanduser().resolve())
+            p = Path(p).expanduser().resolve()
         except Exception:
-            pass
+            continue
+        if p not in dirs:
+            dirs.append(p)
     return dirs
 
 
+def _fold(p: Path) -> Path:
+    """`p` as APFS compares names: letter case and Unicode composition do
+    not matter. resolve() keeps the case it is given, so ~/projects/... and
+    ~/Projects/... were two folders to the guard and one folder on disk."""
+    return Path(unicodedata.normalize("NFC", str(p)).casefold())
+
+
 def _overlaps(a: Path, b: Path) -> bool:
+    """True when `a` is `b`, or one holds the other. On a case-sensitive
+    volume the fold refuses a little more, never less."""
+    a, b = _fold(a), _fold(b)
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 

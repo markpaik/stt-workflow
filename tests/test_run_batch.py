@@ -452,6 +452,82 @@ def test_rate_sample_tags_true_concurrency_not_stale_worker_count(sandbox, monke
     assert (100.0, 1) in recorded  # the fix: solo retry tagged n_active=1, not 2
 
 
+def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
+    """The key was read from stt.env when the file finished. The batch
+    keeps the engine it loaded at start, so a model switched in the panel
+    mid-run (and a strict file run locally under a cloud setting) filed its
+    seconds under a model that did not run."""
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, rates, summarize
+
+    engines = {"A.m4a": "mlx-whisper/large-v3", "B.m4a": config.PARAKEET_MODEL,
+               "C.m4a": None}
+    for name in engines:
+        (config.ICLOUD_DIR / name).write_bytes(b"\x00" * 64)
+    # the panel switched the model to turbo after this run started
+    (config.PROJECT_DIR / "stt.env").write_text(
+        "STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+
+    def stub(src_str, dest_str, opts):
+        name = Path(src_str).name
+        return {"ok": True, "key": name, "mtime": Path(src_str).stat().st_mtime,
+                "outputs": [], "summary": "s", "who": "", "duration_sec": 600.0,
+                "stage_secs": {"transcribing": 60.0}, "asr_engine": engines[name]}
+
+    monkeypatch.setattr(run_batch, "process_one", stub)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    recorded = {}
+    real = rates.record
+    monkeypatch.setattr(rates, "record", lambda dur, ss, key, n_active=1, **k: (
+        recorded.__setitem__(len(recorded), key), real(dur, ss, key, n_active, **k)))
+    monkeypatch.setattr(sys, "argv",
+                        ["run_batch.py", "--no-diarize", "--source", str(config.ICLOUD_DIR),
+                         "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    # a result that names no engine (an older worker) keeps the setting
+    assert sorted(recorded.values()) == ["mlxwhisper:large-v3", "mlxwhisper:turbo",
+                                         "parakeet"]
+    rates._cache.update(sig=None, learned=None)
+    assert set(rates.learned()["asr"]) == {"mlxwhisper:large-v3@1", "mlxwhisper:turbo@1",
+                                          "parakeet@1"}
+
+
+def test_process_one_passes_on_the_engine_process_file_ran(sandbox, monkeypatch):
+    from pathlib import Path
+
+    from stt import config, icloud, pipeline
+
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    audio_src = src / "Sync 05012026.m4a"
+    audio_src.write_bytes(b"REAL AUDIO BYTES")
+
+    def fake_process_file(s, dest_dir=None, **kw):
+        base = Path(s).stem
+        config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+        j = config.meeting_file(base, ".json", dest_dir)
+        j.write_text("{}")
+        t = config.meeting_file(base, ".txt", dest_dir)
+        t.write_text("x")
+        return {"base": base, "txt": t, "json": j, "emb": None,
+                "duration_sec": 1.0, "n_speakers": 1, "identified": [],
+                "asr_engine": "mlx-whisper/turbo"}
+    monkeypatch.setattr(pipeline, "process_file", fake_process_file)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": False}
+    res = run_batch.process_one(str(audio_src), str(config.MEETINGS_DIR), opts)
+    assert res["asr_engine"] == "mlx-whisper/turbo"
+
+
 def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
     """The per-file pass: drafts for a meeting without an ai_summary, no-ops
     for one that already has it, and never leaves a stale 'summarizing' entry
@@ -797,6 +873,67 @@ def test_naming_a_held_file_overrides_the_park_and_clears_it(sandbox, monkeypatc
         signal.signal(signal.SIGTERM, old)
 
     assert seen == ["one.m4a"]
+    assert holds.items() == set()
+
+
+def test_a_sweep_releases_the_hold_of_a_file_that_left_the_folders(sandbox, monkeypatch, capsys):
+    """A hold is a name. A held file binned in Finder left its name in
+    holds.json, and the next recording under that name started held and
+    every sweep skipped it. A dry run and a run of another --source leave
+    the hold alone: neither one says what the watched folders hold."""
+    from stt import config, holds
+    config.ICLOUD_DIR.mkdir(parents=True, exist_ok=True)
+    (config.ICLOUD_DIR / "kept.m4a").write_bytes(b"\x00" * 64)
+    holds.hold("kept.m4a")
+    holds.hold("Weekly Sync 09012026.m4a")      # its file was binned in Finder
+    monkeypatch.setattr(run_batch, "process_one", lambda *a, **k: pytest.fail(
+        "a held file was processed"))
+
+    assert _run_main(monkeypatch, "--dry-run") == 0
+    assert holds.items() == {"kept.m4a", "Weekly Sync 09012026.m4a"}
+    other = config.PROJECT_DIR / "elsewhere"
+    other.mkdir()
+    monkeypatch.setattr(run_batch, "preflight_source", lambda *_: True)
+    import sys
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(other),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    import signal
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert holds.items() == {"kept.m4a", "Weekly Sync 09012026.m4a"}
+
+    assert _run_main(monkeypatch) == 0
+    assert holds.items() == {"kept.m4a"}
+    out = capsys.readouterr().out
+    assert "hold released: Weekly Sync 09012026.m4a" in out
+    assert "on hold, skipping: kept.m4a" in out
+
+
+def test_a_missing_or_unreadable_folder_releases_no_hold(sandbox):
+    """An unmounted drive or iCloud Drive turned off must never read as
+    "every held file was deleted": the drafts would all be transcribed."""
+    from stt import config, holds
+    holds.hold("Draft Memo.m4a")
+    root = config.PROJECT_DIR / "folders"
+    primary, extra = root / "primary", root / "extra"
+    assert holds.release_missing([primary, extra]) == []     # primary missing
+    primary.mkdir(parents=True)
+    extra.mkdir()
+    extra.chmod(0)
+    try:
+        assert holds.release_missing([primary, extra]) == []  # cannot list
+    finally:
+        extra.chmod(0o700)
+    (extra / "Draft Memo.m4a").write_bytes(b"\x00")
+    assert holds.release_missing([primary, extra]) == []     # still there
+    assert holds.items() == {"Draft Memo.m4a"}
+    (extra / "Draft Memo.m4a").unlink()
+    extra.rmdir()                                             # missing extra
+    assert holds.release_missing([primary, extra]) == ["Draft Memo.m4a"]
     assert holds.items() == set()
 
 
@@ -1706,3 +1843,39 @@ def test_the_library_in_other_letter_case_is_still_the_library(sandbox, tmp_path
     (tmp_path / "elsewhere").mkdir()
     assert not config.is_live_store(tmp_path / "elsewhere")
     assert not config.is_live_store(tmp_path / "not made yet")
+
+
+def test_the_folder_defaults_follow_stt_env_over_a_stale_environment(
+        sandbox, monkeypatch, tmp_path):
+    """--source and --dest defaulted to the import-time constants, which
+    read the environment first. The panel's folder picker put
+    STT_MEETINGS_DIR in its own environment, stt.env changed later, and
+    a spawned batch wrote meetings into the old folder, where the index
+    (is_live_store) never saw them."""
+    stale, cur = tmp_path / "X", tmp_path / "Y"
+    monkeypatch.setenv("STT_MEETINGS_DIR", str(stale))
+    monkeypatch.setattr(run_batch.config, "MEETINGS_DIR", stale)  # import-time
+    monkeypatch.setattr(run_batch.config, "ICLOUD_DIR", stale / "src")
+    (sandbox / "stt.env").write_text(f"STT_MEETINGS_DIR={cur}\n"
+                                     f"STT_ICLOUD_DIR={cur / 'src'}\n")
+    ns = run_batch.build_parser().parse_args([])
+    assert (ns.dest, ns.source) == (str(cur), str(cur / "src"))
+    assert run_batch.config.is_live_store(ns.dest)
+    # the defaults are the panel's folders: a replay stores neither
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=ns.source, dest=ns.dest), [])
+    assert "source" not in spec and "dest" not in spec
+
+
+def test_the_folder_picker_leaves_the_panels_environment_alone(sandbox, monkeypatch, tmp_path):
+    """set_folder wrote the new folder into os.environ. Every spawned
+    batch inherited it, and run.sh keeps a variable the shell set, so the
+    value went stale as soon as stt.env changed by hand or by init.sh."""
+    from gui import server
+    monkeypatch.delenv("STT_MEETINGS_DIR", raising=False)
+    pick = tmp_path / "Picked"
+    pick.mkdir()
+    assert server.set_folder("dest", str(pick), confirm=True)["ok"]
+    assert "STT_MEETINGS_DIR" not in os.environ
+    assert run_batch.config.meetings_dir() == pick
+    assert f"STT_MEETINGS_DIR={pick}" in (sandbox / "stt.env").read_text()

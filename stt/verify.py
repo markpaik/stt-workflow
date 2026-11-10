@@ -24,10 +24,27 @@ FLAG = "possible:engine_disagreement"
 # worth a human's time (them/him, can/could etc. still flag)
 FILLERS = {"um", "uh", "uhh", "mm", "mhm", "mmhmm", "hmm", "huh", "ah", "oh", "er"}
 MERGE_GAP = 0.8  # disagreement regions closer than this merge into one review item
+# A second engine that stops early (a crash mid-file, a dropped last chunk)
+# leaves the primary's tail with nothing to align against, and regions() made
+# that whole tail one disagreement: every segment in it was flagged. When this
+# many primary words or more start over STOP_SLACK seconds after the second
+# engine's last word, the tail is not compared.
+STOP_TAIL_WORDS = 5
+STOP_SLACK = MERGE_GAP
+
+
+# curly and modifier apostrophes read as the straight one. A curly one became
+# a space, so "don\u2019t" split into "don t" and flagged against "don't".
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
 
 
 def _norm(text: str) -> str:
-    text = re.sub(r"[^\w\s']", " ", text.lower())
+    text = text.lower().translate(_APOSTROPHES)
+    # a comma between digit groups goes: "1,000" against "1000" is one number
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+    text = re.sub(r"[^\w\s']", " ", text)
+    # an apostrophe at a word's edge is a quote mark, not part of the word
+    text = re.sub(r"(?<!\w)'|'(?!\w)", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -87,6 +104,19 @@ def secondary_engine(primary_engine: str):
     return "parakeet", None
 
 
+def heard(primary_words, secondary_words):
+    """The primary words the second engine's output reaches: all of them,
+    unless the second engine stopped early. Then only the words that start
+    by the end of its last word."""
+    if not secondary_words:
+        return primary_words
+    last = max(w["end"] for w in secondary_words)
+    past = sum(1 for w in primary_words if w["start"] > last + STOP_SLACK)
+    if past < STOP_TAIL_WORDS:
+        return primary_words
+    return [w for w in primary_words if w["start"] <= last]
+
+
 def run(wav, primary_words, primary_engine, progress=None):
     """Transcribe `wav` with the second engine and return (regions, engine_name)."""
     import os
@@ -114,21 +144,32 @@ def run(wav, primary_words, primary_engine, progress=None):
         # the second engine clearly failed on this audio — flagging the entire
         # transcript as "disagreement" would be noise, not signal
         return [], out["engine"]
-    return regions(primary_words, sec_words), out["engine"]
+    reached = heard(primary_words, sec_words)
+    if len(reached) < len(primary_words):
+        print(f"   second opinion stopped at {max(w['end'] for w in sec_words):.0f}s: the "
+              f"{len(primary_words) - len(reached)} words after it are not "
+              "compared", flush=True)
+    return regions(reached, sec_words), out["engine"]
 
 
 def apply_flags(segments, regs):
     """Flag every segment a disagreement region touches and attach the second
     engine's candidate text so the review dialog can offer it."""
+    found = [[] for _ in segments]
+    for r in regs:
+        ov = [min(seg["end"], r["end"]) - max(seg["start"], r["start"])
+              for seg in segments]
+        # A region flags the segments it lies in (overlap > 0). Only a region
+        # that lies in none flags the segments it touches (overlap == 0): a
+        # zero-width pure insertion, which computes exactly 0 against the
+        # segment it sits inside, or an insertion in the gap between two
+        # lines. ">= 0" for every region also flagged both neighbours of a
+        # region that only touched them at an end point.
+        inside = [i for i, o in enumerate(ov) if o > 0]
+        for i in inside or [i for i, o in enumerate(ov) if o >= 0]:
+            found[i].append(r)
     n = 0
-    for seg in segments:
-        # >= 0, not > 0: a zero-width region (a pure insertion with no
-        # inter-word gap, r["start"] == r["end"]) always computes an overlap
-        # of exactly 0 against ANY segment it sits inside — never negative
-        # unless it's genuinely outside the segment — so a strict > 0 check
-        # let every zero-width disagreement escape flagging entirely.
-        hits = [r for r in regs
-                if min(seg["end"], r["end"]) - max(seg["start"], r["start"]) >= 0]
+    for seg, hits in zip(segments, found):
         if not hits or seg.get("reviewed"):
             continue
         if FLAG not in seg.setdefault("flags", []):
@@ -154,11 +195,27 @@ def save_sidecar(base: str, regs, engine: str, dest_dir=None):
     os.replace(tmp, p)
 
 
+def _region_ok(r) -> bool:
+    return (isinstance(r, dict)
+            and all(isinstance(r.get(k), (int, float)) and not isinstance(r.get(k), bool)
+                    for k in ("start", "end"))
+            and all(isinstance(r.get(k), str) for k in ("ours", "theirs")))
+
+
 def load_sidecar(base: str):
+    """The sidecar as {"engine", "regions"}, or None. A file that does not
+    read (bad bytes, bad JSON, not an object) is None, and a region of the
+    wrong shape is dropped. Only bad JSON was caught: bad UTF-8, a list, or
+    "regions": null raised in relabel and stopped that meeting's relabel."""
     p = sidecar_path(base)
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):            # UnicodeDecodeError and JSONDecodeError too
         return None
+    if not isinstance(d, dict):
+        return None
+    regs = d.get("regions")
+    d["regions"] = [r for r in regs if _region_ok(r)] if isinstance(regs, list) else []
+    return d

@@ -5,6 +5,11 @@ For each meeting: map each NAMED speaker in the json to its diarization
 cluster by word-time overlap against the cached raw turns, then enroll that
 cluster's centroid embedding under the person's name. Read-only unless
 --apply is passed.
+
+Two kinds of named speaker are never enrolled, the same as /api/name and
+enroll.py: a meeting-only label (`local: true` in the roster: a transcript
+label, never a voiceprint), and a cluster below the quality floor
+(unknowns.floor_violation, pooled across its unnamed split twins).
 """
 import argparse
 import json
@@ -14,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from stt import config, diarcache, identify  # noqa: E402
+from stt import config, diarcache, identify, unknowns  # noqa: E402
 
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument("--apply", action="store_true",
@@ -43,17 +48,47 @@ if APPLY:
         print(f"registry.json could not be read: moved aside to {moved.name}")
 
 for base in config.meeting_bases():
-    j = json.loads(config.meeting_file(base, ".json").read_text())
-    named = {s["id"]: s["name"] for s in j.get("speakers", []) if s.get("name")}
+    # one damaged meeting is skipped, never the end of the run: a rebuild
+    # only runs after a registry loss, and a crash midway under --apply
+    # left a half-rebuilt registry
+    try:
+        j = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError) as e:
+        print(f"{base}: transcript json unreadable ({e}) — skipped")
+        continue
+    if not isinstance(j, dict) or not isinstance(j.get("speakers", []), list):
+        print(f"{base}: transcript json is not a meeting — skipped")
+        continue
+    roster = [s for s in j.get("speakers", []) if isinstance(s, dict)]
+    named = {s["id"]: s["name"] for s in roster if s.get("name") and not s.get("local")}
+    local = [s["name"] for s in roster if s.get("name") and s.get("local")]
     if not named:
+        if local:
+            print(f"\n{base}:")
+            for name in local:
+                print(f"  {name}: meeting-only label — skipped")
         continue
     emb_path = config.meeting_file(base, ".emb.npz")
     diar_path = config.meeting_file(base, ".diar.npz")
     if not emb_path.exists() or not diar_path.exists():
         print(f"{base}: MISSING caches — skipped")
         continue
-    embs = dict(np.load(emb_path).items())
-    raw_turns, _, _, _ = diarcache.load(diar_path)
+    try:
+        with np.load(emb_path, allow_pickle=False) as z:
+            embs = {k: z[k] for k in z.files}
+    except Exception as e:
+        print(f"{base}: embedding cache unreadable ({e}) — skipped")
+        continue
+    if not embs:
+        print(f"{base}: embedding cache holds no clusters — skipped")
+        continue
+    try:
+        raw_turns, _, cent_emb, _ = diarcache.load(diar_path)
+    except (OSError, ValueError) as e:
+        print(f"{base}: diarization cache unreadable ({e}) — skipped")
+        continue
+    stats = unknowns.talk_stats(raw_turns)
+    unnamed = [s["id"] for s in roster if not s.get("name")]
 
     # cluster -> list of (start,end) spans
     spans = {}
@@ -70,6 +105,8 @@ for base in config.meeting_bases():
         return s
 
     print(f"\n{base}:")
+    for name in local:
+        print(f"  {name}: meeting-only label — skipped")
     for sid, name in named.items():
         mids = [(w["start"] + w["end"]) / 2 for w in j.get("words", [])
                 if w.get("speaker") == sid]
@@ -81,10 +118,19 @@ for base in config.meeting_bases():
         frac, cluster = scored[0]
         runner = scored[1][0] if len(scored) > 1 else 0.0
         ok = frac >= 0.6 and frac - runner >= 0.2
+        verdict = "ENROLL" if ok else "AMBIGUOUS — skipped"
+        if ok:
+            veto = unknowns.floor_violation(unknowns.pooled_stats(
+                cluster, cent_emb, stats, unnamed))
+            if veto:
+                ok, verdict = False, f"BELOW THE FLOOR — skipped ({veto})"
         print(f"  {name}: cluster={cluster} overlap={frac:.2f} "
-              f"(runner-up {runner:.2f}) {'ENROLL' if ok else 'AMBIGUOUS — skipped'}")
+              f"(runner-up {runner:.2f}) {verdict}")
         if ok and APPLY:
-            identify.enroll(name, embs[cluster], source=base)
+            try:
+                identify.enroll(name, embs[cluster], source=base)
+            except ValueError as e:      # a bad name or a zero-norm centroid
+                print(f"  {name}: not enrolled ({e})")
 
 if APPLY:
     reg = identify.load_registry()

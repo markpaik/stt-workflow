@@ -104,9 +104,67 @@ def _get_model():
     return _model
 
 
+# one model "word": a run with no whitespace and none of the punctuation the
+# model is allowed to change. _normalize_for_model splits text into exactly these.
+_PIECE_RE = re.compile(r"[^\s.,!?;:]+")
+# an abbreviation whose last period is part of the word: 'U.S.', 'e.g.',
+# 'a.m.', 'Ph.D.'. Letters only, so the period after '3.5.' still ends a
+# sentence and the model's mark replaces it.
+_ABBREV_RE = re.compile(r"(?:[^\W\d_]{1,4}\.){2,}")
+
+
 def _normalize_for_model(text: str) -> str:
     text = re.sub(r"[.,!?;:]", " ", text.lower())
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _restore_inner_punct(out: str, text: str) -> str:
+    """Put back the punctuation INSIDE an original token: '3.5', '9:30',
+    '$1,200', 'v1.2', 'jo.doe@example.org'.
+
+    The model input splits such a token into separate words ('3 5'), and the
+    model punctuates the pieces as words. The identity check ignores
+    punctuation, so '3 5' would pass it and ship. This rebuilds each such token
+    from the ORIGINAL text: its inner punctuation verbatim, the model's casing
+    on its first piece only (a sentence-initial 'v1.2' may become 'V1.2'),
+    and the model's punctuation after it (or the original's when the model put
+    none). Anything the model wrote between the pieces is dropped. The last
+    period of an abbreviation ('e.g.') is part of the token: the model's
+    mark goes after it ('e.g.,'), never in its place ('e.g,').
+
+    Call it only on output that passed the identity check. Returns the
+    original text if the pieces do not line up (they always should)."""
+    spans, n = [], 0
+    for tok in text.split():
+        pieces = list(_PIECE_RE.finditer(tok))
+        if len(pieces) >= 2:
+            a, b = pieces[0].start(), pieces[-1].end()
+            trail = re.match(r"[.,!?;:]*", tok[b:]).group()
+            core, abbrev = tok[a:b], False
+            if trail.startswith(".") and _ABBREV_RE.fullmatch(core + "."):
+                core, trail, abbrev = core + ".", trail[1:], True
+            spans.append((n, len(pieces), core, pieces[0].group(), trail, abbrev))
+        n += len(pieces)
+    if not spans:
+        return out
+    got = list(_PIECE_RE.finditer(out))
+    if len(got) != n:
+        return text
+    res, pos = [], 0
+    for first, count, core, head, trail, abbrev in spans:
+        start, end = got[first].start(), got[first + count - 1].end()
+        model_head = got[first].group()
+        if model_head.lower() == head.lower() and len(model_head) == len(head):
+            core = model_head + core[len(head):]
+        if abbrev and out[end:end + 1] == ".":
+            end += 1        # the model's period is the abbreviation's own
+        tail = re.match(r"[.,!?;:]*", out[end:]).group()
+        res += [out[pos:start], core]
+        if not tail:
+            res.append(trail)
+        pos = end
+    res.append(out[pos:])
+    return "".join(res)
 
 
 def _repair_unk(out: str, norm: str) -> str:
@@ -140,7 +198,10 @@ def _accept(text: str, norm: str, sentences) -> str:
     # ignoring case/punctuation (exactly what the model is allowed to change).
     if _normalize_for_model(out).split() != norm.split():
         return text
-    return out or text
+    # the check above ignores punctuation, so a token whose punctuation is
+    # part of the word ('3.5' fed to the model as '3 5') must be rebuilt from
+    # the original, or '3 5' ships as the transcript text
+    return _restore_inner_punct(out, text) if out else text
 
 
 def restore(text: str) -> str:

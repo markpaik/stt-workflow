@@ -43,6 +43,24 @@ def test_fingerprint_never_reads_a_dataless_icloud_file(sandbox, monkeypatch):
     assert dupes.fingerprint(p) is None
 
 
+def test_a_dataless_file_gets_its_fingerprint_once_the_download_ends(sandbox, monkeypatch):
+    """An iCloud download keeps the size and the mtime, so the cache key does
+    not move. A cached None hid the 'identical' proof from the long-lived
+    panel until a restart."""
+    from stt import icloud
+    p = sandbox / "cloud.m4a"
+    p.write_bytes(b"y" * 4096)
+    real = icloud._fully_present
+    dupes._fp_cache.clear()
+    monkeypatch.setattr(icloud, "_fully_present", lambda _p: False)
+    assert dupes.fingerprint(p) is None
+    monkeypatch.setattr(icloud, "_fully_present", real)    # download done
+    fp = dupes.fingerprint(p)
+    assert fp is not None
+    dupes._fp_cache.clear()
+    assert dupes.fingerprint(p) == fp
+
+
 # ------------------------------------------------------- source duplicates --
 
 def _meeting(base, source_file, audio=b"", text="", dur=600.0):
@@ -202,6 +220,29 @@ def test_the_cache_follows_an_edited_transcript(sandbox):
     os.utime(j, (j.stat().st_atime + 10, j.stat().st_mtime + 10))
     assert dupes.cache_is_current(config.meetings_dir()) is False
     assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
+
+
+def test_the_cache_follows_a_replace_that_keeps_the_mtime(sandbox):
+    """cp -p, rsync -t or a backup restore puts new text under the old mtime.
+    The sketch keyed on the mtime alone stayed, and the pair list stayed
+    wrong both ways until the next real edit."""
+    import os
+    body = _words(400)
+    _meeting("A Mtg 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("B Mtg 05012026", "b.m4a", text=_words(400, "q"), dur=600.0)
+    assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
+
+    j = mfile("B Mtg 05012026", ".json")
+    st = j.stat()
+    d = json.loads(j.read_text())
+    d["segments"] = [{"text": body}]          # now the same text as A
+    j.write_text(json.dumps(d))
+    os.utime(j, (st.st_atime, st.st_mtime))   # the old mtime, kept
+    assert j.stat().st_mtime == st.st_mtime
+    assert dupes.cache_is_current(config.meetings_dir()) is False
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert [(p["a"], p["b"]) for p in pairs] == [("A Mtg 05012026", "B Mtg 05012026")]
+    assert dupes.cache_is_current(config.meetings_dir()) is True
 
 
 def test_similarity_is_an_honest_jaccard_estimate():
@@ -484,3 +525,89 @@ def test_the_dupes_endpoint_publishes_whether_a_scan_has_run(sandbox):
     assert dupes.cache_scanned() is True
     src = (_srv.Path(_srv.__file__).resolve().parent / "server.py").read_text()
     assert '"scanned": dupes.cache_scanned()' in src
+
+
+def test_a_cache_file_of_the_wrong_shape_reads_empty_and_the_scan_repairs_it(sandbox):
+    """dupes_cache.json is valid JSON of the wrong shape (a list, null, a
+    pair or a sketch with the wrong fields). Every reader raised
+    AttributeError, the scan that would rewrite the file raised too, and
+    the cache stayed broken until someone deleted it."""
+    body = _words(400)
+    _meeting("Standup 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("Standup 05022026", "b.m4a", text=body, dur=600.0)
+    d = config.meetings_dir()
+    for payload in ("[]", "null", '"x"', '{"sketches": [], "pairs": {}}',
+                    '{"pairs": [5, null, {"a": 1, "b": "B"}], "sig": "s"}',
+                    '{"sketches": {"Standup 05012026": {"mtime": "x", "words": 1,'
+                    ' "hashes": 5}, "Standup 05022026": 7}}'):
+        dupes.cache_path().write_text(payload)
+        assert dupes.cached_pairs(d) == [], payload
+        dupes.cache_truncated(), dupes.cache_scanned(), dupes.cache_is_current(d)
+        pairs = dupes.similar_meetings(dest_dir=d)
+        assert [(p["a"], p["b"]) for p in pairs] == \
+            [("Standup 05012026", "Standup 05022026")], payload
+        # the scan saved a good file over the bad one
+        assert dupes.cache_is_current(d) and len(dupes.cached_pairs(d)) == 1, payload
+
+
+def test_a_meeting_json_of_the_wrong_shape_never_stops_the_scan(sandbox):
+    """similar_meetings caught only OSError and ValueError. A valid json of
+    another shape (a top-level list, a string or null segment, a number for
+    the word list) raised AttributeError or TypeError. The scan saved no
+    answer, so no pair was found for any meeting while that file existed."""
+    body = _words(400)
+    _meeting("Standup 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("Standup 05022026", "b.m4a", text=body, dur=600.0)
+    for base, raw in (("Odd List 05032026", "[]"),
+                      ("Odd Text 05032026", '{"segments": ["hello"]}'),
+                      ("Odd Null 05032026", '{"segments": [null, {"text": "a b"}]}'),
+                      ("Odd Words 05032026",
+                       '{"segments": [{"text": "a b c d e f"}], "words": 5}')):
+        mfile(base, ".json").write_text(raw)
+        mfile(base, ".txt").write_text("stub")
+    d = config.meetings_dir()
+    pairs = dupes.similar_meetings(dest_dir=d)
+    assert [(p["a"], p["b"]) for p in pairs] == [("Standup 05012026", "Standup 05022026")]
+    assert dupes.cache_is_current(d), "a scan that ends saves its answer"
+    assert dupes.transcript_text("Odd List 05032026", d) == ""
+    assert dupes.transcript_text("Odd Null 05032026", d) == "a b"
+
+
+def test_two_different_meetings_that_hold_one_asr_loop_are_not_a_match(sandbox):
+    """A silent recording that ASR turns into "thank you" over and over holds
+    2 distinct shingles. Two such meetings of one length had the same sketch
+    and read as a 1.0 duplicate. A transcript too thin to judge is not
+    paired. Short real speech still is."""
+    _meeting("Alpha 05012026", "a.m4a", text="thank you " * 200, dur=600.0)
+    _meeting("Beta 05022026", "b.m4a", text="thank you " * 300, dur=600.0)
+    phrase = "please remember to subscribe to the channel for more videos like this "
+    _meeting("Gamma 05032026", "c.m4a", text=phrase * 40, dur=900.0)
+    _meeting("Delta 05042026", "d.m4a", text=phrase * 45, dur=900.0)
+    d = config.meetings_dir()
+    assert dupes.similar_meetings(dest_dir=d) == []
+    # forty words of speech that does not repeat are enough to compare
+    _meeting("Clip 05052026", "e.m4a", text=_words(40), dur=30.0)
+    _meeting("Clip Redo 05052026", "f.m4a", text=_words(40), dur=30.0)
+    assert [(p["a"], p["b"]) for p in dupes.similar_meetings(dest_dir=d)] == \
+        [("Clip 05052026", "Clip Redo 05052026")]
+
+
+def test_same_bytes_sees_an_edit_the_sampled_fingerprint_misses(sandbox):
+    """The fingerprint hashes the size and the first, middle and last
+    megabyte. A same-size edit between those windows keeps the fingerprint,
+    so the bulk delete needs a full compare to call two files identical."""
+    body = bytes(range(256)) * (4 * 1024 * 4)          # 4 MB
+    edited = bytearray(body)
+    off = dupes.CHUNK + 100000
+    edited[off:off + 100] = b"\0" * 100
+    a, b, c = sandbox / "a.m4a", sandbox / "b.m4a", sandbox / "c.m4a"
+    a.write_bytes(body)
+    b.write_bytes(bytes(edited))
+    c.write_bytes(body)
+    assert dupes.fingerprint(a) == dupes.fingerprint(b), "the sample misses it"
+    assert dupes.same_bytes(a, b) is False
+    assert dupes.same_bytes(a, c) is True
+    d = sandbox / "d.m4a"
+    d.write_bytes(body[:-1])
+    assert dupes.same_bytes(a, d) is None, "sizes differ: no full compare"
+    assert dupes.same_bytes(a, sandbox / "missing.m4a") is False

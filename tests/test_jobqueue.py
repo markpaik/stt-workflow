@@ -400,3 +400,31 @@ def test_every_timeline_row_carries_its_save_stamp(sandbox):
     assert rows and all("generated_at" in r for r in rows)
     row = next(r for r in rows if r["id"] == "Some Meeting 05012026")
     assert row["generated_at"] == "2026-05-01T09:00:00"
+
+
+def test_a_start_after_a_timed_out_stop_keeps_the_worker(sandbox):
+    """stop() set _stopping, timed out on the job in hand, and start() saw
+    the live thread and returned. The worker exited after that job, and a
+    later submit sat queued forever."""
+    ran, release = [], threading.Event()
+
+    class Slow(jobqueue.RelabelQueue):
+        def _execute(self, job):
+            if job.reason == "slow":
+                release.wait(10)
+            ran.append(job.reason)
+
+    q = Slow().start()
+    try:
+        q.submit(["Standup 05012026"], "slow")
+        _until(lambda: q.snapshot()["running"], what="the slow job to start")
+        assert q.stop(timeout=0.05) is False      # the job in hand outlasts it
+        q.start()
+        release.set()
+        _until(lambda: "slow" in ran, what="the slow job to end")
+        q.submit(["Standup 05022026"], "after")
+        _until(lambda: "after" in ran, what="the later job to run")
+        assert q._thread is not None and q._thread.is_alive()
+    finally:
+        release.set()
+        q.stop(timeout=5)

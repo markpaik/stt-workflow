@@ -12,7 +12,9 @@ titles) in doctor.json for the panel.
    config.migration_dir() (mode 700), and journals the copy with the file's
    hash before and after.
 3. Undo restores a file from its copy only where the file still holds what
-   the fix wrote. A file changed since is kept and reported.
+   the fix wrote. A file changed since is kept and reported. A removed
+   stale stopping.flag is never put back, and undo names what it cannot
+   reverse (a log rotation, the calibration cap, a mode change).
 
 What `fix` repairs (section 12, minus the centroid rebuild, which the plan
 drops):
@@ -22,22 +24,35 @@ drops):
   to the folder layout, a record is relinked to the meeting whose stored
   source time matches it, then to the one whose title words and date match;
   same-day twins that tie on title words are paired one to one by time
-  (`relink_tie`); anything left is moved to manifest_retired.json;
+  (`relink_tie`); anything left is moved to manifest_retired.json (never
+  while the store holds no meeting: unmounted, every record looks stale);
 - a live meeting with no manifest record gets one, keyed by its
   `source_name` with its `source_mtime`, so a re-dropped source is skipped;
-- queue holds on files that no longer exist;
+- queue holds on files that no longer exist (never while the source
+  folder is missing);
 - failure dismissals whose name's latest recorded result is a success;
 - a stopping.flag left behind when no batch is running;
 - logs over their cap and calibration.jsonl over its cap.
 
 What it only reports: a folder name that disagrees with its `title` and
-date, meetings missing the store keys (tools/backfill_keys.py adds them),
-scratch audio left in work/, an stt.env value that cannot be read and is
-replaced by its default (`bad_setting`), and (with deep=True) a stored
+date, a meeting json that is not readable (`unreadable_json`), a
+manifest.json that is not readable or not a manifest
+(`manifest_unreadable`), a manifest record that is not an object
+(`manifest_bad_record`), a meetings
+folder that is missing or holds no meeting while the manifest has
+records (`store_missing`), a source folder that is missing while files
+are held (`source_missing`), a folder with no meeting json
+(`folder_without_json`), meetings missing the store keys
+(tools/backfill_keys.py adds them), scratch audio left in work/, an
+stt.env value that cannot be read and is replaced by its default
+(`bad_setting`), a missing Hugging Face token (`diarizer_no_token`), a
+speakrs helper, model set or sandbox-exec that is missing so pyannote
+runs instead (`diarizer_fallback`), and (with deep=True) a stored
 duration longer than the audio.
 """
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -73,13 +88,66 @@ def _store(store):
 
 
 def _manifest() -> dict:
-    m = fj.read_json(config.MANIFEST_PATH) or {}
-    m.setdefault("processed", {})
+    """The manifest as the checks read it: only its records that are
+    objects. A file of the wrong shape reads as empty (_manifest_problem
+    names it), and a record of the wrong shape is skipped
+    (_bad_records names it). Every one raised in check before."""
+    m = fj.read_json(config.MANIFEST_PATH)
+    m = m if isinstance(m, dict) else {}
+    proc = m.get("processed")
+    m["processed"] = ({k: r for k, r in proc.items() if isinstance(r, dict)}
+                      if isinstance(proc, dict) else {})
     return m
 
 
+def _bad_records() -> list:
+    """Manifest keys whose record is not an object ("x", null, a list)."""
+    m = fj.read_json(config.MANIFEST_PATH)
+    proc = m.get("processed") if isinstance(m, dict) else None
+    if not isinstance(proc, dict):
+        return []
+    return sorted(k for k, r in proc.items() if not isinstance(r, dict))
+
+
+def _num(v):
+    """A finite number from a stored value, or None. A hand edit can leave
+    text, NaN or an infinity there: float() raised on text, and a
+    timestamp raised on NaN or an infinity."""
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _manifest_problem():
+    """Why manifest.json cannot be read, or None (no file is no problem).
+    A truncated or damaged file read as an empty manifest: check named
+    nothing, fix planned a record for every meeting over it, and the next
+    batch treated every source as new. The registry's own check reports a
+    damaged registry.json, so this reports the manifest the same way."""
+    try:
+        raw = config.MANIFEST_PATH.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"cannot be read ({e.strerror or e})"
+    try:
+        m = json.loads(raw)
+    except ValueError:              # bad JSON, or bytes that are not UTF-8
+        return "is not readable JSON, so the next batch run treats every source as new"
+    if not isinstance(m, dict) or not isinstance(m.get("processed", {}), dict):
+        return "does not hold a processed-files object"
+    return None
+
+
 def _core(rec) -> list:
-    return [o for o in (rec.get("outputs") or []) if str(o).endswith((".txt", ".json"))]
+    outs = rec.get("outputs")
+    if not isinstance(outs, list):
+        return []
+    return [o for o in outs if isinstance(o, str) and o.endswith((".txt", ".json"))]
 
 
 def _stale(rec) -> bool:
@@ -91,7 +159,7 @@ def _meetings(store) -> dict:
     out = {}
     for b in config.meeting_bases(store):
         d = fj.read_json(config.meeting_file(b, ".json", store))
-        if d is not None:
+        if isinstance(d, dict):     # a list or a string is no meeting either
             out[b] = d
     return out
 
@@ -135,8 +203,14 @@ def manifest_plan(store=None) -> list:
       "key": manifest key, "outputs": new outputs (not for retire),
       "meeting": base (not for retire), "mtime": (link only)}]"""
     store = _store(store)
+    if _manifest_problem():
+        return []                   # never plan, or write, over a damaged file
     m = _manifest()
     meets = _meetings(store)
+    if not meets:
+        # an unmounted, moved or empty store makes every record look stale:
+        # retiring them all would re-transcribe every source (_store_away)
+        return []
     linked = _linked(m)
     jpath = {b: str(config.meeting_file(b, ".json", store)) for b in meets}
     free = {b for b in meets if jpath[b] not in linked}
@@ -157,13 +231,10 @@ def manifest_plan(store=None) -> list:
                 free.discard(old_base)
                 continue
         # R1 by time: the meeting whose stored source time is this record's
-        try:
-            rm = float(rec.get("mtime"))
-        except (TypeError, ValueError):
-            rm = None
+        rm = _num(rec.get("mtime"))
         hits = [b for b in free if rm is not None
-                and meets[b].get("source_mtime") is not None
-                and abs(float(meets[b]["source_mtime"]) - rm) < 1.0]
+                and _num(meets[b].get("source_mtime")) is not None
+                and abs(_num(meets[b]["source_mtime"]) - rm) < 1.0]
         if len(hits) == 1:
             b = hits[0]
             acts.append({"op": "relink_mtime", "key": key, "meeting": b,
@@ -173,7 +244,10 @@ def manifest_plan(store=None) -> list:
         # R1 by title words and date
         day = dates.meeting_date(os.path.splitext(key)[0])
         if day is None and rm is not None:
-            day = date.fromtimestamp(rm).isoformat()
+            try:
+                day = date.fromtimestamp(rm).isoformat()
+            except (OverflowError, OSError, ValueError):
+                day = None          # a time past what the platform holds
         kt = _tokens(key) | _tokens(old_base)
         hits = [b for b in free if meets[b].get("date") == day
                 and _jaccard(kt, _tokens(b)) >= TITLE_MATCH_MIN]
@@ -188,13 +262,16 @@ def manifest_plan(store=None) -> list:
             continue
         acts.append({"op": "retire", "key": key})
     acts += _pair_ties(ties, free, meets, store)
-    # R3: a live meeting with no record, rebuilt from its own keys
+    # R3: a live meeting with no record, rebuilt from its own keys (a key
+    # whose record is of the wrong shape is reported, never linked over)
+    bad = set(_bad_records())
     for b in sorted(free):
         d = meets[b]
-        key, mt = d.get("source_name"), d.get("source_mtime")
-        if not key or mt is None or key in m["processed"]:
+        key, mt = d.get("source_name"), _num(d.get("source_mtime"))
+        if (not isinstance(key, str) or not key or mt is None
+                or key in m["processed"] or key in bad):
             continue
-        acts.append({"op": "link", "key": key, "meeting": b, "mtime": float(mt),
+        acts.append({"op": "link", "key": key, "meeting": b, "mtime": mt,
                      "outputs": [jpath[b], str(config.meeting_file(b, ".txt", store))]})
     return acts
 
@@ -204,7 +281,7 @@ def _rec_time(rec) -> str:
     if rec.get("processed_at"):
         return str(rec["processed_at"])
     try:
-        return datetime.fromtimestamp(float(rec.get("mtime"))).isoformat(timespec="seconds")
+        return datetime.fromtimestamp(_num(rec.get("mtime"))).isoformat(timespec="seconds")
     except (TypeError, ValueError, OSError, OverflowError):
         return ""
 
@@ -239,16 +316,48 @@ def _pair_ties(ties, free: set, meets: dict, store: Path) -> list:
     return acts
 
 
+def _store_away(store) -> int:
+    """Stale manifest records left alone because the store holds no
+    meeting (unmounted, moved or empty): every record looked stale then,
+    and fix retired them all. 0 when the store has meetings."""
+    if config.meeting_bases(store) or _manifest_problem():
+        return 0
+    return sum(1 for rec in _manifest()["processed"].values() if _stale(rec))
+
+
+def _there(p: Path, test=Path.exists) -> bool:
+    """`test(p)`, where a denied stat (a folder macOS privacy guards, a
+    parent with no search right) counts as there: check and fix raised
+    PermissionError on it. A hold is released only on a file known gone."""
+    try:
+        return test(p)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _source_away() -> bool:
+    """The source folder is not there (unmounted or moved): every held
+    name looked gone then, and fix released the hold on a private file,
+    so the next batch ran it."""
+    return not _there(config.source_dir(), Path.is_dir)
+
+
 def _stale_holds() -> list:
     from . import holds
     names = []
+    if _source_away():
+        return names
     try:
-        cur = json.loads(holds.PATH.read_text())
-    except (OSError, ValueError):
+        # holds' own reader: a file of the wrong shape holds no names (a
+        # JSON string iterated its letters here, a number raised)
+        cur = holds.items()
+    except OSError:
         return names
     dirs = config.source_dirs()
-    for n in cur or []:
-        if not any((d / n).exists() for d in dirs):
+    for n in cur:
+        if not any(_there(d / n) for d in dirs):
             names.append(n)
     return sorted(names)
 
@@ -271,8 +380,39 @@ def _stale_dismissals() -> list:
     return sorted(n for n in d if n in latest and latest[n].get("ok") is True)
 
 
+def _folders_without_json(store) -> list:
+    """[(folder, why)] for each folder in the store that holds no
+    <name>.json: an interrupted run or a hand copy. No reader lists one,
+    and Archive, Delete and tools/purge.py all refuse it as no meeting.
+    The batch's start-up sweep (run_batch._sweep_shells) removes one that
+    holds no audio. Checked only while no batch runs: a run writing a
+    meeting makes its folder just before the json."""
+    out = []
+    try:
+        folders = sorted(p for p in Path(store).iterdir()
+                         if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        return out
+    for p in folders:
+        if (p / f"{p.name}.json").exists():
+            continue
+        try:
+            audio = any(f.suffix.lower() in config.AUDIO_SUFFIXES for f in p.iterdir())
+        except OSError:
+            audio = False
+        out.append((p.name, (
+            "no meeting json, but it holds audio: move the audio to a watched "
+            "folder to transcribe it again, or delete the folder in Finder")
+            if audio else
+            "no meeting json and no audio: the next batch start removes it"))
+    return out
+
+
 def _batch_running() -> bool:
-    return bool(status.read().get("running"))
+    """A dead batch's stale running flag does not count: a hard kill left
+    it true, so check skipped the stop flag and the scratch audio, and fix
+    refused, until the next batch ran (status.batch_running)."""
+    return status.batch_running()
 
 
 def _stop_flag():
@@ -287,6 +427,17 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
     if registry:
         out += [_from_registry(f) for f in registry_doctor.check(voiceprints_dir, store)]
     meets = _meetings(store)
+    for b in config.meeting_bases(store):
+        if b not in meets:
+            # meeting_bases counts it, but no reader can: the panel lists
+            # it nowhere, and every other check here skipped it in silence
+            out.append(Finding("unreadable_json", b,
+                               f"{b}.json is not readable JSON, or holds no meeting "
+                               "object. Restore it from a backup, or delete the "
+                               "folder in Finder", False))
+    if not _batch_running():
+        for name, why in _folders_without_json(store):
+            out.append(Finding("folder_without_json", name, why, False))
     for b, d in meets.items():
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:
@@ -298,8 +449,11 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         raw = d.get("title") or dates.title_of(b)
         stamped = {(dates.stamp(t, d["date"]) if d.get("date") else t)
                    for t in (names.file_title(raw) or raw, raw)}
-        wants = {n + dates.twin_suffix(b)
-                 for n in stamped | {config.cap_name(n) for n in stamped}}
+        # a title that ends in its own '(2)' ('Sprint (2)') gives a folder
+        # whose tail reads as a twin suffix: the folder that holds just the
+        # stamped title is in step too, not only the one with a suffix added
+        named = stamped | {config.cap_name(n) for n in stamped}
+        wants = named | {n + dates.twin_suffix(b) for n in named}
         if b not in wants:
             why = "folder name differs from its title and date"
             if not dates.is_iso_form(b) and dates.meeting_date(b):
@@ -307,11 +461,38 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
             out.append(Finding("name_mismatch", b, why, False))
         if deep:
             a = config.meeting_audio(b, store)
-            if a is not None and d.get("duration_sec"):
+            dur = _num(d.get("duration_sec"))
+            if a is not None and dur:
                 real = provenance.probe_tags(a).get("duration")
-                if real and float(d["duration_sec"]) > real + 60:
+                if real and dur > real + 60:
                     out.append(Finding("duration_mismatch", b,
                                        "stored length is longer than the audio", False))
+    mp = _manifest_problem()
+    if mp:
+        out.append(Finding("manifest_unreadable", config.MANIFEST_PATH.name,
+                           f"manifest.json {mp}. Restore it from a backup, or "
+                           "move it aside and run fix, which links each meeting "
+                           "back from its own keys", False))
+    for k in _bad_records():
+        out.append(Finding("manifest_bad_record", k,
+                           "manifest record is not an object, so the batch cannot "
+                           "read it. Restore manifest.json from a backup", False))
+    away = _store_away(store)
+    if away:
+        out.append(Finding("store_missing", store.name,
+                           f"the meetings folder is missing or holds no meeting, "
+                           f"so {away} manifest record(s) point at nothing. Fix "
+                           "retires none of them until the folder is back", False))
+    if _source_away():
+        from . import holds
+        try:
+            n = len(holds.items())
+        except OSError:
+            n = 0
+        if n:
+            out.append(Finding("source_missing", config.source_dir().name,
+                               f"the source folder is not there, so fix keeps "
+                               f"all {n} queue hold(s) until it is back", False))
     for a in manifest_plan(store):
         kind = {"flat": "manifest_flat", "relink_mtime": "manifest_stale",
                 "relink_title": "manifest_stale", "relink_tie": "manifest_stale",
@@ -344,6 +525,34 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
                            "over its cap", True))
     for name, why in config.setting_problems():
         out.append(Finding("bad_setting", name, why, False))
+    for kind, detail in diarizer_findings():
+        out.append(Finding(kind, "diarizer", detail, False))
+    return out
+
+
+def diarizer_findings() -> list:
+    """(kind, detail) pairs for the speaker engine. Reads only.
+
+    diarizer_no_token: no Hugging Face token. Both engines need the gated
+    pyannote embedder (naming and per-turn embeddings), so the batch stops
+    at its start until HF_TOKEN is set. diarizer_fallback: STT_DIARIZER is
+    speakrs, but its helper, its Core ML models or sandbox-exec is missing,
+    so every file takes the slower pyannote path. Before this, the only
+    trace of either was one log line per file."""
+    from . import speakrs_diar
+    out = []
+    if not (config._env_file().get("HF_TOKEN") or config.resolve_hf_token()):
+        out.append(("diarizer_no_token",
+                    "no Hugging Face token: the batch stops at its start until "
+                    "HF_TOKEN is set in stt.env (both speaker engines need the "
+                    "gated pyannote embedder)"))
+    if config.diarizer_now() == "speakrs":
+        ok, why = speakrs_diar.available()
+        if ok and not Path(speakrs_diar.SANDBOX_EXEC).exists():
+            ok, why = False, f"{speakrs_diar.SANDBOX_EXEC} missing"
+        if not ok:
+            out.append(("diarizer_fallback",
+                        f"{why}; every file uses the slower pyannote path"))
     return out
 
 
@@ -421,6 +630,11 @@ class _Run:
             shutil.copytree(d, copy, ignore=shutil.ignore_patterns("*.lock"))
         self.pending[str(d)] = {"dir": str(d), "copy": str(copy) if d.is_dir() else None,
                                 "hashes_before": _dir_hashes(d)}
+
+    def note(self, text: str):
+        """Journal a change this run made that undo cannot reverse, so the
+        undo can say so instead of claiming the whole run is back."""
+        self.journal.write({"run": self.id, "not_undoable": text})
 
     def close(self):
         for k, e in self.pending.items():
@@ -527,14 +741,20 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
         hk = housekeeping.rotate_all()
         if hk["logs"]:
             done.append(f"rotated {len(hk['logs'])} log(s)")
+            run.note(f"rotated {len(hk['logs'])} log(s): the old lines are in "
+                     "the .gz files beside each log")
         if hk["calibration"]:
             done.append("capped calibration.jsonl")
+            run.note("capped calibration.jsonl: the old lines are in "
+                     "calibration.jsonl.1.gz")
         # a mode change is not journaled: it only takes away other accounts'
         # access, and `chmod` puts it back if ever wanted
         if kinds["loose_mode"]:
             n = config.tighten_private_paths()
             if n:
                 done.append(f"made {n} private file(s) or folder(s) owner-only")
+                run.note(f"made {n} private file(s) or folder(s) owner-only: "
+                         "chmod gives other accounts their access back")
     finally:
         run.close()
     return {"dry_run": False, "plan": plan, "run": run.id,
@@ -543,9 +763,19 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
 
 def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
     """Restore every file the run changed, where the file still holds what
-    the run wrote. A file changed since is kept and reported."""
-    restored, kept = [], []
+    the run wrote. A file changed since is kept and reported.
+
+    Two things are not put back, and the result names both. A stale
+    stopping.flag the fix removed stays removed (`skipped`): it was a stop
+    request for a batch long gone, and restoring it only made the next
+    check report it again. A log rotation, the calibration cap and a mode
+    change are not journaled as file copies (`not_undone`): the old lines
+    stay in the gzip generations, and chmod reverses a mode."""
+    restored, kept, skipped, not_undone = [], [], [], []
     for e in reversed(fj.entries(run_id, journal_dir)):
+        if "not_undoable" in e:
+            not_undone.append(e["not_undoable"])
+            continue
         if "dir" not in e and "file" not in e:
             continue                  # a note (a tie pairing), not a change
         if "dir" in e:
@@ -566,6 +796,9 @@ def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
             restored.append(e["dir"])
             continue
         p = Path(e["file"])
+        if p.name == _stop_flag().name:
+            skipped.append(e["file"])
+            continue
         if _sha(p) != e.get("sha_after"):
             kept.append(e["file"])
             continue
@@ -577,7 +810,8 @@ def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
                 shutil.copy2(e["copy"], tmp)
                 os.replace(tmp, p)
         restored.append(e["file"])
-    return {"run": run_id, "restored": restored, "kept": kept, "dry_run": dry_run}
+    return {"run": run_id, "restored": restored, "kept": kept, "skipped": skipped,
+            "not_undone": list(reversed(not_undone)), "dry_run": dry_run}
 
 
 def run_check_at_batch_end(store=None):

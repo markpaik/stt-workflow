@@ -14,7 +14,6 @@ Read-only: it opens rates.jsonl and nothing else.
     ./run.sh py tools/eta_backtest.py path/to/rates.jsonl
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -93,12 +92,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("path", nargs="?", default=str(rates.RATES_LOG))
     args = ap.parse_args(argv)
-    rows = []
-    for ln in Path(args.path).read_text().splitlines():
-        try:
-            rows.append(json.loads(ln))
-        except json.JSONDecodeError:
-            continue
+    # rates' own reader: a line that is JSON but not a usable row is skipped
+    rows = rates.parse_rows(Path(args.path).read_text(errors="replace").splitlines())
     rows.sort(key=lambda r: r.get("at") or "")   # time order, stable for ties
     recs = replay(rows)
     print(f"{args.path}: {len(recs)} samples, "

@@ -410,6 +410,13 @@ def label_people(full: str, known=()) -> str:
                         re.split(r"\s+and\s+", full) if p.strip())
 
 
+# series words a topic also uses on its own: one of them alone opens a
+# real topic, so it stays
+_ORDINARY = {"weekly", "meeting", "call", "monthly", "session"}
+# words only a series name uses, in any series
+_SERIES_WORDS = {"checkin", "thrive", "dialogue"}
+
+
 def build_title(series_id: str, topic: str, person: str = "") -> str:
     """The title without its date stamp. A series: '<name> – <topic>', or
     the name alone when there is no topic. A one-off: the topic, else
@@ -418,17 +425,29 @@ def build_title(series_id: str, topic: str, person: str = "") -> str:
     if s is None:
         t = clean_topic(topic, max_words=8)
         return t or "Untitled Meeting"
+    # the person is the model's PERSON line when it matched nobody, and the
+    # title is a folder name: no path character, and no dash that
+    # split_title would read as the topic separator ('Robin – Sam')
+    person = re.sub(r"\s+", " ", _TOPIC_BAD.sub(" ", str(person or ""))).strip()
     name = s.name(person)
     avoid = [s.template.replace("{person}", "").strip()] + (
         [person] + [_first(p) for p in re.split(r"\s+and\s+", person)] if person else [])
     # a topic that opens with the series' own words ('LT Weekly Budget')
-    # repeats the name: those leading words go
-    own = {w.lower() for w in re.findall(r"[\w-]+", s.template.replace("{person}", ""))}
-    own |= {"weekly", "meeting", "call", "check-in", "checkin", "thrive", "dialogue",
-            "monthly", "session"}
+    # repeats the name: those leading words go. A lone ordinary word is a
+    # real topic ('Meeting Norms', 'Call Center Staffing'), so the run goes
+    # only when it holds a word that names the series or the person, or
+    # is two words or more ('Weekly Meeting Norms').
+    def norm(w):
+        return re.sub(r"[^\w]", "", w).lower()
+    own = {norm(w) for w in s.template.replace("{person}", "").split()} - {""}
+    who = {norm(w) for w in avoid[1:] for w in w.split()} - {""}
+    naming = (own - _ORDINARY) | _SERIES_WORDS | who
     words = str(topic or "").split()
-    while words and re.sub(r"[^\w-]", "", words[0]).lower() in own:
-        words.pop(0)
+    run = 0
+    while run < len(words) and norm(words[run]) in own | _ORDINARY | naming:
+        run += 1
+    if run >= 2 or any(norm(w) in naming for w in words[:run]):
+        words = words[run:]
     t = clean_topic(" ".join(words), avoid=avoid)
     return f"{name}{SEP}{t}" if t else name
 

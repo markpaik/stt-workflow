@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contrast audit for the panel's colour tokens (gui/static/app.css).
+"""Contrast audit for the panel's colour tokens (gui/static/next.css).
 
 The Indigo Blueprint round, like Signal and Boardroom Wide before it, promises
 that every text pair reaches WCAG AA 4.5:1 in BOTH themes and that a token
@@ -8,23 +8,21 @@ module is the arithmetic behind that promise: it reads the four token blocks
 straight out of the stylesheet, resolves the var() aliases, and measures each
 pair the design actually paints.
 
-Run it:      python3 tools/token_contrast.py            (gui/static/app.css)
-             python3 tools/token_contrast.py --css next (gui/static/next.css)
+Run it:      python3 tools/token_contrast.py
 Import it:   from tools.token_contrast import audit  ->  list of Result rows
 
-tests/test_new_shell.py runs it over the shipped sheet, so a future token edit
+tests/test_next_shell.py runs it over the shipped sheet, so a future token edit
 cannot quietly drop a pair below 4.5:1.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
 
-CSS_PATH = Path(__file__).resolve().parent.parent / "gui" / "static" / "app.css"
-# the /next frame's sheet (plan Phase 4C), audited with its own base pairs
-NEXT_CSS_PATH = CSS_PATH.with_name("next.css")
+CSS_PATH = Path(__file__).resolve().parent.parent / "gui" / "static" / "next.css"
 
 AA = 4.5   # WCAG AA for normal-size text; the house floor for every pair
 
@@ -43,32 +41,12 @@ BLOCKS = (
 # block whether or not a rule still paints them. Foreground first, background
 # second; both are token names without the leading dashes. Everything else the
 # sheet paints is found by painted_pairs() below, so a new rule cannot add an
-# unmeasured pair (the hand list had already drifted: accent-text on
-# accent-soft and ink on rec-soft were painted and never measured).
+# unmeasured pair. Beside the page grounds, the frame paints text on the
+# sidebar's --hair (current nav item, its Needs you count), the toast (paper
+# on ink), accent text on accent-soft (a chip that is on, a search match), and
+# --sel, a selected row's ground set by class, not by the rule that sets the
+# text colour, so the scan below cannot find those.
 PAIRS = (
-    ("ink", "paper"), ("ink", "card"), ("ink", "inset"),
-    ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
-    ("accent-text", "paper"), ("accent-text", "card"), ("accent-text", "inset"),
-    ("acc-ink", "accent"),
-    ("ok", "ok-soft"), ("ok", "card"),
-    ("busy", "busy-soft"),
-    ("attn", "attn-soft"), ("attn", "card"), ("attn", "paper"), ("attn", "inset"),
-    ("amber", "amber-soft"),          # the alias pair, measured in its own right
-    ("rec-text", "rec-soft"), ("rec-text", "card"), ("rec-text", "paper"),
-    ("work", "work-soft"),
-    ("personal", "personal-soft"), ("personal", "card"),
-    # the selected list row (docs/ui-refresh phase 3): its title, meta, and
-    # teal review count sit on --sel, a ground set by class, not by the rule
-    # that sets the text colour, so the scan below cannot find these
-    ("ink", "sel"), ("sub", "sel"), ("attn", "sel"),
-)
-
-
-# The /next frame's promised pairs. It retires --busy, --amber, --work, and
-# --personal, and it adds the grounds the frame paints text on: the sidebar's
-# --hair (current nav item, its Needs you count), the toast (paper on ink),
-# and accent text on accent-soft (a chip that is on, a search match).
-NEXT_PAIRS = (
     ("ink", "paper"), ("ink", "card"), ("ink", "inset"), ("ink", "hair"),
     ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
     ("accent-text", "paper"), ("accent-text", "card"), ("accent-text", "inset"),
@@ -168,11 +146,31 @@ def painted_pairs(css: str) -> set[tuple[str, str]]:
     return out
 
 
+def _opaque_hex(value: str) -> str | None:
+    """A resolved token value as #rrggbb when it is one opaque hex colour,
+    else None. #rgb, #rgba, #rrggbb and #rrggbbaa are read; an alpha below
+    ff is not opaque. luminance() read only the first six digits, so #fffe
+    and rgba(...) raised "invalid literal for int() with base 16", and
+    #ffffff80 was measured as opaque white."""
+    m = re.fullmatch(r"#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", value.strip())
+    if not m:
+        return None
+    h = m.group(1)
+    if len(h) <= 4:
+        h = "".join(c * 2 for c in h)
+    if len(h) == 8:
+        if h[6:].lower() != "ff":
+            return None
+        h = h[:6]
+    return "#" + h
+
+
 def _is_colour(value: str) -> bool:
-    """A resolved token value that is a hex colour. A scanned pair whose token
-    holds something else (a gradient, a length, an rgba() alpha wash) is not a
-    contrast pair at all."""
-    return bool(re.fullmatch(r"#[0-9a-fA-F]{3,8}", value.strip()))
+    """A resolved token value that is an opaque hex colour. A scanned pair
+    whose token holds something else (a gradient, a length, an rgba() or
+    #rrggbbaa alpha wash) is not a contrast pair the arithmetic can judge:
+    what shows through a wash depends on what lies under it."""
+    return _opaque_hex(value) is not None
 
 
 def _lin(channel: int) -> float:
@@ -181,10 +179,10 @@ def _lin(channel: int) -> float:
 
 
 def luminance(hex_colour: str) -> float:
-    h = hex_colour.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    h = _opaque_hex(hex_colour)
+    if h is None:
+        raise ValueError(f"not an opaque hex colour: {hex_colour!r}")
+    r, g, b = (int(h[i:i + 2], 16) for i in (1, 3, 5))
     return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
 
 
@@ -203,7 +201,7 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
     arithmetic has no opinion about."""
     css = Path(css_path).read_text(encoding="utf-8")
     if pairs is None:
-        pairs = NEXT_PAIRS if Path(css_path).name == "next.css" else PAIRS
+        pairs = PAIRS
     scanned = sorted(painted_pairs(css))          # stable order, base pairs first
     rows: list[Result] = []
     for label, pattern in BLOCKS:
@@ -213,6 +211,13 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
             missing = [n for n in (fg, bg) if n not in tokens]
             if missing:
                 raise AssertionError(f"{label}: token(s) not defined: {missing}")
+            # a base pair the design promises cannot be skipped: a token
+            # that is not one opaque colour fails the audit by name
+            for n in (fg, bg):
+                if not _is_colour(tokens[n]):
+                    raise AssertionError(
+                        f"{label}: --{n} is {tokens[n]!r}, not an opaque hex "
+                        f"colour, so {fg} on {bg} cannot be measured")
             seen.add((fg, bg))
             rows.append(Result(label, fg, bg,
                                tokens[fg], tokens[bg],
@@ -232,11 +237,16 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
 
 
 def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    # --css next audits the /next frame's sheet; the default stays app.css
-    path = NEXT_CSS_PATH if argv[:2] == ["--css", "next"] else CSS_PATH
+    # no options: a stray argument (the old --css) is an error, not ignored
+    argparse.ArgumentParser(description=__doc__.split("\n\n")[0]).parse_args(argv)
+    path = CSS_PATH
     print(f"{path.name}")
-    rows = audit(path)
+    try:
+        rows = audit(path)
+    except AssertionError as e:
+        # a token block or a base token the design names is gone: say which
+        print(f"FAIL {e}")
+        return 1
     for r in rows:
         print(r.line())
     bad = [r for r in rows if not r.ok]

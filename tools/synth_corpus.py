@@ -567,15 +567,23 @@ def _assert_sandboxed():
     home = Path(raw).expanduser().resolve()
     if not (home / HOME_MARKER).exists():
         sys.exit(f"refusing: {home} has no {HOME_MARKER} marker — not an eval sandbox")
+    # The functions too: they read the home's stt.env first, so a kept
+    # stt.env that names another meetings folder passed the constants
+    # (where the environment wins) while the stages wrote outside the home.
     for label, p in (("PROJECT_DIR", config.PROJECT_DIR),
                      ("VOICEPRINTS_DIR", config.VOICEPRINTS_DIR),
                      ("MEETINGS_DIR", config.MEETINGS_DIR),
                      ("RECORDINGS_DIR", config.RECORDINGS_DIR),
-                     ("ICLOUD_DIR", config.ICLOUD_DIR)):
+                     ("ICLOUD_DIR", config.ICLOUD_DIR),
+                     ("meetings_dir()", config.meetings_dir()),
+                     ("recordings_dir()", config.recordings_dir()),
+                     ("source_dir()", config.source_dir()),
+                     ("SEARCH_DB", config.SEARCH_DB)):
         rp = Path(p).expanduser().resolve()
         if not (rp == home or rp.is_relative_to(home)):
             sys.exit(f"refusing: config.{label} = {rp} escapes the sandbox {home} "
-                     "(is a STT_<X>_DIR env var overriding STT_HOME?)")
+                     "(does a STT_<X>_DIR env var or the home's stt.env "
+                     "override STT_HOME?)")
     return home
 
 

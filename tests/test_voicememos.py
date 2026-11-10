@@ -84,6 +84,33 @@ def test_the_allow_list_copies_only_finished_long_new_memos(sandbox):
             c["not_local"]) == (1, 1, 1, 1, 1)
 
 
+def test_a_zero_byte_file_and_a_missing_length_have_their_own_reasons(sandbox):
+    """A zero-byte memo counted as "not_local" (an iCloud placeholder has a
+    size and no blocks, not size 0), and a NULL ZDURATION read as 0 s and
+    counted as "short". Both are held back, under a reason that says what
+    is wrong, and the doctor line names them."""
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"},
+              {"start": "2026-11-04 09:00:00", "title": "Empty One", "uuid": "U-E"},
+              {"start": "2026-11-05 09:00:00", "title": "No Length", "uuid": "U-N"}])
+    conn = sqlite3.connect(str(c / voicememos.DB_NAME))
+    path = conn.execute("SELECT ZPATH FROM ZCLOUDRECORDING WHERE ZUNIQUEID='U-E'"
+                        ).fetchone()[0]
+    conn.execute("UPDATE ZCLOUDRECORDING SET ZDURATION=NULL WHERE ZUNIQUEID='U-N'")
+    conn.commit()
+    conn.close()
+    f = c / path
+    mt = f.stat().st_mtime
+    f.write_bytes(b"")
+    os.utime(f, (mt, mt))
+
+    r = voicememos.sync(now=NOW)
+    assert r["status"] == "ok"
+    assert _staged() == ["2026-11-03 Budget Review.m4a"]
+    assert r["counts"] == {"copied": 1, "empty": 1, "no_duration": 1}
+    lines = {f.kind: f.detail for f in doctor.check(registry=False)}
+    assert lines["voicememos_skipped"] == "empty 1, no_duration 1"
+
+
 def test_no_marker_is_required_and_a_default_title_is_no_label(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "New Recording 4"}])
     voicememos.sync(now=NOW)
@@ -129,6 +156,74 @@ def test_a_resync_makes_no_duplicate_even_after_the_batch_removed_the_copy(sandb
         p.unlink()                       # the batch stored it and deleted the copy
     r = voicememos.sync(now=NOW)
     assert r["counts"].get("already") == 1 and _staged() == []
+
+
+def test_a_sync_stopped_mid_loop_never_stages_a_memo_twice(sandbox, monkeypatch):
+    """The state was saved once, after the whole loop. A sync stopped after
+    one copy left that file staged with no record, and the next sync copied
+    the same memo again as 'Budget Review (2)'."""
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"},
+          {"start": "2026-11-04 09:00:00", "title": "Staff Huddle"}])
+    real = voicememos.shutil.copyfile
+    calls = []
+
+    def stop_on_second(a, b, *k, **kw):
+        if str(a).endswith(".m4a"):          # a memo, not the database copy
+            calls.append(a)
+        if len(calls) == 2:
+            raise KeyboardInterrupt          # Stop, or a kill, mid-sync
+        return real(a, b, *k, **kw)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", stop_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        voicememos.sync(now=NOW)
+    assert len(voicememos.load_state()["staged"]) == 1
+    monkeypatch.setattr(voicememos.shutil, "copyfile", real)
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"already": 1, "copied": 1}
+    assert _staged() == ["2026-11-03 Budget Review.m4a",
+                         "2026-11-04 Staff Huddle.m4a"]
+
+
+def test_a_block_and_an_ingest_note_saved_during_a_sync_survive_it(sandbox, monkeypatch):
+    """sync() saved the copy of the state it read at its start. A block()
+    from tools/purge.py, or an ingest note, saved while the copy loop ran
+    was lost: the purged memo could come back, and the delete step lost
+    its proof."""
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-A"}])
+    voicememos.sync(now=NOW)
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-A"},
+          {"start": "2026-11-04 09:00:00", "title": "Staff Huddle", "uuid": "U-B"}])
+    real = voicememos.shutil.copyfile
+
+    def other_writers(a, b, *k, **kw):
+        if str(a).endswith(".m4a"):
+            assert voicememos.block("U-PURGED")
+            assert voicememos.note_ingested("U-A", "k", "2026-11-03 Budget Review")
+        return real(a, b, *k, **kw)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", other_writers)
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"already": 1, "copied": 1}
+    st = voicememos.load_state()
+    assert st["blocked"] == ["U-PURGED"]
+    assert st["staged"]["U-A"]["ingested"]["key"] == "k"
+    assert set(st["staged"]) == {"U-A", "U-B"} and st["last"]["status"] == "ok"
+
+
+def test_a_state_change_waits_for_the_state_lock(sandbox):
+    """Two processes change the state with a read, a change and a save. The
+    lock makes that one step, so neither save drops the other's change."""
+    import fcntl
+    import threading
+    lock = voicememos.state_path().with_name(voicememos.STATE_LOCK_NAME)
+    done = threading.Event()
+    with open(lock, "a+") as fh:          # another process holds the lock
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        t = threading.Thread(target=lambda: (voicememos.block("U-1"), done.set()))
+        t.start()
+        assert not done.wait(0.3), "block() saved while another writer held the lock"
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    t.join(5)
+    assert done.is_set() and voicememos.load_state()["blocked"] == ["U-1"]
 
 
 def test_a_blocked_memo_never_comes_back(sandbox):
@@ -223,6 +318,25 @@ def test_a_typed_date_in_the_title_is_not_doubled(sandbox):
         assert dates.meeting_date(n) == "2026-11-03"
 
 
+def test_a_typed_date_restamp_does_not_know_stays_in_the_title(sandbox):
+    """_staged_name's comment said any date inside a title is removed. Only
+    the stamps dates.restamp knows go (a leading ISO date, a trailing or
+    standalone 8-digit date). An ISO date in the middle is part of what the
+    person typed, so it stays, and the start still leads. A slashed date
+    loses its slashes (no file name holds one) and then reads as a trailing
+    8-digit stamp, so it goes."""
+    _lib([{"start": "2026-11-07 09:00:00", "title": "Notes 2026-10-05 sync"},
+          {"start": "2026-11-07 10:00:00", "title": "Standup 10/05/2026"},
+          {"start": "2026-11-07 11:00:00", "title": "2026-10-05 Planning"}])
+    voicememos.sync(now=NOW)
+    assert _staged() == ["2026-11-07 Notes 2026-10-05 sync.m4a",
+                         "2026-11-07 Planning.m4a",
+                         "2026-11-07 Standup.m4a"]
+    from stt import dates
+    for n in _staged():
+        assert dates.meeting_date(n) == "2026-11-07"
+
+
 def test_a_denied_stat_on_the_database_is_recorded(sandbox, monkeypatch):
     """Path.exists() re-raises PermissionError: the sync must record it for
     the doctor, never raise."""
@@ -255,6 +369,50 @@ def test_a_denied_file_stat_is_recorded(sandbox, monkeypatch):
     monkeypatch.setattr(pathlib.Path, "stat", real)
     assert r["status"] == "denied" and _staged() == []
     assert voicememos.load_state()["last"]["status"] == "denied"
+
+
+@pytest.mark.parametrize("where", ["copy", "stat"])
+def test_a_denied_read_of_one_memo_file_lets_the_others_copy(sandbox, monkeypatch, where):
+    """The database read worked and one memo's audio was denied. The sync
+    returned "denied" at that memo, so every later memo waited a run and
+    the doctor said to grant Full Disk Access. The one memo now counts as
+    copy_failed, the others copy, and the sync is "ok"."""
+    import pathlib
+    from pathlib import Path
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Locked Memo", "uuid": "U-L"},
+          {"start": "2026-11-04 09:00:00", "title": "Budget Review"},
+          {"start": "2026-11-05 09:00:00", "title": "Staff Huddle"}])
+    first = voicememos.read_rows(voicememos.container_dir())[0]["path"]
+    real_copy, real_stat = voicememos.shutil.copyfile, pathlib.Path.stat
+
+    def copyfile(src, dst, *a, **k):
+        if Path(src).name == first:
+            raise PermissionError("denied")
+        return real_copy(src, dst, *a, **k)
+
+    def stat(self, *a, **k):
+        if self.name == first:
+            raise PermissionError("denied")
+        return real_stat(self, *a, **k)
+    if where == "copy":
+        monkeypatch.setattr(voicememos.shutil, "copyfile", copyfile)
+    else:
+        monkeypatch.setattr(pathlib.Path, "stat", stat)
+    r = voicememos.sync(now=NOW)
+    # put back ONLY the two fakes: monkeypatch.undo() would also drop the
+    # sandbox fixture's patches and point the sync at the real library
+    monkeypatch.setattr(pathlib.Path, "stat", real_stat)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", real_copy)
+    assert r["status"] == "ok"
+    assert _staged() == ["2026-11-04 Budget Review.m4a", "2026-11-05 Staff Huddle.m4a"]
+    assert r["counts"] == {"copied": 2, "copy_failed": 1}
+    kinds = {f.kind: f.detail for f in doctor.check(registry=False)}
+    assert "voicememos_denied" not in kinds
+    assert kinds["voicememos_skipped"] == "copy_failed 1"
+    # the denied memo was not marked staged, so the next run tries it again
+    assert voicememos.container_dir() == sandbox / "vm_container"
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"copied": 1, "already": 2}
 
 
 def test_a_sync_that_raises_is_recorded_by_the_batch(sandbox, monkeypatch):
@@ -312,6 +470,29 @@ def test_every_reader_of_the_source_folders_sees_the_voice_memos_staging(sandbox
          "segments": [], "speakers": [], "words": []}))
     r = archive.delete_meeting("Staged Memo 05012026")
     assert r["ok"] and "re-transcribed" in (r["note"] or "")
+
+
+@pytest.mark.parametrize("zdate", [1e20, 1e12, float("inf")])
+def test_a_corrupt_zdate_skips_its_memo_and_the_others_still_copy(sandbox, zdate):
+    """start_of promises None when neither the name nor ZDATE can be read.
+    A huge, infinite or NaN ZDATE on a row with another file name raised
+    OverflowError or ValueError, which left sync() before any later memo
+    was copied."""
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Odd One", "uuid": "U-ODD",
+               "path": "odd name.m4a"},
+              {"start": "2026-11-04 09:00:00", "title": "Staff Huddle"}])
+    conn = sqlite3.connect(str(c / voicememos.DB_NAME))
+    conn.execute("UPDATE ZCLOUDRECORDING SET ZDATE=? WHERE ZUNIQUEID='U-ODD'", (zdate,))
+    conn.commit()
+    conn.close()
+    r = voicememos.sync(now=NOW)
+    assert r["status"] == "ok"
+    assert r["counts"] == {"no_start": 1, "copied": 1}
+    assert _staged() == ["2026-11-04 Staff Huddle.m4a"]
+    # SQLite keeps a NaN as NULL, so only a direct call reaches that case
+    assert voicememos.start_of({"path": "odd name.m4a", "zdate": zdate}) == (None, False)
+    assert voicememos.start_of({"path": "odd name.m4a",
+                                "zdate": float("nan")}) == (None, False)
 
 
 def test_memo_in_recently_deleted_is_never_eligible(tmp_path):

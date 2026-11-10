@@ -4,8 +4,6 @@ A transcript with 0 segments never reaches the model: Generate answers "No
 speech found in this recording." and writes nothing, the batch writes no
 summary, and the panel offers no Generate. Every name is synthetic."""
 import json
-import re
-from pathlib import Path
 
 import run_batch
 from gui import server as srv
@@ -54,12 +52,3 @@ def test_the_meta_carries_no_speech(sandbox):
     base = _silent()
     m = next(x for x in srv.gather_state()["meetings"] if x["base"] == base)
     assert m["no_speech"] is True
-
-
-def test_the_reader_offers_no_generate_on_a_silent_meeting():
-    js = (Path(srv.__file__).resolve().parent / "static" / "app.js").read_text()
-    fn = re.search(r"function _mSummaryInner\(m\)\{.*?\n\}", js, re.S).group(0)
-    head = fn[:fn.index("const has=")]
-    assert "if(m.no_speech)" in head
-    assert "No speech found in this recording." in head
-    assert "mGenSummary" not in head

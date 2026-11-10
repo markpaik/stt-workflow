@@ -543,8 +543,16 @@ def clean_filters(raw: dict) -> dict:
 
 
 def _group_bases(key: str) -> set:
+    """The meetings of group `key`. Raises FilterError for a key that names
+    no group: a typo or a stale key (a key follows the group's dominant
+    title, so an old link can outlive it) answered total 0 with no error,
+    which reads the same as a real empty result. Ask says the same for a
+    group scope that is gone."""
     from . import groups
-    return set(groups.members(key))
+    g = groups.by_key(key)
+    if g is None:
+        raise FilterError(f"in: '{key}' is not a group, or that group no longer exists")
+    return set(g["bases"])
 
 
 def meeting_passes(fc: dict, f: dict, bases=None) -> bool:

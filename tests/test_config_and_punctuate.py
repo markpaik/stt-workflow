@@ -95,6 +95,78 @@ def test_punctuator_unk_repaired_from_original():
     assert punctuate._repair_unk("clean text", norm) == "clean text"
 
 
+
+class _SplitsLikeTheModel:
+    """Answers the way the real model did on 2026-11-10: it punctuates the
+    pieces of a split token ('3 5') as separate words, and may put a comma or
+    a full stop between them."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def infer(self, xs):
+        return [[self.answers[x]] for x in xs]
+
+
+def test_punctuate_keeps_punctuation_inside_a_token(sandbox, monkeypatch):
+    """'3.5' reaches the model as '3 5'. The identity check ignores
+    punctuation, so '3 5' passed it and shipped: a rate, a time and a sum of
+    money were rewritten in the transcript. The token must come back whole."""
+    monkeypatch.setattr(punctuate, "_model", _SplitsLikeTheModel({
+        "the rate is 3 5 percent": "The rate is 3 5 percent.",
+        "meet at 9 30 in room 4 2": "Meet at 9, 30 in Room 4. 2.",
+        "it costs $1 200 for the self-management course":
+            "It costs $1 200 for the <unk>management course.",
+        "v1 2 shipped and jo doe@example org knows":
+            "V1 2 shipped, and jo doe@example. Org knows.",
+        "we met at 9 a m": "We met at 9 a m",
+    }))
+    segs = [{"text": t} for t in [
+        "The rate is 3.5 percent.",
+        "Meet at 9:30 in room 4.2",
+        "It costs $1,200 for the self-management course",
+        "v1.2 shipped and jo.doe@example.org knows",
+        "we met at 9 a.m.",
+    ]]
+    punctuate.restore_segments(segs)
+    assert [s["text"] for s in segs] == [
+        "The rate is 3.5 percent.",
+        "Meet at 9:30 in Room 4.2.",
+        "It costs $1,200 for the self-management course.",
+        # the model's casing on the first piece only, its comma after it
+        "V1.2 shipped, and jo.doe@example.org knows.",
+        # the model put nothing after 'a m', so the original's '.' stays
+        "We met at 9 a.m.",
+    ]
+    assert punctuate.restore("The rate is 3.5 percent.") == \
+        "The rate is 3.5 percent."
+
+
+def test_the_last_period_of_an_abbreviation_stays_before_the_models_mark():
+    """The rebuild put the model's mark after an inner-punctuation token
+    in place of the original's: 'e.g.' with the model's ',' came back as
+    'e.g,'. An abbreviation's last period is part of the word. A number's
+    is not: '3.5.' still takes the model's comma."""
+    r = punctuate._restore_inner_punct
+    assert r("The U s. team e. g, Ana agreed.", "the U.S. team, e.g. Ana, agreed") == \
+        "The U.S. team e.g., Ana agreed."
+    assert r("In the U s.", "in the U.S.") == "In the U.S."
+    assert r("Met at 9 a m. then left", "met at 9 a.m. then left") == \
+        "Met at 9 a.m. then left"
+    assert r("See Ph d, and more", "see Ph.D. and more") == "See Ph.D., and more"
+    assert r("It was 3 5, then", "it was 3.5. then") == "It was 3.5, then"
+    # an original mark after the abbreviation stays when the model puts none
+    assert r("Bring snacks e g fruit", "bring snacks, e.g., fruit") == \
+        "Bring snacks e.g., fruit"
+
+
+def test_inner_punct_rebuild_refuses_pieces_that_do_not_line_up():
+    """A defensive path: output whose pieces do not match the original's count
+    keeps the original text, never a half-rebuilt line."""
+    assert punctuate._restore_inner_punct("Three 5 extra.", "3.5") == "3.5"
+    assert punctuate._restore_inner_punct("Plain words.", "plain words") == \
+        "Plain words."
+
 # ---------------------------------------------------------------------------
 # Batched restoration. Measured 2026-09-13: 4.0s of a 7.1s relabel was the
 # punctuator reloading its SentencePiece tokenizer once per infer() call, 273
@@ -352,6 +424,63 @@ def test_an_empty_or_good_speakrs_number_is_quiet(tmp_path):
     rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC=" 0.6 ", STT_SPEAKRS_TIMEOUT_SEC="900")
     assert (rc, out) == (0, "0.6 900 speakrs") and "warning" not in err
 
+
+
+_TYPO_PRINT = ("from stt import config as c, unknowns as u, housekeeping as h; "
+               "print(c.NAMING_THRESHOLD, c.REFINE_ID_MIN, c.RECLUSTER_ITERS, "
+               "c.BATTERY_FLOOR, c.CHANNEL_FLOOR_DBFS, u.MATCH_MIN, h.LOG_MAX_BYTES)")
+_TYPO_DEFAULTS = "0.6 0.6 2 20 -45.0 0.6 10000000"
+
+
+@pytest.mark.parametrize("name, raw", [
+    ("STT_NAMING_THRESHOLD", "abc"), ("STT_NAMING_THRESHOLD", "nan"),
+    ("STT_REFINE_ID_MIN", ""), ("STT_RECLUSTER_ITERS", "2.5"),
+    ("STT_BATTERY_FLOOR", "20%"), ("STT_CHANNEL_FLOOR_DBFS", "-45dB"),
+    ("STT_UNKNOWN_MATCH_MIN", "O.6"), ("STT_LOG_MAX_BYTES", "10MB")])
+def test_a_typo_in_any_number_setting_warns_and_keeps_the_default(tmp_path, name, raw):
+    """Every other number setting parsed with a bare float() or int() at
+    import. STT_NAMING_THRESHOLD=abc, an empty STT_REFINE_ID_MIN=, or
+    STT_BATTERY_FLOOR=20% raised ValueError, and the batch, the panel and
+    every tool that imports stt.config stopped."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), name: raw})
+    r = subprocess.run([sys.executable, "-c", _TYPO_PRINT], capture_output=True,
+                       text=True, env=e, cwd=str(repo), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == _TYPO_DEFAULTS
+    if raw:
+        assert name in r.stderr and "using" in r.stderr
+    else:
+        assert "warning" not in r.stderr
+
+
+def test_a_good_number_setting_still_wins(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo),
+              "STT_NAMING_THRESHOLD": " 0.7 ", "STT_RECLUSTER_ITERS": "4",
+              "STT_REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS": "1e9",
+              "STT_UNKNOWN_MATCH_MIN": "0.65"})
+    r = subprocess.run([sys.executable, "-c",
+                        "from stt import config as c, unknowns as u; "
+                        "print(c.NAMING_THRESHOLD, c.RECLUSTER_ITERS, "
+                        "c.REFINE_JUNK_REPAIR_MAX_CLUSTER_SECS, u.MATCH_MIN)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    assert (r.returncode, r.stdout.strip()) == (0, "0.7 4 1000000000.0 0.65"), r.stderr
+    assert "warning" not in r.stderr
+
+
+def test_the_doctor_names_a_number_typo(sandbox, monkeypatch):
+    (sandbox / "stt.env").write_text("STT_BATTERY_FLOOR=20%\n")
+    monkeypatch.delenv("STT_BATTERY_FLOOR", raising=False)
+    assert [p[0] for p in config.setting_problems()] == ["STT_BATTERY_FLOOR"]
 
 @pytest.mark.parametrize("raw, want, warns", [
     ("speakr", "speakrs", True), ("pyanote", "speakrs", True), ("cuda", "speakrs", True),

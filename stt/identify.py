@@ -18,7 +18,9 @@ import re
 import shutil
 import sys
 import threading
+import unicodedata
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -74,9 +76,21 @@ def _private_dir():
 
 
 def _save_npy(path, arr):
-    np.save(path, arr)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    """A sample stack, written whole or not at all: through a temporary
+    file and os.replace, so a crash or a full disk mid-write leaves the old
+    stack, never a truncated file that every later read raises on."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            np.save(fh, arr)
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _atomic_write(path, text: str):
@@ -164,47 +178,65 @@ def _unique_filename(stem: str, reg: dict) -> str:
     for what's in use — not just an on-disk exists() check, since callers
     already remove/never-added the current person's own entry before calling
     this, so a legitimate re-enrollment is never blocked by itself)."""
-    # casefolded: the default macOS disk is case-insensitive, so
-    # "alex rivera.npy" IS "Alex Rivera.npy" there
-    claimed = {meta["file"].casefold() for meta in reg.values()}
+    # folded (_fold): the default macOS disk ignores case and Unicode
+    # normalization, so "alex rivera.npy" IS "Alex Rivera.npy" there, and an
+    # 'e' plus a combining accent IS the precomposed 'é'
+    claimed = {_fold(meta["file"]) for meta in reg.values()}
     # unknown voices keep their U###.npy stacks in the same folder, and a
     # file nobody claims may still be someone's only copy: never reuse either
     with contextlib.suppress(OSError, ValueError, AttributeError):
         unk = json.loads((config.VOICEPRINTS_DIR / "unknowns.json").read_text())
-        claimed |= {str(m.get("file", "")).casefold()
+        claimed |= {_fold(str(m.get("file", "")))
                     for m in (unk.get("speakers") or {}).values()}
     with contextlib.suppress(OSError):
-        claimed |= {p.name.casefold() for p in config.VOICEPRINTS_DIR.glob("*.npy")}
+        claimed |= {_fold(p.name) for p in config.VOICEPRINTS_DIR.glob("*.npy")}
     fname = f"{stem}.npy"
     n = 2
-    while fname.casefold() in claimed:
+    while _fold(fname) in claimed:
         fname = f"{stem}_{n}.npy"
         n += 1
     return fname
 
 
+def _fold(s: str) -> str:
+    """`s` as the default macOS disk compares a file name: case and Unicode
+    normalization both ignored. 'Jos' + U+00E9 (typed) and 'Jose' + U+0301
+    (pasted from Finder) are one file there, so they are one key here.
+    NFD on both sides of the casefold is the Unicode canonical caseless
+    match."""
+    return unicodedata.normalize(
+        "NFD", unicodedata.normalize("NFD", str(s)).casefold())
+
+
 def _name_key(name: str) -> str:
-    return " ".join(str(name).split()).casefold()
+    return _fold(" ".join(str(name).split()))
 
 
-_RESERVED = re.compile(r"U\d+", re.IGNORECASE)
+_RESERVED = re.compile(r"U\d+|(?:speaker|voice)\s+\d+", re.IGNORECASE)
 
 
 def reserved_name(name) -> bool:
     """'U007' is an unknown voice's id, and its samples live in U007.npy in
-    this same folder. A person by that name would share the file."""
-    return bool(_RESERVED.fullmatch(str(name or "").strip()))
+    this same folder. A person by that name would share the file.
+
+    'Speaker 7' and 'Voice 3' are the labels an unknown voice shows
+    (unknowns.display) and a meeting-only cluster shows. A person enrolled
+    as 'Speaker 7' looked like unknown U007 everywhere, and speaker_text
+    reads such a label as no name at all."""
+    return bool(_RESERVED.fullmatch(" ".join(str(name or "").split())))
 
 
-RESERVED_ERROR = ("Names like U7 or U007 are reserved for unknown voices. "
-                  "Pick a different name.")
+RESERVED_ERROR = ("Names like U7, Speaker 7 or Voice 3 are reserved for unknown "
+                  "voices. Pick a different name.")
 
 
 def canonical_name(name: str, reg: dict = None) -> str:
-    """The enrolled spelling of `name` when one differs only in case or
-    spacing, else `name` stripped. "alex rivera" typed for an enrolled
-    "Alex Rivera" is the same person: a second entry would point at the same
-    file on a case-insensitive disk and overwrite her samples."""
+    """The enrolled spelling of `name` when one differs only in case,
+    spacing or Unicode normalization, else `name` stripped. "alex rivera"
+    typed for an enrolled "Alex Rivera" is the same person: a second entry
+    would point at the same file on a case-insensitive disk and overwrite
+    her samples. A precomposed 'é' and an 'e' with a combining accent are
+    the same file on that disk too."""
     name = str(name or "").strip()
     if reg is None:
         reg = load_registry()
@@ -225,16 +257,36 @@ def _l2(v):
     return v / n
 
 
+_unreadable_warned = set()
+
+
 def load_voiceprints() -> dict:
-    """Return {name: np.ndarray of shape (n_samples, dim)} for all enrolled people."""
+    """Return {name: np.ndarray of shape (n_samples, dim)} for all enrolled people.
+
+    A sample file that cannot be read (truncated, overwritten, a pickle)
+    leaves that person out, with one warning per file. np.load raised on
+    it, and every caller fell with it: the batch's naming for each meeting,
+    unknowns.assign() and the panel's voice pages. The registry doctor names
+    the file ("cannot be read")."""
     out = {}
     for name, meta in load_registry().items():
         f = config.VOICEPRINTS_DIR / meta["file"]
-        if f.exists():
-            arr = np.load(f)
-            if arr.ndim == 1:  # legacy single-centroid format
-                arr = arr.reshape(1, -1)
-            out[name] = arr
+        if not f.exists():
+            continue
+        try:
+            arr = np.load(f, allow_pickle=False)
+        except (OSError, ValueError, EOFError):
+            arr = None
+        if arr is None or arr.ndim not in (1, 2) or not np.issubdtype(arr.dtype, np.number):
+            if str(f) not in _unreadable_warned:
+                _unreadable_warned.add(str(f))
+                print(f"WARNING: {f.name} cannot be read — {name} is not matched "
+                      "until it is restored or re-enrolled (tools/registry_doctor.py "
+                      "names it).", file=sys.stderr)
+            continue
+        if arr.ndim == 1:  # legacy single-centroid format
+            arr = arr.reshape(1, -1)
+        out[name] = arr
     return out
 
 
@@ -289,6 +341,11 @@ def sample_check(name, vector, exclude=(), prints=None):
     source best. `prints` (load_voiceprints()) lets a caller that checks
     many rows read the profiles from disk once."""
     prints = load_voiceprints() if prints is None else prints
+    if name not in prints:
+        # enroll() files 'jordan lee' under an enrolled 'Jordan Lee'
+        # (canonical_name), so the sample is checked against that stack too
+        key = _name_key(name)
+        name = next((nm for nm in prints if _name_key(nm) == key), name)
     own = prints.get(name)
     if own is None:
         return None
@@ -465,6 +522,45 @@ def rename_source_refs(old_base: str, new_base: str) -> int:
                 meta["source_ids"] = [new_id if (s == old_base and i is None) else i
                                       for s, i in zip(srcs, ids)]
                 meta["sources"] = [new_base if s == old_base else s for s in srcs]
+                n += 1
+        if n:
+            save_registry(reg)
+    return n
+
+
+def forget_source_refs(base: str, meeting_id=None) -> int:
+    """A deleted meeting's name off the samples it fed: each `sources`
+    entry that names it becomes '?' and its id None, as the doctor's fix
+    writes for a dead reference. The sample keeps its row: its embedding
+    still identifies the person. Without this, a normal Delete left the
+    next doctor check listing one `registry_dangling` finding per person
+    the meeting fed.
+
+    An entry another meeting still answers to (a live or archived twin of
+    the name, or an id that resolves) is left alone, the doctor's own
+    liveness rule. A damaged registry is never written over. Returns the
+    people touched."""
+    alive = set(config.meeting_bases()) | set(config.archived_bases())
+    ids = config.load_meetings_index()["ids"]
+
+    def dead(s, i):
+        if s in alive:
+            return False
+        return not (i and ids.get(i) in alive)
+
+    n = 0
+    with lock_registry():
+        reg = load_registry_for_write()
+        for meta in reg.values():
+            if not isinstance(meta, dict) or not isinstance(meta.get("sources"), list):
+                continue
+            srcs = meta["sources"]
+            sids = aligned_source_ids(meta)
+            hit = {k for k, (s, i) in enumerate(zip(srcs, sids))
+                   if (s == base or (meeting_id and i == meeting_id)) and dead(s, i)}
+            if hit:
+                meta["sources"] = ["?" if k in hit else s for k, s in enumerate(srcs)]
+                meta["source_ids"] = [None if k in hit else i for k, i in enumerate(sids)]
                 n += 1
         if n:
             save_registry(reg)

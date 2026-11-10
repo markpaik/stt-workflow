@@ -74,6 +74,32 @@ def test_backfill_stamps_the_archive_without_indexing_it(sandbox):
     assert config.base_of(arc_id) is None, "archived is not resolvable as live"
 
 
+def test_the_archive_backfill_leaves_no_base_named_lock(sandbox):
+    """The panel stamps the archive at start. Each archived meeting was
+    locked under its base (no id yet), and only the LIVE pass swept the
+    locks, so a fresh demo home showed 'orphan_lock <archived base>.lock'
+    in the registry doctor right after the panel started."""
+    from stt import registry_doctor
+    _meeting("Live Mtg 05012026")
+    d = config.archive_dir() / "Old Mtg 01012026"
+    d.mkdir(parents=True)
+    (d / "Old Mtg 01012026.json").write_text(json.dumps(
+        {"source_file": "Old Mtg 01012026.m4a", "date": "2026-01-01",
+         "speakers": [], "segments": [], "words": []}))
+
+    config.backfill_meeting_ids()
+    config.backfill_meeting_ids(config.archive_dir())
+    arc_id = config.id_of("Old Mtg 01012026", config.archive_dir())
+    assert arc_id
+    assert not (_locks() / "Old Mtg 01012026.lock").exists()
+    assert config.orphan_lock_files() == []
+    assert not [f for f in registry_doctor.check() if f.kind == "orphan_lock"]
+    # the archived meeting still locks, now under its id
+    with review.lock_meeting("Old Mtg 01012026"):
+        assert (_locks() / f"{arc_id}.lock").exists()
+    assert config.orphan_lock_files() == []
+
+
 def test_the_index_rebuilds_from_a_scan_when_it_is_missing(sandbox):
     """The index is a cache of what the meeting jsons say. Deleting it (or
     never having had one) costs one scan, not a broken library."""

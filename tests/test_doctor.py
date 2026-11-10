@@ -5,6 +5,7 @@ under their caps."""
 import gzip
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -151,7 +152,51 @@ def test_fix_repairs_and_journals_then_undo_restores(lib):
     assert dry["restored"] and _manifest() == m
     u = doctor.undo(r["run"], dry_run=False)
     assert not u["kept"]
-    assert _tree(config.PROJECT_DIR) == before
+    # every file is back but the stale stop flag, which undo never restores
+    flag = str(control.STOP_FLAG.relative_to(config.PROJECT_DIR))
+    assert u["skipped"] == [str(control.STOP_FLAG)]
+    assert _tree(config.PROJECT_DIR) == {k: v for k, v in before.items() if k != flag}
+
+
+def test_undo_says_what_it_cannot_undo_and_never_restores_a_stop_flag(
+        sandbox, monkeypatch, tmp_path, capsys):
+    """undo printed 'restored 3 file(s)' after a fix that also rotated a
+    log, as if the whole run were back, and it put the stale stopping.flag
+    back, so the next check reported stale_stop_flag again."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setattr(config, "LOG_DIR", sandbox / "logs")
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 1000)
+    logs = config.LOG_DIR
+    logs.mkdir(exist_ok=True)
+    (logs / "big.log").write_bytes(b"x" * 12000)
+    control.STOP_FLAG.write_text("x")
+    holds.PATH.write_text(json.dumps(["Not Here.m4a"]))
+    r = doctor.fix(dry_run=False, registry=False)
+    assert any(d.startswith("rotated 1 log") for d in r["done"])
+    assert not control.STOP_FLAG.exists()
+    capsys.readouterr()
+    assert doctor_cli.main(["undo", r["run"], "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "not restored: stopping.flag" in out
+    assert "not undone: rotated 1 log(s)" in out and ".gz" in out
+    assert not control.STOP_FLAG.exists()
+    assert json.loads(holds.PATH.read_text()) == ["Not Here.m4a"]
+    assert "stale_stop_flag" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_torn_last_journal_line_never_stops_the_doctor_undo(lib, capsys):
+    """A kill inside one journal write, or a hand edit, leaves a line that
+    is not JSON. `doctor undo` raised a JSONDecodeError traceback on it and
+    restored nothing, though every whole entry before it was intact."""
+    before = _tree(config.PROJECT_DIR)
+    r = doctor.fix(dry_run=False, registry=False)
+    with open(lib / "migration" / f"{r['run']}.jsonl", "a") as fh:
+        fh.write('garbage\n{"file": "' + str(holds.PATH) + '", "sha_af')
+    capsys.readouterr()
+    assert doctor_cli.main(["undo", r["run"], "--apply"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+    flag = str(control.STOP_FLAG.relative_to(config.PROJECT_DIR))
+    assert _tree(config.PROJECT_DIR) == {k: v for k, v in before.items() if k != flag}
 
 
 def test_undo_keeps_a_file_changed_since(lib):
@@ -169,6 +214,23 @@ def test_fix_refuses_while_a_batch_runs(lib):
     assert r.get("error") and r["run"] is None
     assert control.STOP_FLAG.exists()
     assert _manifest() == json.loads(before["manifest.json"])["processed"]
+
+
+def test_a_dead_batchs_running_flag_neither_hides_findings_nor_blocks_fix(lib):
+    """A hard kill skips end_run, so status.json keeps running true with a
+    dead pid. check skipped the stale stop flag and the scratch audio, and
+    fix refused 'a batch is running', until the next batch ran."""
+    import subprocess
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()                                  # reaped: its pid is free
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    config.WORK_DIR.mkdir(exist_ok=True)
+    (config.WORK_DIR / "x.wav").write_bytes(b"scratch")
+    kinds = {f.kind for f in doctor.check(registry=False)}
+    assert {"stale_stop_flag", "work_scratch"} <= kinds
+    r = doctor.fix(dry_run=False, registry=False)
+    assert not r.get("error") and r["run"]
+    assert not control.STOP_FLAG.exists()
 
 
 def test_registry_repairs_copy_the_voiceprints_first_and_undo(lib, monkeypatch):
@@ -191,6 +253,154 @@ def test_registry_repairs_copy_the_voiceprints_first_and_undo(lib, monkeypatch):
     assert (lib / "migration" / r["run"] / "voiceprints" / "unknowns.json").exists()
     doctor.undo(r["run"], dry_run=False)
     assert _tree(vp) == before
+
+
+@pytest.mark.parametrize("raw", [b'{"processed": {"a.m4a": {', b"\xff\xfe\x00bad", b""])
+def test_a_damaged_manifest_is_reported_and_never_planned_over(lib, raw):
+    """A truncated manifest read as an empty one: check named nothing
+    about it, and fix planned a fresh record for every meeting over it."""
+    config.MANIFEST_PATH.write_bytes(raw)
+    fs = doctor.check(registry=False)
+    bad = [f for f in fs if f.kind == "manifest_unreadable"]
+    assert len(bad) == 1 and bad[0].subject == "manifest.json" and not bad[0].fixable
+    assert not {"manifest_stale", "manifest_flat", "manifest_unlinked"} & {f.kind for f in fs}
+    assert doctor.manifest_plan() == []
+    r = doctor.fix(dry_run=False, registry=False)
+    assert r["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_bytes() == raw
+    # no manifest at all is no finding: a new home has none yet
+    config.MANIFEST_PATH.unlink()
+    assert "manifest_unreadable" not in {f.kind for f in doctor.check(registry=False)}
+
+
+@pytest.mark.parametrize("raw", ['{"processed": []}', '{"processed": null}', "[1]",
+                                 '"x"', "null"])
+def test_a_manifest_of_the_wrong_shape_is_reported_not_raised(lib, raw):
+    """fj.read_json passes any valid JSON through, so a processed list or
+    null, or a manifest that is no object, raised AttributeError and
+    aborted the whole check."""
+    config.MANIFEST_PATH.write_text(raw)
+    fs = doctor.check(registry=False)
+    assert "manifest_unreadable" in {f.kind for f in fs}
+    assert doctor.fix(dry_run=False, registry=False)["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_text() == raw
+
+
+@pytest.mark.parametrize("rec", ["x", None, [1]])
+def test_a_manifest_record_of_the_wrong_shape_is_reported_not_raised(lib, rec):
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"]["Fresh Arrival.m4a"] = rec
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    fs = doctor.check(registry=False)
+    assert [f.subject for f in fs if f.kind == "manifest_bad_record"] == ["Fresh Arrival.m4a"]
+    ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
+    assert ops["budget.m4a"] == "relink_mtime"        # the good records still plan
+    assert "Fresh Arrival.m4a" not in ops             # never linked over
+    doctor.fix(dry_run=False, registry=False)
+    assert json.loads(config.MANIFEST_PATH.read_text())["processed"]["Fresh Arrival.m4a"] == rec
+
+
+@pytest.mark.parametrize("mtime", [float("nan"), float("inf"), 1e20, "abc", [1]])
+def test_a_record_time_that_is_no_timestamp_never_aborts_the_check(lib, mtime):
+    """mtime NaN raised ValueError and 1e999 OverflowError in
+    date.fromtimestamp; the record now just has no time."""
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"]["gone.m4a"]["mtime"] = mtime
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
+    assert ops["gone.m4a"] == "retire"
+    assert "manifest_stale" in {f.kind for f in doctor.check(registry=False)}
+
+
+@pytest.mark.parametrize("field, value, links", [
+    ("duration_sec", "abc", True), ("duration_sec", [1], True),
+    ("source_mtime", "abc", False), ("source_mtime", [1], False),
+    ("source_mtime", float("nan"), False), ("source_name", ["a"], False)])
+def test_a_meeting_field_of_the_wrong_shape_never_aborts_the_check(
+        lib, monkeypatch, field, value, links):
+    """duration_sec 'abc' raised ValueError in check --deep, and a text
+    source_mtime raised in the relink by time and in the link."""
+    from stt import provenance
+    monkeypatch.setattr(provenance, "probe_tags", lambda a: {"duration": 600.0})
+    base = "Fresh Arrival 09302026"
+    mfile(base, ".m4a").write_bytes(b"audio")
+    j = config.meeting_file(base, ".json")
+    d = json.loads(j.read_text())
+    d[field] = value
+    j.write_text(json.dumps(d))
+    kinds = {f.kind for f in doctor.check(registry=False, deep=True)}
+    assert "manifest_stale" in kinds
+    # a link needs a real source name and a real time
+    assert ("Fresh Arrival.m4a" in {a["key"] for a in doctor.manifest_plan()}) is links
+
+
+def test_a_meeting_json_that_is_no_object_is_reported_not_raised(lib):
+    j = config.meeting_file("Odd Folder", ".json")
+    j.write_text("[1]")
+    fs = doctor.check(registry=False, deep=True)
+    assert [f.subject for f in fs if f.kind == "unreadable_json"] == ["Odd Folder"]
+
+
+def test_a_missing_store_retires_no_record_and_says_so(lib):
+    """With the meetings folder unmounted or moved, every record looked
+    stale, and fix moved them all to manifest_retired.json, so the next
+    batch would transcribe every source again."""
+    store = config.meetings_dir()
+    before = config.MANIFEST_PATH.read_bytes()
+    store.rename(store.with_name("meetings.away"))
+    fs = doctor.check(registry=False)
+    away = [f for f in fs if f.kind == "store_missing"]
+    assert len(away) == 1 and "5 manifest record(s)" in away[0].detail
+    assert not {"manifest_stale", "manifest_flat"} & {f.kind for f in fs}
+    r = doctor.fix(dry_run=False, registry=False)
+    assert r["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_bytes() == before
+    assert not (config.PROJECT_DIR / doctor.RETIRED_NAME).exists()
+    # an empty folder is the same: no meeting to check a record against
+    store.mkdir()
+    assert doctor.manifest_plan() == []
+    assert "store_missing" in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_missing_source_folder_releases_no_hold_and_says_so(lib):
+    """With the source folder unmounted or moved, every held name looked
+    gone, and fix released the hold on a private file, so the next batch
+    ran it."""
+    src = config.source_dir()
+    holds.PATH.write_text(json.dumps(["Private Memo.wav"]))
+    (src / "Private Memo.wav").write_bytes(b"x")
+    assert "stale_hold" not in {f.kind for f in doctor.check(registry=False)}
+    src.rename(src.with_name("source.away"))
+    fs = doctor.check(registry=False)
+    assert "stale_hold" not in {f.kind for f in fs}
+    away = [f for f in fs if f.kind == "source_missing"]
+    assert len(away) == 1 and "1 queue hold(s)" in away[0].detail
+    r = doctor.fix(dry_run=False, registry=False)
+    assert not any("stale hold" in d for d in r["done"])
+    assert json.loads(holds.PATH.read_text()) == ["Private Memo.wav"]
+
+
+def test_a_denied_source_folder_counts_as_there_and_releases_no_hold(lib):
+    """A source folder under a parent with no search right (or one macOS
+    privacy guards) gives PermissionError on a stat. check and fix raised
+    it from _source_away and from _stale_holds' exists()."""
+    locked = config.PROJECT_DIR / "locked"
+    src = locked / "src"
+    src.mkdir(parents=True)
+    (config.PROJECT_DIR / "stt.env").write_text(f"STT_ICLOUD_DIR={src}\n")
+    holds.PATH.write_text(json.dumps(["Private Memo.wav"]))
+    (src / "Private Memo.wav").write_bytes(b"x")
+    os.chmod(locked, 0)
+    try:
+        if os.access(src, os.F_OK):
+            pytest.skip("this user can stat a mode-000 folder's children")
+        fs = doctor.check(registry=False)
+        assert not {"stale_hold", "source_missing"} & {f.kind for f in fs}
+        r = doctor.fix(dry_run=False, registry=False)
+        assert not any("stale hold" in d for d in r["done"])
+    finally:
+        os.chmod(locked, 0o700)
+    assert json.loads(holds.PATH.read_text()) == ["Private Memo.wav"]
 
 
 def test_the_batch_end_report_holds_counts_and_no_names(lib):
@@ -246,6 +456,167 @@ def test_an_appending_writer_keeps_writing_to_the_same_file(sandbox, monkeypatch
         fh.write("after\n")
         fh.flush()
     assert log.read_text() == "after\n"
+
+
+def _seed_generations(logs, name="a.log"):
+    for i in (1, 2, 3):
+        (logs / f"{name}.{i}.gz").write_bytes(gzip.compress(f"old{i}\n".encode()))
+
+
+def _generations(logs, name="a.log"):
+    return [gzip.decompress((logs / f"{name}.{i}.gz").read_bytes()) for i in (1, 2, 3)]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only file")
+def test_a_log_the_batch_cannot_write_keeps_every_generation(sandbox):
+    """rotate() shifted the generations, then failed at the truncate. The log
+    stayed over the cap and each run shifted again: after three runs every
+    generation held the same copy and old1 to old3 were gone."""
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"X" * 50)
+    log.chmod(0o444)
+    try:
+        for _ in range(3):
+            with pytest.raises(PermissionError):
+                housekeeping.rotate(log, 10, 3)
+        assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+        assert sorted(p.name for p in logs.iterdir()) == [
+            "a.log", "a.log.1.gz", "a.log.2.gz", "a.log.3.gz"]
+    finally:
+        log.chmod(0o644)
+    assert housekeeping.rotate(log, 10, 3) is True       # writable again: it rotates
+    assert _generations(logs) == [b"X" * 50, b"old1\n", b"old2\n"]
+
+
+def test_a_failed_copy_moves_no_generation_and_leaves_no_temp(sandbox, monkeypatch):
+    """A full disk fails the gzip copy: nothing shifts, the log keeps its lines."""
+    import errno
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"Y" * 50)
+
+    def full(path, mode="rb", *a, **k):
+        if "w" in mode:
+            open(path, "wb").close()             # the temp exists, then the disk fills
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return gzip.GzipFile(path, mode)
+    monkeypatch.setattr(housekeeping.gzip, "open", full)
+    with pytest.raises(OSError):
+        housekeeping.rotate(log, 10, 3)
+    assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+    assert log.read_bytes() == b"Y" * 50
+    assert not list(logs.glob("*.tmp"))
+
+
+def test_one_log_that_fails_never_stops_the_others(sandbox, monkeypatch, capsys):
+    """rotate_logs had no per-file try: the first failure ended the loop,
+    rotate_all swallowed it, and every later log went unrotated with no
+    sign."""
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 10)
+    logs = sandbox / "logs"
+    logs.mkdir()
+    for n in ("a.log", "b.log", "c.log"):
+        (logs / n).write_bytes(b"Z" * 50)
+    real = housekeeping.rotate
+
+    def stuck(path, *a, **k):
+        if path.name == "a.log":
+            raise PermissionError(13, "Permission denied")
+        return real(path, *a, **k)
+    monkeypatch.setattr(housekeeping, "rotate", stuck)
+    assert housekeeping.rotate_logs(logs) == ["b.log", "c.log"]
+    assert (logs / "b.log").stat().st_size == 0 and (logs / "c.log").stat().st_size == 0
+    assert "could not rotate logs/a.log" in capsys.readouterr().err
+    monkeypatch.setattr(config, "LOG_DIR", logs)
+    (logs / "c.log").write_bytes(b"Z" * 50)
+    assert housekeeping.rotate_all()["logs"] == ["c.log"]
+
+
+def test_a_leftover_temp_gzip_is_not_a_log(sandbox, monkeypatch):
+    """A process killed between the gzip and the replace left
+    c.log.1.gz.tmp. It was listed as a log and rotated into
+    c.log.1.gz.tmp.1.gz. The next rotation of c.log replaces it."""
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 10)
+    logs = sandbox / "logs"
+    logs.mkdir()
+    (logs / "c.log.1.gz.tmp").write_bytes(b"Z" * 50)
+    (logs / "c.log").write_bytes(b"C" * 50)
+    assert [f.name for f in housekeeping.log_files(logs)] == ["c.log"]
+    assert housekeeping.rotate_logs(logs) == ["c.log"]
+    assert sorted(p.name for p in logs.iterdir()) == ["c.log", "c.log.1.gz"]
+    assert gzip.decompress((logs / "c.log.1.gz").read_bytes()) == b"C" * 50
+
+
+@pytest.mark.parametrize("name", ["STT_LOG_MAX_BYTES", "STT_CALIBRATION_MAX_BYTES"])
+@pytest.mark.parametrize("raw", ["0", "-5"])
+def test_a_cap_below_one_byte_keeps_the_default(tmp_path, name, raw):
+    """A cap of 0 or less rotated every file on every run."""
+    import subprocess
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), name: raw})
+    r = subprocess.run([sys.executable, "-c", "from stt import housekeeping as h; "
+                        "print(h.LOG_MAX_BYTES, h.CALIBRATION_MAX_BYTES)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "10000000 10000000"
+    assert name in r.stderr and "using 10000000" in r.stderr
+
+
+def test_an_empty_file_never_rotates_and_keeps_every_generation(sandbox):
+    """At a cap of 0 an empty log rotated into an empty name.1.gz, and the
+    real history moved one step closer to deletion."""
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"")
+    for _ in range(3):
+        assert housekeeping.rotate(log, 0, 3) is False
+    assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+    log.write_bytes(b"X")
+    assert housekeeping.rotate(log, 0, 3) is True       # a file with bytes still rotates
+    assert _generations(logs) == [b"X", b"old1\n", b"old2\n"]
+
+
+def test_two_rotations_of_one_file_at_once_do_not_collide(sandbox):
+    """The batch and the doctor's fix both rotate. Two rotations at once
+    shared name.1.gz.tmp: one os.replace took it and the other raised
+    FileNotFoundError, which cost the rest of that pass."""
+    import fcntl
+    import threading
+    logs = sandbox / "logs"
+    logs.mkdir()
+    log = logs / "x.log"
+    log.write_bytes(b"DATA\n" * 100)
+    with open(log, "rb") as held:                  # another rotation holds it
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert housekeeping.rotate(log, 10, 3) is False
+    assert sorted(p.name for p in logs.iterdir()) == ["x.log"]
+    assert log.stat().st_size == 500
+    for _ in range(20):
+        log.write_bytes(b"DATA\n" * 100)
+        for g in logs.glob("*.gz"):
+            g.unlink()
+        start, results = threading.Barrier(2), []
+
+        def go():
+            start.wait()
+            try:
+                results.append(housekeeping.rotate(log, 10, 3))
+            except Exception as e:
+                results.append(e)
+        ts = [threading.Thread(target=go) for _ in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert sorted(results) == [False, True], results
+        assert sorted(p.name for p in logs.iterdir()) == ["x.log", "x.log.1.gz"]
+        assert gzip.decompress((logs / "x.log.1.gz").read_bytes()) == b"DATA\n" * 100
 
 
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
@@ -360,3 +731,115 @@ def test_a_run_id_with_a_slash_never_becomes_a_path(tmp_path):
             fieldjournal.journal_path(bad, tmp_path)
     assert fieldjournal.journal_path("backfill-20261109T101500", tmp_path) == \
         tmp_path / "backfill-20261109T101500.jsonl"
+
+
+def test_check_reports_a_folder_with_no_json_or_an_unreadable_one(sandbox, monkeypatch):
+    """A folder with no meeting json (an interrupted run, a hand copy) or
+    with a json that is not JSON reached no reader: the panel listed
+    nothing, Archive and Delete refused it as no meeting, and the check
+    said 'clean: nothing to report'. Each one is reported now, and how to
+    clear it. A batch that runs makes its folder before its json, so the
+    folder check waits for it."""
+    _m("2026-08-04 Fine", title="Fine")
+    md = config.meetings_dir()
+    (md / "2026-08-02 Empty Folder").mkdir()
+    (md / "2026-08-03 No Json").mkdir()
+    (md / "2026-08-03 No Json" / "2026-08-03 No Json.txt").write_text("stub")
+    (md / "2026-08-05 Audio Only").mkdir()
+    (md / "2026-08-05 Audio Only" / "2026-08-05 Audio Only.m4a").write_bytes(b"a")
+    (md / "2026-08-01 Corrupt One").mkdir()
+    (md / "2026-08-01 Corrupt One" / "2026-08-01 Corrupt One.json").write_text("{bad json")
+    (md / ".archive").mkdir(exist_ok=True)
+    found = {(f.kind, f.subject): f for f in doctor.check(registry=False)}
+    bad = found[("unreadable_json", "2026-08-01 Corrupt One")]
+    assert not bad.fixable and "not readable JSON" in bad.detail
+    for name in ("2026-08-02 Empty Folder", "2026-08-03 No Json"):
+        assert "next batch start removes it" in found[("folder_without_json", name)].detail
+    assert "holds audio" in found[("folder_without_json", "2026-08-05 Audio Only")].detail
+    assert not any(s.startswith(".") or s == "2026-08-04 Fine" for k, s in found
+                   if k in ("unreadable_json", "folder_without_json"))
+    monkeypatch.setattr(doctor, "_batch_running", lambda: True)
+    kinds = {f.kind for f in doctor.check(registry=False)}
+    assert "folder_without_json" not in kinds and "unreadable_json" in kinds
+
+
+# ---------- the speaker engine ----------
+
+def _no_diar_env(monkeypatch):
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "STT_DIARIZER", "STT_SPEAKRS_AHC",
+              "STT_SPEAKRS_TIMEOUT_SEC"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_the_doctor_says_when_there_is_no_hugging_face_token(sandbox, monkeypatch):
+    """Both engines need the gated pyannote embedder, and the batch stops at
+    its start without a token. The doctor said nothing about it."""
+    from stt import speakrs_diar
+    _no_diar_env(monkeypatch)
+    monkeypatch.setattr(config, "HF_TOKEN", None)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: None)
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
+    kinds = {f.kind: f for f in doctor.check(registry=False)}
+    assert "diarizer_no_token" in kinds
+    assert "HF_TOKEN" in kinds["diarizer_no_token"].detail
+    (sandbox / "stt.env").write_text("HF_TOKEN=hf_synthetic\n")
+    assert "diarizer_no_token" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_the_doctor_says_when_speakrs_falls_back_to_pyannote(sandbox, monkeypatch):
+    """A missing helper or model set showed only as a warning line per file
+    in the log. The doctor names it once, and says nothing when pyannote
+    is the engine the owner picked."""
+    from stt import speakrs_diar
+    _no_diar_env(monkeypatch)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "hf_synthetic")
+    monkeypatch.setattr(speakrs_diar, "available",
+                        lambda: (False, "speakrs helper not built (x); run init.sh"))
+    found = [f for f in doctor.check(registry=False) if f.kind == "diarizer_fallback"]
+    assert len(found) == 1 and "run init.sh" in found[0].detail
+    assert "slower pyannote path" in found[0].detail
+    (sandbox / "stt.env").write_text("STT_DIARIZER=pyannote\n")
+    assert "diarizer_fallback" not in {f.kind for f in doctor.check(registry=False)}
+    (sandbox / "stt.env").write_text("")
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
+    monkeypatch.setattr(speakrs_diar, "SANDBOX_EXEC", str(sandbox / "no-sandbox-exec"))
+    found = [f for f in doctor.check(registry=False) if f.kind == "diarizer_fallback"]
+    assert len(found) == 1 and "no-sandbox-exec missing" in found[0].detail
+
+
+def test_the_doctor_names_an_unreadable_diarizer_setting(sandbox, monkeypatch):
+    """STT_DIARIZER, STT_SPEAKRS_AHC and STT_SPEAKRS_TIMEOUT_SEC warned at
+    import and fell back, but the doctor's bad_setting list left them out."""
+    _no_diar_env(monkeypatch)
+    (sandbox / "stt.env").write_text(
+        "STT_DIARIZER=speakr\nSTT_SPEAKRS_AHC=abc\nSTT_SPEAKRS_TIMEOUT_SEC=0\n")
+    bad = {f.subject: f.detail for f in doctor.check(registry=False)
+           if f.kind == "bad_setting"}
+    assert set(bad) == {"STT_DIARIZER", "STT_SPEAKRS_AHC", "STT_SPEAKRS_TIMEOUT_SEC"}
+    assert "using speakrs" in bad["STT_DIARIZER"]
+    assert "using 0.55" in bad["STT_SPEAKRS_AHC"]
+    assert "using 3600" in bad["STT_SPEAKRS_TIMEOUT_SEC"]
+    (sandbox / "stt.env").write_text(
+        "STT_DIARIZER=Pyannote\nSTT_SPEAKRS_AHC=0.6\nSTT_SPEAKRS_TIMEOUT_SEC=900\n")
+    assert not [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+
+
+def test_the_doctor_names_a_shell_style_line_that_sets_nothing(sandbox, monkeypatch):
+    """stt.env is not shell. 'export STT_DIARIZER=pyannote' read as the key
+    'export STT_DIARIZER', run.sh and setup.sh skipped the line, and the
+    setting stayed at its default with no word anywhere."""
+    _no_diar_env(monkeypatch)
+    (sandbox / "stt.env").write_text(
+        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_PUNCTUATE=1\n_OK_2=x\n")
+    bad = {f.subject: f.detail for f in doctor.check(registry=False)
+           if f.kind == "bad_setting"}
+    assert set(bad) == {"export STT_DIARIZER", "MY KEY"}
+    assert "no 'export'" in bad["export STT_DIARIZER"]
+
+
+def test_stt_env_example_lists_every_diarizer_setting():
+    text = (Path(__file__).resolve().parent.parent / "stt.env.example").read_text()
+    for name in ("STT_DIARIZER", "STT_SPEAKRS_AHC", "STT_SPEAKRS_TIMEOUT_SEC",
+                 "STT_SPEAKRS_BIN", "STT_SPEAKRS_MODELS", "HF_TOKEN"):
+        assert f"{name}=" in text, name
+    assert "BOTH engines" in text

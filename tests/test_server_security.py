@@ -202,11 +202,23 @@ def test_transcript_endpoint_accepts_real_base(running_server):
     assert status == 200 and body["base"] == "Legit Meeting"
 
 
-def test_audio_txt_review_edits_reject_unknown_base(running_server):
+def test_audio_txt_review_reject_unknown_base(running_server):
     for path in ("/api/audio?base=../x", "/api/txt?base=../x",
-                 "/api/review?base=../x", "/api/edits?base=../x"):
+                 "/api/review?base=../x"):
         status, _ = _get(running_server, path)
         assert status == 400, path
+
+
+def test_the_classic_page_only_endpoints_are_gone(running_server):
+    """/api/edits (the classic reader's edit count) and /api/recorder_note
+    (the classic strip's dismiss) had no caller left once the old page was
+    deleted. Both now answer as unknown routes. The note itself still clears
+    in the library: stt/recorder.py clears it when a new capture starts."""
+    _make_meeting("Legit Meeting")
+    status, body = _get(running_server, "/api/edits?base=Legit%20Meeting")
+    assert (status, body) == (404, {"error": "not found"})
+    status, body = _post(running_server, "/api/recorder_note", {"clear": True})
+    assert (status, body) == (404, {"error": "not found"})
 
 
 def test_suggest_is_a_post_and_get_writes_nothing(running_server, monkeypatch):
@@ -593,6 +605,31 @@ def test_queue_delete_gates_confirm_membership_and_active(running_server):
     assert not (src / "Bad Take.opts.json").exists()  # sidecar went with it
 
 
+def test_queue_delete_is_not_refused_by_a_killed_batchs_entry(running_server):
+    """Only end_run clears status.json's active map: a batch killed by
+    SIGKILL left its entry, and the queue refused the delete as 'being
+    processed right now' until the next batch started."""
+    import json
+    import subprocess
+    import sys
+
+    from stt import config, status as st
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "Bad Take.m4a"
+    f.write_bytes(b"audio")
+    p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    p.wait()                                   # exited and reaped: nobody owns the entry
+    d = st.read()
+    d.update(running=True, pid=p.pid, pgid=p.pid,
+             active={"Bad Take.m4a": {"stage": "transcribing"}})
+    st.STATUS_PATH.write_text(json.dumps(d))
+    status, body = _post(running_server, "/api/queue_delete",
+                         {"name": "Bad Take.m4a", "confirm": True})
+    assert status == 200 and body["ok"], body
+    assert not f.exists()
+
+
 def test_queue_endpoints_are_origin_gated(running_server):
     status, _ = _get(running_server, "/api/queue_audio?name=x.m4a",
                      headers={"Origin": "https://evil.example.com"})
@@ -934,32 +971,6 @@ def test_audio_range_suffix_and_unsatisfiable(running_server):
 
 # ---------- HTML/JS defects (findings #19, #12) ----------
 
-def _shell_js():
-    return (Path(srv.__file__).resolve().parent / "static" / "app.js"
-            ).read_text(encoding="utf-8")
-
-
-def test_flag_title_attribute_escapes_flag_text():
-    """The transcript's uncertainty marker interpolates flag text into an HTML
-    title attribute; a flag containing a quote (a speaker name flows into
-    `possible:<name>`) would break out of the attribute without esc()."""
-    js = _shell_js()
-    assert 'title="Uncertain: ${esc((g.flags||[]).join(\', \'))}"' in js
-    # the raw, un-escaped form must never appear
-    assert 'title="Uncertain: ${(g.flags||[]).join(\', \')}"' not in js
-
-
-def test_speaker_select_restores_prior_selection_on_cancel():
-    """Cancelling the New-person prompt must restore the segment's prior
-    speaker, not silently jump to option 0 (misattributing the line)."""
-    js = _shell_js()
-    # remembers the prior real selection and restores it on cancel
-    assert "sel._prev" in js
-    assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in js
-    # the unconditional reset must never return
-    assert "if(!nm){sel.selectedIndex=0;return}" not in js
-
-
 def _new_shell_js():
     static = Path(srv.__file__).resolve().parent / "static"
     return "\n".join((static / f).read_text(encoding="utf-8")
@@ -968,18 +979,18 @@ def _new_shell_js():
 
 
 def test_new_shell_flag_reason_is_escaped():
-    """The new shell's port of the flag-title test above: a flag code (a
-    speaker name flows into `possible:<name>`) reaches the line and the card
-    only through esc()."""
+    """A flag code (a speaker name flows into `possible:<name>`) reaches the
+    line and the card only through esc(), so a quote in a name never breaks
+    out of the markup."""
     js = _new_shell_js()
     assert "${esc(mFlagWhy(g))}" in js and "${esc(mFlagWhy(it))}" in js
     assert "${mFlagWhy(" not in js
 
 
 def test_new_shell_new_person_never_falls_back_to_the_first_speaker():
-    """The new shell's port of the select-restore test above: "New person"
-    with an empty name box refuses the save (mSpkValue answers __new__ and
-    every caller refuses it), so a line is never silently given to option 0."""
+    """"New person" with an empty name box refuses the save (mSpkValue
+    answers __new__ and every caller refuses it), so a line is never silently
+    given to option 0."""
     js = _new_shell_js()
     assert "return v?'name:'+v:'__new__';" in js
     for fn in ("mEditSave", "mRevApply", "mRevSave", "mSplitSave", "mInsertSave"):
@@ -1594,6 +1605,29 @@ def test_deleting_a_queued_file_reports_the_twin_in_the_other_folder(running_ser
     assert not (rec / "Weekly Sync.m4a").exists()
 
 
+def test_deleting_the_last_queued_copy_releases_its_hold(running_server):
+    """A hold is a name. It stayed after the panel binned the file, so the
+    next recording under that name started held and every sweep skipped it.
+    A twin in the other folder keeps the hold: it takes the row's place."""
+    from stt import holds
+    src, rec = config.source_dir(), config.recordings_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    rec.mkdir(parents=True, exist_ok=True)
+    (src / "Weekly Sync.m4a").write_bytes(b"FIRST" + b"\x01" * 900)
+    (rec / "Weekly Sync.m4a").write_bytes(b"SECOND" + b"\x02" * 4000)
+    holds.hold("Weekly Sync.m4a")
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body.get("shadowed") is True
+    assert holds.is_held("Weekly Sync.m4a"), "the twin keeps the hold"
+
+    st, body = _post(running_server, "/api/queue_delete",
+                     {"name": "Weekly Sync.m4a", "confirm": True})
+    assert st == 200 and body["ok"] is True
+    assert holds.items() == set()
+
+
 def test_the_sweep_spares_a_file_whose_meeting_dropped_its_audio(running_server):
     """R2: drop_audio removes a meeting's stored audio and keeps the transcript,
     but the manifest's recorded fingerprint goes on matching the source. The
@@ -1642,6 +1676,37 @@ def test_the_sweep_reproves_the_bytes_before_each_unlink(running_server, monkeyp
     assert st == 200 and body["deleted"] == []
     assert (src / "board prep 2.m4a").exists(), \
         "identity must be proven at unlink time, not taken from the snapshot"
+
+
+def test_the_sweep_compares_every_byte_when_the_meeting_holds_a_same_size_copy(
+        running_server):
+    """The fingerprint samples the first, middle and last megabyte. A
+    same-size edit between them kept it, so the row read "identical" and
+    the sweep deleted a file whose bytes differ from the meeting's copy."""
+    from stt import dupes
+    body = bytes(range(256)) * (4 * 1024 * 4)          # 4 MB
+    edited = bytearray(body)
+    off = dupes.CHUNK + 100000
+    edited[off:off + 100] = b"\0" * 100
+    base = "Board Prep 05012026"
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": "board prep.m4a", "duration_sec": 600.0,
+         "speakers": [], "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    mfile(base, ".m4a").write_bytes(body)
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "board prep 2.m4a"
+    f.write_bytes(bytes(edited))
+
+    _, state = _get(running_server, "/api/state")
+    row = [q for q in state["queue"] if q["name"] == "board prep 2.m4a"][0]
+    assert row["dup_reason"] == "identical", "the sample cannot see the edit"
+    st, body_ = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body_["deleted"] == []
+    assert body_["skipped"] == [{"name": "board prep 2.m4a",
+                                 "reason": "its bytes differ from the meeting's copy"}]
+    assert f.exists()
 
 
 def test_the_sweep_still_takes_a_file_it_can_prove_right_now(running_server):
@@ -2086,12 +2151,10 @@ def test_a_transcripts_folder_with_other_files_needs_a_confirm(
     assert r.get("ok") is True          # nothing in it: no question to ask
 
 
-def test_both_shells_offer_the_folder_confirm():
+def test_the_shell_offers_the_folder_confirm():
     root = Path(__file__).resolve().parent.parent / "gui" / "static"
     nxt = (root / "next.js").read_text()
     assert "'folder-confirm'" in nxt and "confirm:true" in nxt
-    app = (root / "app.js").read_text()
-    assert "dFolderGo" in app and "DRAWER.folderAsk" in app
 
 
 @pytest.mark.parametrize("hosts", [("127.0.0.1", "evil.com"), ("evil.com", "127.0.0.1"),
@@ -2252,3 +2315,27 @@ def test_a_dropped_voice_cannot_be_named_back_to_life(running_server, monkeypatc
     assert unknowns.promote("U007", "Ghost") is False
     assert "Ghost" not in identify.load_registry()
     assert unknowns.load()["speakers"]["U007"].get("dropped"), "the tombstone stays"
+
+
+
+def test_naming_a_voice_speaker_7_is_refused_while_u007_shows_that_label(
+        running_server, monkeypatch):
+    """POST /api/name {"uid": "U012", "name": "Speaker 7"} enrolled a person
+    whose name matched unknown U007's display label."""
+    import numpy as np
+
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    rng = np.random.default_rng(9)
+    speakers = {}
+    for uid in ("U007", "U012"):
+        v = rng.normal(size=256)
+        np.save(config.VOICEPRINTS_DIR / f"{uid}.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+        speakers[uid] = {"file": f"{uid}.npy", "meetings": ["M"]}
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 13, "speakers": speakers}))
+    st, body = _post(running_server, "/api/name",
+                     {"uid": "U012", "name": "Speaker 7", "confirm": True})
+    assert body == {"ok": False, "error": identify.RESERVED_ERROR}
+    assert "Speaker 7" in identify.RESERVED_ERROR
+    assert "Speaker 7" not in identify.load_registry()

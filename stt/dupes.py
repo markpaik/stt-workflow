@@ -6,8 +6,10 @@ under a NEW name or a new mtime (an iCloud re-sync, a second export, a copy off
 another Mac), and the manifest keys on name + mtime, so it reads as brand new
 and gets transcribed all over again. Here the file is identified by its CONTENT:
 size first (a free stat, and two different recordings essentially never share an
-exact byte count), then a hash of the head and tail. Only a size collision is
-ever hashed, so the common poll does no reading at all.
+exact byte count), then a hash of the first, middle and last megabyte. Only a
+size collision is ever hashed, so the common poll does no reading at all. That
+hash is a sample: the bulk delete compares every byte before an unlink whenever
+the meeting holds a copy of the same size.
 
 CURE (transcripts). Prevention only works going forward, and a library already
 carries whatever slipped through. Two transcripts of the same audio are compared
@@ -59,7 +61,7 @@ def _atomic_write(p: Path, text: str):
 # ---------------------------------------------------------------- files -----
 
 CHUNK = 1024 * 1024          # head and tail bytes folded into a fingerprint
-_fp_cache = {}               # (path, size, mtime) -> fingerprint or None
+_fp_cache = {}               # (path, size, mtime) -> fingerprint (never None)
 
 
 def cache_path():
@@ -73,9 +75,13 @@ def ignored_path():
 def fingerprint(path):
     """A content fingerprint for a media file, or None when one cannot be taken.
 
-    Size plus the first, MIDDLE and last megabyte: two recordings that agree on
-    all four are the same bytes for any practical purpose, and it costs two
-    seeks instead of reading gigabytes. NEVER touches a dataless iCloud file --
+    Size plus the first, MIDDLE and last megabyte. It is a SAMPLE, not proof
+    that every byte agrees: two files of one size that differ only between
+    those windows (a same-size edit in place) get the same fingerprint. Two
+    different recordings differ in the head, so they never collide, and it
+    costs two seeks instead of reading gigabytes. The bulk delete therefore
+    compares every byte (same_bytes) whenever the meeting still holds a copy
+    of the same size. NEVER touches a dataless iCloud file --
     reading one would trigger a multi-gigabyte download from a status poll,
     which is exactly the surprise this feature is supposed to prevent.
 
@@ -100,24 +106,53 @@ def fingerprint(path):
                 h.update(fh.read(CHUNK))
                 # any file bigger than one chunk gets its tail hashed too. The
                 # old cut-off was 2*CHUNK, which left everything past the first
-                # megabyte of a 1-2 MB file OUT of the "byte-identical" proof
-                # that gates the no-undo bulk delete; an overlapping tail read
+                # megabyte of a 1-2 MB file OUT of the sample that flags a
+                # file for the no-undo bulk delete; an overlapping tail read
                 # is merely redundant, never wrong
                 if st.st_size > CHUNK:
                     fh.seek(-CHUNK, os.SEEK_END)
                     h.update(fh.read(CHUNK))
                 # and a MIDDLE megabyte. Head plus tail alone leaves every byte
                 # between them out of the hash, so two files above 2*CHUNK that
-                # differ only in the middle collided -- and this hash is the
-                # "byte-identical" proof that gates a bulk delete with no undo.
+                # differ only in the middle collided. Bytes between the three
+                # windows are still out of it: see same_bytes.
                 if st.st_size > 2 * CHUNK:
                     fh.seek((st.st_size - CHUNK) // 2)
                     h.update(fh.read(CHUNK))
             fp = h.hexdigest()
     except OSError:
         fp = None
-    _fp_cache[key] = fp
+    # only a real fingerprint is cached. A None comes from a dataless iCloud
+    # file, an empty file or a read error, and each one can end without the
+    # size or mtime moving: an iCloud download keeps both. A cached None then
+    # hid the 'identical' proof from the long-lived panel until a restart.
+    # Not caching it costs one stat per poll for that file.
+    if fp is not None:
+        _fp_cache[key] = fp
     return fp
+
+
+def same_bytes(a, b):
+    """True when two files hold the same bytes, every one compared. False
+    when they differ, or one cannot be read in full (a dataless iCloud file
+    is never read). None when their sizes differ: then no full compare can
+    say anything, and the caller keeps what proof it has."""
+    a, b = Path(a), Path(b)
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return None
+        from . import icloud
+        if not (icloud._fully_present(a) and icloud._fully_present(b)):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(CHUNK), fb.read(CHUNK)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
 
 
 def _record_base(rec) -> str:
@@ -137,9 +172,11 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
     bases that still exist (live plus archived). Two independent signals, and
     they are NOT equally strong:
 
-      identical -- same size AND same head/tail hash as a meeting's stored
-        audio (a plain copy of the original) or as the fingerprint the manifest
-        recorded for a processed source. Proof enough to offer a bulk delete.
+      identical -- same size AND same sampled fingerprint as a meeting's
+        stored audio (a plain copy of the original) or as the fingerprint the
+        manifest recorded for a processed source. Enough to OFFER a bulk
+        delete. The delete compares every byte first when the meeting holds
+        a copy of the same size (same_bytes).
       name -- the file is named exactly like some meeting's source file. Common
         and useful, but a recurring export ("Weekly Sync.m4a") legitimately
         reuses one name for genuinely different meetings, so this one only ever
@@ -176,6 +213,8 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
     # Gated on liveness: records outlive their meetings (deletions before the
     # delete_meeting scrub existed left dead records behind).
     for key, rec in (man.get("processed") or {}).items():
+        if not isinstance(rec, dict):
+            continue                 # a hand-edited record that is not an object
         fp, size = rec.get("fp"), rec.get("size")
         base = _record_base(rec)
         if not base:
@@ -210,9 +249,15 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
 # Jaccard over word shingles. Two ASR passes over the same audio agree far above
 # this; genuinely different meetings by the same people, on the same agenda,
 # land well below it. The threshold only decides what gets REVIEWED.
-THRESHOLD = float(os.environ.get("STT_DUPE_THRESHOLD", "0.72"))
+THRESHOLD = config.env_float("STT_DUPE_THRESHOLD", 0.72)
 SHINGLE = 5           # words per shingle
 SKETCH_K = 256        # bottom-k hashes kept per meeting
+# fewest distinct shingles a transcript needs before it is compared at all.
+# A silent recording that ASR turned into "thank you" two hundred times holds
+# 2 distinct shingles, so two such meetings of one length had the same sketch
+# and read as a 1.0 match. Bottom-k Jaccard on a handful of hashes measures
+# nothing. 32 is about 36 words of speech that does not repeat itself.
+MIN_SHINGLES = 32
 DUR_TOL = 0.20        # candidate pair durations within 20% of each other
 MAX_PAIRS = 20000     # hard bound on the comparison loop
 _WORD = re.compile(r"[a-z0-9']+")
@@ -249,6 +294,18 @@ def similarity(a, b) -> float:
     return sum(1 for h in union if h in sa and h in sb) / len(union)
 
 
+def _items(d, key) -> list:
+    """The dict items of a transcript's list field (segments, words). A
+    file of another shape (a top-level list, a string or null item) gives
+    only the items that are dicts, so one bad file never stops a scan."""
+    v = d.get(key) if isinstance(d, dict) else None
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _text(d) -> str:
+    return " ".join(str(s.get("text") or "") for s in _items(d, "segments"))
+
+
 def transcript_text(base: str, dest_dir=None) -> str:
     """The words only, from the .json segments -- never the .txt, whose lines
     are prefixed with speaker names. A rename or a relabel rewrites every one of
@@ -259,7 +316,7 @@ def transcript_text(base: str, dest_dir=None) -> str:
         d = json.loads(j.read_text())
     except (OSError, ValueError):
         return ""
-    return " ".join(str(s.get("text") or "") for s in d.get("segments") or [])
+    return _text(d)
 
 
 def library_signature(dest_dir=None) -> str:
@@ -269,20 +326,57 @@ def library_signature(dest_dir=None) -> str:
     parts = []
     for base in sorted(config.meeting_bases(dest_dir)):
         try:
-            parts.append(f"{base}:{config.meeting_file(base, '.json', dest_dir).stat().st_mtime}")
+            st = config.meeting_file(base, '.json', dest_dir).stat()
         except OSError:
             continue
+        parts.append(f"{base}:" + ":".join(map(repr, _stamp(st))))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
+def _stamp(st) -> tuple:
+    """(mtime, size, ctime) of one transcript: what says it is unchanged.
+    The mtime alone is not enough. A restore that keeps it (cp -p, rsync
+    -t, a backup) or a rewrite inside the same second left the old sketch
+    in place, and the pair list stayed wrong both ways. No user call can
+    set the ctime, so any write moves it."""
+    return (st.st_mtime, st.st_size, st.st_ctime)
+
+
+def _is_num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _good_pair(p) -> bool:
+    return (isinstance(p, dict) and isinstance(p.get("a"), str)
+            and isinstance(p.get("b"), str) and _is_num(p.get("score")))
+
+
+def _good_sketch(v) -> bool:
+    """A cached per-meeting entry that similar_meetings can use as it is."""
+    return (isinstance(v, dict) and _is_num(v.get("mtime"))
+            and _is_num(v.get("words")) and _is_num(v.get("dur") or 0.0)
+            and isinstance(v.get("hashes"), list)
+            and all(isinstance(h, int) for h in v["hashes"]))
+
+
 def _load_cache() -> dict:
+    """The last scan, or an empty one. Valid JSON of the wrong shape (a list,
+    null, a pair or a sketch with the wrong fields) raised AttributeError in
+    every reader, and the scan that would rewrite the file raised too, so
+    the cache stayed broken until someone deleted it. Each part of the wrong
+    shape now reads as empty, and the next scan saves a good file."""
     try:
         c = json.loads(cache_path().read_text())
-        c.setdefault("sketches", {})
-        c.setdefault("pairs", [])
-        return c
     except (OSError, ValueError):
+        c = None
+    if not isinstance(c, dict):
         return {"sketches": {}, "pairs": [], "sig": None}
+    sk = c.get("sketches")
+    c["sketches"] = ({b: v for b, v in sk.items() if _good_sketch(v)}
+                     if isinstance(sk, dict) else {})
+    pairs = c.get("pairs")
+    c["pairs"] = [p for p in pairs if _good_pair(p)] if isinstance(pairs, list) else []
+    return c
 
 
 def _save_cache(c: dict):
@@ -376,17 +470,16 @@ def _length_signal(d: dict) -> tuple:
     if dur <= 0:
         # the transcript's own timing, when it has any
         for key, field in (("segments", "end"), ("words", "end")):
-            for item in reversed(d.get(key) or []):
+            for item in reversed(_items(d, key)):
                 try:
                     dur = max(dur, float(item.get(field) or 0.0))
-                except (AttributeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     continue
                 if dur > 0:
                     break
             if dur > 0:
                 break
-    words = len(_tokens(" ".join(str(s.get("text") or "")
-                                 for s in d.get("segments") or [])))
+    words = len(_tokens(_text(d)))
     return max(0.0, dur), words
 
 
@@ -404,7 +497,7 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     """[{"a": base, "b": base, "score": float}] for every live pair that looks
     like the same recording, best score first.
 
-    Sketches are cached per meeting (keyed on the transcript's mtime), so the
+    Sketches are cached per meeting (keyed on the transcript's _stamp), so the
     steady-state cost is one new meeting's shingles. The pair walk is gated on
     duration first: same meeting means same length, and it keeps the comparison
     loop off O(N^2) Jaccards on a big library."""
@@ -415,14 +508,16 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     for base in sorted(config.meeting_bases(dest_dir)):
         j = config.meeting_file(base, ".json", dest_dir)
         try:
-            mtime = j.stat().st_mtime
+            mtime, size, ctime = _stamp(j.stat())
         except OSError:
             continue
         prev = old.get(base)
-        # "words" is required: an entry cached by an older build carries no
-        # word count, and the length gate below needs one whenever the
-        # duration is missing
-        if prev and abs(prev.get("mtime", 0) - mtime) < 1.0 and "words" in prev:
+        # "words" is required (_good_sketch): an entry cached by an older
+        # build carries no word count, and the length gate below needs one
+        # whenever the duration is missing. An entry from an older build
+        # has no size or ctime either, so it is sketched once more.
+        if (prev and prev["mtime"] == mtime and prev.get("size") == size
+                and prev.get("ctime") == ctime):
             sketches[base] = prev["hashes"]
             durs[base] = prev.get("dur") or 0.0
             lens[base] = prev.get("words") or 0
@@ -431,16 +526,22 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
             d = json.loads(j.read_text())
         except (OSError, ValueError):
             continue
-        text = " ".join(str(s.get("text") or "") for s in d.get("segments") or [])
-        sk = sketch(text)
+        # a valid file of another shape (a top-level list) raised
+        # AttributeError, which stopped the whole scan for every meeting
+        if not isinstance(d, dict):
+            continue
+        sk = sketch(_text(d))
         dur, nwords = _length_signal(d)
         sketches[base], durs[base], lens[base] = sk, dur, nwords
-        old[base] = {"mtime": mtime, "dur": dur, "words": nwords, "hashes": sk}
+        old[base] = {"mtime": mtime, "size": size, "ctime": ctime,
+                     "dur": dur, "words": nwords, "hashes": sk}
     # drop cache entries for meetings that are gone (deleted, archived, renamed)
     cache["sketches"] = {b: v for b, v in old.items() if b in sketches}
 
     skip = ignored_pairs()
-    bases = sorted(sketches)
+    # a transcript too thin to judge (a loop, a one-line clip) is never
+    # paired: it stays cached, and it pairs once it holds enough words
+    bases = sorted(b for b in sketches if len(sketches[b]) >= MIN_SHINGLES)
     # gather every duration-eligible pair FIRST, then compare the closest
     # lengths first: same recording means same length, so when the budget
     # cannot cover everything it is the far-apart pairs that go unchecked

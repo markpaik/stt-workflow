@@ -167,3 +167,80 @@ def test_working_secondary_engine_flags_real_disagreement(monkeypatch):
                               "mlx-community/parakeet-tdt-0.6b-v2")
     assert engine == "mlx-whisper/turbo"
     assert any(r["theirs"] == "renewed" for r in regs)
+
+
+def test_a_second_engine_that_stops_early_flags_no_tail(monkeypatch, capsys):
+    """A second engine that crashed or dropped its last chunk still passed the
+    30% floor, and the whole unheard tail became one region: every segment
+    in it was flagged. Only the part it reached is compared now."""
+    from stt import asr_mlxwhisper
+    words = "we will review the attendance numbers for every school this week and next".split()
+    primary = _w([(2.0 * i, 2.0 * i + 1.5, w) for i, w in enumerate(words)])
+    sec = [dict(w) for w in primary[:6]]          # it stopped after "numbers"
+    sec[2]["word"] = "renew"                        # one real disagreement it heard
+    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+                        lambda wav, progress=None: {"words": sec,
+                                                    "engine": "mlx-whisper/turbo"})
+    regs, _ = verify.run("dummy.wav", primary, "mlx-community/parakeet-tdt-0.6b-v3")
+    assert regs == [{"start": 4.0, "end": 5.5, "ours": "review", "theirs": "renew"}]
+    assert "not compared" in capsys.readouterr().out
+    # the raw alignment still makes the tail one region: run() is the guard
+    assert verify.regions(primary, sec)[-1]["ours"].startswith("for every school")
+    # a few unheard words at the end are a disagreement, not a stopped engine
+    assert verify.heard(primary, primary[:-2]) == primary
+    assert verify.heard(primary, []) == primary
+
+
+def test_apply_flags_skips_a_neighbour_that_only_touches_the_region():
+    """The overlap test was >= 0 for every region, so a region that lies in
+    one segment also flagged both neighbours that end or start at its edge.
+    A region that lies in no segment still flags the ones it touches."""
+    def segs():
+        return [{"start": 0.0, "end": 5.0, "text": "a"},
+                {"start": 5.0, "end": 9.0, "text": "b"},
+                {"start": 9.0, "end": 12.0, "text": "c"}]
+    s = segs()
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 9.0, "ours": "x", "theirs": "y"}]) == 1
+    assert [x.get("flags") for x in s] == [None, [verify.FLAG], None]
+    s = segs()                                      # zero width on a shared edge
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 5.0, "ours": "", "theirs": "y"}]) == 2
+    assert [bool(x.get("flags")) for x in s] == [True, True, False]
+    s = [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 6.0, "end": 9.0, "text": "b"}]
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 6.0, "ours": "", "theirs": "y"}]) == 2
+
+
+def test_a_curly_apostrophe_or_a_digit_comma_is_the_same_word():
+    """A curly apostrophe became a space, so "don’t" read as "don t" and
+    flagged against "don't". "1,000" read as "1 000" against "1000"."""
+    def W(text):
+        return _w([(0.5 * i, 0.5 * i + 0.4, w) for i, w in enumerate(text.split())])
+    for ours, theirs in [("we don't know", "we don’t know"),
+                         ("we don’t know", "we don't know"),
+                         ("paid 1,000 dollars", "paid 1000 dollars"),
+                         ("paid 1,000,000 dollars", "paid 1000000 dollars"),
+                         ("he said ‘fine’ twice", "he said fine twice"),
+                         ("he said 'fine' twice", "he said fine twice")]:
+        assert verify.regions(W(ours), W(theirs)) == [], (ours, theirs)
+    assert verify._norm("1,2,3") == "1 2 3"          # a list keeps its commas apart
+    assert verify.regions(W("we can't go"), W("we can go")) != []
+
+
+def test_a_sidecar_of_the_wrong_shape_never_stops_a_relabel(sandbox):
+    """load_sidecar caught only bad JSON. Bad UTF-8, a list, or a null
+    "regions" raised in relabel, and that meeting's relabel stopped."""
+    good = {"start": 0.4, "end": 0.8, "ours": "reviewed", "theirs": "renewed"}
+    p = mfile("Mtg", ".verify.json")
+    for raw, want in [(b"\xff\xfe{bad", None), (b"[1,2]", None), (b'"x"', None),
+                      (b'{"engine":"x","regions":null}', []),
+                      (b'{"engine":"x","regions":{"a":1}}', []),
+                      (json.dumps({"engine": "x", "regions": [
+                          good, 3, None, {"start": "a", "end": 1, "ours": "", "theirs": ""},
+                          {"start": 1, "end": 2}]}).encode(), [good])]:
+        p.write_bytes(raw)
+        vc = verify.load_sidecar("Mtg")                     # what relabel does
+        if want is None:
+            assert vc is None, raw
+            continue
+        assert vc["regions"] == want, raw
+        segs = [{"start": 0.0, "end": 2.0, "text": "We reviewed the dashboard", "flags": []}]
+        assert verify.apply_flags(segs, vc.get("regions", [])) == len(want)

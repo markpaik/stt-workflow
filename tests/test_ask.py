@@ -403,9 +403,91 @@ def test_the_evaluation_refuses_a_real_home(monkeypatch):
     monkeypatch.delenv("STT_HOME", raising=False)
     with pytest.raises(SystemExit):
         ask_eval._guard()
-    monkeypatch.setenv("STT_HOME", str(config.Path.home() / "Projects/brain/meetings"))
+    monkeypatch.setenv("STT_HOME", str(config.DEFAULT_MEETINGS_DIR))
     with pytest.raises(SystemExit):
         ask_eval._guard()
+    monkeypatch.setenv("STT_HOME", str(config.DEFAULT_MEETINGS_DIR / "inside"))
+    with pytest.raises(SystemExit):
+        ask_eval._guard()
+
+
+def test_the_evaluation_guard_follows_folder_redirects(sandbox, monkeypatch, tmp_path):
+    """_guard checked STT_HOME alone, and build() wrote into
+    config.meetings_dir() and rebuilt config.SEARCH_DB. A meetings folder
+    named in the home's stt.env or in STT_MEETINGS_DIR, or a PROJECT_DIR
+    elsewhere, put the 12 synthetic meetings beside a foreign folder's
+    files. The guard runs before build() writes anything."""
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    assert ask_eval._guard() == tmp_path.resolve()
+    decoy = tmp_path.parent / (tmp_path.name + "-decoy")
+    (tmp_path / "stt.env").write_text(f"STT_MEETINGS_DIR={decoy}\n")
+    with pytest.raises(SystemExit, match="the meetings folder .* is outside STT_HOME"):
+        ask_eval._guard()
+    (tmp_path / "stt.env").unlink()
+    monkeypatch.setattr(config, "MEETINGS_DIR", decoy)   # STT_MEETINGS_DIR at import
+    with pytest.raises(SystemExit, match="the meetings folder"):
+        ask_eval._guard()
+    monkeypatch.setattr(config, "MEETINGS_DIR", tmp_path / "meetings")
+    monkeypatch.setattr(config, "SEARCH_DB", decoy / "search.db")  # STT_PROJECT_DIR
+    with pytest.raises(SystemExit, match="the search index"):
+        ask_eval._guard()
+    assert not decoy.exists()
+
+
+def test_the_evaluation_guard_refuses_the_main_checkouts_library(monkeypatch, tmp_path):
+    """_guard read only its own checkout's stt.env. A worktree has none,
+    so a home inside the library that the main checkout's stt.env names
+    passed. _guard only resolves the paths: it writes nothing."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(ask_eval.__file__).resolve().parent))
+    import demo_seed
+    main = tmp_path / "main"
+    live = tmp_path / "Live Library"
+    main.mkdir()
+    (main / "stt.env").write_text(f"STT_MEETINGS_DIR={live}\n")
+    monkeypatch.setattr(demo_seed, "_other_checkouts", lambda repo: [main])
+    for real in (live / "inside", main / "voiceprints"):
+        monkeypatch.setenv("STT_HOME", str(real))
+        with pytest.raises(SystemExit, match="overlaps a real folder"):
+            ask_eval._guard()
+
+
+@pytest.mark.parametrize("fold", [str.lower, str.upper])
+def test_the_evaluation_guard_folds_letter_case(monkeypatch, fold):
+    """APFS folds letter case and resolve() does not, so a home typed as
+    ~/projects/... was not the real ~/Projects/... folder to the guard.
+    _guard only resolves the paths: it writes nothing."""
+    from pathlib import Path
+    repo = Path(ask_eval.__file__).resolve().parent.parent
+    for real in (config.DEFAULT_MEETINGS_DIR / "inside", repo / "voiceprints" / "x"):
+        monkeypatch.setenv("STT_HOME", fold(str(real)))
+        with pytest.raises(SystemExit, match="overlaps a real folder"):
+            ask_eval._guard()
+    for held in (repo, repo.parent):
+        monkeypatch.setenv("STT_HOME", fold(str(held)))
+        with pytest.raises(SystemExit, match="is or holds the checkout"):
+            ask_eval._guard()
+
+
+@pytest.mark.parametrize("sub", ["qa/ask_home", "work/qa-scan2/ae"])
+def test_the_evaluation_guard_accepts_a_scratch_home_inside_the_checkout(
+        monkeypatch, sub):
+    """The guard refused every home inside the checkout, so qa/demo_home
+    (demo_seed's documented scratch place) and work/qa-scan2 printed
+    "refused: STT_HOME overlaps a real folder" for the checkout itself.
+    _guard only resolves the paths: it writes nothing."""
+    from pathlib import Path
+    repo = Path(ask_eval.__file__).resolve().parent.parent
+    home = repo / sub
+    monkeypatch.setenv("STT_HOME", str(home))
+    monkeypatch.delenv("STT_MEETINGS_DIR", raising=False)
+    # config as it reads under this STT_HOME: every folder inside the home
+    monkeypatch.setattr(config, "PROJECT_DIR", home)
+    monkeypatch.setattr(config, "MEETINGS_DIR", home / "meetings")
+    monkeypatch.setattr(config, "SEARCH_DB", home / "search.db")
+    assert ask_eval._guard() == home.resolve()
+    assert not home.exists()
 
 
 def test_purge_finds_a_thread_citing_an_accented_name_without_an_id(sandbox, monkeypatch, tmp_path):

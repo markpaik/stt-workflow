@@ -1,13 +1,16 @@
 """review: the accept/edit workflow against real files, plus voice-clip lookup
 including the named-mid-batch fallback (transcripts not yet relabeled)."""
 import json
+import os
+import shutil
 import threading
 import time
 
 import numpy as np
+import pytest
 
-from stt import config, diarcache, identify, review
-from conftest import mfile
+from stt import audio, config, diarcache, identify, review
+from conftest import decision_count, mfile
 
 
 def _make_meeting(sandbox, base="Mtg", flag_seg=1):
@@ -481,9 +484,9 @@ def test_redo_archives_decisions(sandbox):
     archived (renamed .superseded), never half-applied and never deleted."""
     _make_meeting(sandbox)
     review.apply("Mtg", 1, "edit", start=5.0, text="Human work.")
-    assert review.count_decisions("Mtg") == 1
+    assert decision_count("Mtg") == 1
     assert review.archive_decisions("Mtg") is True
-    assert review.count_decisions("Mtg") == 0
+    assert decision_count("Mtg") == 0
     assert (mfile("Mtg", ".reviews.superseded.json")).exists()
     # rebuilt data gets nothing reapplied — clean slate
     data = _make_meeting(sandbox)
@@ -501,6 +504,52 @@ def test_retranscribe_engine_selection(sandbox):
     assert os.environ["STT_WHISPER_MLX_MODEL"] == "large-v3"
     # unknown engine -> clean error dict, not a crash
     assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "bogus")["error"]
+
+
+def test_retranscribe_loads_no_whisper_model_it_does_not_list(sandbox, monkeypatch):
+    """Any "mlxwhisper:<text>" set <text> as the Whisper model, so a request
+    could make the child load or fetch any repo or folder. "mlxwhisper:"
+    crashed with a raw FileNotFoundError."""
+    from stt import retranscribe
+    monkeypatch.setenv("STT_WHISPER_MLX_MODEL", "turbo")
+    for engine in ("mlxwhisper:example-org/model", "mlxwhisper:", "mlxwhisper",
+                   "mlxwhisper:/tmp/folder", "Parakeet", "cloud:scribe"):
+        with pytest.raises(ValueError, match="unknown engine"):
+            retranscribe._asr_module(engine)
+        assert "unknown engine" in retranscribe.retranscribe("Mtg", 0, 1, engine)["error"]
+    assert os.environ["STT_WHISPER_MLX_MODEL"] == "turbo"
+
+
+@pytest.mark.skipif(not (shutil.which(audio.FFMPEG) or os.path.exists(audio.FFMPEG)),
+                    reason="ffmpeg not installed")
+def test_retranscribe_refuses_a_span_that_is_no_stretch_of_the_recording(sandbox, monkeypatch):
+    """An end before the start made a 0.5 s clip at the start, a negative
+    span read the first seconds, and a span past the end made an empty wav
+    the model crashed on. The first two came back as a proposal for the
+    line with a success status."""
+    import wave
+    from stt import retranscribe
+    w = mfile("Mtg", ".wav")
+    with wave.open(str(w), "wb") as f:                # 4 s of silence
+        f.setnchannels(1), f.setsampwidth(2), f.setframerate(16000)
+        f.writeframes(b"\0\0" * 16000 * 4)
+    heard = []
+
+    class Fake:
+        def transcribe(self, clip, progress=None):
+            with wave.open(str(clip)) as c:
+                heard.append(c.getnframes() / c.getframerate())
+            return {"text": " fine ", "engine": "fake"}
+    monkeypatch.setattr(retranscribe, "_asr_module", lambda engine: Fake())
+    for start, end, why in [(3, 2, "before the start"), (-3, -1, "0 or later"),
+                            (float("nan"), 2, "numbers"), (1, float("inf"), "numbers"),
+                            (1e9, 1e9 + 1, "after the recording ends")]:
+        out = retranscribe.retranscribe("Mtg", start, end)
+        assert why in out["error"] and "text" not in out, (start, end, out)
+    assert heard == []                                # no clip reached the model
+    assert retranscribe.retranscribe("Mtg", 1, 2) == {"text": "fine", "engine": "fake"}
+    assert retranscribe.retranscribe("Mtg", 2, 2)["text"] == "fine"   # zero length: 0.5 s
+    assert [round(d, 2) for d in heard] == [1.5, 0.5]
 
 
 def test_minor_triage_and_bulk_accept(sandbox):
@@ -935,3 +984,75 @@ def test_an_insert_near_the_end_is_cut_at_the_end(sandbox):
     seg = d["segments"][r["index"]]
     assert (seg["start"], seg["end"]) == (8.0, 9.0)
     assert "NaN" not in (mfile("Mtg", ".json")).read_text()
+
+
+def test_an_edit_replays_the_text_the_live_edit_stored(sandbox):
+    """The live edit stored text.strip(), and the sidecar kept the raw text,
+    so the next relabel replayed '  padded text  \\n' into the transcript.
+    A blank text with a speaker change replaced the line's words with
+    spaces on replay."""
+    _make_meeting(sandbox)
+    assert review.apply("Mtg", 1, "edit", start=5.0, text="  padded text  \n")["ok"]
+    live = json.loads(mfile("Mtg", ".json").read_text())["segments"][1]["text"]
+    assert live == "padded text"
+    decs = json.loads(mfile("Mtg", ".reviews.json").read_text())
+    assert decs[-1]["text"] == "padded text"
+    data = _make_meeting(sandbox)          # simulate the relabel rebuild
+    review.reapply_decisions("Mtg", data)
+    assert data["segments"][1]["text"] == live
+
+    _make_meeting(sandbox, base="Two")
+    assert review.apply("Two", 1, "edit", start=5.0, text="   ",
+                        speaker_id="SPEAKER_01")["ok"]
+    assert json.loads(mfile("Two", ".reviews.json").read_text())[-1]["text"] is None
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "Uncertain bit here."
+
+    # a sidecar from before the fix still holds the raw text
+    mfile("Two", ".reviews.json").write_text(json.dumps([
+        {"start": 5.0, "end": 6.0, "action": "edit", "text": " old raw \n",
+         "speaker_id": None, "at": "2026-11-01T10:00:00"}]))
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "old raw"
+
+
+def test_a_manual_person_with_no_line_left_leaves_the_roster(sandbox):
+    """Deleting an inserted line, or giving it to someone else, left the
+    hand-added person in speakers[] and in the .txt header ('3 speaker(s)
+    | identified: Mark, Pat Q') with no line behind the name. A pruned
+    number is never handed to the next new person."""
+    _make_meeting(sandbox)
+    r = review.insert_segment("Mtg", 6.5, 7.5, "name:Pat Q", "An aside.")
+    assert r["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert [s["id"] for s in d["speakers"] if s.get("manual")] == ["MANUAL_1"]
+    # reassign the inserted line to a diarized speaker
+    assert review.apply("Mtg", r["index"], "edit", start=6.5,
+                        speaker_id="SPEAKER_01")["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert not [s for s in d["speakers"] if s.get("manual")]
+    assert "Pat Q" not in mfile("Mtg", ".txt").read_text()
+    assert {s["id"] for s in d["speakers"]} == {"SPEAKER_00", "SPEAKER_01"}
+
+    # a delete prunes too, and the next new person takes a fresh number
+    r = review.insert_segment("Mtg", 7.0, 7.8, "name:Lee K", "Another aside.")
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert [s["id"] for s in d["speakers"] if s.get("manual")] == ["MANUAL_2"]
+    assert review.delete_segment("Mtg", r["index"], start=7.0)["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert not [s for s in d["speakers"] if s.get("manual")]
+    assert "Lee K" not in mfile("Mtg", ".txt").read_text()
+
+    # MANUAL_3 pruned while MANUAL_4 stays: the count would reuse MANUAL_4
+    a = review.insert_segment("Mtg", 7.1, 7.6, "name:Noor", "One.")
+    b = review.insert_segment("Mtg", 8.0, 8.5, "name:Sami", "Two.")
+    assert a["ok"] and b["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    noor = next(i for i, s in enumerate(d["segments"]) if s["text"] == "One.")
+    assert review.delete_segment("Mtg", noor, start=7.1)["ok"]
+    assert review.insert_segment("Mtg", 8.6, 8.9, "name:Ana", "Three.")["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    manual = {s["id"]: s["display"] for s in d["speakers"] if s.get("manual")}
+    assert manual == {"MANUAL_4": "Sami", "MANUAL_5": "Ana"}

@@ -3,6 +3,8 @@ fresh file, processed, outputs deleted (self-heal), re-recorded file."""
 import os
 from pathlib import Path
 
+import pytest
+
 from stt import manifest
 
 
@@ -259,3 +261,141 @@ def test_a_missing_file_is_never_parked(sandbox):
     p.unlink()
     assert not manifest.is_parked(manifest.load(), p.name, p)
     assert manifest.record_failure(p.name, p, "x") == {}
+
+
+# ---------- a damaged manifest is kept aside, never written over ----------
+
+def _kept(config):
+    return sorted(p for p in config.MANIFEST_PATH.parent.iterdir()
+                  if p.name.startswith("manifest.json.bad-"))
+
+
+def test_a_damaged_manifest_is_copied_aside_before_the_next_write(sandbox, capsys, monkeypatch):
+    """load() read a truncated manifest as empty, and the next update() saved
+    that empty manifest over it: every processed record was gone, with no
+    warning and no copy, and a keep-original setup re-transcribed the whole
+    library."""
+    from stt import config
+    monkeypatch.setitem(manifest._warned, "damaged", False)
+    manifest.save({"processed": {"a.m4a": {"mtime": 1.0, "outputs": []}}})
+    whole = config.MANIFEST_PATH.read_bytes()
+    config.MANIFEST_PATH.write_bytes(whole[:30])
+    assert manifest.load() == {"processed": {}}
+    assert "manifest.json is not readable" in capsys.readouterr().err
+    with manifest.update() as m:
+        manifest.mark(m, "b", 2.0, [])
+    kept = _kept(config)
+    assert len(kept) == 1 and kept[0].read_bytes() == whole[:30]
+    assert "kept a copy as " + kept[0].name in capsys.readouterr().err
+    assert list(manifest.load()["processed"]) == ["b"]
+    # the new file is readable, so the next write keeps no second copy
+    manifest.record("c", 3.0, [])
+    assert _kept(config) == kept
+    assert sorted(manifest.load()["processed"]) == ["b", "c"]
+
+
+def test_bytes_that_are_not_text_are_a_damaged_manifest(sandbox, monkeypatch):
+    from stt import config
+    monkeypatch.setitem(manifest._warned, "damaged", False)
+    config.MANIFEST_PATH.write_bytes(b'{"processed": {"\xff\xfe": 1}}')
+    assert manifest.load() == {"processed": {}}
+    manifest.save({"processed": {}})
+    assert [p.read_bytes() for p in _kept(config)] == [b'{"processed": {"\xff\xfe": 1}}']
+
+
+def test_a_readable_manifest_is_never_copied_aside(sandbox):
+    from stt import config
+    manifest.save({"processed": {}})
+    manifest.record("a", 1.0, [])
+    assert _kept(config) == []
+
+
+@pytest.mark.parametrize("text", ["null", "[]", "42", '"abc"', '{"processed": null}',
+                                  '{"processed": []}', '{"processed": "x"}'])
+def test_json_of_the_wrong_shape_reads_empty_and_is_kept_aside(sandbox, text, monkeypatch):
+    """Only bad JSON was caught: 'null', '[]' or '42' made load() raise
+    AttributeError on setdefault, and {"processed": null} made
+    is_processed() raise. Either stopped the whole batch run."""
+    from stt import config
+    monkeypatch.setitem(manifest._warned, "damaged", False)
+    config.MANIFEST_PATH.write_text(text)
+    m = manifest.load()
+    assert m == {"processed": {}}
+    assert manifest.is_processed(m, "a.m4a", 1.0) is False
+    manifest.record("b.m4a", 2.0, [])
+    assert list(manifest.load()["processed"]) == ["b.m4a"]
+    assert [p.read_text() for p in _kept(config)] == [text]
+
+
+@pytest.mark.parametrize("rec", [{"mtime": None}, {"mtime": "soon"}, {"mtime": [1]},
+                                 {"mtime": float("nan")},
+                                 {"mtime": 1.0, "outputs": None},
+                                 {"mtime": 1.0, "outputs": "a.json"},
+                                 {"mtime": 1.0, "outputs": [None, 5, {"x": 1}]}])
+def test_a_record_of_the_wrong_shape_never_raises(sandbox, rec):
+    """A record with mtime null or text raised TypeError in is_processed,
+    and outputs null raised it too."""
+    m = {"processed": {"a.m4a": rec}}
+    got = manifest.is_processed(m, "a.m4a", 1.0)
+    # an unusable mtime is no record; outputs with no transcript path keep
+    # the old reading of a record with no outputs
+    want = isinstance(rec.get("mtime"), float) and rec["mtime"] == 1.0
+    assert got is want
+    # a retarget leaves outputs it cannot read as they are: a string was
+    # walked one character at a time and saved back as a list of letters
+    import json
+    from stt import config
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    manifest.retarget("/nowhere/old", "/nowhere/new")
+    assert manifest.load()["processed"]["a.m4a"].get("outputs") == rec.get("outputs")
+
+
+def test_records_that_are_not_objects_are_skipped_and_kept(sandbox, tmp_path):
+    """is_processed, retarget, dupes, provenance and the archive scrub call
+    rec.get() on every record: a bare 1 or null there raised in each of
+    them. Such a record stays on disk for a person to repair
+    (tools/doctor.py reports it as manifest_bad_record)."""
+    import json
+    from stt import archive, config, dupes, provenance
+    m = {"processed": {"a.m4a": 1, "b.m4a": None, "c.m4a": {"mtime": 3.0, "outputs": []}}}
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    got = manifest.load()
+    assert got == m
+    assert manifest.is_processed(got, "a.m4a", 1.0) is False
+    assert manifest.is_processed(got, "b.m4a", 1.0) is False
+    assert manifest.retarget("/nowhere/old", "/nowhere/new") is False
+    assert dupes.source_duplicates([], [], man=got) == {}
+    assert provenance.manifest_names(got) == {}
+    manifest.record("d.m4a", 4.0, [])
+    assert sorted(manifest.load()["processed"]) == ["a.m4a", "b.m4a", "c.m4a", "d.m4a"]
+    assert _kept(config) == []          # a whole, readable file: no copy
+
+    # a delete still scrubs its own record: the bad ones made the scrub
+    # raise, and its except skipped it, so the source read as new again
+    from conftest import mfile
+    base = "Weekly 05012026"
+    mfile(base, ".json").write_text(json.dumps({"date": "2026-05-01", "speakers": [],
+                                                "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    manifest.record("weekly.m4a", 5.0, [config.meeting_file(base, ".json")])
+    assert archive.delete_meeting(base)["ok"]
+    assert sorted(manifest.load()["processed"]) == ["a.m4a", "b.m4a", "c.m4a", "d.m4a"]
+
+
+def test_a_failure_list_that_is_not_an_object_reads_as_none(sandbox, capsys, monkeypatch,
+                                                            tmp_path):
+    """record_failure called .get() on m["failed"] and is_parked did too:
+    a list there raised in both."""
+    from stt import config
+    monkeypatch.setitem(manifest._warned, "damaged", False)
+    text = '{"processed": {"c.m4a": {"mtime": 3.0}}, "failed": []}'
+    config.MANIFEST_PATH.write_text(text)
+    m = manifest.load()
+    assert m == {"processed": {"c.m4a": {"mtime": 3.0}}, "failed": {}}
+    assert "failure list that is not an object" in capsys.readouterr().err
+    src = tmp_path / "d.m4a"
+    src.write_bytes(b"x" * 16)
+    assert manifest.is_parked(m, "d.m4a", src) is False
+    assert manifest.record_failure("d.m4a", src, "boom")["count"] == 1
+    assert [p.read_text() for p in _kept(config)] == [text]
+    assert manifest.load()["processed"] == {"c.m4a": {"mtime": 3.0}}

@@ -36,6 +36,17 @@ def mfile(base, suffix):
     return p
 
 
+def decision_count(base) -> int:
+    """How many saved human edits meeting `base` has: the length of its
+    .reviews.json. The panel read this through review.count_decisions for
+    the classic page's Redo warning, so it is a test helper now."""
+    import json
+    try:
+        return len(json.loads(config.meeting_file(base, ".reviews.json").read_text()))
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     d = tmp_path
@@ -63,6 +74,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MIC_SPEAKER", None)  # don't inherit the real user's setting
     # a bad setting warns once per process: each test starts with none said
     monkeypatch.setattr(config, "_setting_warned", set())
+    # the undo journals and rename plans live outside the repo, by default in
+    # the REAL Application Support folder: a purge in a test reads and
+    # rewrites that folder, so it must be the sandbox's own
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(d / "migration"))
     # the Voice Memos sync runs at every batch start: a sandbox run must read
     # a synthetic library, never the real one, even with STT_HOME unset
     monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(d / "vm_container"))
@@ -97,8 +112,7 @@ def sandbox(tmp_path, monkeypatch):
 # unknown id (the diarizer split one person) and so both display "Speaker 68".
 # Naming U068 names both clusters, so it is ONE voice: 21 voices in 22
 # clusters. Four clusters are transcript-local "Voice N" labels with no uid.
-# Shared by the gather_state test (tests/test_timeline_feed.py) and the strip
-# test (tests/test_new_shell.py), so both count the same meeting.
+# The gather_state test (tests/test_timeline_feed.py) counts it.
 SPLIT_VOICE_BASE = "Board Meeting 09232026"
 SPLIT_VOICE_UID = "U068"
 

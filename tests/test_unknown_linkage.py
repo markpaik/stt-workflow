@@ -12,6 +12,8 @@ The third rule is about numbers, not voices. A freed number is never reused,
 so "Speaker 3" in a year-old transcript can never come back meaning somebody
 else.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -245,3 +247,148 @@ def test_a_new_meeting_still_cannot_link_to_a_drifted_stack(sandbox):
     out = unknowns.assign({"S0": b}, {"S0": None}, "M3", stats={"S0": GOOD_STATS})
     assert out["S0"] == "U051"
     assert unknowns.load()["speakers"]["U050"]["meetings"] == ["M1", "M2"]
+
+
+# ---------- a damaged registry ----------
+
+@pytest.mark.parametrize("damage", ["{ not json", "[]", "null",
+                                    '{"next": 2, "speakers": ["U001"]}'])
+def test_a_damaged_registry_is_never_written_over(sandbox, capsys, damage):
+    """load() reads a damaged unknowns.json as empty. assign() ran on that
+    empty registry, minted U001 again, saved the new voice over the old
+    U001.npy and saved a one-voice registry over the damaged file. Every
+    global number restarted and the old samples were gone. A list or a null
+    at the top raised AttributeError in load(). Now nothing writes at all:
+    the clusters keep their meeting-local labels until the file is fixed."""
+    e = _basis(seed=41)
+    assert unknowns.assign({"S0": e[0]}, {"S0": None}, "M1",
+                           stats={"S0": GOOD_STATS}) == {"S0": "U001"}
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    old = npy.read_bytes()
+    reg_path = config.VOICEPRINTS_DIR / "unknowns.json"
+    reg_path.write_text(damage)
+
+    assert unknowns.load() == {"next": 1, "speakers": {}}
+    assert "corrupt" in capsys.readouterr().err
+    assert unknowns.assign({"S0": e[1]}, {"S0": None}, "M2",
+                           stats={"S0": GOOD_STATS}) == {}
+    assert not unknowns.promote("U001", "Zed Quill")
+    assert not unknowns.merge("U001", "U002")
+    assert not unknowns.archive("U001")
+    assert not unknowns.restore("U001")
+    assert not unknowns.drop("U001")
+    assert unknowns.rename_meeting_refs("M1", "M1 renamed") == 0
+    assert unknowns.forget_meeting_refs("M1") == 0
+    with pytest.raises(unknowns.UnknownsUnreadable):
+        unknowns.save({"next": 1, "speakers": {}})
+    # the doctor reports it and its --fix leaves it alone
+    found = registry_doctor.check()
+    assert ("corrupt", "unknowns.json") in [(f.kind, f.subject) for f in found]
+    registry_doctor.fix(found)
+
+    assert reg_path.read_text() == damage
+    assert npy.read_bytes() == old
+    assert sorted(p.name for p in config.VOICEPRINTS_DIR.glob("*.npy")) == ["U001.npy"]
+
+
+def test_a_damaged_sample_file_never_stops_assign(sandbox, capsys):
+    """_samples called np.load with no guard. Every assign() scores each
+    cluster against every unknown, so one truncated U###.npy raised
+    ValueError for every meeting after it, and samples_of() raised into the
+    panel. A damaged file now reads as no samples, with one warning."""
+    e = _basis(seed=43)
+    assert unknowns.assign({"S0": e[0]}, {"S0": None}, "M1",
+                           stats={"S0": GOOD_STATS}) == {"S0": "U001"}
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    for junk in (b"junk", npy.read_bytes()[:60], b""):
+        npy.write_bytes(junk)
+        assert unknowns.samples_of("U001") is None
+    out = unknowns.assign({"S0": e[1], "S1": e[2]}, {"S0": None, "S1": None}, "M2",
+                          stats={"S0": GOOD_STATS, "S1": GOOD_STATS})
+    assert sorted(out.values()) == ["U002", "U003"]
+    assert not unknowns.promote("U001", "Zed Quill")
+    assert npy.read_bytes() == b"", "the damaged file is left for the user"
+    assert capsys.readouterr().err.count("U001.npy cannot be read") == 1
+
+
+def test_a_sample_write_that_dies_midway_keeps_the_old_stack(sandbox, monkeypatch):
+    """np.save wrote the stack in place, so a crash or a full disk left a
+    truncated U###.npy behind. The write now goes through a temporary file:
+    the old stack stays whole and no temporary file is left."""
+    e = _basis(seed=44)
+    unknowns.assign({"S0": e[0]}, {"S0": None}, "M1", stats={"S0": GOOD_STATS})
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    old = npy.read_bytes()
+
+    def dying_save(target, arr, *a, **kw):
+        if hasattr(target, "write"):
+            target.write(old[:40])
+        else:
+            Path(target).write_bytes(old[:40])
+        raise OSError("No space left on device")
+
+    # its own context: undo() on the fixture's monkeypatch would also undo
+    # the sandbox paths
+    with monkeypatch.context() as m:
+        m.setattr(np, "save", dying_save)
+        with pytest.raises(OSError):
+            # a returning voice: the link appends to U001's stack
+            unknowns.assign({"S0": _mix(e, 1.0, 0.1)}, {"S0": None}, "M2",
+                            stats={"S0": GOOD_STATS})
+    assert config.VOICEPRINTS_DIR == npy.parent
+    assert npy.read_bytes() == old
+    assert not list(config.VOICEPRINTS_DIR.glob("*.tmp"))
+    assert unknowns.load()["speakers"]["U001"]["meetings"] == ["M1"]
+
+
+@pytest.mark.parametrize("entry", [5, None, "U001.npy", {"meetings": ["M0"]},
+                                   {"file": None, "meetings": ["M0"]}])
+def test_a_hand_edited_entry_never_stops_assign(sandbox, entry):
+    """An entry that is not an object raised TypeError in assign(), and one
+    with no 'file' raised KeyError, for every meeting after the edit. The
+    first kind now leaves the registry on load, the second has no samples,
+    and the number either one held is never handed out again."""
+    import json
+    e = _basis(seed=45)
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(
+        json.dumps({"next": 2, "speakers": {"U001": entry}}))
+    out = unknowns.assign({"S0": e[0]}, {"S0": None}, "M1", stats={"S0": GOOD_STATS})
+    assert out == {"S0": "U002"}
+    reg = unknowns.load()
+    assert reg["next"] == 3
+    if isinstance(entry, dict):
+        # a merge of the file-less entry moves its meetings and raises nothing
+        assert unknowns.merge("U001", "U002")
+        assert unknowns.load()["speakers"]["U002"]["meetings"] == ["M1", "M0"]
+    else:
+        assert set(reg["speakers"]) == {"U002"}
+
+
+def test_a_merge_across_embedding_sizes_is_refused_with_nothing_changed(sandbox):
+    """merge() called np.vstack on stacks of 128 and 256 dimensions and
+    raised ValueError. promote() returns False for the same case. merge()
+    now refuses too, and both voices stay as they were."""
+    e = _basis(seed=46)
+    small = np.random.default_rng(46).normal(size=128)
+    _seed_unknown("U001", [e[0]], ["M1"])
+    _seed_unknown("U002", [small / np.linalg.norm(small)], ["M2"])
+    before = {u: (config.VOICEPRINTS_DIR / f"{u}.npy").read_bytes() for u in ("U001", "U002")}
+    assert unknowns.merge("U002", "U001") is False
+    assert unknowns.merge("U001", "U002") is False
+    reg = unknowns.load()
+    assert set(reg["speakers"]) == {"U001", "U002"}
+    assert reg["speakers"]["U001"]["meetings"] == ["M1"]
+    for u, raw in before.items():
+        assert (config.VOICEPRINTS_DIR / f"{u}.npy").read_bytes() == raw
+
+
+def test_the_speech_floor_message_never_rounds_up_to_the_floor():
+    """The refusal said 'only 0s of speech' for a 0.3 s clip, and a value
+    just under the floor rounded up to the floor itself."""
+    from stt import config, unknowns
+    floor = config.UNKNOWN_MIN_TALK_SECS
+    msg = lambda secs: unknowns.floor_violation({"talk_secs": secs, "reliable_turns": 99})
+    assert "only 0.3s of speech" in msg(0.3)
+    assert f"only {floor - 0.1:g}s of speech" in msg(floor - 0.04)
+    assert "only 5s of speech" in msg(5.0)
+    assert msg(floor) is None

@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO / "tools"))
 import demo_seed  # noqa: E402
 
 from stt import config, holds, identify, jobs, manifest, review, status, unknowns  # noqa: E402
+from conftest import decision_count  # noqa: E402
 
 
 # --------------------------------------------------------------- override ---
@@ -47,8 +48,40 @@ def test_stt_home_backwards_compatible():
     # "STT_workflow" once and is "stt_workflow" now, and a worktree is named
     # for its branch. PROJECT_DIR defaults to the folder holding stt/.
     assert Path(p["project"]).name == REPO.name
-    assert "Projects/brain/meetings" in p["meetings"]      # real default, not under a home
+    # the neutral default init.sh offers, never a person's own library path
+    assert p["meetings"] == str(Path.home() / "Documents/Meeting Transcripts")
     assert Path(p["voiceprints"]).name == "voiceprints"
+
+
+def test_the_default_transcripts_folder_is_the_one_init_offers():
+    """config.py defaulted to the owner's own library path while init.sh
+    offered ~/Documents/Meeting Transcripts. One neutral default now, and
+    no code path names a person's folder."""
+    import re
+    init = (REPO / "init.sh").read_text()
+    m = re.search(r'^DEFAULT_DST="\$HOME/([^"]+)"$', init, re.M)
+    assert m and Path.home() / m.group(1) == config.DEFAULT_MEETINGS_DIR
+    for d in ("stt", "gui", "tools"):
+        for f in (REPO / d).rglob("*.py"):
+            assert "Projects/brain" not in f.read_text(), f
+    for f in ("init.sh", "setup.sh", "run.sh", "run_batch.py", "stt.env.example"):
+        assert "Projects/brain" not in (REPO / f).read_text(), f
+
+
+def test_a_process_without_stt_env_in_its_environment_reads_the_folders_from_it(tmp_path):
+    """launchd starts the menu bar (and its panel) without stt.env in the
+    environment, so config.MEETINGS_DIR there was the default wherever the
+    library really was. The import-time folders now read stt.env too, and
+    a variable set in the environment still wins."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "stt.env").write_text(f'STT_MEETINGS_DIR="{tmp_path}/lib"\n'
+                                  f"STT_ICLOUD_DIR={tmp_path}/src\n")
+    p = _run_config({"STT_PROJECT_DIR": str(proj)})
+    assert p["meetings"] == str(tmp_path / "lib")
+    assert p["source"] == str(tmp_path / "src")
+    p = _run_config({"STT_PROJECT_DIR": str(proj), "STT_MEETINGS_DIR": str(tmp_path / "env")})
+    assert p["meetings"] == str(tmp_path / "env")
 
 
 def test_stt_home_redirects_every_state_path(tmp_path):
@@ -144,7 +177,7 @@ def test_review_flags_load_with_alt_and_minor(seeded):
     assert any(not it["minor"] for it in out["items"])          # substantial ones too
     alts = [it["alt"] for it in out["items"] if it.get("alt")]
     assert alts and alts[0][0]["theirs"], "second-engine alternative text present"
-    assert review.count_decisions("2026-04-08 LT Weekly Meeting – Reserve Target") >= 1
+    assert decision_count("2026-04-08 LT Weekly Meeting – Reserve Target") >= 1
 
 
 def test_speaker_store_loads(seeded):
@@ -161,6 +194,17 @@ def test_speaker_store_loads(seeded):
     # the active unknown must be playable: it names a real meeting it was heard in
     uid = active[0]
     assert review.find_voice_clips(uid, sp[uid]["meetings"][0], n=1)
+
+
+def test_a_fresh_seed_passes_the_registry_doctor(seeded, monkeypatch):
+    """unknowns.json had no "next" key, so registry_doctor reported the
+    fresh seed as stale_next and exited 1: the doctor's exit-status gate
+    could not be shown on the demo."""
+    from stt import registry_doctor
+    monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", seeded / "meetings_index.json")
+    raw = json.loads((seeded / "voiceprints" / "unknowns.json").read_text())
+    assert raw["next"] == unknowns.next_floor(raw)
+    assert registry_doctor.check(seeded / "voiceprints", seeded / "meetings") == []
 
 
 def test_history_has_success_and_failure(seeded):
@@ -227,6 +271,134 @@ def test_refuses_dir_overlapping_real_data(tmp_path, monkeypatch):
         demo_seed.main(["--dir", str(real / "inside")])  # nested under real data
 
 
+def test_the_guard_folds_letter_case_as_apfs_does(tmp_path, monkeypatch):
+    """resolve() keeps the case it is given and APFS folds it, so
+    ~/projects/brain/meetings/demo_x passed while ~/Projects/... was
+    refused. synth_corpus uses the same compare."""
+    real = tmp_path / "Real Meetings"
+    real.mkdir()
+    monkeypatch.setattr(config, "MEETINGS_DIR", real)
+    monkeypatch.setattr(config, "ICLOUD_DIR", tmp_path / "src")
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "rec")
+    for t in (tmp_path / "real meetings" / "demo_x", tmp_path / "REAL MEETINGS",
+              Path(str(tmp_path).upper()) / "Real Meetings"):
+        with pytest.raises(SystemExit, match="overlaps a real configured"):
+            demo_seed.resolve_target(str(t))
+    # composed and decomposed accents are one name on APFS too
+    assert demo_seed._overlaps(Path("/a/Caf\u00e9/x"), Path("/a/cafe\u0301"))
+    assert not demo_seed._overlaps(Path("/a/Real Meetings2"), Path("/a/real meetings"))
+    assert demo_seed.resolve_target(str(tmp_path / "demo")) == (tmp_path / "demo").resolve()
+
+
+def _checkout_copy(tmp_path, env_text):
+    """A copy of the code (stt/ and tools/demo_seed.py) whose own stt.env
+    names a synthetic live library, so every live folder is a tmp path."""
+    import shutil
+    co = tmp_path / "checkout"
+    shutil.copytree(REPO / "stt", co / "stt",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (co / "tools").mkdir()
+    shutil.copy(REPO / "tools" / "demo_seed.py", co / "tools" / "demo_seed.py")
+    (co / "stt.env").write_text(env_text)
+    return co
+
+
+def _resolve_in(co, env_extra, *targets):
+    """resolve_target(t) for each target, in a fresh interpreter run from
+    the copy `co`: 'ACCEPTED <path>' or 'REFUSED <why>' per target. It
+    writes nothing."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(env_extra, PYTHONPATH=str(co))
+    code = ("import sys; sys.path.insert(0, 'tools'); import demo_seed\n"
+            "for t in sys.argv[1:]:\n"
+            "    try: print('ACCEPTED', demo_seed.resolve_target(t))\n"
+            "    except SystemExit as e: print('REFUSED', e)\n")
+    r = subprocess.run([sys.executable, "-c", code, *map(str, targets)], env=env,
+                       cwd=str(co), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_the_guard_sees_the_live_library_with_stt_home_exported(tmp_path):
+    """_real_data_dirs said it read the folders without STT_HOME, but
+    nothing cleared it. With STT_HOME exported every folder it listed was
+    inside the scratch home, and a --dir inside the real library passed."""
+    live = (tmp_path / "Live Library").resolve()
+    rec = (tmp_path / "live rec").resolve()
+    co = _checkout_copy(tmp_path, f"STT_MEETINGS_DIR={live}\nSTT_RECORDINGS_DIR={rec}\n")
+    home = tmp_path / "scratch"
+    out = _resolve_in(co, {"STT_HOME": str(home),
+                           "STT_MEETINGS_DIR": str(home / "meetings")},
+                      live / "demo_x", rec, co / "voiceprints" / "x",
+                      tmp_path / "elsewhere")
+    assert out[0] == (f"REFUSED refusing: --dir {live / 'demo_x'} overlaps a real "
+                      f"configured data folder ({live}). Pick a throwaway path "
+                      "such as qa/demo_home.")
+    assert out[1].startswith("REFUSED") and out[2].startswith("REFUSED")
+    assert out[3] == f"ACCEPTED {(tmp_path / 'elsewhere').resolve()}"
+    # the run without STT_HOME refuses the same way, as before
+    assert _resolve_in(co, {}, live / "demo_x")[0].startswith("REFUSED")
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+def test_the_guard_run_from_a_worktree_sees_the_main_checkouts_library(tmp_path):
+    """The guard read only its own checkout's stt.env. A worktree has
+    none, so it listed the defaults and a --dir inside the real library
+    (named in the main checkout's stt.env) passed."""
+    import shutil
+    main = tmp_path / "main"
+    main.mkdir()
+    _git("init", "-q", cwd=main)
+    (main / "README").write_text("x\n")
+    _git("add", "README", cwd=main)
+    _git("commit", "-q", "-m", "init", cwd=main)
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=main)
+    shutil.copytree(REPO / "stt", wt / "stt",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (wt / "tools").mkdir()
+    shutil.copy(REPO / "tools" / "demo_seed.py", wt / "tools" / "demo_seed.py")
+    assert not (wt / "stt.env").exists()
+    live = (tmp_path / "Live Library").resolve()
+    src = (tmp_path / "Live Source").resolve()
+    (main / "stt.env").write_text(f"STT_MEETINGS_DIR={live}\nSTT_ICLOUD_DIR={src}\n")
+    fake_home = tmp_path / "user"   # no batch agent plist
+    out = _resolve_in(wt, {"HOME": str(fake_home)}, live / "demo_x", src,
+                      main / "voiceprints" / "x", tmp_path / "elsewhere")
+    assert out[0].startswith(f"REFUSED refusing: --dir {live / 'demo_x'} overlaps")
+    assert out[1].startswith("REFUSED") and out[2].startswith("REFUSED")
+    assert out[3] == f"ACCEPTED {(tmp_path / 'elsewhere').resolve()}"
+
+
+def test_the_guard_sees_the_library_of_the_batch_agents_checkout(tmp_path):
+    """The batch agent runs from its plist's WorkingDirectory. That
+    checkout's stt.env names the live library, wherever the seeder runs."""
+    import plistlib
+    live = (tmp_path / "Agent Library").resolve()
+    agent_co = tmp_path / "agent checkout"
+    agent_co.mkdir()
+    (agent_co / "stt.env").write_text(f'STT_MEETINGS_DIR="{live}"\n')
+    fake_home = tmp_path / "user"
+    plist = fake_home / demo_seed.BATCH_PLIST_NAME
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(plistlib.dumps({"Label": "com.stt-workflow.batch",
+                                      "WorkingDirectory": str(agent_co)}))
+    co = _checkout_copy(tmp_path, "")
+    out = _resolve_in(co, {"HOME": str(fake_home)}, live / "demo_x",
+                      agent_co / "voicememos", tmp_path / "elsewhere")
+    assert out[0].startswith(f"REFUSED refusing: --dir {live / 'demo_x'} overlaps")
+    assert out[1].startswith("REFUSED")
+    assert out[2].startswith("ACCEPTED")
+    # a damaged plist is no guard, never a crash
+    plist.write_bytes(b"not a plist")
+    assert _resolve_in(co, {"HOME": str(fake_home)}, tmp_path / "elsewhere")[0] \
+        .startswith("ACCEPTED")
+
+
 def test_wipe_only_removes_a_home_it_built(tmp_path):
     target = tmp_path / "home"
     demo_seed.main(["--dir", str(target)])
@@ -244,3 +416,97 @@ def test_wipe_only_removes_a_home_it_built(tmp_path):
     # with --wipe on our own marked home: rebuilds cleanly
     demo_seed.main(["--dir", str(target), "--wipe"])
     assert config.meeting_file  # sanity: module intact
+
+
+def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
+    """Each seeded meeting lacked the store keys the pipeline writes (title,
+    source_name, audio_fp, date_source, recorded_at) and its meeting_id,
+    and unknowns.json had no `next`, so a fresh home failed `doctor.py
+    check` with missing_keys on every meeting and a registry_stale_next.
+    The seed also used to build folder names with a colon the sanitizer
+    never writes. The check runs in a fresh interpreter under STT_HOME, as
+    the finding's repro did. The two diarizer findings speak about the
+    machine (a Hugging Face token, a built speakrs helper), not the home,
+    so the check runs on a machine that has both settled."""
+    from stt import provenance
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    for j in sorted((home / "meetings").glob("*/*.json")):
+        if j.name.endswith(".reviews.json"):
+            continue
+        d = json.loads(j.read_text())
+        assert next(iter(d)) == "meeting_id" and len(d["meeting_id"]) == 16, j
+        assert all(k in d for k in provenance.KEYS), j
+        assert d["title"] and d["audio_fp"], j
+        if d["recorded_at"]:
+            assert d["date_source"] == "recorder" and d["recorded_at"][:10] == d["date"]
+        assert ":" not in j.parent.name, j
+    reg = json.loads((home / "voiceprints" / "unknowns.json").read_text())
+    assert reg["next"] == unknowns.next_floor(reg)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO),
+                "HF_TOKEN": "hf_synthetic", "STT_DIARIZER": "pyannote"})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean: nothing to report" in out.stdout
+
+
+def test_a_recorder_meeting_starts_at_the_time_its_name_says(tmp_path):
+    """recorder.final_name names a capture 'YYYY-MM-DD Recording HHMM' by
+    its start, and provenance dates such a name 'recorder' at that time.
+    The seed took the start from the processing time instead, so Home and
+    the README screenshots showed 'Recording 1430' at 3:01 PM, and it read
+    'Recording 0915' as a typed date with no time."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    today = demo_seed.date.today().isoformat()
+    for base, start in ((f"{today} Recording 1430", f"{today}T14:30"),
+                        ("2026-07-10 Recording 0915", "2026-07-10T09:15")):
+        d = json.loads((home / "meetings" / base / f"{base}.json").read_text())
+        assert d["date_source"] == "recorder", base
+        assert d["recorded_at"][:16] == start, base
+    # a memo with no time in its name still starts before it was processed
+    j = next((home / "meetings").glob("*Reading Partner Kickoff/*Kickoff.json"))
+    d = json.loads(j.read_text())
+    assert d["recorded_at"][:10] == d["date"]
+    assert d["recorded_at"][11:16] < d["processed_at"][11:16]
+
+
+def test_a_fresh_demo_home_is_registry_doctor_clean(tmp_path):
+    """The README points at tools/registry_doctor.py for the voice
+    registries alone, and the phase 8 plan asks for a demo home it passes
+    clean. Run it as a person would: a fresh interpreter under STT_HOME,
+    report only. Exit 0 means no finding of any kind, and the run writes
+    nothing in the voiceprints folder."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    vp = home / "voiceprints"
+    before = {p.name: p.stat().st_mtime_ns for p in vp.iterdir()}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "registry_doctor.py")],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean — nothing to report" in out.stdout
+    assert {p.name: p.stat().st_mtime_ns for p in vp.iterdir()} == before
+
+
+def test_a_sandbox_never_finds_the_real_mlx_model(tmp_path):
+    """Code resolves from the checkout (config.CODE_DIR: run.sh, .venv,
+    the menu-bar icon). The MLX model's own environment is the exception:
+    under STT_HOME it resolves inside the home, so a demo or QA run with
+    Ollama off never loads the real 8B model."""
+    home = tmp_path / "home"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(PYTHONPATH=str(REPO), STT_HOME=str(home), STT_OLLAMA_URL="off")
+    code = ("import json; from stt import config, summarize; "
+            "print(json.dumps({'llm': str(summarize.LLM_PY), "
+            "'code': str(config.CODE_DIR), 'local': summarize.backend_available('local')}))")
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=str(REPO),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    p = json.loads(out.stdout.strip().splitlines()[-1])
+    assert p["llm"] == str(home / ".venv-llm" / "bin" / "python")
+    assert p["code"] == str(REPO)
+    assert p["local"] is False

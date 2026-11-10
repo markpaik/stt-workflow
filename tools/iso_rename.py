@@ -106,7 +106,8 @@ def _batch_lock_held() -> bool:
 
 
 def batch_running() -> bool:
-    return bool(status.read().get("running")) or _batch_lock_held()
+    """A dead batch's stale running flag does not count (status.batch_running)."""
+    return status.batch_running() or _batch_lock_held()
 
 
 def busy_reason():
@@ -132,11 +133,14 @@ def header_line(base: str):
 
 def header_stale(base: str, d: dict, new_base: str) -> bool:
     """True when the header line does not open with the name it should
-    have after the move."""
+    have after the move. That name carries the title the apply step stores
+    (dates.shown_title), as the panel's rename writes it: a long title kept
+    whole while the folder holds its byte-cut form (config.cap_name) is no
+    rewrite, and neither is a '1:1' on a '1-1' folder."""
     line = header_line(base)
     if line is None or not output._HEADER_LINE.match(line):
         return False
-    want = output.header_name(new_base, {**d, "title": dates.title_of(new_base)})
+    want = output.header_name(new_base, {**d, "title": dates.shown_title(d.get("title"), new_base)})
     return output._HEADER_LINE.match(line).group(1) != want
 
 
@@ -438,7 +442,9 @@ def undo(dry: bool = True, log=print) -> dict:
         if cur is None:
             c["gone"] += 1
             continue
-        log(f"  {cur}  ->  {old}")
+        # a meeting the move only gave a new header keeps its name: say
+        # so, rather than 'X  ->  X'
+        log(f"  {cur}  ->  {old}" if cur != old else f"  {cur}  (header only)")
         if dry:
             c["would undo"] += 1
             continue
@@ -476,34 +482,37 @@ def main(argv=None):
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--undo", action="store_true")
     a = ap.parse_args(argv)
-    if a.undo:
-        r = undo(dry=not a.apply)
-    elif a.apply:
-        r = apply()
-    if a.apply:
-        # every rename leaves the old name's lock file behind: sweep the
-        # ones nobody holds, so the registry hygiene check stays clean
-        print(f"pruned {config.prune_lock_files()} stale lock file(s)")
-    else:
-        doc = plan()
-        rows = doc["rows"]
-        for row in rows:
-            if row.get("skip"):
-                print(f"  SKIP  {row['old_base']}  ({row['skip']})")
-            elif row["rename"]:
-                print(f"  {row['old_base']}  ->  {row['new_base']}"
-                      + (f"   [{'; '.join(row['flags'])}]" if row["flags"] else ""))
-        print(f"\nplan:      {plan_path()}")
-        print(f"readable:  {plan_path().with_suffix('.tsv')}")
-        for k, n in sorted(counts(rows).items(), key=lambda kv: (-kv[1], kv[0])):
+    if a.undo or a.apply:
+        # --undo alone is the undo's dry run. It fell through to the forward
+        # plan, which printed 'name already ISO' counts and rewrote the plan
+        # files, and the undo plan itself was never shown.
+        r = undo(dry=not a.apply) if a.undo else apply()
+        if not r.get("ok"):
+            print(f"refused: {r['error']}", file=sys.stderr)
+            return 2
+        for k, n in sorted(r["counts"].items()):
             print(f"  {n:4d}  {k}")
-        print("\nDRY RUN: nothing in the library changed. --apply renames from this plan.")
+        if a.apply:
+            # every rename leaves the old name's lock file behind: sweep the
+            # ones nobody holds, so the registry hygiene check stays clean
+            print(f"pruned {config.prune_lock_files()} stale lock file(s)")
+        else:
+            print("\nDRY RUN: nothing in the library changed. "
+                  "--undo --apply runs this undo.")
         return 0
-    if not r.get("ok"):
-        print(f"refused: {r['error']}", file=sys.stderr)
-        return 2
-    for k, n in sorted(r["counts"].items()):
+    doc = plan()
+    rows = doc["rows"]
+    for row in rows:
+        if row.get("skip"):
+            print(f"  SKIP  {row['old_base']}  ({row['skip']})")
+        elif row["rename"]:
+            print(f"  {row['old_base']}  ->  {row['new_base']}"
+                  + (f"   [{'; '.join(row['flags'])}]" if row["flags"] else ""))
+    print(f"\nplan:      {plan_path()}")
+    print(f"readable:  {plan_path().with_suffix('.tsv')}")
+    for k, n in sorted(counts(rows).items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"  {n:4d}  {k}")
+    print("\nDRY RUN: nothing in the library changed. --apply renames from this plan.")
     return 0
 
 

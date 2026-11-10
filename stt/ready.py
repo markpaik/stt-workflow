@@ -69,7 +69,15 @@ def load_seen():
 
 def mark_seen(dest_dir=None, now=None) -> dict:
     """Record a look: now, and every live meeting's key. Atomic, mode 600.
-    Holds ids and a time only, never a title."""
+    Holds ids and a time only, never a title.
+
+    With no library folder (a volume not mounted yet at login) the look saw
+    nothing, so the last look stands and nothing is written. Writing ids []
+    made the next Redo of an old meeting count as new, and cleared every
+    meeting still waiting to be seen."""
+    if not Path(dest_dir or config.meetings_dir()).is_dir():
+        return load_seen() or {
+            "seen_at": (now or datetime.now()).isoformat(timespec="seconds"), "ids": []}
     keys = sorted({_key_of(b, dest_dir)[0] for b in config.meeting_bases(dest_dir)})
     d = {"seen_at": (now or datetime.now()).isoformat(timespec="seconds"), "ids": keys}
     p = seen_path()
