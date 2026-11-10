@@ -300,7 +300,12 @@ def start_of(row: dict):
             pass
     z = row.get("zdate")
     if isinstance(z, (int, float)):
-        return (_CORE_DATA_EPOCH + timedelta(seconds=float(z))).astimezone(), False
+        # a corrupt ZDATE (huge, inf, nan) raised OverflowError or ValueError
+        # here, which left sync() and stopped every later memo's copy
+        try:
+            return (_CORE_DATA_EPOCH + timedelta(seconds=float(z))).astimezone(), False
+        except (OverflowError, ValueError):
+            pass
     return None, False
 
 

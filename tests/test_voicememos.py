@@ -472,6 +472,29 @@ def test_every_reader_of_the_source_folders_sees_the_voice_memos_staging(sandbox
     assert r["ok"] and "re-transcribed" in (r["note"] or "")
 
 
+@pytest.mark.parametrize("zdate", [1e20, 1e12, float("inf")])
+def test_a_corrupt_zdate_skips_its_memo_and_the_others_still_copy(sandbox, zdate):
+    """start_of promises None when neither the name nor ZDATE can be read.
+    A huge, infinite or NaN ZDATE on a row with another file name raised
+    OverflowError or ValueError, which left sync() before any later memo
+    was copied."""
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Odd One", "uuid": "U-ODD",
+               "path": "odd name.m4a"},
+              {"start": "2026-11-04 09:00:00", "title": "Staff Huddle"}])
+    conn = sqlite3.connect(str(c / voicememos.DB_NAME))
+    conn.execute("UPDATE ZCLOUDRECORDING SET ZDATE=? WHERE ZUNIQUEID='U-ODD'", (zdate,))
+    conn.commit()
+    conn.close()
+    r = voicememos.sync(now=NOW)
+    assert r["status"] == "ok"
+    assert r["counts"] == {"no_start": 1, "copied": 1}
+    assert _staged() == ["2026-11-04 Staff Huddle.m4a"]
+    # SQLite keeps a NaN as NULL, so only a direct call reaches that case
+    assert voicememos.start_of({"path": "odd name.m4a", "zdate": zdate}) == (None, False)
+    assert voicememos.start_of({"path": "odd name.m4a",
+                                "zdate": float("nan")}) == (None, False)
+
+
 def test_memo_in_recently_deleted_is_never_eligible(tmp_path):
     from stt import voicememos as vm
     row = {"uuid": "u1", "path": "20261105 100000-ABCDEF12.m4a", "zdate": 0,
