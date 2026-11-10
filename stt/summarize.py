@@ -1473,15 +1473,19 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             return {"ok": False,
                     "error": "A title needs a word besides the date. "
                              "Set date in the row menu changes the date."}
+        if names.title_was_cut(title):
+            note = (f"The title is cut to {names.TITLE_MAX} characters, "
+                    "between two words.")
         typed_stamp = dates.stamp_date(new_title)
         from datetime import date as _today_d
         if (typed_stamp and date is None and to_base is None
                 and typed_stamp > _today_d.today().isoformat()):
             # canonical() keeps a future stamp in the title (it names an
             # event): say so, or the typed date seems to be ignored
-            note = (f"{typed_stamp} is in the future, so it stays in the "
-                    "title and the meeting keeps its date. Set date changes "
-                    "the date.")
+            note = " ".join(x for x in (
+                note, f"{typed_stamp} is in the future, so it stays in the "
+                      "title and the meeting keeps its date. Set date changes "
+                      "the date.") if x)
 
     if to_base is not None:
         to_base = _sanitize_name(to_base)

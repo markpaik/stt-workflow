@@ -225,6 +225,30 @@ def test_a_long_typed_title_fits_a_folder_name(sandbox):
                 if f.kind == "name_mismatch" and f.subject.startswith("2026-07-04 会議")]
 
 
+def test_a_long_title_is_cut_between_words_and_the_reply_says_so(sandbox):
+    """The cap was a hard slice, so a long title ended mid-word
+    ('Extraordinaril') in the folder, the header and the panel, and the
+    reply said only ok. It is cut at the last space before the cap now,
+    and the reply carries a note. A staged memo name is cut the same way."""
+    from stt import names, voicememos
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly")
+    typed = "Quarterly " + "Extraordinarily " * 20 + "Long"
+    r = summarize.rename_meeting("2026-07-04 Weekly", typed)
+    assert r["ok"], r
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"].endswith("Extraordinarily")
+    assert len(d["title"]) <= names.TITLE_MAX and typed.startswith(d["title"])
+    assert r["base"] == "2026-07-04 " + d["title"]
+    assert str(names.TITLE_MAX) in r["note"]
+    # one long word, or CJK, has no space to go back to: cut at the cap
+    assert names.clean_title("x" * 130) == "x" * names.TITLE_MAX
+    # a title under the cap says nothing
+    r = summarize.rename_meeting(r["base"], "Short Title")
+    assert r["ok"] and "note" not in r
+    staged = voicememos._safe("Notes " + "Wonderfully " * 12)
+    assert len(staged) <= 100 and staged.endswith("Wonderfully")
+
+
 def test_a_rename_leaves_no_orphan_lock(sandbox):
     """The rename locked its destination by name, since the new name had no
     id yet. The meeting locks by its id afterward, so 'doctor check' listed
