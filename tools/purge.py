@@ -78,17 +78,27 @@ def _read_json(p: Path):
 
 # ---------- the plan ----------
 
+def _outputs(rec) -> list:
+    """The output paths of one manifest record. A record that is not an
+    object, or outputs that are not a list of names, give none: the
+    manifest keeps such a record for a person to repair (doctor names it
+    manifest_bad_record), and the purge raised AttributeError on it."""
+    outs = rec.get("outputs") if isinstance(rec, dict) else None
+    return [o for o in outs if isinstance(o, str)] if isinstance(outs, list) else []
+
+
 def _manifest_keys(folder: Path, base: str, meta: dict) -> list:
-    m = _read_json(config.MANIFEST_PATH) or {}
+    m = _read_json(config.MANIFEST_PATH)
+    processed = m.get("processed") if isinstance(m, dict) else None
+    if not isinstance(processed, dict):
+        processed = {}
     keys = []
-    for k, rec in (m.get("processed") or {}).items():
-        outs = rec.get("outputs") or []
-        if any(Path(o).parent == folder or Path(o).stem == base for o in outs):
+    for k, rec in processed.items():
+        if any(Path(o).parent == folder or Path(o).stem == base for o in _outputs(rec)):
             keys.append(k)
     for k in (meta.get("source_name"), meta.get("source_file")):
-        if k and k in (m.get("processed") or {}) and k not in keys:
-            rec = m["processed"][k]
-            if any(Path(o).parent == folder for o in rec.get("outputs") or []):
+        if isinstance(k, str) and k in processed and k not in keys:
+            if any(Path(o).parent == folder for o in _outputs(processed[k])):
                 keys.append(k)
     return keys
 

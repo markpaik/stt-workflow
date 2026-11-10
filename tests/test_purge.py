@@ -254,3 +254,23 @@ def test_a_legacy_meeting_without_source_name_finds_its_original(sandbox, monkey
     src.write_bytes(b"legacy source")
     p = purge.plan(LEAK)
     assert p["sources"] == [str(src)]
+
+
+def test_a_manifest_record_that_is_not_an_object_never_stops_the_purge(
+        sandbox, monkeypatch, tmp_path):
+    """The manifest keeps a record that is not an object, for a person to
+    repair (doctor: manifest_bad_record). The purge read every record with
+    rec.get("outputs") and raised AttributeError, even on a dry run."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"].update({"Bad Record.m4a": "x", "Odd Outputs.m4a": {"outputs": 7},
+                           "Personal Errand 2.m4a": {"outputs": [None, 3]}})
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    p = purge.plan(LEAK)
+    assert p["ok"] and p["manifest_keys"] == ["Personal Errand.m4a"]
+    assert purge.apply(LEAK)["done"]
+    left = json.loads(config.MANIFEST_PATH.read_text())["processed"]
+    assert sorted(left) == ["Bad Record.m4a", "Budget Review.m4a",
+                            "Odd Outputs.m4a", "Personal Errand 2.m4a"]
+    assert left["Bad Record.m4a"] == "x"   # kept for a person to repair
