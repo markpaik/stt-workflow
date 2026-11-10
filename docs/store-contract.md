@@ -21,7 +21,7 @@ A reader may rely on these keys in `<base>.json`.
 | Key | Meaning | Changes when |
 |---|---|---|
 | `meeting_id` | 16 hex characters, the meeting's identity. It is the first key in the file | Never |
-| `title` | The folder name without its date stamp and twin suffix | A title edit, a date edit that renames, or a Redo, always to match the folder |
+| `title` | The title a person sees, without a date stamp or twin suffix, at most 120 characters (`names.clean_title`). It keeps a `:` or `/` as typed. The folder holds its filename-safe form instead: `names.file_title` makes `:` and `/` a `-`, and `config.cap_name` cuts a long name to the folder byte limit. So `Dana 1:1` sits in `2026-01-15 Dana 1-1`. Do not rebuild the folder name from `title`: find files by the folder name, and show `dates.shown_title(title, base)`, which falls back to the folder's own title when `title` is missing or stale | A title edit, a date edit that renames, or a Redo |
 | `date` | The meeting day, ISO. It is the day in the folder stamp | A date edit or a date correction, which also renames the folder |
 | `date_source` | Where `date` came from: `typed`, `recorder`, `short_typed`, `mtime`, or `manual` | With `date` |
 | `recorded_at` | The true start, ISO with offset, or null when no source gives one. When set, its day equals `date` | With `date` |
@@ -46,7 +46,7 @@ A `date_source` of `mtime` or `short_typed` means the date is a guess. The panel
 
 ## Invariants
 
-1. The folder name equals `dates.restamp(title, date)` plus the twin suffix. `stt/doctor.py` reports any folder that breaks this as `name_mismatch`.
+1. The folder name equals `config.cap_name(dates.stamp(names.file_title(title), date))` plus the twin suffix. A future date typed in a title names an event and stays in `title`, so the folder keeps it too. A folder named before the filename-safe rule may hold `title` as typed, colon and all, and that also passes. `stt/doctor.py` reports any folder that breaks this as `name_mismatch`.
 2. A meeting has exactly one live folder. `meetings_index.json` maps `meeting_id` to that folder, and it is a cache that a scan can rebuild.
 3. `search.db` (`config.SEARCH_DB`, under `PROJECT_DIR`, mode 600) is the full-text index behind `/api/search`. It holds the live meetings only, and it is a cache: every search first re-reads each `<base>.json` whose mtime or size changed and drops the rows of a folder that is gone. `python -m stt.search --rebuild` builds it again from the jsons alone. A json that parses but has a shape the index cannot read is recorded with no lines until it changes, so one bad meeting never turns the index off for the rest. When the index finds nothing or fails, the search falls back to a substring scan.
 4. `group_overrides.json` (`PROJECT_DIR`, mode 600) holds the "Not part of this group" corrections, `{meeting_id: {"not_in": [group key]}}`, keyed on the folder name only for a meeting with no id. Groups themselves are computed on read (`stt/groups.py`) and stored nowhere. `group_usage.jsonl` (mode 600) counts group opens and group questions, `{at, event}`, with no title or key.

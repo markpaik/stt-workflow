@@ -488,6 +488,31 @@ def test_a_title_edit_updates_the_title_key(sandbox):
     assert d["date_source"] == "mtime"            # the date did not move
 
 
+@pytest.mark.parametrize("typed", ["Dana 1:1", "Q3/Q4 Review", "a" * 300, "李" * 80,
+                                   "Planning Retreat 12312099"])
+def test_the_title_key_and_the_folder_follow_the_store_contract(sandbox, typed):
+    """docs/store-contract.md said `title` is the folder name without its
+    stamp, "always to match the folder". The code keeps the typed title:
+    'Dana 1:1' sits in '... Dana 1-1', and a long title is cut by bytes in
+    the folder only. The contract now states that, and invariant 1 is the
+    formula a reader can check."""
+    from stt import names
+    _m("Budget Review 09292026", title="Budget Review", date_source="mtime")
+    r = summarize.rename_meeting("Budget Review 09292026", typed)
+    b = r["base"]
+    d = _load(b)
+    assert d["title"] == names.clean_title(typed)          # the title as typed
+    assert b == config.cap_name(dates.stamp(names.file_title(d["title"]), d["date"]))
+    assert dates.shown_title(d["title"], b) == d["title"]
+
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "store-contract.md").read_text()
+    row = next(ln for ln in doc.splitlines() if ln.startswith("| `title` |"))
+    assert "always to match the folder" not in row
+    assert "`names.file_title`" in row and "`config.cap_name`" in row
+    assert ("`config.cap_name(dates.stamp(names.file_title(title), date))` plus the "
+            "twin suffix") in doc
+
+
 def test_a_repair_passes_its_own_source_and_start_time(sandbox):
     _m("Planning Talk 10292026", date="2026-10-29")
     r = summarize.apply_meeting_edits("Planning Talk 10292026", date="2026-10-23",

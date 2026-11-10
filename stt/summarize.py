@@ -1402,8 +1402,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     Work/Personal category, whether it still needs review, and the title's
     state.
 
-    Every title or date edit also keeps the `title` key equal to the folder
-    name it lands on, without the date stamp or twin suffix.
+    Every title or date edit also sets the `title` key to the title a
+    person sees for the folder it lands on (dates.shown_title): the typed
+    title, without a date stamp or twin suffix, when the folder carries its
+    filename-safe form, else the folder's own title. The two differ: a
+    typed '1:1' is '1-1' in the folder, and a long title is cut by bytes in
+    the folder (config.cap_name) but kept whole in `title`.
 
     A date edit records where the date came from. `date_source` defaults to
     `manual`, because the panel is a person. A repair passes the real
