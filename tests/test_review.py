@@ -1,12 +1,15 @@
 """review: the accept/edit workflow against real files, plus voice-clip lookup
 including the named-mid-batch fallback (transcripts not yet relabeled)."""
 import json
+import os
+import shutil
 import threading
 import time
 
 import numpy as np
+import pytest
 
-from stt import config, diarcache, identify, review
+from stt import audio, config, diarcache, identify, review
 from conftest import mfile
 
 
@@ -501,6 +504,38 @@ def test_retranscribe_engine_selection(sandbox):
     assert os.environ["STT_WHISPER_MLX_MODEL"] == "large-v3"
     # unknown engine -> clean error dict, not a crash
     assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "bogus")["error"]
+
+
+@pytest.mark.skipif(not (shutil.which(audio.FFMPEG) or os.path.exists(audio.FFMPEG)),
+                    reason="ffmpeg not installed")
+def test_retranscribe_refuses_a_span_that_is_no_stretch_of_the_recording(sandbox, monkeypatch):
+    """An end before the start made a 0.5 s clip at the start, a negative
+    span read the first seconds, and a span past the end made an empty wav
+    the model crashed on. The first two came back as a proposal for the
+    line with a success status."""
+    import wave
+    from stt import retranscribe
+    w = mfile("Mtg", ".wav")
+    with wave.open(str(w), "wb") as f:                # 4 s of silence
+        f.setnchannels(1), f.setsampwidth(2), f.setframerate(16000)
+        f.writeframes(b"\0\0" * 16000 * 4)
+    heard = []
+
+    class Fake:
+        def transcribe(self, clip, progress=None):
+            with wave.open(str(clip)) as c:
+                heard.append(c.getnframes() / c.getframerate())
+            return {"text": " fine ", "engine": "fake"}
+    monkeypatch.setattr(retranscribe, "_asr_module", lambda engine: Fake())
+    for start, end, why in [(3, 2, "before the start"), (-3, -1, "0 or later"),
+                            (float("nan"), 2, "numbers"), (1, float("inf"), "numbers"),
+                            (1e9, 1e9 + 1, "after the recording ends")]:
+        out = retranscribe.retranscribe("Mtg", start, end)
+        assert why in out["error"] and "text" not in out, (start, end, out)
+    assert heard == []                                # no clip reached the model
+    assert retranscribe.retranscribe("Mtg", 1, 2) == {"text": "fine", "engine": "fake"}
+    assert retranscribe.retranscribe("Mtg", 2, 2)["text"] == "fine"   # zero length: 0.5 s
+    assert [round(d, 2) for d in heard] == [1.5, 0.5]
 
 
 def test_minor_triage_and_bulk_accept(sandbox):
