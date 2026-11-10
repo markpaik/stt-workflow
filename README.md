@@ -563,8 +563,12 @@ four run options apply to the next manual run:
   speaker (it flags the line instead) and never sends audio or text to a
   cloud service. A meeting processed in strict stays strict: a Redo or a
   speaker re-identify keeps it on.
-- **Verify** transcribes with a second, different engine and flags every
-  place the two disagree, with both readings.
+- **Verify** transcribes with a second, different local engine and flags
+  every place the two disagree, with both readings. A cloud engine is never
+  the second engine. Parakeet is the only local engine, so Verify does
+  nothing on a Parakeet transcript and checks a cloud transcript with
+  Parakeet. With `STT_VERIFY=1` and Parakeet, the doctor reports
+  `verify_no_second_engine`.
 - **One-time speakers**, for focus groups, never adds unnamed voices to the
   speaker library and keeps no samples of them.
 
