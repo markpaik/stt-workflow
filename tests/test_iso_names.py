@@ -524,6 +524,29 @@ def test_the_dry_run_flags_no_title_change_the_apply_step_keeps(sandbox,
     assert d["title"] == "Kim 1:1"
 
 
+@pytest.mark.parametrize("long", [" ".join(["alpha"] * 60), "会議" * 60, "Dana 1:1 " + "b" * 110])
+def test_the_dry_run_plans_no_header_rewrite_after_a_long_rename(sandbox, monkeypatch,
+                                                                tmp_path, long):
+    """A panel rename to a title past the folder byte limit writes the
+    header with the whole title, and the folder holds the cut form. The
+    planner built its header from the cut folder title, so the dry run
+    listed '1  header rewrite' for a meeting already in step."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("2026-07-04 Weekly", date="2026-07-04", mid="mid-w", title="Weekly",
+       header_name="2026-07-04 Weekly")
+    r = summarize.rename_meeting("2026-07-04 Weekly", long)
+    assert r["ok"], r
+    assert dates.title_of(r["base"]) != json.loads(
+        config.meeting_file(r["base"], ".json").read_text())["title"]   # cut by bytes
+    header = _first_line(r["base"])
+    assert ir.main([]) == 0
+    rows = {x["old_base"]: x for x in json.loads(ir.plan_path().read_text())["rows"]}
+    row = rows[r["base"]]
+    assert row["rename"] is False and row["header"] is False
+    assert ir.main(["--apply"]) == 0
+    assert _first_line(r["base"]) == header
+
+
 def test_a_collision_with_an_iso_name_gets_the_twin_suffix(lib):
     _m("2026-08-03 Kim Weekly Check-in – Plans (3)", date="2026-08-03")
     _m("2026-08-09 Standup", date="2026-08-09")

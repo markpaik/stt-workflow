@@ -133,11 +133,14 @@ def header_line(base: str):
 
 def header_stale(base: str, d: dict, new_base: str) -> bool:
     """True when the header line does not open with the name it should
-    have after the move."""
+    have after the move. That name carries the title the apply step stores
+    (dates.shown_title), as the panel's rename writes it: a long title kept
+    whole while the folder holds its byte-cut form (config.cap_name) is no
+    rewrite, and neither is a '1:1' on a '1-1' folder."""
     line = header_line(base)
     if line is None or not output._HEADER_LINE.match(line):
         return False
-    want = output.header_name(new_base, {**d, "title": dates.title_of(new_base)})
+    want = output.header_name(new_base, {**d, "title": dates.shown_title(d.get("title"), new_base)})
     return output._HEADER_LINE.match(line).group(1) != want
 
 
