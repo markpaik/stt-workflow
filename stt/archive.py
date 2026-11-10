@@ -47,6 +47,14 @@ def purge_meeting_dir(path: Path):
     except Exception as e:
         print(f"   delete: unknown-speaker references not scrubbed ({e})",
               file=sys.stderr)
+    # an enrolled person's samples stay (their embeddings still identify
+    # the person), but a sample no longer claims a meeting that is gone:
+    # the doctor listed each as a fixable registry_dangling finding
+    try:
+        from . import identify
+        identify.forget_source_refs(path.name, mid)
+    except Exception as e:
+        print(f"   delete: voice sample sources not cleared ({e})", file=sys.stderr)
     # the stores keyed on this meeting: its group override (by id, or by
     # name for a meeting without one) and its keep-both pairs. A name that a
     # live or archived twin still carries keeps its entries.
@@ -208,8 +216,8 @@ def delete_meeting(base: str) -> dict:
     """Permanently delete a meeting — live or archived. Scrubs the unknowns
     registry's references (the audio is gone; enrolled voiceprint samples are
     KEPT, their embeddings still identify people in future meetings — only the
-    clip playback for samples sourced here dies, and the clip endpoints skip
-    non-live meetings gracefully). Returns {ok, freed_mb, note?, error?}."""
+    clip playback for samples sourced here dies, and each such sample's
+    source reads '?' from here on). Returns {ok, freed_mb, note?, error?}."""
     from . import review
     if base in config.meeting_bases():
         if _is_active(base):

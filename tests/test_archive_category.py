@@ -188,6 +188,40 @@ def test_delete_removes_everything_and_scrubs_speaker_refs(sandbox):
     assert u["meetings"] == ["Other 05012026"]
 
 
+def test_delete_clears_the_sample_sources_it_fed_so_the_doctor_is_quiet(sandbox):
+    """A Delete keeps enrolled samples by design, but each sample still
+    named the deleted meeting, so the next doctor check listed one fixable
+    registry_dangling finding per person it fed. The source is now '?' (the
+    doctor fix's own value), the sample row stays, and a source that a
+    live twin of the name still answers to is left alone."""
+    import numpy as np
+    from stt import doctor, identify
+    _meeting("2026-05-01 Board Prep", meeting_id="aaaa000000000001")
+    _meeting("2026-05-02 Kept", meeting_id="aaaa000000000002")
+    config.backfill_meeting_ids()
+    rng = np.random.default_rng(3)
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-01 Board Prep")
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-02 Kept")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-01 Board Prep")
+    before = identify.load_registry()
+    assert before["Dana Fox"]["sources"] == ["2026-05-01 Board Prep", "2026-05-02 Kept"]
+
+    assert archive.delete_meeting("2026-05-01 Board Prep")["ok"]
+    reg = identify.load_registry()
+    assert reg["Dana Fox"]["sources"] == ["?", "2026-05-02 Kept"]
+    assert reg["Dana Fox"]["n_samples"] == 2 and reg["Sam Chen"]["sources"] == ["?"]
+    assert identify.aligned_source_ids(reg["Dana Fox"])[0] is None
+    assert not [f for f in doctor.check() if f.kind == "registry_dangling"]
+
+    # an archived twin of the name still answers to it: its samples stay put
+    _meeting("2026-05-03 Twin")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-03 Twin")
+    archive.archive_meeting("2026-05-03 Twin")
+    _meeting("2026-05-03 Twin")
+    assert archive.delete_meeting("2026-05-03 Twin")["ok"]
+    assert identify.load_registry()["Sam Chen"]["sources"] == ["?", "2026-05-03 Twin"]
+
+
 def test_delete_works_on_an_archived_meeting_too(sandbox):
     _meeting("Gone 05012026")
     archive.archive_meeting("Gone 05012026")
