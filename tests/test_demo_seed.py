@@ -163,6 +163,17 @@ def test_speaker_store_loads(seeded):
     assert review.find_voice_clips(uid, sp[uid]["meetings"][0], n=1)
 
 
+def test_a_fresh_seed_passes_the_registry_doctor(seeded, monkeypatch):
+    """unknowns.json had no "next" key, so registry_doctor reported the
+    fresh seed as stale_next and exited 1: the doctor's exit-status gate
+    could not be shown on the demo."""
+    from stt import registry_doctor
+    monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", seeded / "meetings_index.json")
+    raw = json.loads((seeded / "voiceprints" / "unknowns.json").read_text())
+    assert raw["next"] == unknowns.next_floor(raw)
+    assert registry_doctor.check(seeded / "voiceprints", seeded / "meetings") == []
+
+
 def test_history_has_success_and_failure(seeded):
     rows = status.history()
     assert len(rows) >= 8

@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np  # a core repo dependency (identify.py); the real loaders need it
 
-from stt import config, dates, output, speaker_text  # real writers/helpers — never invent a schema
+from stt import config, dates, output, speaker_text, unknowns  # real writers/helpers — never invent a schema
 
 # --- synthetic cast (the ONLY person names that may appear) ---
 OWNER = "Morgan Ellis"
@@ -242,7 +242,11 @@ def write_voiceprints(home: Path, sources_seen: dict, unknown_meetings: dict):
         if info.get("archived"):
             entry["archived"] = True
         speakers[uid] = entry
-    (vp / "unknowns.json").write_text(json.dumps({"speakers": speakers}, indent=2))
+    # "next" is the monotonic counter the real store keeps (unknowns.
+    # heal_next): without it registry_doctor reported a fresh seed as
+    # stale_next and exited 1
+    reg = {"next": unknowns.next_floor({"speakers": speakers}), "speakers": speakers}
+    (vp / "unknowns.json").write_text(json.dumps(reg, indent=2))
     return registry, speakers
 
 
