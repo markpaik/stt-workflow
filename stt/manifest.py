@@ -3,6 +3,8 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -64,16 +66,56 @@ def update():
         save(m)
 
 
+_warned = {"damaged": False}
+
+
+def _read():
+    """(manifest, damaged): the manifest on disk, and True when the file is
+    there but cannot be read as one (a truncated file, outside damage, a
+    hand edit). A damaged file reads as an empty manifest."""
+    try:
+        raw = config.MANIFEST_PATH.read_bytes()
+    except FileNotFoundError:
+        return {"processed": {}}, False
+    try:
+        m = json.loads(raw)
+    except ValueError:              # bad JSON, or bytes that are not UTF-8
+        return {"processed": {}}, True
+    m.setdefault("processed", {})   # a malformed file must not blank the queue
+    return m, False
+
+
 def load() -> dict:
     with locked():
-        if config.MANIFEST_PATH.exists():
-            try:
-                m = json.loads(config.MANIFEST_PATH.read_text())
-                m.setdefault("processed", {})  # a malformed file must not blank the queue
-                return m
-            except json.JSONDecodeError:
-                pass
-        return {"processed": {}}
+        m, damaged = _read()
+        if damaged and not _warned["damaged"]:
+            # once per process: the panel loads the manifest on every poll
+            _warned["damaged"] = True
+            print(f"warning: {config.MANIFEST_PATH.name} is not readable, so "
+                  "every source reads as new. tools/doctor.py check names it, "
+                  "and the next write keeps a copy of it", file=sys.stderr, flush=True)
+        return m
+
+
+def _keep_aside():
+    """Copy a damaged manifest.json to manifest.json.bad-<time> before a
+    write replaces it. The write would otherwise drop every processed record
+    it held with no copy left, and a keep-original setup re-transcribes the
+    whole library. Never raises: a failed copy must not block the write."""
+    if not _read()[1]:
+        return
+    src = config.MANIFEST_PATH
+    stem = f"{src.name}.bad-{datetime.now():%Y%m%d-%H%M%S}"
+    bad, n = src.with_name(stem), 2
+    while bad.exists():
+        bad, n = src.with_name(f"{stem}-{n}"), n + 1
+    try:
+        shutil.copy2(src, bad)
+    except OSError:
+        return
+    print(f"warning: {src.name} was not readable; kept a copy as {bad.name} "
+          "before writing a new one. Its processed records are in that copy",
+          file=sys.stderr, flush=True)
 
 
 def save(m: dict):
@@ -81,6 +123,7 @@ def save(m: dict):
     # truncated read would make every already-processed file look brand new
     # and get needlessly reprocessed
     with locked():
+        _keep_aside()
         tmp = config.MANIFEST_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(m, indent=2))
         os.replace(tmp, config.MANIFEST_PATH)

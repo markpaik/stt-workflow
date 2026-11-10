@@ -104,6 +104,9 @@ dismissed_failures.json
 # these types lives there. /*.db* also covers the SQLite -wal and -shm files.
 /*.json
 /*.jsonl
+# a damaged state file kept aside before a write replaces it
+# (manifest.json.bad-<time>, queued_jobs.json.bad, holds.json.bad)
+/*.json.bad*
 /*.npz
 /*.db*
 /*.gz
