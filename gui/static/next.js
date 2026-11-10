@@ -7,10 +7,9 @@
    (next-voice.js). The server joins this file, next-meeting.js, and
    next-voice.js in that fixed order into one script: no modules, no build.
 
-   Since the 4D swap, / serves this page and /classic keeps the old one for
-   30 days. Both read the same GET /api/state poll and call only existing
-   endpoints. Where each of the 20 classic surfaces went is in gui/DESIGN.md.
-   tests/test_next_shell.py and tests/test_next_meeting.py pin them.
+   Since the 4D swap, / serves this page. It reads one GET /api/state poll
+   and calls only existing endpoints. tests/test_next_shell.py and
+   tests/test_next_meeting.py pin it.
    ============================================================================ */
 
 const ICON={
@@ -125,7 +124,7 @@ function renderFrame(){
   <button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>
   <button class="searchbtn" type="button" data-act="palette" title="Search titles and words (/ or Cmd K)">${ic('search')}<span>Search</span></button>
   ${navHTML()}
-  <div class="side-foot"><a href="/classic">Open the classic page</a><a href="#" data-act="keys">Keys</a></div>`;
+  <div class="side-foot"><a href="#" data-act="keys">Keys</a></div>`;
  $('#topbar').innerHTML=`<button class="icon-btn" type="button" data-act="menu" aria-label="Open the menu">${ic('menu')}</button>${UI.route==='meeting'?`<a class="icon-btn" href="#recordings" aria-label="Back to Recordings">${ic('back')}</a>`:''}<span class="t">${esc(pageTitle())}</span>${pillHTML()}<button class="icon-btn" type="button" data-act="palette" aria-label="Search">${ic('search')}</button>`;
 }
 
@@ -431,7 +430,7 @@ function settingsView(){
 /* ------------------------------------------------------------ overlays ---- */
 function layersHTML(){
  let h='';
- if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button><div class="side-foot"><a href="/classic">Open the classic page</a></div></div>`;
+ if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button></div>`;
  if(UI.palette)h+=`<div class="veil" data-act="close-layer"></div><div class="palette" role="dialog" aria-label="Search"><input type="search" id="pal-in" placeholder="Search titles and words" aria-label="Search" value="${esc(UI.pq)}" autocomplete="off"><div class="res" id="pal-res">${palResults()}</div></div>`;
  if(UI.keys)h+=`<div class="veil" data-act="close-layer"></div><div class="palette keysheet" role="dialog" aria-label="Keyboard keys"><div class="keysheet-head"><strong>Keys</strong><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><div class="keys">${KEYS.map(([k,d])=>`<span>${k.split(' ').map(x=>/^(or|then)$/.test(x)?`<span class="sub">${x}</span>`:`<kbd>${esc(x)}</kbd>`).join(' ')}</span><span>${esc(d)}</span>`).join('')}</div></div>`;
  $('#layers').innerHTML=h;
@@ -780,8 +779,8 @@ addEventListener('drop',async e=>{if(!hasFiles(e))return;e.preventDefault();drag
 
 /* ----------------------------------------------- poll, tab title, seen ---- */
 // The tab title counts Needs you items that joined while the tab was hidden,
-// the same "(N) Meetings" the classic page shows. A visible tab marks the
-// look for the menu bar's "new since last look" count.
+// as "(N) Meetings". A visible tab marks the look for the menu bar's "new
+// since last look" count.
 let HIDDEN_BASE=null;
 function tabTitle(){const n=HIDDEN_BASE==null?0:Math.max(0,needsYou().length-HIDDEN_BASE);return (n?`(${n}) `:'')+pageTitle()+' · Meetings';}
 document.addEventListener('visibilitychange',()=>{

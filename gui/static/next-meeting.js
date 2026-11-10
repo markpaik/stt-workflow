@@ -4,19 +4,17 @@
    line; the category, date source, and location note; one notice line when
    voices are open; the sticky tab row (Summary, Transcript, Ask); the tab
    panel, with a People rail at 1200px and wider; the audio bar docked at the
-   bottom. The finish strip of the classic reader is gone: the title moved to
-   the header chip, the voices to the notice and the voice sheet
-   (next-voice.js), and the flags to the Transcript tab's Uncertain lines
-   filter and its Check.
+   bottom. The title is the header chip, the voices are the notice and the
+   voice sheet (next-voice.js), and the flags are the Transcript tab's
+   Uncertain lines filter and its Check.
 
    The page is built once per meeting. The 2s poll repaints the header, the
    notice, the People rail, and the Summary tab in place when their markup
    changes, and never the transcript: a card, a find, or a typed question
-   survives every poll. A finished relabel reloads the lines, as the classic
-   relabelWatch did, but never while a card, the voice sheet, a find, or a
-   title edit is open.
+   survives every poll. A finished relabel reloads the lines, but never
+   while a card, the voice sheet, a find, or a title edit is open.
 
-   Every write is an existing endpoint, with the classic reader's payloads:
+   Every write is an existing endpoint, with the server's payload contract:
    /api/review with the segment's ORIGINAL json index plus its start as the
    server's cross-check, /api/accept_meeting for a Keep or an edited title,
    /api/suggest (POST) for Generate, /api/ask for a question.
@@ -28,7 +26,7 @@ const MRATES=[1,1.25,1.5,2,0.75];
 const ENGINES=[['parakeet','Parakeet, fast'],['mlxwhisper:large-v3','Whisper v3, thorough'],['mlxwhisper:turbo','Whisper turbo']];
 const MTABS=[['summary','Summary'],['transcript','Transcript'],['ask','Ask']];
 
-// #m/<base> and #m/<base>/t/<secs>: the classic reader's deep links, kept
+// #m/<base> and #m/<base>/t/<secs>: a meeting, or a meeting at a second
 function parseMeetingHash(h){
  const x=/^m\/([^/]+)(?:\/t\/(\d+(?:\.\d+)?))?$/.exec(h||'');if(!x)return null;
  let base;try{base=decodeURIComponent(x[1]);}catch(e){return null;}

@@ -14,8 +14,8 @@
    8. Footer: Save and next, Skip, Not a real speaker (Clear name for a voice
       named for this meeting only).
 
-   Saves go through vsSave, the port of the classic saveName: the identity
-   is captured before the await, one naming request runs at a time (VBUSY),
+   Saves go through vsSave: the identity is captured before the await, one
+   naming request runs at a time (VBUSY),
    the floor refusal offers the meeting-only save, the quality warning offers
    Save anyway, and the toast says what the server applied. The walk asks
    about each voice once per run: most talk time first, and never a voice the

@@ -5,8 +5,8 @@
 <style>
 /*@NEXT_CSS@*/</style>
 <script>
-// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint, with
-// the same stt_theme key as the classic page. Storage can throw, so wrapped.
+// theme: "auto" follows macOS; "light"/"dark" pin it. Applied pre-paint,
+// under the stt_theme key. Storage can throw, so wrapped.
 (function(){try{var q=new URLSearchParams(location.search).get("theme");
 var t=q||localStorage.getItem("stt_theme");
 if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t);}catch(e){}})();

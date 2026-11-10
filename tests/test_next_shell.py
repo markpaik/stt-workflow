@@ -95,6 +95,17 @@ def test_root_serves_the_shell_and_classic_redirects_to_it(running_server):
         assert (status, where, body) == (302, "/", b""), path
 
 
+def test_the_shell_never_points_at_the_deleted_classic_page():
+    # the sidebar foot held "Open the classic page", and the narrow menu
+    # sheet's foot held nothing else. Both are gone with the page itself.
+    page = _compose_next()
+    assert "/classic" not in page
+    assert "classic" not in page.lower()
+    js = _next_js()
+    assert '<div class="side-foot"><a href="#" data-act="keys">Keys</a></div>' in js
+    assert js.count('class="side-foot"') == 1
+
+
 def test_next_frame_reloads_from_disk_without_a_restart(sandbox, tmp_path, monkeypatch):
     d = tmp_path / "static"
     d.mkdir()
