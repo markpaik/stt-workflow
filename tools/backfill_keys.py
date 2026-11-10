@@ -13,7 +13,9 @@ The write follows config.backfill_meeting_ids: the meeting's own lock, a
 re-read under it, one atomic replace, and `generated_at` left as it was, so
 an open panel page does not reload. A meeting the batch is writing is
 skipped and reported. Every added key goes to a journal first, and undo
-removes a key only where it still holds the value this run wrote.
+removes a key only where it still holds the value this run wrote. A write
+run first stamps a meeting_id on any meeting that lacks one, so undo can
+find a meeting renamed after the run.
 
   ./run.sh py tools/backfill_keys.py                       # dry run: counts only
   ./run.sh py tools/backfill_keys.py --apply               # write, print the run id
@@ -99,6 +101,9 @@ def apply(store=None, journal_dir=None, run_id=None, probe=True, today=None) -> 
     store = Path(store) if store else config.meetings_dir()
     run_id = run_id or datetime.now().strftime("backfill-%Y%m%dT%H%M%S")
     jpath = fj.journal_path(run_id, journal_dir)
+    # undo finds each meeting by its id: a meeting journaled with none could
+    # not be found again once its folder moved (tools/fix_dates.py does the same)
+    config.backfill_meeting_ids(store)
     names = _names()
     applied, skipped = [], []
     journal = None

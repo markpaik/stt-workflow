@@ -337,6 +337,30 @@ def test_the_backfill_works_on_a_store_that_already_has_the_amnesty_keys(store):
     assert d["title_state"] == "provisional" and d["title"] == "Budget Review"
 
 
+def test_the_backfill_undo_finds_a_meeting_renamed_after_the_run(store):
+    """A store with no meeting ids journaled "meeting_id": null, so undo
+    looked a meeting up by its old folder name. A rename after the run made
+    it "no longer live", and its added keys stayed. apply() now stamps the
+    ids first, as tools/fix_dates.py does."""
+    for b in config.meeting_bases():
+        j = config.meeting_file(b, ".json")
+        d = json.loads(j.read_text())
+        d.pop("meeting_id", None)
+        j.write_text(json.dumps(d, indent=2))
+    r = backfill_keys.apply()
+    jp = store / "migration" / f"{r['run']}.jsonl"
+    assert all(json.loads(x)["meeting_id"] for x in jp.read_text().splitlines())
+    res = summarize.apply_meeting_edits("Team Huddle 09292026",
+                                        to_base="Team Huddle Renamed 09292026")
+    assert res.get("ok"), res
+    new = res["base"]
+    u = backfill_keys.undo(r["run"], dry_run=False)
+    assert not u["missing"], u["missing"]
+    d = _load(new)
+    for k in ("source_name", "audio_fp", "date_source", "recorded_at"):
+        assert k not in d, k
+
+
 # ---------- the date-correction tool ----------
 
 @pytest.fixture
