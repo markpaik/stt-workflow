@@ -549,3 +549,24 @@ def test_two_different_meetings_that_hold_one_asr_loop_are_not_a_match(sandbox):
     _meeting("Clip Redo 05052026", "f.m4a", text=_words(40), dur=30.0)
     assert [(p["a"], p["b"]) for p in dupes.similar_meetings(dest_dir=d)] == \
         [("Clip 05052026", "Clip Redo 05052026")]
+
+
+def test_same_bytes_sees_an_edit_the_sampled_fingerprint_misses(sandbox):
+    """The fingerprint hashes the size and the first, middle and last
+    megabyte. A same-size edit between those windows keeps the fingerprint,
+    so the bulk delete needs a full compare to call two files identical."""
+    body = bytes(range(256)) * (4 * 1024 * 4)          # 4 MB
+    edited = bytearray(body)
+    off = dupes.CHUNK + 100000
+    edited[off:off + 100] = b"\0" * 100
+    a, b, c = sandbox / "a.m4a", sandbox / "b.m4a", sandbox / "c.m4a"
+    a.write_bytes(body)
+    b.write_bytes(bytes(edited))
+    c.write_bytes(body)
+    assert dupes.fingerprint(a) == dupes.fingerprint(b), "the sample misses it"
+    assert dupes.same_bytes(a, b) is False
+    assert dupes.same_bytes(a, c) is True
+    d = sandbox / "d.m4a"
+    d.write_bytes(body[:-1])
+    assert dupes.same_bytes(a, d) is None, "sizes differ: no full compare"
+    assert dupes.same_bytes(a, sandbox / "missing.m4a") is False

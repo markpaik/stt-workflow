@@ -1630,6 +1630,37 @@ def test_the_sweep_reproves_the_bytes_before_each_unlink(running_server, monkeyp
         "identity must be proven at unlink time, not taken from the snapshot"
 
 
+def test_the_sweep_compares_every_byte_when_the_meeting_holds_a_same_size_copy(
+        running_server):
+    """The fingerprint samples the first, middle and last megabyte. A
+    same-size edit between them kept it, so the row read "identical" and
+    the sweep deleted a file whose bytes differ from the meeting's copy."""
+    from stt import dupes
+    body = bytes(range(256)) * (4 * 1024 * 4)          # 4 MB
+    edited = bytearray(body)
+    off = dupes.CHUNK + 100000
+    edited[off:off + 100] = b"\0" * 100
+    base = "Board Prep 05012026"
+    mfile(base, ".json").write_text(json.dumps(
+        {"source_file": "board prep.m4a", "duration_sec": 600.0,
+         "speakers": [], "segments": [], "words": []}))
+    mfile(base, ".txt").write_text("stub")
+    mfile(base, ".m4a").write_bytes(body)
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    f = src / "board prep 2.m4a"
+    f.write_bytes(bytes(edited))
+
+    _, state = _get(running_server, "/api/state")
+    row = [q for q in state["queue"] if q["name"] == "board prep 2.m4a"][0]
+    assert row["dup_reason"] == "identical", "the sample cannot see the edit"
+    st, body_ = _post(running_server, "/api/queue_delete_dupes", {"confirm": True})
+    assert st == 200 and body_["deleted"] == []
+    assert body_["skipped"] == [{"name": "board prep 2.m4a",
+                                 "reason": "its bytes differ from the meeting's copy"}]
+    assert f.exists()
+
+
 def test_the_sweep_still_takes_a_file_it_can_prove_right_now(running_server):
     """R2 and R3 together must not disarm the feature: a real byte-identical
     copy of a meeting that still holds its audio is still swept."""

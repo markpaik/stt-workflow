@@ -3307,7 +3307,8 @@ class Handler(BaseHTTPRequestHandler):
                     # fingerprint keeps matching after drop_audio removed the
                     # meeting's own copy, so the base reads live while the only
                     # remaining bytes of that recording are the file below.
-                    if not _stored_audio(f.get("dup_of")):
+                    stored = _stored_audio(f.get("dup_of"))
+                    if not stored:
                         _skip(f["name"],
                               "this is the last copy of that recording")
                         continue
@@ -3326,6 +3327,16 @@ class Handler(BaseHTTPRequestHandler):
                     if not snap or dupes.fingerprint(p) != snap:
                         _skip(f["name"],
                               "the file changed since it was flagged")
+                        continue
+                    # the fingerprint samples three megabytes, so a same-size
+                    # edit between them still matched. When the meeting holds
+                    # a copy of the same size, every byte is compared first.
+                    # A video's stored audio is an extracted track of another
+                    # size, and the original's bytes exist nowhere else: there
+                    # the sampled fingerprint is the only proof there is.
+                    if dupes.same_bytes(p, stored) is False:
+                        _skip(f["name"],
+                              "its bytes differ from the meeting's copy")
                         continue
                     try:
                         freed += p.stat().st_size / 1e6

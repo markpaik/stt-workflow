@@ -6,8 +6,10 @@ under a NEW name or a new mtime (an iCloud re-sync, a second export, a copy off
 another Mac), and the manifest keys on name + mtime, so it reads as brand new
 and gets transcribed all over again. Here the file is identified by its CONTENT:
 size first (a free stat, and two different recordings essentially never share an
-exact byte count), then a hash of the head and tail. Only a size collision is
-ever hashed, so the common poll does no reading at all.
+exact byte count), then a hash of the first, middle and last megabyte. Only a
+size collision is ever hashed, so the common poll does no reading at all. That
+hash is a sample: the bulk delete compares every byte before an unlink whenever
+the meeting holds a copy of the same size.
 
 CURE (transcripts). Prevention only works going forward, and a library already
 carries whatever slipped through. Two transcripts of the same audio are compared
@@ -73,9 +75,13 @@ def ignored_path():
 def fingerprint(path):
     """A content fingerprint for a media file, or None when one cannot be taken.
 
-    Size plus the first, MIDDLE and last megabyte: two recordings that agree on
-    all four are the same bytes for any practical purpose, and it costs two
-    seeks instead of reading gigabytes. NEVER touches a dataless iCloud file --
+    Size plus the first, MIDDLE and last megabyte. It is a SAMPLE, not proof
+    that every byte agrees: two files of one size that differ only between
+    those windows (a same-size edit in place) get the same fingerprint. Two
+    different recordings differ in the head, so they never collide, and it
+    costs two seeks instead of reading gigabytes. The bulk delete therefore
+    compares every byte (same_bytes) whenever the meeting still holds a copy
+    of the same size. NEVER touches a dataless iCloud file --
     reading one would trigger a multi-gigabyte download from a status poll,
     which is exactly the surprise this feature is supposed to prevent.
 
@@ -100,16 +106,16 @@ def fingerprint(path):
                 h.update(fh.read(CHUNK))
                 # any file bigger than one chunk gets its tail hashed too. The
                 # old cut-off was 2*CHUNK, which left everything past the first
-                # megabyte of a 1-2 MB file OUT of the "byte-identical" proof
-                # that gates the no-undo bulk delete; an overlapping tail read
+                # megabyte of a 1-2 MB file OUT of the sample that flags a
+                # file for the no-undo bulk delete; an overlapping tail read
                 # is merely redundant, never wrong
                 if st.st_size > CHUNK:
                     fh.seek(-CHUNK, os.SEEK_END)
                     h.update(fh.read(CHUNK))
                 # and a MIDDLE megabyte. Head plus tail alone leaves every byte
                 # between them out of the hash, so two files above 2*CHUNK that
-                # differ only in the middle collided -- and this hash is the
-                # "byte-identical" proof that gates a bulk delete with no undo.
+                # differ only in the middle collided. Bytes between the three
+                # windows are still out of it: see same_bytes.
                 if st.st_size > 2 * CHUNK:
                     fh.seek((st.st_size - CHUNK) // 2)
                     h.update(fh.read(CHUNK))
@@ -118,6 +124,29 @@ def fingerprint(path):
         fp = None
     _fp_cache[key] = fp
     return fp
+
+
+def same_bytes(a, b):
+    """True when two files hold the same bytes, every one compared. False
+    when they differ, or one cannot be read in full (a dataless iCloud file
+    is never read). None when their sizes differ: then no full compare can
+    say anything, and the caller keeps what proof it has."""
+    a, b = Path(a), Path(b)
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return None
+        from . import icloud
+        if not (icloud._fully_present(a) and icloud._fully_present(b)):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(CHUNK), fb.read(CHUNK)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
 
 
 def _record_base(rec) -> str:
@@ -137,9 +166,11 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
     bases that still exist (live plus archived). Two independent signals, and
     they are NOT equally strong:
 
-      identical -- same size AND same head/tail hash as a meeting's stored
-        audio (a plain copy of the original) or as the fingerprint the manifest
-        recorded for a processed source. Proof enough to offer a bulk delete.
+      identical -- same size AND same sampled fingerprint as a meeting's
+        stored audio (a plain copy of the original) or as the fingerprint the
+        manifest recorded for a processed source. Enough to OFFER a bulk
+        delete. The delete compares every byte first when the meeting holds
+        a copy of the same size (same_bytes).
       name -- the file is named exactly like some meeting's source file. Common
         and useful, but a recurring export ("Weekly Sync.m4a") legitimately
         reuses one name for genuinely different meetings, so this one only ever
