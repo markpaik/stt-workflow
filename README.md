@@ -376,8 +376,21 @@ A title stays on one line: a line break becomes a space, and a
 bidirectional control or a zero-width space is dropped. A colon or a slash
 is kept. The title shows as typed (`Dana 1:1`, `Q3/Q4 Planning`), and the
 folder, which cannot hold either one, says `Dana 1-1` and `Q3-Q4 Planning`.
+A title over 120 characters is cut between two words, and the save says so.
 Saving a title the meeting already has never renames its folder, and a
 same-day twin keeps its `(2)` or `(3)`.
+
+Two meetings with the same title on the same day are twins: the second
+folder ends in ` (2)`, the third in ` (3)`, and the list shows the number
+so you can tell them apart. Numbers are not shuffled when one twin moves
+to another date or is deleted, because the speaker registries name
+meetings by folder. A twin left with a number and no plain sibling drops
+the number on its next title or date edit. Folders named before the
+date-first rule read `<title> MMDDYYYY`. Every reader takes both forms,
+the next title or date edit moves an old folder to the new form, and
+`tools/iso_rename.py` moves the whole library at once.
+[docs/store-contract.md](docs/store-contract.md) holds the full naming
+rules.
 
 ### Search and Ask
 

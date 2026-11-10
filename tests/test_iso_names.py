@@ -279,6 +279,19 @@ def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
     assert r["base"] == "2026-05-05 Race Name"
 
 
+def test_a_twin_left_alone_keeps_its_number_until_its_next_edit(sandbox):
+    """The README and the store contract say a ' (2)' can stand alone after
+    its plain sibling moves to another date, and that its next title or
+    date edit drops the number. This pins both halves of that sentence."""
+    _m("2025-05-21 Team Sync", date="2025-05-21", title="Team Sync")
+    _m("2025-05-21 Team Sync (2)", date="2025-05-21", title="Team Sync")
+    r = summarize.set_meeting_date("2025-05-21 Team Sync", "2025-05-22")
+    assert r["ok"] and r["base"] == "2025-05-22 Team Sync"
+    assert "2025-05-21 Team Sync (2)" in config.meeting_bases()      # not renumbered
+    r = summarize.set_meeting_date("2025-05-21 Team Sync (2)", "2025-05-21")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync"
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")
