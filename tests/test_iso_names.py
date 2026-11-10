@@ -379,6 +379,20 @@ def test_the_doctor_reads_an_iso_folder_as_in_step(sandbox):
     assert "iso_rename" in mm["Old Form 08032026"]
 
 
+def test_a_title_that_ends_in_its_own_number_is_no_doctor_finding(sandbox):
+    """'Sprint (2)' stamps to '2026-03-03 Sprint (2)', whose ' (2)' reads as
+    a twin suffix. The doctor added that suffix to the stamped title, so it
+    wanted '2026-03-03 Sprint (2) (2)' and reported a mismatch that was not
+    there. A real twin of it, and a real mismatch, are still read right."""
+    from stt import doctor
+    _m("2026-03-03 Sprint (2)", date="2026-03-03", title="Sprint (2)")
+    _m("2026-03-03 Sprint (2) (2)", date="2026-03-03", title="Sprint (2)")
+    _m("2026-03-04 Review (3)", date="2026-03-04", title="Review (3)")
+    _m("2026-03-05 Standup", date="2026-03-05", title="Standup (2)")
+    mm = [f.subject for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+    assert mm == ["2026-03-05 Standup"]
+
+
 # ---------- the .txt header ----------
 
 def test_the_header_names_the_date_and_title(sandbox):

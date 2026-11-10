@@ -437,8 +437,11 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         raw = d.get("title") or dates.title_of(b)
         stamped = {(dates.stamp(t, d["date"]) if d.get("date") else t)
                    for t in (names.file_title(raw) or raw, raw)}
-        wants = {n + dates.twin_suffix(b)
-                 for n in stamped | {config.cap_name(n) for n in stamped}}
+        # a title that ends in its own '(2)' ('Sprint (2)') gives a folder
+        # whose tail reads as a twin suffix: the folder that holds just the
+        # stamped title is in step too, not only the one with a suffix added
+        named = stamped | {config.cap_name(n) for n in stamped}
+        wants = named | {n + dates.twin_suffix(b) for n in named}
         if b not in wants:
             why = "folder name differs from its title and date"
             if not dates.is_iso_form(b) and dates.meeting_date(b):
