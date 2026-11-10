@@ -347,3 +347,23 @@ def test_a_partial_or_non_object_baseline_still_writes_the_scoreboard(tmp_path):
         run_dir, board, _ = diar_eval.write_scoreboard(out_root, "2026-07-15", empty)
         assert (run_dir / "scoreboard.json").exists()
         assert (run_dir / "scoreboard.md").exists()
+
+
+def test_the_idle_wait_reads_a_dead_batchs_flag_as_idle(sandbox):
+    """With no panel up, panel_busy read status.json's running flag alone.
+    A hard kill skips end_run, so the flag stayed true, and wait_for_idle
+    waited its whole two hours for a batch that was gone."""
+    import socket
+    import subprocess
+    from stt import status
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()                                    # nothing listens there now
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert diar_eval.panel_busy(port) is False
+    import os
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": os.getpid()}))
+    assert diar_eval.panel_busy(port) is True

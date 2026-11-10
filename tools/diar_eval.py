@@ -470,7 +470,9 @@ def _hf_token_from_env_file():
 
 def panel_busy(port: int) -> bool:
     """Is a batch running? Ask the live panel first; fall back to the status
-    file when no panel is up."""
+    file when no panel is up. The fallback is status.batch_running: the
+    flag alone stayed true after a hard kill, and the wait ran its whole
+    two hours for a batch that was gone."""
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/state", timeout=5) as r:
@@ -479,7 +481,7 @@ def panel_busy(port: int) -> bool:
     except Exception:
         try:
             from stt import status
-            return bool(status.read().get("running"))
+            return status.batch_running()
         except Exception:
             return False
 
