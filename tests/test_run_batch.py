@@ -1843,3 +1843,39 @@ def test_the_library_in_other_letter_case_is_still_the_library(sandbox, tmp_path
     (tmp_path / "elsewhere").mkdir()
     assert not config.is_live_store(tmp_path / "elsewhere")
     assert not config.is_live_store(tmp_path / "not made yet")
+
+
+def test_the_folder_defaults_follow_stt_env_over_a_stale_environment(
+        sandbox, monkeypatch, tmp_path):
+    """--source and --dest defaulted to the import-time constants, which
+    read the environment first. The panel's folder picker put
+    STT_MEETINGS_DIR in its own environment, stt.env changed later, and
+    a spawned batch wrote meetings into the old folder, where the index
+    (is_live_store) never saw them."""
+    stale, cur = tmp_path / "X", tmp_path / "Y"
+    monkeypatch.setenv("STT_MEETINGS_DIR", str(stale))
+    monkeypatch.setattr(run_batch.config, "MEETINGS_DIR", stale)  # import-time
+    monkeypatch.setattr(run_batch.config, "ICLOUD_DIR", stale / "src")
+    (sandbox / "stt.env").write_text(f"STT_MEETINGS_DIR={cur}\n"
+                                     f"STT_ICLOUD_DIR={cur / 'src'}\n")
+    ns = run_batch.build_parser().parse_args([])
+    assert (ns.dest, ns.source) == (str(cur), str(cur / "src"))
+    assert run_batch.config.is_live_store(ns.dest)
+    # the defaults are the panel's folders: a replay stores neither
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=ns.source, dest=ns.dest), [])
+    assert "source" not in spec and "dest" not in spec
+
+
+def test_the_folder_picker_leaves_the_panels_environment_alone(sandbox, monkeypatch, tmp_path):
+    """set_folder wrote the new folder into os.environ. Every spawned
+    batch inherited it, and run.sh keeps a variable the shell set, so the
+    value went stale as soon as stt.env changed by hand or by init.sh."""
+    from gui import server
+    monkeypatch.delenv("STT_MEETINGS_DIR", raising=False)
+    pick = tmp_path / "Picked"
+    pick.mkdir()
+    assert server.set_folder("dest", str(pick), confirm=True)["ok"]
+    assert "STT_MEETINGS_DIR" not in os.environ
+    assert run_batch.config.meetings_dir() == pick
+    assert f"STT_MEETINGS_DIR={pick}" in (sandbox / "stt.env").read_text()

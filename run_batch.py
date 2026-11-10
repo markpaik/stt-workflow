@@ -177,7 +177,7 @@ def job_spec_from_args(args, todo) -> dict:
     # a run into other folders replays into the same ones: without them a
     # sandbox or test run's replay wrote into the real library. The default
     # folders are left out, so a panel job stays as the panel queued it.
-    for key, default in (("source", config.ICLOUD_DIR), ("dest", config.MEETINGS_DIR)):
+    for key, default in (("source", config.source_dir()), ("dest", config.meetings_dir())):
         v = getattr(args, key, None)
         if v and Path(v) != Path(default):
             spec[key] = str(v)
@@ -805,8 +805,11 @@ def _requeue_if_unintended(claimed_job) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--source", default=str(config.ICLOUD_DIR))
-    ap.add_argument("--dest", default=str(config.MEETINGS_DIR),
+    # the folders as the panel and is_live_store read them: stt.env first.
+    # The import-time constants read the environment first, so a stale
+    # STT_MEETINGS_DIR wrote meetings beside the library, unindexed.
+    ap.add_argument("--source", default=str(config.source_dir()))
+    ap.add_argument("--dest", default=str(config.meetings_dir()),
                     help="the meetings folder to write into (default: the library). "
                          "A run into any other folder writes no descriptions or "
                          "automatic titles")

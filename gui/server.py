@@ -1693,8 +1693,10 @@ def set_folder(which: str, path: str, confirm: bool = False):
             return {"need_confirm": True, "which": which, "path": str(p), "warn": warn}
     key = "STT_ICLOUD_DIR" if which == "source" else "STT_MEETINGS_DIR"
     _env_file_set({key: str(p)})
-    import os
-    os.environ[key] = str(p)  # children (batch runs) inherit immediately
+    # No os.environ write: every child reads stt.env (run.sh, and the
+    # batch's --source and --dest defaults). run.sh keeps a variable the
+    # shell already set, so a value written here went stale when stt.env
+    # changed later, and a spawned batch wrote into the old folder.
     if which == "source":
         config.ICLOUD_DIR = p
         # the agent's WatchPaths must follow the new source folder
