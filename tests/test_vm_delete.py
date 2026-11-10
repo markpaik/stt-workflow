@@ -755,6 +755,24 @@ def test_apply_refuses_while_a_batch_runs(vm, monkeypatch):
     assert _tool("--apply") == 2 and vm.calls() == []
 
 
+def test_apply_runs_after_a_batch_died_with_its_running_flag_set(vm, capsys):
+    """A hard kill or a power loss skips end_run, so status.json keeps
+    running true with a dead pid. --apply trusted the flag alone and
+    refused until the next batch ran."""
+    from stt import status
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()                                  # reaped: its pid is free
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert _tool("--apply") == 0
+    assert "A batch is running" not in capsys.readouterr().out
+    assert _rows()["U-1"]["deleted"] and len(vm.calls()) == 1
+    # a live pid still refuses
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": os.getpid()}))
+    assert _tool("--apply") == 2
+
+
 def test_clear_halt_from_the_tool(vm, capsys):
     voicememos._set_halt("synthetic stop", "U-1")
     assert _tool("--clear-halt") == 0

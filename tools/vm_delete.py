@@ -23,6 +23,7 @@ the database), look at Voice Memos and its Recently Deleted first, then run
 --clear-halt.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -88,6 +89,26 @@ def _setting_lines():
     return out
 
 
+def _batch_running() -> bool:
+    """True while status.json says a batch runs and that batch's pid is
+    alive. A hard kill or a power loss skips end_run, so the flag stayed
+    true with a dead pid, and --apply refused until the next batch ran. A
+    flag with no pid, or a pid that cannot be checked, still counts."""
+    st = status.read()
+    if not st.get("running"):
+        return False
+    pid = st.get("pid")
+    if not pid:
+        return True
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError, TypeError):
+        return True
+    return True
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     g = ap.add_mutually_exclusive_group()
@@ -109,7 +130,7 @@ def main(argv=None) -> int:
         print(ln)
 
     if a.apply:
-        if status.read().get("running"):
+        if _batch_running():
             print("A batch is running. Try again when it ends.")
             return 2
         r = voicememos.delete_pass(force=True, log=print,
