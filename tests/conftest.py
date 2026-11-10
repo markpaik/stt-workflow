@@ -36,6 +36,17 @@ def mfile(base, suffix):
     return p
 
 
+def decision_count(base) -> int:
+    """How many saved human edits meeting `base` has: the length of its
+    .reviews.json. The panel read this through review.count_decisions for
+    the classic page's Redo warning, so it is a test helper now."""
+    import json
+    try:
+        return len(json.loads(config.meeting_file(base, ".reviews.json").read_text()))
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch):
     d = tmp_path

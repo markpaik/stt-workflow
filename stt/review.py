@@ -637,15 +637,6 @@ def _decisions_path(base: str):
     return config.meeting_file(base, ".reviews.json")
 
 
-def count_decisions(base: str) -> int:
-    """How many saved human edits this meeting has (for the Redo warning)."""
-    p = _decisions_path(base)
-    try:
-        return len(json.loads(p.read_text()))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return 0
-
-
 def archive_decisions(base: str, dest_dir=None) -> bool:
     """A REDO rebuilds transcription AND diarization from scratch — the new
     speaker cluster ids have no relation to the old ones, so replaying old

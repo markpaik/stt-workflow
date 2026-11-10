@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from stt import audio, config, diarcache, identify, review
-from conftest import mfile
+from conftest import decision_count, mfile
 
 
 def _make_meeting(sandbox, base="Mtg", flag_seg=1):
@@ -484,9 +484,9 @@ def test_redo_archives_decisions(sandbox):
     archived (renamed .superseded), never half-applied and never deleted."""
     _make_meeting(sandbox)
     review.apply("Mtg", 1, "edit", start=5.0, text="Human work.")
-    assert review.count_decisions("Mtg") == 1
+    assert decision_count("Mtg") == 1
     assert review.archive_decisions("Mtg") is True
-    assert review.count_decisions("Mtg") == 0
+    assert decision_count("Mtg") == 0
     assert (mfile("Mtg", ".reviews.superseded.json")).exists()
     # rebuilt data gets nothing reapplied — clean slate
     data = _make_meeting(sandbox)

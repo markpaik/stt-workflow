@@ -7,7 +7,7 @@ import json
 import numpy as np
 
 from stt import config, diarcache, review
-from conftest import mfile
+from conftest import decision_count, mfile
 
 
 def _seed_meeting(base="Mtg"):
@@ -68,11 +68,11 @@ def test_editing_an_inserted_line_updates_it_in_place_not_a_new_decision(sandbox
     _seed_meeting("Mtg")
     r = review.insert_segment("Mtg", 6.5, 7.5, "name:Noor", "Quikc aside.")
     idx = r["index"]
-    assert review.count_decisions("Mtg") == 1
+    assert decision_count("Mtg") == 1
 
     r2 = review.apply("Mtg", idx, "edit", start=6.5, text="Quick aside.")
     assert r2["ok"]
-    assert review.count_decisions("Mtg") == 1  # still one decision, not two
+    assert decision_count("Mtg") == 1  # still one decision, not two
 
     decisions = json.loads((mfile("Mtg", ".reviews.json")).read_text())
     assert len(decisions) == 1
