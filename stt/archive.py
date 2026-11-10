@@ -197,6 +197,13 @@ def restore_meeting(base: str) -> dict:
                 new_base = r["base"]
     except Exception:
         pass
+    # a description a Redo left out of date lost its place in the batch's
+    # index while the meeting was archived. Best-effort, like the above.
+    try:
+        from . import summarize
+        summarize.stale_relist(new_base)
+    except Exception:
+        pass
     return {"ok": True, "base": new_base}
 
 

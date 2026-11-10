@@ -104,6 +104,27 @@ def test_restore_brings_it_back_intact(sandbox):
     assert d["category"] == "personal"  # byte-identical: nothing was rewritten
 
 
+def test_a_restored_meeting_with_an_out_of_date_description_is_due_again(sandbox):
+    """stale_bases reads the live store only. It dropped the entry of a
+    Redo'd meeting while it sat in the archive, and nothing listed it again
+    on restore: the batch never regenerated that description."""
+    base = "Vendor Demo 05012026"
+    _meeting(base, meeting_id="mid-v1", ai_stale=True)
+    config.index_set("mid-v1", base)
+    summarize.stale_mark("mid-v1", base)
+    assert summarize.stale_bases() == [base]
+    archive.archive_meeting(base)
+    assert summarize.stale_bases() == []
+    assert archive.restore_meeting(base)["ok"]
+    assert summarize.stale_bases() == [base]
+    # a meeting with an up-to-date description is not listed by a restore
+    _meeting("Fresh Demo 05012026", meeting_id="mid-v2")
+    config.index_set("mid-v2", "Fresh Demo 05012026")
+    archive.archive_meeting("Fresh Demo 05012026")
+    archive.restore_meeting("Fresh Demo 05012026")
+    assert summarize.stale_bases() == [base]
+
+
 def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
     """A pre-feature archived name can collide with a live meeting. Restore must
     not clobber it — and the speaker registries reference meetings BY NAME, so

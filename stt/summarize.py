@@ -1176,6 +1176,24 @@ def stale_mark(key: str, base: str):
         idx[key] = {"base": base, "fails": 0, "next_after": 0}
 
 
+def stale_relist(base: str) -> bool:
+    """List a meeting again whose json still says ai_stale. stale_bases
+    reads the live store only, so it dropped the entry of a meeting that
+    sat in the archive: a restore calls this, or the batch never
+    regenerates that description. True when the meeting is listed."""
+    try:
+        d = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not (isinstance(d, dict) and d.get("ai_stale")):
+        return False
+    with _stale_index() as idx:
+        key = _stale_key(base)
+        if key not in idx:
+            idx[key] = {"base": base, "fails": 0, "next_after": 0}
+    return True
+
+
 def stale_clear(key: str):
     try:
         with _stale_index() as idx:
