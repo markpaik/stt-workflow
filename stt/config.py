@@ -573,22 +573,24 @@ def mic_speaker() -> str | None:
     return _env_file().get("STT_MIC_SPEAKER") or MIC_SPEAKER
 
 
-# --- Local LLM hardware limits (the owner's rule: keep the fan quiet) ---
-# Every local LLM run (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback) runs at
-# lowered priority: before each call the Ollama processes are set to nice
-# STT_LLM_NICE (an absolute value, never an increment) and put on background
-# QoS (`taskpolicy -b`, which also lowers their GPU priority), and the MLX
-# subprocess starts at nice STT_LLM_NICE under `taskpolicy -b`. A loop over many meetings
-# (tools/retitle_all.py, the batch's summary sweeps) rests after each
-# meeting. Inside STT_LLM_QUIET_HOURS (default 07:00-22:00) it rests
-# STT_LLM_REST_RATIO (default 1.0) times the wall time the meeting took,
-# and at least STT_LLM_REST_MIN_SEC (default 20). Outside them it rests
-# STT_LLM_REST_RATIO_NIGHT (default 0) times that time. One panel request
-# (Regenerate, Ask) never rests. Read fresh from stt.env: no restart.
-LLM_NICE_DEFAULT = 10
-LLM_REST_RATIO_DEFAULT = 1.0
+# --- Local LLM hardware limits (opt-in quiet mode) ---
+# By default local LLM runs (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback)
+# run at full speed: normal priority, no rest between meetings. Quiet mode is
+# opt-in. With STT_LLM_NICE above 0, before each call the Ollama processes are
+# set to that nice (an absolute value, never an increment) and put on
+# background QoS (`taskpolicy -b`, which also lowers their GPU priority), and
+# the MLX subprocess starts at that nice under `taskpolicy -b`. At 0 neither
+# happens. A loop over many meetings (tools/retitle_all.py, the batch's
+# summary sweeps) rests after each meeting only when the rest settings ask:
+# inside STT_LLM_QUIET_HOURS (default 07:00-22:00) it rests STT_LLM_REST_RATIO
+# times the wall time the meeting took, and at least STT_LLM_REST_MIN_SEC.
+# Outside them it rests STT_LLM_REST_RATIO_NIGHT times that time. All three
+# default to 0. One panel request (Regenerate, Ask) never rests. Read fresh
+# from stt.env: no restart.
+LLM_NICE_DEFAULT = 0
+LLM_REST_RATIO_DEFAULT = 0.0
 LLM_REST_RATIO_NIGHT_DEFAULT = 0.0
-LLM_REST_MIN_SEC_DEFAULT = 20.0
+LLM_REST_MIN_SEC_DEFAULT = 0.0
 LLM_QUIET_HOURS_DEFAULT = "07:00-22:00"
 
 
@@ -603,6 +605,12 @@ def _num_setting(name, default, cast=float, lo=0):
 
 def llm_nice() -> int:
     return min(20, _num_setting("STT_LLM_NICE", LLM_NICE_DEFAULT, int))
+
+
+def llm_background() -> bool:
+    """True in quiet mode (STT_LLM_NICE above 0): local model processes are
+    reniced and put on background QoS. False runs them at normal priority."""
+    return llm_nice() > 0
 
 
 def llm_rest_ratio() -> float:

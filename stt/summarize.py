@@ -279,12 +279,15 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
         raise UserError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
-        # the MLX fallback runs at lowered priority too: background QoS
-        # (taskpolicy -b) and nice config.llm_nice(). `nice -n` ADDS to this
-        # process's own nice, so the increment is what lands the model at
-        # the setting, never past it (a batch already at nice 4 adds 6)
-        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(_nice_increment()),
-                            str(LLM_PY), "-c", _RUNNER],
+        # in quiet mode the MLX fallback runs at lowered priority too:
+        # background QoS (taskpolicy -b) and nice config.llm_nice(). `nice -n`
+        # ADDS to this process's own nice, so the increment is what lands the
+        # model at the setting, never past it (a batch at nice 4 adds 6).
+        # At STT_LLM_NICE=0 it runs at normal priority.
+        cmd = [str(LLM_PY), "-c", _RUNNER]
+        if config.llm_background():
+            cmd = ["taskpolicy", "-b", "nice", "-n", str(_nice_increment())] + cmd
+        r = subprocess.run(cmd,
                            input=json.dumps({"model": MODEL, "prompt": prompt,
                                              "max_tokens": max_tokens, "think": think}),
                            capture_output=True, text=True, timeout=600)
@@ -342,8 +345,13 @@ def renice_ollama() -> int:
     keeps the fan quiet. The value is absolute (`renice 10 -p`): on macOS
     `renice -n 10` adds 10 to the current nice, so repeated calls pushed
     the model to nice 20. Best effort: a failure never stops the run.
+    At STT_LLM_NICE=0 (the default) it does nothing: the model keeps normal
+    priority. A process lowered earlier stays lowered until Ollama restarts,
+    because macOS lets a user lower priority but not raise it.
     Returns how many processes were reniced."""
     import subprocess
+    if not config.llm_background():
+        return 0
     pids = set()
     for args in (["pgrep", "-x", "ollama"], ["pgrep", "-f", "ollama runner"]):
         try:

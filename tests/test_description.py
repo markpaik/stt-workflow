@@ -253,8 +253,27 @@ def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(os, "getpriority", lambda which, who: 0)
+    monkeypatch.setenv("STT_LLM_NICE", "10")
     assert summarize._generate("hi") == "mlx"
     assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", "10"]
+
+
+def test_at_nice_0_the_mlx_fallback_runs_at_normal_priority(sandbox, monkeypatch):
+    """The default is full speed: no background QoS and no nice prefix."""
+    _ollama_on(monkeypatch, sandbox)
+    monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
+    _fake_urlopen(monkeypatch, [], fail=True)
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    monkeypatch.delenv("STT_LLM_NICE", raising=False)
+    seen = []
+
+    def fake_run(args, **k):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert summarize._generate("hi") == "mlx"
+    assert not any(a[0] in ("taskpolicy", "renice", "nice") for a in seen)
+    assert seen[-1][0] == sys.executable
 
 
 def test_the_mlx_fallback_lands_at_the_setting_whatever_the_batch_runs_at(sandbox, monkeypatch):
@@ -271,6 +290,7 @@ def test_the_mlx_fallback_lands_at_the_setting_whatever_the_batch_runs_at(sandbo
         seen.append(args)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("STT_LLM_NICE", "10")
     for mine, inc in ((4, "6"), (10, "0"), (15, "0")):
         seen.clear()
         monkeypatch.setattr(os, "getpriority", lambda which, who, v=mine: v)
@@ -289,6 +309,7 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
             raise OSError("not permitted")
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("STT_LLM_NICE", "10")
     assert summarize.renice_ollama() == 2
     renice = [c for c in calls if c[0] == "renice"]
     assert {c[-1] for c in renice} == {"101", "202", "303"}
@@ -298,6 +319,16 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
     qos = [c for c in calls if c[0] == "taskpolicy"]
     assert {c[-1] for c in qos} == {"101", "202", "303"}
     assert all(c[1:3] == ["-b", "-p"] for c in qos)
+
+
+def test_at_nice_0_renice_touches_no_process(sandbox, monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **k: calls.append(args)
+                        or subprocess.CompletedProcess(args, 0, stdout="101\n", stderr=""))
+    monkeypatch.delenv("STT_LLM_NICE", raising=False)
+    assert config.llm_background() is False
+    assert summarize.renice_ollama() == 0
+    assert calls == []
 
 
 @pytest.mark.parametrize("raw", ["10:00–12:00", "10:00—12:00", "10-12", "10:00 to 12:00",
@@ -345,10 +376,11 @@ def test_hardware_settings_come_from_stt_env(sandbox, monkeypatch):
     monkeypatch.delenv("STT_LLM_REST_RATIO", raising=False)
     from datetime import datetime
     day, night = datetime(2026, 11, 5, 14, 0), datetime(2026, 11, 5, 23, 30)
-    assert config.llm_nice() == 10
-    assert config.llm_rest_seconds(10, now=day) == 20         # the floor
-    assert config.llm_rest_seconds(100, now=day) == 100       # 1.0 x the work
-    assert config.llm_rest_seconds(100, now=night) == 0       # night ratio 0
+    # the defaults: full speed, no rest
+    assert config.llm_nice() == 0 and config.llm_background() is False
+    assert config.llm_rest_seconds(10, now=day) == 0
+    assert config.llm_rest_seconds(100, now=day) == 0
+    assert config.llm_rest_seconds(100, now=night) == 0
     assert config.llm_quiet_now(datetime(2026, 11, 5, 7, 0))
     assert not config.llm_quiet_now(datetime(2026, 11, 5, 22, 0))
     (sandbox / "stt.env").write_text(
@@ -760,6 +792,7 @@ def test_renice_holds_the_setting_over_repeated_calls(sandbox, monkeypatch):
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         return real_run(args, **k)
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("STT_LLM_NICE", "10")
     try:
         for _ in range(3):
             summarize.renice_ollama()

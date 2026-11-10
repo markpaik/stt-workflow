@@ -479,15 +479,17 @@ where it is.
 
 ### Hardware limits for the local model
 
-Local model runs are kept at low priority on purpose, so the Mac stays quiet
-and responsive. The settings are read fresh from `stt.env`, with no restart.
+Local model runs go at full speed by default: normal priority and no rest
+between meetings. If the fan bothers you, quiet mode is opt-in: raise
+`STT_LLM_NICE` and the rest settings. The settings are read fresh from
+`stt.env`, with no restart.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LLM_NICE` | `10` | Before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers their GPU priority). The MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run |
+| `STT_LLM_NICE` | `0` | `0` keeps normal priority. Above 0 is quiet mode: before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers their GPU priority). The MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run |
 | `STT_LLM_QUIET_HOURS` | `07:00-22:00` | The daytime window for the rest rule. It may wrap past midnight. The two times may be joined by `-`, an en dash, or `to`, and a bare hour works (`10-12`). The same time at both ends (`10:00-10:00`) means all day, so the model rests after every meeting. A value that cannot be read uses the default |
-| `STT_LLM_REST_RATIO` | `1.0` | Inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's description sweeps) rests after each meeting for this multiple of the time that meeting took |
-| `STT_LLM_REST_MIN_SEC` | `20` | The shortest rest inside the quiet hours |
+| `STT_LLM_REST_RATIO` | `0` | Inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's description sweeps) rests after each meeting for this multiple of the time that meeting took |
+| `STT_LLM_REST_MIN_SEC` | `0` | The shortest rest inside the quiet hours |
 | `STT_LLM_REST_RATIO_NIGHT` | `0` | The rest multiple outside the quiet hours |
 
 The batch logs each rest. A single panel request (Regenerate, Ask) never
@@ -545,8 +547,9 @@ never the checkout's own, and exports land in `$STT_HOME/exports`.
   it could not read.
 - **A description is out of date.** A Redo marks it so. The batch refreshes
   it when the queue is empty, or press Regenerate.
-- **The fan runs during a retitle.** Raise `STT_LLM_REST_RATIO` or
-  `STT_LLM_NICE`, or run the tool outside the quiet hours.
+- **The fan runs during a retitle.** Turn on quiet mode: set `STT_LLM_NICE`
+  to 10 and `STT_LLM_REST_RATIO` to 1. A model process lowered earlier keeps
+  its priority until Ollama restarts.
 - **A file failed.** The Activity page shows the error with Retry. A file
   that ffmpeg cannot read, or one that failed three times without changing,
   waits there until it changes or you press Retry. The logs are in `logs/`
