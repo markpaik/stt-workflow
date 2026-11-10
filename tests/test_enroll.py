@@ -243,3 +243,12 @@ def test_a_reserved_name_or_a_damaged_registry_is_one_line(sandbox, monkeypatch)
     assert str(ei.value) == identify.REGISTRY_UNREADABLE
     assert ran == [] and reg.read_text() == '{"broken'
     assert sorted(p.name for p in (sandbox / "voiceprints").iterdir()) == ["registry.json"]
+
+
+def test_the_help_text_names_folders_in_the_date_first_form():
+    """The --help examples showed an old 'LT Meeting 05212026' folder, a
+    form the pipeline no longer writes."""
+    import re
+    from stt import dates
+    shown = re.findall(r'--from-meeting "([^"]+)"', enroll.__doc__)
+    assert shown and all(dates.is_iso_form(b) for b in shown), shown

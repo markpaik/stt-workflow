@@ -4,16 +4,22 @@
 Recommended (enroll-from-transcript): after a meeting is processed, look at its
 .txt, see which Speaker N is whom, and enroll from the saved embeddings sidecar:
 
-  ./run.sh enroll --from-meeting "LT Meeting 05212026" --speaker SPEAKER_01 --name "Mark Paik"
+  ./run.sh enroll --from-meeting "2026-05-21 Team Sync" --speaker SPEAKER_01 --name "Ana Ortiz"
 
 Or from a short single-speaker clip:
 
-  ./run.sh enroll --audio ~/samples/mark.m4a --name "Mark Paik"
+  ./run.sh enroll --audio ~/samples/ana.m4a --name "Ana Ortiz"
 
 List / inspect:
 
   ./run.sh enroll --list
-  ./run.sh enroll --from-meeting "LT Meeting 05212026"   # lists that meeting's speakers
+  ./run.sh enroll --from-meeting "2026-05-21 Team Sync"   # lists that meeting's speakers
+
+It refuses, and writes nothing, for a name the panel would refuse (empty,
+over 200 characters, a line break or an invisible control, or a name like
+U7 that an unknown voice holds), a speaker with less than 30 s of speech or
+fewer than 10 clear turns in that meeting, and a registry.json it cannot
+read. A sample that looks like the wrong person needs --confirm.
 """
 import argparse
 import sys
