@@ -535,3 +535,54 @@ def test_a_stack_with_a_corrupt_row_is_reported_once_and_never_merged(sandbox):
     assert [(f.kind, f.subject) for f in again] == [("invalid", "U022[1]")]
     assert registry_doctor.fix(again) == []
     assert [(f.kind, f.subject) for f in registry_doctor.check()] == [("invalid", "U022[1]")]
+
+
+def test_a_rebuild_never_enrolls_a_meeting_only_label_or_a_voice_below_the_floor(tmp_path):
+    """rebuild_voiceprints enrolled every named roster speaker. A
+    meeting-only label (local: true, 'a transcript label, never a
+    voiceprint') and a cluster with 3 s of speech both planned as ENROLL,
+    a voiceprint /api/name and enroll.py refuse. Both are skipped now, and
+    a person with enough speech still enrolls."""
+    from stt import diarcache
+    home = tmp_path / "home"
+    base = "2026-08-01 Synthetic Sync"
+    folder = home / "meetings" / base
+    folder.mkdir(parents=True)
+    (home / "voiceprints").mkdir()
+    e = _basis(seed=31)
+    # SPEAKER_00: 12 turns of 4 s (48 s); SPEAKER_01 and SPEAKER_02: one 3 s turn
+    turns = [{"start": i * 5.0, "end": i * 5.0 + 4.0, "cluster": "SPEAKER_00"}
+             for i in range(12)]
+    turns += [{"start": 100.0, "end": 103.0, "cluster": "SPEAKER_01"},
+              {"start": 110.0, "end": 113.0, "cluster": "SPEAKER_02"}]
+    cent = {"SPEAKER_00": e[0], "SPEAKER_01": e[1], "SPEAKER_02": e[2]}
+    diarcache.save(folder / f"{base}.diar.npz", turns, [None] * len(turns), cent)
+    np.savez(folder / f"{base}.emb.npz", **cent)
+    words = [{"start": t["start"] + 1, "end": t["start"] + 1.5, "word": "w",
+              "speaker": t["cluster"]} for t in turns]
+    (folder / f"{base}.json").write_text(json.dumps({
+        "meeting_id": "m-synthetic-1", "source_file": f"{base}.m4a",
+        "speakers": [{"id": "SPEAKER_00", "name": "Alex Rivera"},
+                     {"id": "SPEAKER_01", "name": "Tiny Tim", "local": True},
+                     {"id": "SPEAKER_02", "name": "Brief Bea"}],
+        "segments": [], "words": words}))
+    (folder / f"{base}.txt").write_text("stub")
+    env = dict(os.environ, STT_HOME=str(home))
+    for k in ("STT_PROJECT_DIR", "STT_VOICEPRINTS_DIR", "STT_MEETINGS_DIR",
+              "STT_ICLOUD_DIR", "STT_RECORDINGS_DIR"):
+        env.pop(k, None)
+    tool = [sys.executable, str(ROOT / "tools/rebuild_voiceprints.py")]
+
+    r = subprocess.run(tool, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    lines = {ln.strip().split(":", 1)[0]: ln for ln in r.stdout.splitlines()
+             if ln.startswith("  ")}
+    assert lines["Alex Rivera"].endswith("ENROLL")
+    assert "meeting-only label — skipped" in lines["Tiny Tim"]
+    assert "BELOW THE FLOOR — skipped" in lines["Brief Bea"]
+
+    r = subprocess.run(tool + ["--apply"], capture_output=True, text=True,
+                       env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    reg = json.loads((home / "voiceprints" / "registry.json").read_text())
+    assert set(reg) == {"Alex Rivera"}
