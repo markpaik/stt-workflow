@@ -86,11 +86,13 @@ def _lock():
                 lk.close()
 
 
-def start_run(pending, sweep=False):
+def start_run(pending, sweep=False, summarizes=False):
     """`pending` is the files this run will process, in the order it will
     run them (shortest first). `sweep` marks a run that re-reads the watched
     folders before every file, so a file that lands mid-run joins it by
-    length: the panel orders every waiting file that way while it runs."""
+    length: the panel orders every waiting file that way while it runs.
+    `summarizes` marks a run that writes a description after each file, so
+    the queue's ETA counts one summary for each file still to finish."""
     # pgid lets the stop path find and kill the WHOLE process group — including
     # parallel workers whose command lines don't mention run_batch.py — even
     # after the parent has died.
@@ -106,6 +108,7 @@ def start_run(pending, sweep=False):
         # survive a batch kicking off mid-recording).
         _write({"running": True, "pid": os.getpid(), "pgid": pgid, "started_at": _now(),
                 "active": {}, "pending": list(pending), "sweep": bool(sweep),
+                "summarizes": bool(summarizes),
                 "recent": prev.get("recent", []),
                 "recording": prev.get("recording"),
                 "recorder_note": prev.get("recorder_note"),
@@ -321,9 +324,11 @@ def note_summary(secs: float):
         _write(d)
 
 
-def summary_estimate() -> float:
+def summary_estimate(st: dict = None) -> float:
+    """The seconds one description takes. `st` is a status.json the caller
+    already read."""
     from statistics import median
-    vals = [v for v in read().get("summary_secs") or []
+    vals = [v for v in (st if st is not None else read()).get("summary_secs") or []
             if isinstance(v, (int, float)) and v > 0]
     return float(median(vals)) if vals else SUMMARY_EST_DEFAULT
 

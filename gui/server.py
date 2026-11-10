@@ -1528,9 +1528,15 @@ def gather_state():
     if running:
         pend_secs = 0.0
         pend_names = set(st.get("pending", []))
+        # a run into the library writes a description after each file: one
+        # summary for every waiting file, and for every active file whose
+        # summary has not started (the summarizing stage counts down itself)
+        per_summary = status.summary_estimate(st) if st.get("summarizes") else 0.0
         for f in queue:
             if f["name"] in pend_names and f.get("est_min"):
-                pend_secs += f["est_min"] * 60
+                pend_secs += f["est_min"] * 60 + per_summary
+        pend_secs += per_summary * sum(1 for e in active.values()
+                                       if e.get("stage") != "summarizing")
         overall_eta = round((active_eta_sum + pend_secs) / n_active) if (active_eta_sum or pend_secs) else None
     rec_state = _recording_state()  # resolved once: reused by the live banner AND the timeline
     order = _run_order(queue, st.get("pending", []) if running else [],

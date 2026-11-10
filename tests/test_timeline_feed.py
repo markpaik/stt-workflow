@@ -1053,6 +1053,33 @@ def test_a_stage_past_its_estimate_reports_its_overrun_on_the_row(sandbox, monke
     assert _row(st, source_file="Board 09232026.m4a")["over"] is None
 
 
+def test_the_queue_eta_counts_a_summary_for_each_file_still_to_finish(sandbox, monkeypatch):
+    """A run into the library writes a description after each file, about
+    75 s each. The queue ETA counted only transcription, so it fell short
+    by a summary per file. Now each waiting file and each active file whose
+    summary has not started adds one. A run that writes no descriptions
+    adds none, and a file in its summarizing stage counts its own."""
+    _source("Board 09232026.m4a")
+    _source("Standup 09242026.m4a")
+    monkeypatch.setattr(srv, "_est_duration", lambda p: 1200.0)
+    _running(monkeypatch)
+
+    def eta(summarizes, stage="transcribing"):
+        status.start_run(["Board 09232026.m4a", "Standup 09242026.m4a"],
+                         summarizes=summarizes)
+        kw = {"est_sec": 40.0} if stage == "summarizing" else {
+            "duration": 600.0, "progress": 0.5}
+        status.set_stage("Board 09232026.m4a", stage, base="Board 09232026", **kw)
+        d = status.read()
+        d["summary_secs"] = [70.0, 80.0, 90.0]
+        status.STATUS_PATH.write_text(json.dumps(d))
+        return srv.gather_state()["overall_eta_sec"]
+    plain, with_summary = eta(False), eta(True)
+    assert abs(with_summary - plain - 2 * 80.0) <= 2     # the waiting and the active file
+    plain, with_summary = eta(False, "summarizing"), eta(True, "summarizing")
+    assert abs(with_summary - plain - 80.0) <= 2         # only the waiting file
+
+
 def _lengths(monkeypatch, secs):
     """Stub the shared length helper by file name (seconds of audio)."""
     from pathlib import Path

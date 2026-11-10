@@ -975,7 +975,9 @@ def main():
     # its own list (--files/--paths/--only/--force) runs exactly that list.
     sweep = not (args.paths or args.files or args.only or args.force)
     control.clear_finish()  # a stale "stop after this file" never cuts this run short
-    status.start_run([s.name for s in todo], sweep=sweep)
+    from stt import summarize as _summarize
+    status.start_run([s.name for s in todo], sweep=sweep,
+                     summarizes=bool(describe and _summarize.available()))
     base_opts = {"do_diarize": not args.no_diarize,
                  "strict": args.strict or config.STRICT,
                  "verify": args.verify or config.VERIFY,
