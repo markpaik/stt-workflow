@@ -304,6 +304,22 @@ def test_recover_orphans_keeps_a_live_recording(sandbox, monkeypatch):
     assert status.recording() == live               # the live recording untouched
 
 
+@pytest.mark.parametrize("in_status", [False, True])
+def test_a_recovered_capture_takes_its_own_day_and_time(sandbox, in_status):
+    """recover_orphans called finalize(caf, None), and final_name stamped
+    the recovery moment. A capture from 9 days ago, recovered at the next
+    menu-bar start, was named and dated today."""
+    import os
+    caf = _stereo_caf(config.recordings_dir() / ".rec-old9.caf")
+    when = datetime(2026, 11, 1, 16, 5, 0)
+    os.utime(caf, (when.timestamp(), when.timestamp()))
+    if in_status:
+        status.set_recording({"pid": 999999, "caf": str(caf)})   # dead helper
+    names = recorder.recover_orphans()
+    assert names == ["2026-11-01 Recording 1605"]
+    assert dates.meeting_date(names[0]) == "2026-11-01"
+    assert (config.recordings_dir() / "2026-11-01 Recording 1605.m4a").exists()
+
 def test_a_stray_caf_a_live_recorder_writes_is_not_finalized(sandbox):
     """status.json can lose the recording entry while a capture runs. The
     stray-CAF sweep then skipped only the path status named, so it

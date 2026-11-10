@@ -378,9 +378,10 @@ def stop(name=None) -> dict:
     return finalize(caf, name)
 
 
-def finalize(caf: Path, name=None) -> dict:
+def finalize(caf: Path, name=None, now=None) -> dict:
     """Transcode a finished CAF to a named stereo m4a in the watched folder,
-    atomically (only a complete file ever becomes visible), then drop the CAF."""
+    atomically (only a complete file ever becomes visible), then drop the CAF.
+    `now` stamps a default name (final_name). None is this moment."""
     caf = Path(caf)
     _growth.pop(str(caf), None)   # this capture is over; its growth history is too
 
@@ -405,7 +406,7 @@ def finalize(caf: Path, name=None) -> dict:
                                  "permissions button).")
         return {"ok": False, "error": "nothing was captured (permission denied?)"}
     staging = staging_dir()
-    final = final_name(name)
+    final = final_name(name, now)
     # keep stereo (L=mic, R=system): Phase 2 exploits the split; Phase 1's
     # to_wav16k downmixes it to mono anyway. Same -f ipod + .part + os.replace
     # idiom as audio.extract_audio, so the watcher never sees a partial file.
@@ -481,6 +482,17 @@ def _uniquify(base: str) -> str:
     return f"{base} ({i})"
 
 
+def _capture_time(caf):
+    """When a recovered capture last wrote audio: its CAF's modification
+    time. A normal stop is stamped when it ends. A recovery at a later
+    menu-bar start took the recovery moment, so a capture from one day was
+    named and dated the next. None when the CAF cannot be read."""
+    try:
+        return datetime.fromtimestamp(Path(caf).stat().st_mtime)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 def recover_orphans() -> list:
     """Clean up after a crash/forced quit: a recorded CAF whose helper is gone.
     Called at menu-bar startup. Returns the names recovered."""
@@ -492,7 +504,8 @@ def recover_orphans() -> list:
     # the real recorder would keep writing to a file that no longer exists.
     if rec and not _recorder_running(rec.get("pid")):
         caf = Path(rec.get("caf", ""))
-        r = finalize(caf, None)  # default 'Recording ...' name; clears the state
+        # default 'Recording ...' name at the capture's time; clears the state
+        r = finalize(caf, None, now=_capture_time(caf))
         if r.get("ok"):
             recovered.append(r["name"])
         else:
@@ -508,7 +521,7 @@ def recover_orphans() -> list:
             # running: its CAF is not a stray while a recorder writes it
             if _caf_has_live_writer(caf):
                 continue
-            r = finalize(caf, None)
+            r = finalize(caf, None, now=_capture_time(caf))
             if r.get("ok"):
                 recovered.append(r["name"])
     sweep_orphan_parts()
