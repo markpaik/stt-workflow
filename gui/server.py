@@ -2567,10 +2567,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(q.get("base")):
                     return
                 self._json(review.list_flagged(q["base"]))
-            elif u.path == "/api/edits":
-                if not self._require_base(q.get("base")):
-                    return
-                self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
                 # Generating a title and summary WRITES the meeting .json, so
                 # it is a POST (plan Phase 4C: GET no longer writes). A stale
@@ -3360,10 +3356,6 @@ class Handler(BaseHTTPRequestHandler):
                 # the X on a failed row whose source file no longer exists:
                 # nothing to delete, just stop showing that old failure
                 self._json({"ok": dismiss_failure(b.text("name", ""))})
-            elif u.path == "/api/recorder_note":
-                # dismiss the last-recording outcome strip
-                status.clear_recorder_note()
-                self._json({"ok": True})
             elif u.path == "/api/fix_recorder_permissions":
                 # Reset THIS APP's TCC entries so macOS re-prompts on the next
                 # Start. Needed because the recorder is ad-hoc signed: a rebuild

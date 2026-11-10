@@ -202,11 +202,23 @@ def test_transcript_endpoint_accepts_real_base(running_server):
     assert status == 200 and body["base"] == "Legit Meeting"
 
 
-def test_audio_txt_review_edits_reject_unknown_base(running_server):
+def test_audio_txt_review_reject_unknown_base(running_server):
     for path in ("/api/audio?base=../x", "/api/txt?base=../x",
-                 "/api/review?base=../x", "/api/edits?base=../x"):
+                 "/api/review?base=../x"):
         status, _ = _get(running_server, path)
         assert status == 400, path
+
+
+def test_the_classic_page_only_endpoints_are_gone(running_server):
+    """/api/edits (the classic reader's edit count) and /api/recorder_note
+    (the classic strip's dismiss) had no caller left once the old page was
+    deleted. Both now answer as unknown routes. The note itself still clears
+    in the library: stt/recorder.py clears it when a new capture starts."""
+    _make_meeting("Legit Meeting")
+    status, body = _get(running_server, "/api/edits?base=Legit%20Meeting")
+    assert (status, body) == (404, {"error": "not found"})
+    status, body = _post(running_server, "/api/recorder_note", {"clear": True})
+    assert (status, body) == (404, {"error": "not found"})
 
 
 def test_suggest_is_a_post_and_get_writes_nothing(running_server, monkeypatch):
