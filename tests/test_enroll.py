@@ -16,14 +16,16 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
     """The clip's dominant voice already has a voiceprint, so its turns carry
     the enrolled NAME while embeddings stay keyed by SPEAKER_0N; a brief second
     cluster must not be enrolled in the dominant speaker's place."""
-    vec_a = np.ones(256, dtype=float)          # 30s dominant cluster
+    vec_a = np.ones(256, dtype=float)          # 36s dominant cluster
     vec_b = np.ones(256, dtype=float) * -1.0   # 2s minority/noise cluster
     fake = {
         # post-refine 'speaker' is the enrolled name for the matched cluster
-        "turns": [{"speaker": "Mark", "start": 0.0, "end": 30.0},
-                  {"speaker": "SPEAKER_01", "start": 30.0, "end": 32.0}],
-        "raw_turns": [{"cluster": "SPEAKER_00", "start": 0.0, "end": 30.0},
-                      {"cluster": "SPEAKER_01", "start": 30.0, "end": 32.0}],
+        "turns": [{"speaker": "Mark", "start": 0.0, "end": 36.0},
+                  {"speaker": "SPEAKER_01", "start": 36.0, "end": 38.0}],
+        # twelve 3 s turns clear the quality floor (30 s, 10 clear turns)
+        "raw_turns": [{"cluster": "SPEAKER_00", "start": 3.0 * i, "end": 3.0 * i + 3.0}
+                      for i in range(12)]
+                     + [{"cluster": "SPEAKER_01", "start": 36.0, "end": 38.0}],
         "embeddings": {"SPEAKER_00": vec_a, "SPEAKER_01": vec_b},
     }
     monkeypatch.setattr(audio, "to_wav16k", lambda src, dst: dst.write_bytes(b"wav"))
@@ -43,6 +45,31 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
     assert enroll.main() == 0
     # the 30s cluster (SPEAKER_00 -> vec_a) must win, not the 2s SPEAKER_01
     assert np.array_equal(captured["vec"], vec_a)
+
+
+@pytest.mark.parametrize("turns, msg", [
+    ([(0.0, 0.3)], "only 0s of speech"),
+    ([(2.0 * i, 2.0 * i + 1.0) for i in range(40)], "only 0 clear turn(s)"),
+])
+def test_audio_enroll_refuses_a_clip_below_the_quality_floor(sandbox, monkeypatch,
+                                                             turns, msg):
+    """--from-meeting refuses a cluster below the floor ("same bar as
+    /api/name"), but --audio had no check: a 0.3 s clip was enrolled as
+    'Blip Short' (dim=192, samples=1)."""
+    fake = {"turns": [],
+            "raw_turns": [{"cluster": "SPEAKER_00", "start": a, "end": b}
+                          for a, b in turns],
+            "embeddings": {"SPEAKER_00": np.ones(192)}}
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, dst: dst.write_bytes(b"wav"))
+    monkeypatch.setattr(diarize, "diarize", lambda wav: fake)
+    clip = sandbox / "blip.wav"
+    clip.write_bytes(b"audio")
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip),
+                                      "--name", "Blip Short"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value).startswith(f"{clip}: This voice has {msg}")
+    assert "Blip Short" not in identify.load_registry()
 
 
 def test_a_missing_or_unreadable_audio_file_is_one_line(sandbox, monkeypatch):

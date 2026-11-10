@@ -18,8 +18,8 @@ List / inspect:
 It refuses, and writes nothing, for a name the panel would refuse (empty,
 over 200 characters, a line break or an invisible control, or a name like
 U7 that an unknown voice holds), a speaker with less than 30 s of speech or
-fewer than 10 clear turns in that meeting, and a registry.json it cannot
-read. A sample that looks like the wrong person needs --confirm.
+fewer than 10 clear turns in that meeting or clip, and a registry.json it
+cannot read. A sample that looks like the wrong person needs --confirm.
 """
 import argparse
 import sys
@@ -134,10 +134,15 @@ def main():
         # embs is keyed by raw diarization cluster label, so tally talk time by
         # the same raw label (raw_turns), not turns' post-refine speaker name,
         # which is the enrolled NAME once a cluster matches a voiceprint.
-        talk = {}
-        for t in diar["raw_turns"]:
-            talk[t["cluster"]] = talk.get(t["cluster"], 0.0) + (t["end"] - t["start"])
-        vec = embs[max(embs, key=lambda l: talk.get(l, 0.0))]
+        stats = unknowns.talk_stats(diar["raw_turns"])
+        label = max(embs, key=lambda l: stats.get(l, {}).get("talk_secs", 0.0))
+        # the quality floor --from-meeting and /api/name apply: a 0.3 s clip
+        # was enrolled, and a voiceprint that thin identifies nobody
+        veto = unknowns.floor_violation(
+            stats.get(label, {"talk_secs": 0.0, "reliable_turns": 0}))
+        if veto:
+            raise SystemExit(f"{args.audio}: {veto} Use a longer clip of one speaker.")
+        vec = embs[label]
     else:
         raise SystemExit("Provide --from-meeting (+--speaker) or --audio")
 
