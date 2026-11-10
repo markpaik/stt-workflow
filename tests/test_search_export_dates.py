@@ -120,6 +120,30 @@ def test_docx_export_writes_valid_file(sandbox, tmp_path, monkeypatch):
     assert "Mtg 05212026" in text
 
 
+def test_export_labels_a_line_from_the_roster_never_the_raw_id(sandbox, tmp_path, monkeypatch):
+    """A voice below the minting floor has a roster entry ("Voice 9") while
+    its lines carry only the raw diarizer id. Word and PDF printed
+    "SPEAKER_08" under a header that read "Voice 9"; the panel and the
+    .txt read "Voice 9"."""
+    data = {"date": "2026-03-01", "duration_sec": 60,
+            "speakers": [{"id": "SPEAKER_08", "display": "Voice 9"}],
+            "segments": [{"start": 1.0, "end": 2.0, "speaker": "SPEAKER_08",
+                          "text": "hello"},
+                         {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_03",
+                          "text": "off the roster"}],
+            "words": []}
+    mfile("2026-03-01 Raw Label", ".json").write_text(json.dumps(data))
+    h = export.to_html("2026-03-01 Raw Label")
+    assert 'class="who">Voice 9 ' in h and 'class="who">Voice 4 ' in h
+    assert "SPEAKER_" not in h
+    monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))
+    (tmp_path / "Downloads").mkdir()
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-01 Raw Label"))).paragraphs]
+    assert "Voice 9  [00:01]" in text and "Voice 4  [00:02]" in text
+    assert not any("SPEAKER_" in t for t in text)
+
+
 def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     _mk_full(sandbox)
     monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))

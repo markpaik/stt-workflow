@@ -14,10 +14,16 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from . import config, dates
+from . import config, dates, output
 from .errors import UserError
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+# A line's speaker label is output.line_label over the roster, the label the
+# panel and the .txt show. The roster names a voice below the minting floor
+# ("Voice 9") while its lines carry only the raw diarizer id, which must
+# never reach a shared file.
 
 
 def _load(base: str) -> dict:
@@ -80,11 +86,12 @@ def to_docx(base: str) -> Path:
     meta.runs[0].font.color.rgb = RGBColor(0x6E, 0x6E, 0x73)
     meta.runs[0].font.size = Pt(10)
 
+    roster = output.roster_labels(d.get("speakers"))
     for seg in d.get("segments", []):
         text = seg.get("text", "").strip()
         if not text:
             continue
-        who = seg.get("display") or seg.get("name") or seg.get("speaker") or "?"
+        who = output.line_label(seg, roster)
         p = doc.add_paragraph()
         r = p.add_run(f"{who}  [{_fmt_ts(seg['start'])}]"
                       + ("  ⚠" if seg.get("flags") else ""))
@@ -99,11 +106,12 @@ def to_docx(base: str) -> Path:
 def to_html(base: str) -> str:
     d = _load(base)
     rows = []
+    roster = output.roster_labels(d.get("speakers"))
     for seg in d.get("segments", []):
         text = seg.get("text", "").strip()
         if not text:
             continue
-        who = seg.get("display") or seg.get("name") or seg.get("speaker") or "?"
+        who = output.line_label(seg, roster)
         warn = ' <span class="warn">uncertain</span>' if seg.get("flags") else ""
         rows.append(
             f'<div class="seg"><div class="who">{html.escape(who)}'
