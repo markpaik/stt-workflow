@@ -40,7 +40,9 @@ meetings leaves the list. Undo removes the key again. A group key is a hash
 of the cluster's most common word set (or its people and hour), so it holds
 while members come and go, and changes only when the dominant spelling does.
 A correction holds through that change: a title group answers to the key of
-each word set it holds, so the key the correction stored still finds it.
+each word set it holds, and to the key of each member's plain words() set
+(the key before series titles counted their series name only), so the key
+the correction stored still finds it.
 
 Use count: `group_usage.jsonl` in PROJECT_DIR gets one line per group open
 or group question, {at, event}, with no title and no key, for the one-month
@@ -485,9 +487,13 @@ def compute(rows: list, me=None, overrides=None) -> list:
                   key=lambda s: (len(sig_members[s]), -len(s), sorted(s)))
         # an override names the key it saw. It holds for every word set the
         # cluster still holds, so a flip of the dominant spelling never
-        # brings an excluded meeting back
+        # brings an excluded meeting back. The plain words() set of each
+        # member counts too: a catalog series title read as words(title)
+        # before title_words, and a correction stored then names that key.
+        legacy = {_key("t", words(by_base[b].get("title") or dates.title_of(b)))
+                  for b in members}
         out.append({"kind": "title", "sig": dom, "members": members,
-                    "keys": {_key("t", sigs[i]) for i in idx}})
+                    "keys": {_key("t", sigs[i]) for i in idx} | legacy})
 
     # 2. people and hour for meetings with no strong title word
     leftovers = []

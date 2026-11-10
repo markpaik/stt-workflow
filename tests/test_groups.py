@@ -297,6 +297,27 @@ def test_an_override_holds_when_the_dominant_spelling_changes(sandbox):
     assert "Budget Alpha Beta 01032026" in groups.current()[0]["bases"]
 
 
+def test_an_override_stored_under_the_plain_words_key_still_holds(sandbox):
+    """Series titles now group by their series name (title_words), so the
+    key of 'Jordan Weekly Check-in – Hiring Plan' changed. A "Not part of
+    this group" stored under the old words(title) key matched no group, and
+    the excluded meeting came back."""
+    t = "Jordan Weekly Check-in – Hiring Plan"
+    _mk(f"2026-10-01 {t}", mid="m1", title=t)
+    _mk(f"2026-10-08 {t}", mid="m2", title=t)
+    _mk(f"2026-10-15 {t}", mid="m3", title=t)
+    (g,) = groups.current()
+    old_key = groups._key("t", groups.words(t))
+    assert g["key"] != old_key and g["count"] == 3
+    groups.set_override("m3", old_key)
+    (g,) = groups.current()
+    assert g["count"] == 2 and f"2026-10-15 {t}" not in g["bases"]
+    # a key of no group the meeting is in excludes nothing
+    groups.set_override("m3", old_key, exclude=False)
+    groups.set_override("m3", groups._key("t", groups.words("Board Study Session")))
+    assert groups.current()[0]["count"] == 3
+
+
 def test_purge_scope_reads_the_override_shape(sandbox):
     from tools import purge
     _mk("Grant Writing 10012026", mid="m1")
