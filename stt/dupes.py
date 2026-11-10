@@ -249,6 +249,18 @@ def similarity(a, b) -> float:
     return sum(1 for h in union if h in sa and h in sb) / len(union)
 
 
+def _items(d, key) -> list:
+    """The dict items of a transcript's list field (segments, words). A
+    file of another shape (a top-level list, a string or null item) gives
+    only the items that are dicts, so one bad file never stops a scan."""
+    v = d.get(key) if isinstance(d, dict) else None
+    return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+
+def _text(d) -> str:
+    return " ".join(str(s.get("text") or "") for s in _items(d, "segments"))
+
+
 def transcript_text(base: str, dest_dir=None) -> str:
     """The words only, from the .json segments -- never the .txt, whose lines
     are prefixed with speaker names. A rename or a relabel rewrites every one of
@@ -259,7 +271,7 @@ def transcript_text(base: str, dest_dir=None) -> str:
         d = json.loads(j.read_text())
     except (OSError, ValueError):
         return ""
-    return " ".join(str(s.get("text") or "") for s in d.get("segments") or [])
+    return _text(d)
 
 
 def library_signature(dest_dir=None) -> str:
@@ -403,17 +415,16 @@ def _length_signal(d: dict) -> tuple:
     if dur <= 0:
         # the transcript's own timing, when it has any
         for key, field in (("segments", "end"), ("words", "end")):
-            for item in reversed(d.get(key) or []):
+            for item in reversed(_items(d, key)):
                 try:
                     dur = max(dur, float(item.get(field) or 0.0))
-                except (AttributeError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     continue
                 if dur > 0:
                     break
             if dur > 0:
                 break
-    words = len(_tokens(" ".join(str(s.get("text") or "")
-                                 for s in d.get("segments") or [])))
+    words = len(_tokens(_text(d)))
     return max(0.0, dur), words
 
 
@@ -458,8 +469,11 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
             d = json.loads(j.read_text())
         except (OSError, ValueError):
             continue
-        text = " ".join(str(s.get("text") or "") for s in d.get("segments") or [])
-        sk = sketch(text)
+        # a valid file of another shape (a top-level list) raised
+        # AttributeError, which stopped the whole scan for every meeting
+        if not isinstance(d, dict):
+            continue
+        sk = sketch(_text(d))
         dur, nwords = _length_signal(d)
         sketches[base], durs[base], lens[base] = sk, dur, nwords
         old[base] = {"mtime": mtime, "dur": dur, "words": nwords, "hashes": sk}

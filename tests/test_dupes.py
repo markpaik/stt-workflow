@@ -507,3 +507,26 @@ def test_a_cache_file_of_the_wrong_shape_reads_empty_and_the_scan_repairs_it(san
             [("Standup 05012026", "Standup 05022026")], payload
         # the scan saved a good file over the bad one
         assert dupes.cache_is_current(d) and len(dupes.cached_pairs(d)) == 1, payload
+
+
+def test_a_meeting_json_of_the_wrong_shape_never_stops_the_scan(sandbox):
+    """similar_meetings caught only OSError and ValueError. A valid json of
+    another shape (a top-level list, a string or null segment, a number for
+    the word list) raised AttributeError or TypeError. The scan saved no
+    answer, so no pair was found for any meeting while that file existed."""
+    body = _words(400)
+    _meeting("Standup 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("Standup 05022026", "b.m4a", text=body, dur=600.0)
+    for base, raw in (("Odd List 05032026", "[]"),
+                      ("Odd Text 05032026", '{"segments": ["hello"]}'),
+                      ("Odd Null 05032026", '{"segments": [null, {"text": "a b"}]}'),
+                      ("Odd Words 05032026",
+                       '{"segments": [{"text": "a b c d e f"}], "words": 5}')):
+        mfile(base, ".json").write_text(raw)
+        mfile(base, ".txt").write_text("stub")
+    d = config.meetings_dir()
+    pairs = dupes.similar_meetings(dest_dir=d)
+    assert [(p["a"], p["b"]) for p in pairs] == [("Standup 05012026", "Standup 05022026")]
+    assert dupes.cache_is_current(d), "a scan that ends saves its answer"
+    assert dupes.transcript_text("Odd List 05032026", d) == ""
+    assert dupes.transcript_text("Odd Null 05032026", d) == "a b"
