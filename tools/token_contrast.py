@@ -16,6 +16,7 @@ cannot quietly drop a pair below 4.5:1.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -145,11 +146,31 @@ def painted_pairs(css: str) -> set[tuple[str, str]]:
     return out
 
 
+def _opaque_hex(value: str) -> str | None:
+    """A resolved token value as #rrggbb when it is one opaque hex colour,
+    else None. #rgb, #rgba, #rrggbb and #rrggbbaa are read; an alpha below
+    ff is not opaque. luminance() read only the first six digits, so #fffe
+    and rgba(...) raised "invalid literal for int() with base 16", and
+    #ffffff80 was measured as opaque white."""
+    m = re.fullmatch(r"#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})", value.strip())
+    if not m:
+        return None
+    h = m.group(1)
+    if len(h) <= 4:
+        h = "".join(c * 2 for c in h)
+    if len(h) == 8:
+        if h[6:].lower() != "ff":
+            return None
+        h = h[:6]
+    return "#" + h
+
+
 def _is_colour(value: str) -> bool:
-    """A resolved token value that is a hex colour. A scanned pair whose token
-    holds something else (a gradient, a length, an rgba() alpha wash) is not a
-    contrast pair at all."""
-    return bool(re.fullmatch(r"#[0-9a-fA-F]{3,8}", value.strip()))
+    """A resolved token value that is an opaque hex colour. A scanned pair
+    whose token holds something else (a gradient, a length, an rgba() or
+    #rrggbbaa alpha wash) is not a contrast pair the arithmetic can judge:
+    what shows through a wash depends on what lies under it."""
+    return _opaque_hex(value) is not None
 
 
 def _lin(channel: int) -> float:
@@ -158,10 +179,10 @@ def _lin(channel: int) -> float:
 
 
 def luminance(hex_colour: str) -> float:
-    h = hex_colour.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    h = _opaque_hex(hex_colour)
+    if h is None:
+        raise ValueError(f"not an opaque hex colour: {hex_colour!r}")
+    r, g, b = (int(h[i:i + 2], 16) for i in (1, 3, 5))
     return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
 
 
@@ -190,6 +211,13 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
             missing = [n for n in (fg, bg) if n not in tokens]
             if missing:
                 raise AssertionError(f"{label}: token(s) not defined: {missing}")
+            # a base pair the design promises cannot be skipped: a token
+            # that is not one opaque colour fails the audit by name
+            for n in (fg, bg):
+                if not _is_colour(tokens[n]):
+                    raise AssertionError(
+                        f"{label}: --{n} is {tokens[n]!r}, not an opaque hex "
+                        f"colour, so {fg} on {bg} cannot be measured")
             seen.add((fg, bg))
             rows.append(Result(label, fg, bg,
                                tokens[fg], tokens[bg],
@@ -209,9 +237,16 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
 
 
 def main(argv=None) -> int:
+    # no options: a stray argument (the old --css) is an error, not ignored
+    argparse.ArgumentParser(description=__doc__.split("\n\n")[0]).parse_args(argv)
     path = CSS_PATH
     print(f"{path.name}")
-    rows = audit(path)
+    try:
+        rows = audit(path)
+    except AssertionError as e:
+        # a token block or a base token the design names is gone: say which
+        print(f"FAIL {e}")
+        return 1
     for r in rows:
         print(r.line())
     bad = [r for r in rows if not r.ok]

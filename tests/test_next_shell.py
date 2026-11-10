@@ -217,6 +217,51 @@ def test_the_audit_measures_the_pairs_the_sheet_actually_paints():
     assert len({frozenset(v) for v in per_block.values()}) == 1
 
 
+@pytest.mark.parametrize("value", ["#fffe", "rgba(255,255,255,.5)", "#ffffff80"])
+def test_the_audit_refuses_a_base_token_that_is_not_one_opaque_colour(tmp_path, value):
+    """luminance() read the first six hex digits of any value: #fffe and
+    rgba(...) raised "invalid literal for int() with base 16", and #ffffff80
+    was measured as opaque white, so a pair that fails with its alpha passed.
+    A base pair names the token and fails instead."""
+    from tools.token_contrast import CSS_PATH, audit
+
+    css = CSS_PATH.read_text(encoding="utf-8")
+    assert "--paper:#F4F6FB;" in css
+    copy = tmp_path / "next.css"
+    copy.write_text(css.replace("--paper:#F4F6FB;", f"--paper:{value};", 1))
+    with pytest.raises(AssertionError, match=r"--paper is .* not an opaque hex colour"):
+        audit(copy)
+
+
+def test_the_colour_reader_handles_every_hex_form():
+    from tools.token_contrast import _is_colour, _opaque_hex, luminance
+
+    assert _opaque_hex("#fff") == _opaque_hex("#ffff") == "#ffffff"
+    assert _opaque_hex("#123456FF") == "#123456"
+    for v in ("#fffe", "#ffffff80", "#12345", "#1234567", "rgba(0,0,0,1)", "none"):
+        assert _opaque_hex(v) is None and not _is_colour(v), v
+    assert luminance("#fff") == luminance("#ffffff") == 1.0
+    with pytest.raises(ValueError, match="not an opaque hex colour"):
+        luminance("#ffffff80")
+
+
+def test_the_audit_cli_names_a_missing_token_and_refuses_stray_flags(
+        tmp_path, monkeypatch, capsys):
+    """A renamed base token ended in an AssertionError traceback, and
+    --css <anything> was silently ignored."""
+    from tools import token_contrast
+
+    css = token_contrast.CSS_PATH.read_text(encoding="utf-8")
+    copy = tmp_path / "next.css"
+    copy.write_text(css.replace("--sub:", "--subx:"))
+    monkeypatch.setattr(token_contrast, "CSS_PATH", copy)
+    assert token_contrast.main([]) == 1
+    assert "FAIL light :root: token(s) not defined: ['sub']" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as e:
+        token_contrast.main(["--css", "app"])
+    assert e.value.code == 2
+
+
 def test_the_dark_token_block_stops_at_its_own_closing_brace():
     """The @media pattern opens TWO braces. Counting from the start of the
     match closed the @media wrapper instead of the :root inside it, so every
