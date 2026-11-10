@@ -53,11 +53,21 @@ CONTENTION = 1.4       # measured diarize slowdown at 2 workers, when unmeasured
 _cache = {"sig": None, "learned": None}
 
 
+def whisper_variant(v) -> str:
+    """The name a Whisper variant's speed is learned and estimated under.
+    An alias of a known model is that model: large-v3-turbo runs the turbo
+    repo, but as its own key it had no default (the 30x Parakeet rate, an
+    ETA about 3.5 times too short) and its samples never taught turbo."""
+    from .asr_mlxwhisper import VARIANT_ALIASES
+    v = v or "large-v3"
+    return VARIANT_ALIASES.get(v, v)
+
+
 def current_asr_key() -> str:
     kv = config._env_file()
     backend = kv.get("STT_ASR_BACKEND", "parakeet")
     if backend == "mlxwhisper":
-        return f"mlxwhisper:{kv.get('STT_WHISPER_MLX_MODEL', 'large-v3')}"
+        return f"mlxwhisper:{whisper_variant(kv.get('STT_WHISPER_MLX_MODEL'))}"
     return backend
 
 

@@ -263,3 +263,23 @@ def test_the_backtest_skips_the_same_lines(sandbox, tmp_path, capsys):
                  ' "asr": "parakeet", "n": 1, "secs": {"transcribing": 60}}\n')
     assert eta_backtest.main([str(p)]) == 0
     assert capsys.readouterr().out.splitlines()[0].endswith("1 samples, 0 of 90 min or more")
+
+
+# ---- the model key follows the model that runs ----
+
+def _env(text):
+    (config.PROJECT_DIR / "stt.env").write_text(text)
+
+
+def test_the_large_v3_turbo_alias_is_estimated_and_learned_as_turbo(sandbox):
+    """asr_mlxwhisper runs the turbo repo for large-v3-turbo. As its own key
+    it got the 30x default: 120 s for an hour, not turbo's 419 s."""
+    _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+    turbo = rates.stage_secs("transcribing", 3600, 1)
+    _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=large-v3-turbo\n")
+    assert rates.current_asr_key() == "mlxwhisper:turbo"
+    assert rates.stage_secs("transcribing", 3600, 1) == turbo
+    assert round(turbo) == round(3600 / config.EST_RATES["asr"]["mlxwhisper:turbo"])
+    _env("STT_ASR_BACKEND=mlxwhisper\n")
+    assert rates.current_asr_key() == "mlxwhisper:large-v3"
+    assert rates.whisper_variant("large-v3") == "large-v3"
