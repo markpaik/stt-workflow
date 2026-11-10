@@ -296,3 +296,22 @@ def test_a_recorder_meeting_starts_at_the_time_its_name_says(tmp_path):
     d = json.loads(j.read_text())
     assert d["recorded_at"][:10] == d["date"]
     assert d["recorded_at"][11:16] < d["processed_at"][11:16]
+
+
+def test_a_fresh_demo_home_is_registry_doctor_clean(tmp_path):
+    """The README points at tools/registry_doctor.py for the voice
+    registries alone, and the phase 8 plan asks for a demo home it passes
+    clean. Run it as a person would: a fresh interpreter under STT_HOME,
+    report only. Exit 0 means no finding of any kind, and the run writes
+    nothing in the voiceprints folder."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    vp = home / "voiceprints"
+    before = {p.name: p.stat().st_mtime_ns for p in vp.iterdir()}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "registry_doctor.py")],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean — nothing to report" in out.stdout
+    assert {p.name: p.stat().st_mtime_ns for p in vp.iterdir()} == before
