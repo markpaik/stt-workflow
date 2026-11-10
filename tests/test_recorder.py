@@ -496,3 +496,21 @@ def test_final_name_strips_bidi_and_zero_width_characters(sandbox):
     assert recorder.final_name("‮gnp.txt", now=FIXED) == "2026-07-09 gnp.txt"
     assert recorder.final_name("Budget​Sync\nTwo", now=FIXED) == \
         "2026-07-09 BudgetSync Two"
+
+
+def test_a_stopped_capture_is_named_for_the_time_it_started(sandbox):
+    """The menu bar's stop calls finalize(caf, None), and final_name took
+    that moment: a capture from 14:30 to 15:10 was named 'Recording 1510'.
+    provenance reads the HHMM as the start time, and the README names a
+    recording by its start ('2026-04-08 Recording 1430')."""
+    caf = _stereo_caf(config.recordings_dir() / ".rec-start01.caf")
+    status.set_recording({"pid": None, "caf": str(caf),
+                          "started_at": "2026-07-09T14:30:05",
+                          "stopped_at": "2026-07-09T15:10:44"})
+    r = recorder.finalize(caf, None)
+    assert r["ok"] and r["name"] == "2026-07-09 Recording 1430"
+    # a typed name with no date takes the start day too
+    caf = _stereo_caf(config.recordings_dir() / ".rec-start02.caf")
+    status.set_recording({"pid": None, "caf": str(caf),
+                          "started_at": "2026-07-08T23:50:00"})
+    assert recorder.finalize(caf, "Late Call")["name"] == "2026-07-08 Late Call"
