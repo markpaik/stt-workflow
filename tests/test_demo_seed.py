@@ -287,3 +287,23 @@ def test_wipe_only_removes_a_home_it_built(tmp_path):
     # with --wipe on our own marked home: rebuilds cleanly
     demo_seed.main(["--dir", str(target), "--wipe"])
     assert config.meeting_file  # sanity: module intact
+
+
+def test_a_sandbox_never_finds_the_real_mlx_model(tmp_path):
+    """Code resolves from the checkout (config.CODE_DIR: run.sh, .venv,
+    the menu-bar icon). The MLX model's own environment is the exception:
+    under STT_HOME it resolves inside the home, so a demo or QA run with
+    Ollama off never loads the real 8B model."""
+    home = tmp_path / "home"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(PYTHONPATH=str(REPO), STT_HOME=str(home), STT_OLLAMA_URL="off")
+    code = ("import json; from stt import config, summarize; "
+            "print(json.dumps({'llm': str(summarize.LLM_PY), "
+            "'code': str(config.CODE_DIR), 'local': summarize.backend_available('local')}))")
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=str(REPO),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    p = json.loads(out.stdout.strip().splitlines()[-1])
+    assert p["llm"] == str(home / ".venv-llm" / "bin" / "python")
+    assert p["code"] == str(REPO)
+    assert p["local"] is False
