@@ -48,7 +48,7 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
 
 
 @pytest.mark.parametrize("turns, msg", [
-    ([(0.0, 0.3)], "only 0s of speech"),
+    ([(0.0, 0.3)], "only 0.3s of speech"),
     ([(2.0 * i, 2.0 * i + 1.0) for i in range(40)], "only 0 clear turn(s)"),
 ])
 def test_audio_enroll_refuses_a_clip_below_the_quality_floor(sandbox, monkeypatch,

@@ -380,3 +380,15 @@ def test_a_merge_across_embedding_sizes_is_refused_with_nothing_changed(sandbox)
     assert reg["speakers"]["U001"]["meetings"] == ["M1"]
     for u, raw in before.items():
         assert (config.VOICEPRINTS_DIR / f"{u}.npy").read_bytes() == raw
+
+
+def test_the_speech_floor_message_never_rounds_up_to_the_floor():
+    """The refusal said 'only 0s of speech' for a 0.3 s clip, and a value
+    just under the floor rounded up to the floor itself."""
+    from stt import config, unknowns
+    floor = config.UNKNOWN_MIN_TALK_SECS
+    msg = lambda secs: unknowns.floor_violation({"talk_secs": secs, "reliable_turns": 99})
+    assert "only 0.3s of speech" in msg(0.3)
+    assert f"only {floor - 0.1:g}s of speech" in msg(floor - 0.04)
+    assert "only 5s of speech" in msg(5.0)
+    assert msg(floor) is None

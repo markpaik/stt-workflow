@@ -439,6 +439,15 @@ def pooled_stats(label, cent_emb, stats, unnamed_labels):
     return total
 
 
+def _secs_below(secs) -> str:
+    """Seconds to one decimal, rounded DOWN, with no trailing zero: 0.3 is
+    '0.3' and 19.96 is '19.9'. A whole-second round said 'only 0s' for a
+    0.3 s clip, and a value just under the floor read as the floor itself."""
+    import math
+    v = math.floor(max(0.0, float(secs)) * 10) / 10
+    return f"{v:.1f}".rstrip("0").rstrip(".")
+
+
 def floor_violation(st) -> str:
     """Plain-language refusal when a cluster is below the evidence floor a
     voice needs before it can identify anyone — used both by assign()'s
@@ -447,7 +456,7 @@ def floor_violation(st) -> str:
     if st is None:
         return None
     if st["talk_secs"] < config.UNKNOWN_MIN_TALK_SECS:
-        return (f"This voice has only {st['talk_secs']:.0f}s of speech, "
+        return (f"This voice has only {_secs_below(st['talk_secs'])}s of speech, "
                 "too little to identify anyone reliably.")
     if st["reliable_turns"] < config.UNKNOWN_MIN_RELIABLE_TURNS:
         return (f"This voice has only {st['reliable_turns']} clear turn(s) of "
