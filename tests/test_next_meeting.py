@@ -1346,3 +1346,28 @@ def test_long_unbroken_text_wraps_inside_the_meeting_page():
     rule = re.search(r"^\.reading\{([^}]*)\}", css, re.M).group(1)
     assert "overflow-wrap:anywhere" in rule and "min-width:0" in rule
     assert re.search(r"^\.steps>li\{[^}]*min-width:0", css, re.M)
+
+
+@needs_node
+def test_the_second_engine_hint_ends_its_sentence_once():
+    """The card wrote a period after the closing quote, so a line that
+    already ended in one read 'two.”.'."""
+    out = _run("""
+await openPage('R2',{segments:[seg(0,0,4,'S1','Speaker 1','The target was three percent, not two.',['possible:engine_disagreement']),
+ seg(1,4,8,'S1','Speaker 1','we agreed on it',['possible:engine_disagreement'])],
+ speaker_options:[opt('S1','Ana Ortiz',{named:true})]},{flagged:2});
+const items=[{index:0,start:0,end:4,text:'The target was three percent, not two.',flags:['possible:engine_disagreement'],speaker:'S1',
+  alt:[{ours:'The target was three percent, not two.',theirs:'The target was two percent.'}]},
+ {index:1,start:4,end:8,text:'we agreed on it',flags:['possible:engine_disagreement'],speaker:'S1',
+  alt:[{ours:'we agreed on it',theirs:'we agreed on that'}]}];
+answer=(p,b)=>p.startsWith('/api/review?')?{items:items.map(x=>Object.assign({},x))}:{};
+const made=[];const oc=document.createElement;document.createElement=()=>{const e=oc();made.push(e);return e;};
+await mRevStart(null);
+const first=made.map(e=>e.innerHTML).filter(h=>h.includes('second engine')).pop();
+mRevGo(1);await flush();
+const second=made.map(e=>e.innerHTML).filter(h=>h.includes('second engine')).pop();
+console.log(JSON.stringify({first,second}));
+""")
+    assert "not two.”." not in out["first"]
+    assert "where this says “The target was three percent, not two.” <button" in out["first"]
+    assert "where this says “we agreed on it”. <button" in out["second"]

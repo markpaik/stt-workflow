@@ -545,7 +545,9 @@ function mRevCard(){
  const el=p>=0?document.getElementById('ln-'+p):null;
  if(!el){mRevExit();return;}                      // the transcript changed underneath
  R.hold=false;R.at={index:it.index,start:it.start,end:it.end};
- const alts=(it.alt||[]).map((a,k)=>`<div class="meta">The second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}”. <button class="btn quiet" type="button" data-act="rev-usealt" data-k="${k}">Use it</button></div>`).join('');
+ // the quote closes the sentence when the line already ends in one: a
+ // period after it read 'two.”.'
+ const alts=(it.alt||[]).map((a,k)=>`<div class="meta">The second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}”${/[.!?…]["”’)]*$/.test(String(a.ours||'').trim())?'':'.'} <button class="btn quiet" type="button" data-act="rev-usealt" data-k="${k}">Use it</button></div>`).join('');
  mCardEl(`<div class="mc-flag attn-t">${esc(mFlagWhy(it))}${it.minor?' Minor.':''}</div>${alts}
   <div class="mc-row">${mSpkSelect('mc-spk',it.speaker)}</div>
   <textarea id="mc-text" class="mc-text" aria-label="Corrected text">${esc(it.text)}</textarea>
