@@ -1587,7 +1587,8 @@ def gather_state():
             "schedule": read_schedule(), "model": current_model(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
-            "paths": {"source": str(src_dir), "dest": str(dst_dir)},
+            "paths": {"source": str(src_dir), "dest": str(dst_dir),
+                      "source_exists": _dir_present(src_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
             "recorder_ready": recorder.available(),
@@ -3710,6 +3711,18 @@ def _cached(parts, cache, compose):
         cache["html"] = compose()
         cache["mtimes"] = mtimes
     return cache["html"]
+
+
+def _dir_present(p) -> bool:
+    """Is the folder there? The first-run card checks the watched folder
+    with it: a path that is set but missing showed a green check. A denied
+    stat (a folder macOS privacy guards) counts as there."""
+    try:
+        return Path(p).is_dir()
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _next_html():

@@ -171,7 +171,10 @@ function setupCard(){
  const line=(ok,t,d,btn)=>`<div class="setup-line"><span class="mark ${ok?'ok':'todo'}">${ok?'✓':'!'}</span><div style="min-width:0"><div style="font-weight:600">${t}</div><div class="meta">${d}</div></div>${btn}</div>`;
  return `<div class="setup"><h2>Set up in three checks</h2>
   ${line(!!S.recorder_ready,S.recorder_ready?'Recorder ready':'Recorder not built','The menu-bar recorder saves mic and system audio.','<a class="btn quiet" href="#settings">Recorder settings</a>')}
-  ${line(!!(S.paths&&S.paths.source),'Watched folder set',esc((S.paths||{}).source||'Not set'),'<a class="btn quiet" href="#settings">Folder settings</a>')}
+  ${(()=>{const P=S.paths||{};const gone=!!P.source&&P.source_exists===false;   // set, but not on disk
+   return line(!!P.source&&!gone,gone?'Watched folder missing':P.source?'Watched folder set':'Watched folder not set',
+    gone?`${esc(P.source)} does not exist yet. Create it, or pick another folder.`:esc(P.source||'Pick the folder new recordings arrive in.'),
+    '<a class="btn quiet" href="#settings">Folder settings</a>');})()}
   ${line(!!you,you?'Your voice is set':'Your voice is not set',you?esc(you):(enrolled?'Pick your name in Settings.':'Name yourself in your first meeting to enroll the voice.'),'<a class="btn quiet" href="#settings">Pick your voice</a>')}
   <p class="sub" style="text-align:center">Record from the menu bar, let Voice Memos sync, or drop an audio file here.</p>
   <div style="display:flex;justify-content:center"><button class="btn primary" type="button" data-act="new">${ic('plus')}New</button></div></div>`;

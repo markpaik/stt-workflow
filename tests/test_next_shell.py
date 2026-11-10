@@ -641,3 +641,36 @@ A.skip();
 console.log(JSON.stringify({focused,hash:location.hash}));
 """)
     assert out == {"focused": 1, "hash": "#home"}
+
+
+def test_state_says_whether_the_watched_folder_exists(running_server):
+    """The first-run card checked only that paths.source was a non-empty
+    string, and config.source_dir() always gives one, so a folder that was
+    set but not created showed a green check."""
+    import shutil as _sh
+    st = json.loads(_get(running_server, "/api/state")[2])
+    assert st["paths"]["source_exists"] is True
+    _sh.rmtree(config.source_dir())
+    st = json.loads(_get(running_server, "/api/state")[2])
+    assert st["paths"]["source"] == str(config.source_dir())
+    assert st["paths"]["source_exists"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_first_run_card_warns_for_a_watched_folder_that_is_missing():
+    out = _run_node("""
+const card=p=>{S=Object.assign({},S||{},{paths:p,enrolled:[],recorder_ready:true});return setupCard();};
+const set=card({source:'/x/source',dest:'/x/m',source_exists:true});
+const gone=card({source:'/x/source',dest:'/x/m',source_exists:false});
+const old=card({source:'/x/source',dest:'/x/m'});
+console.log(JSON.stringify({set,gone,old}));
+""")
+    mark = lambda html, title: re.search(
+        r'<span class="mark (ok|todo)">[^<]*</span><div[^>]*><div[^>]*>' + title, html)
+    assert mark(out["set"], "Watched folder set").group(1) == "ok"
+    m = mark(out["gone"], "Watched folder missing")
+    assert m and m.group(1) == "todo"
+    assert "/x/source does not exist yet" in out["gone"]
+    assert "Watched folder set" not in out["gone"]
+    # a server from before the field: the old check
+    assert mark(out["old"], "Watched folder set").group(1) == "ok"
