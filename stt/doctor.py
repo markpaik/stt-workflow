@@ -31,7 +31,9 @@ drops):
 - logs over their cap and calibration.jsonl over its cap.
 
 What it only reports: a folder name that disagrees with its `title` and
-date, meetings missing the store keys (tools/backfill_keys.py adds them),
+date, a meeting json that is not readable (`unreadable_json`), a folder
+with no meeting json (`folder_without_json`), meetings missing the store
+keys (tools/backfill_keys.py adds them),
 scratch audio left in work/, an stt.env value that cannot be read and is
 replaced by its default (`bad_setting`), and (with deep=True) a stored
 duration longer than the audio.
@@ -271,6 +273,34 @@ def _stale_dismissals() -> list:
     return sorted(n for n in d if n in latest and latest[n].get("ok") is True)
 
 
+def _folders_without_json(store) -> list:
+    """[(folder, why)] for each folder in the store that holds no
+    <name>.json: an interrupted run or a hand copy. No reader lists one,
+    and Archive, Delete and tools/purge.py all refuse it as no meeting.
+    The batch's start-up sweep (run_batch._sweep_shells) removes one that
+    holds no audio. Checked only while no batch runs: a run writing a
+    meeting makes its folder just before the json."""
+    out = []
+    try:
+        folders = sorted(p for p in Path(store).iterdir()
+                         if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        return out
+    for p in folders:
+        if (p / f"{p.name}.json").exists():
+            continue
+        try:
+            audio = any(f.suffix.lower() in config.AUDIO_SUFFIXES for f in p.iterdir())
+        except OSError:
+            audio = False
+        out.append((p.name, (
+            "no meeting json, but it holds audio: move the audio to a watched "
+            "folder to transcribe it again, or delete the folder in Finder")
+            if audio else
+            "no meeting json and no audio: the next batch start removes it"))
+    return out
+
+
 def _batch_running() -> bool:
     return bool(status.read().get("running"))
 
@@ -287,6 +317,16 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
     if registry:
         out += [_from_registry(f) for f in registry_doctor.check(voiceprints_dir, store)]
     meets = _meetings(store)
+    for b in config.meeting_bases(store):
+        if b not in meets:
+            # meeting_bases counts it, but no reader can: the panel lists
+            # it nowhere, and every other check here skipped it in silence
+            out.append(Finding("unreadable_json", b,
+                               f"{b}.json is not readable JSON. Restore it from a "
+                               "backup, or delete the folder in Finder", False))
+    if not _batch_running():
+        for name, why in _folders_without_json(store):
+            out.append(Finding("folder_without_json", name, why, False))
     for b, d in meets.items():
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:

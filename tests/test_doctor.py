@@ -360,3 +360,33 @@ def test_a_run_id_with_a_slash_never_becomes_a_path(tmp_path):
             fieldjournal.journal_path(bad, tmp_path)
     assert fieldjournal.journal_path("backfill-20261109T101500", tmp_path) == \
         tmp_path / "backfill-20261109T101500.jsonl"
+
+
+def test_check_reports_a_folder_with_no_json_or_an_unreadable_one(sandbox, monkeypatch):
+    """A folder with no meeting json (an interrupted run, a hand copy) or
+    with a json that is not JSON reached no reader: the panel listed
+    nothing, Archive and Delete refused it as no meeting, and the check
+    said 'clean: nothing to report'. Each one is reported now, and how to
+    clear it. A batch that runs makes its folder before its json, so the
+    folder check waits for it."""
+    _m("2026-08-04 Fine", title="Fine")
+    md = config.meetings_dir()
+    (md / "2026-08-02 Empty Folder").mkdir()
+    (md / "2026-08-03 No Json").mkdir()
+    (md / "2026-08-03 No Json" / "2026-08-03 No Json.txt").write_text("stub")
+    (md / "2026-08-05 Audio Only").mkdir()
+    (md / "2026-08-05 Audio Only" / "2026-08-05 Audio Only.m4a").write_bytes(b"a")
+    (md / "2026-08-01 Corrupt One").mkdir()
+    (md / "2026-08-01 Corrupt One" / "2026-08-01 Corrupt One.json").write_text("{bad json")
+    (md / ".archive").mkdir(exist_ok=True)
+    found = {(f.kind, f.subject): f for f in doctor.check(registry=False)}
+    bad = found[("unreadable_json", "2026-08-01 Corrupt One")]
+    assert not bad.fixable and "not readable JSON" in bad.detail
+    for name in ("2026-08-02 Empty Folder", "2026-08-03 No Json"):
+        assert "next batch start removes it" in found[("folder_without_json", name)].detail
+    assert "holds audio" in found[("folder_without_json", "2026-08-05 Audio Only")].detail
+    assert not any(s.startswith(".") or s == "2026-08-04 Fine" for k, s in found
+                   if k in ("unreadable_json", "folder_without_json"))
+    monkeypatch.setattr(doctor, "_batch_running", lambda: True)
+    kinds = {f.kind for f in doctor.check(registry=False)}
+    assert "folder_without_json" not in kinds and "unreadable_json" in kinds
