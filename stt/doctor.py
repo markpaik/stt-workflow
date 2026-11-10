@@ -24,24 +24,29 @@ drops):
   to the folder layout, a record is relinked to the meeting whose stored
   source time matches it, then to the one whose title words and date match;
   same-day twins that tie on title words are paired one to one by time
-  (`relink_tie`); anything left is moved to manifest_retired.json;
+  (`relink_tie`); anything left is moved to manifest_retired.json (never
+  while the store holds no meeting: unmounted, every record looks stale);
 - a live meeting with no manifest record gets one, keyed by its
   `source_name` with its `source_mtime`, so a re-dropped source is skipped;
-- queue holds on files that no longer exist;
+- queue holds on files that no longer exist (never while the source
+  folder is missing);
 - failure dismissals whose name's latest recorded result is a success;
 - a stopping.flag left behind when no batch is running;
 - logs over their cap and calibration.jsonl over its cap.
 
 What it only reports: a folder name that disagrees with its `title` and
 date, a meeting json that is not readable (`unreadable_json`), a
-manifest.json that is not readable (`manifest_unreadable`), a folder
-with no meeting json (`folder_without_json`), meetings missing the store
-keys (tools/backfill_keys.py adds them),
-scratch audio left in work/, an stt.env value that cannot be read and is
-replaced by its default (`bad_setting`), a missing Hugging Face token
-(`diarizer_no_token`), a speakrs helper, model set or sandbox-exec that
-is missing so pyannote runs instead (`diarizer_fallback`), and (with
-deep=True) a stored duration longer than the audio.
+manifest.json that is not readable (`manifest_unreadable`), a meetings
+folder that is missing or holds no meeting while the manifest has
+records (`store_missing`), a source folder that is missing while files
+are held (`source_missing`), a folder with no meeting json
+(`folder_without_json`), meetings missing the store keys
+(tools/backfill_keys.py adds them), scratch audio left in work/, an
+stt.env value that cannot be read and is replaced by its default
+(`bad_setting`), a missing Hugging Face token (`diarizer_no_token`), a
+speakrs helper, model set or sandbox-exec that is missing so pyannote
+runs instead (`diarizer_fallback`), and (with deep=True) a stored
+duration longer than the audio.
 """
 import hashlib
 import json
@@ -165,6 +170,10 @@ def manifest_plan(store=None) -> list:
         return []                   # never plan, or write, over a damaged file
     m = _manifest()
     meets = _meetings(store)
+    if not meets:
+        # an unmounted, moved or empty store makes every record look stale:
+        # retiring them all would re-transcribe every source (_store_away)
+        return []
     linked = _linked(m)
     jpath = {b: str(config.meeting_file(b, ".json", store)) for b in meets}
     free = {b for b in meets if jpath[b] not in linked}
@@ -267,9 +276,27 @@ def _pair_ties(ties, free: set, meets: dict, store: Path) -> list:
     return acts
 
 
+def _store_away(store) -> int:
+    """Stale manifest records left alone because the store holds no
+    meeting (unmounted, moved or empty): every record looked stale then,
+    and fix retired them all. 0 when the store has meetings."""
+    if config.meeting_bases(store) or _manifest_problem():
+        return 0
+    return sum(1 for rec in _manifest()["processed"].values() if _stale(rec))
+
+
+def _source_away() -> bool:
+    """The source folder is not there (unmounted or moved): every held
+    name looked gone then, and fix released the hold on a private file,
+    so the next batch ran it."""
+    return not config.source_dir().is_dir()
+
+
 def _stale_holds() -> list:
     from . import holds
     names = []
+    if _source_away():
+        return names
     try:
         # holds' own reader: a file of the wrong shape holds no names (a
         # JSON string iterated its letters here, a number raised)
@@ -390,6 +417,22 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
                            "every source as new. Restore it from a backup, or "
                            "move it aside and run fix, which links each meeting "
                            "back from its own keys", False))
+    away = _store_away(store)
+    if away:
+        out.append(Finding("store_missing", store.name,
+                           f"the meetings folder is missing or holds no meeting, "
+                           f"so {away} manifest record(s) point at nothing. Fix "
+                           "retires none of them until the folder is back", False))
+    if _source_away():
+        from . import holds
+        try:
+            n = len(holds.items())
+        except OSError:
+            n = 0
+        if n:
+            out.append(Finding("source_missing", config.source_dir().name,
+                               f"the source folder is not there, so fix keeps "
+                               f"all {n} queue hold(s) until it is back", False))
     for a in manifest_plan(store):
         kind = {"flat": "manifest_flat", "relink_mtime": "manifest_stale",
                 "relink_title": "manifest_stale", "relink_tie": "manifest_stale",

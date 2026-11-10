@@ -258,6 +258,45 @@ def test_a_damaged_manifest_is_reported_and_never_planned_over(lib, raw):
     assert "manifest_unreadable" not in {f.kind for f in doctor.check(registry=False)}
 
 
+def test_a_missing_store_retires_no_record_and_says_so(lib):
+    """With the meetings folder unmounted or moved, every record looked
+    stale, and fix moved them all to manifest_retired.json, so the next
+    batch would transcribe every source again."""
+    store = config.meetings_dir()
+    before = config.MANIFEST_PATH.read_bytes()
+    store.rename(store.with_name("meetings.away"))
+    fs = doctor.check(registry=False)
+    away = [f for f in fs if f.kind == "store_missing"]
+    assert len(away) == 1 and "5 manifest record(s)" in away[0].detail
+    assert not {"manifest_stale", "manifest_flat"} & {f.kind for f in fs}
+    r = doctor.fix(dry_run=False, registry=False)
+    assert r["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_bytes() == before
+    assert not (config.PROJECT_DIR / doctor.RETIRED_NAME).exists()
+    # an empty folder is the same: no meeting to check a record against
+    store.mkdir()
+    assert doctor.manifest_plan() == []
+    assert "store_missing" in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_missing_source_folder_releases_no_hold_and_says_so(lib):
+    """With the source folder unmounted or moved, every held name looked
+    gone, and fix released the hold on a private file, so the next batch
+    ran it."""
+    src = config.source_dir()
+    holds.PATH.write_text(json.dumps(["Private Memo.wav"]))
+    (src / "Private Memo.wav").write_bytes(b"x")
+    assert "stale_hold" not in {f.kind for f in doctor.check(registry=False)}
+    src.rename(src.with_name("source.away"))
+    fs = doctor.check(registry=False)
+    assert "stale_hold" not in {f.kind for f in fs}
+    away = [f for f in fs if f.kind == "source_missing"]
+    assert len(away) == 1 and "1 queue hold(s)" in away[0].detail
+    r = doctor.fix(dry_run=False, registry=False)
+    assert not any("stale hold" in d for d in r["done"])
+    assert json.loads(holds.PATH.read_text()) == ["Private Memo.wav"]
+
+
 def test_the_batch_end_report_holds_counts_and_no_names(lib):
     doctor.run_check_at_batch_end()
     rep = (config.PROJECT_DIR / doctor.REPORT_PATH_NAME).read_text()
