@@ -372,6 +372,9 @@ console.log(JSON.stringify({h:vsHTML()}));
                                   'data-act="vs-save"')]
     assert order == sorted(order)
     assert "Who is Speaker 68?" in h
+    # the clip's start reads as where the turn is, beside the talk time:
+    # 'Longest turn · 0:01' read as a length next to '1m 42s of talk'
+    assert 'Longest turn at <span class="mono">0:04</span>' in h
 
 
 @needs_node
