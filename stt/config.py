@@ -47,15 +47,6 @@ def _home_default(sub: str, hard_default) -> str:
 
 
 # --- Paths ---
-ICLOUD_DIR = Path(os.environ.get("STT_ICLOUD_DIR", _home_default(
-    "source", HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")))
-MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR",
-                                   _home_default("meetings", HOME / "Projects/brain/meetings")))
-# where the on-device meeting recorder drops finished captures — a LOCAL folder
-# (not iCloud): these calls are sensitive and the files are large, so they never
-# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
-RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
-    "recordings", HOME / "Library/Application Support/com.stt-workflow/recordings")))
 # The state root: manifest, status/history, holds, queue, voiceprints, stt.env,
 # work/, logs/ all hang off this. Defaults to STT_HOME when set (so all of that
 # state travels with the demo home), else this checkout. Code and static assets
@@ -63,6 +54,32 @@ RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
 # repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   _HOME or Path(__file__).resolve().parent.parent))
+# The transcripts folder when nothing names one: the same default init.sh
+# offers. It was the owner's own library path, so a fresh clone that skipped
+# init.sh wrote meetings there, and init.sh and the code disagreed.
+DEFAULT_MEETINGS_DIR = HOME / "Documents/Meeting Transcripts"
+
+
+def _folder(env_name: str, sub: str, hard_default) -> Path:
+    """An import-time folder setting: the environment, then stt.env, then
+    the STT_HOME or hard default. stt.env is read here too because a
+    process launchd starts (the menu bar and its panel) never has it in its
+    environment: config.MEETINGS_DIR there was the default, wherever the
+    library really is. The functions below (meetings_dir and the rest) read
+    stt.env fresh on every call."""
+    from . import envfile
+    v = os.environ.get(env_name) or envfile.parse(PROJECT_DIR / "stt.env").get(env_name)
+    return Path(v or _home_default(sub, hard_default))
+
+
+ICLOUD_DIR = _folder("STT_ICLOUD_DIR", "source",
+                     HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")
+MEETINGS_DIR = _folder("STT_MEETINGS_DIR", "meetings", DEFAULT_MEETINGS_DIR)
+# where the on-device meeting recorder drops finished captures — a LOCAL folder
+# (not iCloud): these calls are sensitive and the files are large, so they never
+# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
+RECORDINGS_DIR = _folder("STT_RECORDINGS_DIR", "recordings",
+                         HOME / "Library/Application Support/com.stt-workflow/recordings")
 # The checkout itself: run.sh, .venv and the code. A spawned command starts
 # from here, never from PROJECT_DIR, which under STT_HOME is a data home with
 # no run.sh in it: the panel's run sat queued while spawned.log said

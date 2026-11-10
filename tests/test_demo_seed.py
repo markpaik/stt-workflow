@@ -47,8 +47,40 @@ def test_stt_home_backwards_compatible():
     # "STT_workflow" once and is "stt_workflow" now, and a worktree is named
     # for its branch. PROJECT_DIR defaults to the folder holding stt/.
     assert Path(p["project"]).name == REPO.name
-    assert "Projects/brain/meetings" in p["meetings"]      # real default, not under a home
+    # the neutral default init.sh offers, never a person's own library path
+    assert p["meetings"] == str(Path.home() / "Documents/Meeting Transcripts")
     assert Path(p["voiceprints"]).name == "voiceprints"
+
+
+def test_the_default_transcripts_folder_is_the_one_init_offers():
+    """config.py defaulted to the owner's own library path while init.sh
+    offered ~/Documents/Meeting Transcripts. One neutral default now, and
+    no code path names a person's folder."""
+    import re
+    init = (REPO / "init.sh").read_text()
+    m = re.search(r'^DEFAULT_DST="\$HOME/([^"]+)"$', init, re.M)
+    assert m and Path.home() / m.group(1) == config.DEFAULT_MEETINGS_DIR
+    for d in ("stt", "gui", "tools"):
+        for f in (REPO / d).rglob("*.py"):
+            assert "Projects/brain" not in f.read_text(), f
+    for f in ("init.sh", "setup.sh", "run.sh", "run_batch.py", "stt.env.example"):
+        assert "Projects/brain" not in (REPO / f).read_text(), f
+
+
+def test_a_process_without_stt_env_in_its_environment_reads_the_folders_from_it(tmp_path):
+    """launchd starts the menu bar (and its panel) without stt.env in the
+    environment, so config.MEETINGS_DIR there was the default wherever the
+    library really was. The import-time folders now read stt.env too, and
+    a variable set in the environment still wins."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "stt.env").write_text(f'STT_MEETINGS_DIR="{tmp_path}/lib"\n'
+                                  f"STT_ICLOUD_DIR={tmp_path}/src\n")
+    p = _run_config({"STT_PROJECT_DIR": str(proj)})
+    assert p["meetings"] == str(tmp_path / "lib")
+    assert p["source"] == str(tmp_path / "src")
+    p = _run_config({"STT_PROJECT_DIR": str(proj), "STT_MEETINGS_DIR": str(tmp_path / "env")})
+    assert p["meetings"] == str(tmp_path / "env")
 
 
 def test_stt_home_redirects_every_state_path(tmp_path):

@@ -403,7 +403,10 @@ def test_the_evaluation_refuses_a_real_home(monkeypatch):
     monkeypatch.delenv("STT_HOME", raising=False)
     with pytest.raises(SystemExit):
         ask_eval._guard()
-    monkeypatch.setenv("STT_HOME", str(config.Path.home() / "Projects/brain/meetings"))
+    monkeypatch.setenv("STT_HOME", str(config.DEFAULT_MEETINGS_DIR))
+    with pytest.raises(SystemExit):
+        ask_eval._guard()
+    monkeypatch.setenv("STT_HOME", str(config.DEFAULT_MEETINGS_DIR / "inside"))
     with pytest.raises(SystemExit):
         ask_eval._guard()
 

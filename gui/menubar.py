@@ -420,7 +420,7 @@ class STTMenuBar(rumps.App):
         subprocess.Popen(["open", str(txt if txt.exists() else config.meetings_dir())])
 
     def open_meetings(self, _):
-        subprocess.Popen(["open", str(config.MEETINGS_DIR)])
+        subprocess.Popen(["open", str(config.meetings_dir())])   # stt.env, read fresh
 
     def open_logs(self, _):
         log = config.LOG_DIR / "stt.err.log"

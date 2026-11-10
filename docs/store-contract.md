@@ -4,7 +4,7 @@ This is what the meeting store promises to the programs that read it: the panel,
 
 ## Layout
 
-- The store is one folder, `~/Projects/brain/meetings` by default (`config.meetings_dir()`, or `STT_MEETINGS_DIR`, or `STT_HOME/meetings`).
+- The store is one folder, `~/Documents/Meeting Transcripts` by default (`config.meetings_dir()`, or `STT_MEETINGS_DIR`, or `STT_HOME/meetings`).
 - A meeting is the folder `<store>/<base>/` that holds `<base>/<base>.json`. The store is one level deep. There are no year folders.
 - Readers skip every folder whose name starts with a dot. `.archive/` holds archived meetings, and `.locks/` holds lock files.
 - Every file of a meeting carries the folder's name: `<base>.json` (the record of truth), `<base>.txt` (the readable transcript), the audio (`.m4a`, or another type from `config.AUDIO_SUFFIXES`), and optional caches and sidecars (`.diar.npz`, `.emb.npz`, `.reviews.json`, `.verify.json`).
