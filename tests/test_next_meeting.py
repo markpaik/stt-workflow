@@ -1393,3 +1393,23 @@ await A['pf-save']();await flush();
 console.log(JSON.stringify({a,b,c:toasts.slice(-1)[0]}));
 """)
     assert out == {"a": "NOTE-A", "b": "NOTE-B", "c": "Saved."}
+
+
+@needs_node
+def test_the_meeting_page_has_one_h1_and_it_stays_on_a_phone():
+    """Every route had an h1 but the meeting page, whose title was a bare
+    button. The title button now sits in an h1, and the phone rule that
+    hides a route's h1 (the top bar names the route there) keeps this one."""
+    out = _run("""
+await openPage('2026-10-20 Board Prep',{},{title:'Board Prep'});
+const h=mHeadHTML(mRow());
+MP.editTitle=true;const e=mHeadHTML(mRow());MP.editTitle=false;
+console.log(JSON.stringify({h,e}));
+""")
+    assert out["h"].count("<h1") == 1
+    assert re.search(r'<h1 class="m-h1"><button class="m-title"[^>]*>Board Prep</button></h1>', out["h"])
+    assert 'id="m-title-in"' in out["e"]
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    phone = css[css.index("@media (max-width:899px)"):]
+    phone = phone[:phone.index("\n}\n")]
+    assert "h1{display:none}" in phone and "h1.m-h1{display:flex}" in phone

@@ -92,7 +92,8 @@ function mHeadHTML(m){
  const title=MP.editTitle
   ?`<input class="m-title-input" type="text" id="m-title-in" value="${esc(MP.titleDraft!=null?MP.titleDraft:m.title)}" aria-label="Title">
     <button class="btn primary" type="button" data-act="m-title-save">Save</button><button class="btn plain" type="button" data-act="m-title-cancel">Cancel</button>`
-  :`<button class="m-title" type="button" data-act="m-title" title="Rename">${esc(m.title)}</button>`;
+  // the page's one h1, as every other route has: the title button inside it
+  :`<h1 class="m-h1"><button class="m-title" type="button" data-act="m-title" title="Rename">${esc(m.title)}</button></h1>`;
  const draft=!MP.editTitle&&isDraft(m)
   ?`<span class="chip ${m.title_state==='needs_title'?'attn':'draft'}" title="${m.title_state==='needs_title'?'Only the model drafted this title':'An automatic title. Keep it or edit it.'}">Draft title</span><button class="btn quiet" type="button" data-act="m-keep">Keep</button>`:'';
  const cat=m.category==='work'?'Work':m.category==='personal'?'Personal':'';

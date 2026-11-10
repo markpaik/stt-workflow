@@ -262,6 +262,7 @@ kbd{font:500 var(--fs-meta) var(--sans);background:var(--inset);color:var(--ink)
 .m-head{display:grid;gap:var(--s1)}
 .back{justify-self:start;margin-left:calc(var(--s2) * -1)}
 .m-title-row{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s2);align-items:center}
+h1.m-h1{display:flex;min-width:0;font:inherit;margin:0}
 .m-title{border:0;background:transparent;padding:0 var(--s1);margin-left:calc(var(--s1) * -1);border-radius:4px;font-size:var(--fs-page);font-weight:600;line-height:1.25;cursor:text;min-width:0;text-align:left;overflow-wrap:anywhere}
 .m-title:hover{background:var(--inset)}
 input.m-title-input[type=text]{font-size:var(--fs-sub);font-weight:600;flex:1 1 260px}
@@ -388,6 +389,7 @@ input.name-input[type=text]{width:100%;font-size:var(--fs-title);min-height:40px
   button.chip,.nchip{min-height:40px}
   .h-desk{display:none!important}
   h1{display:none}
+  h1.m-h1{display:flex}  /* the page title is the meeting's own: it stays */
   .audio{padding:var(--s2) var(--s4)}
   .line{grid-template-columns:44px minmax(0,1fr) 44px}
   .line .who{grid-column:2;grid-row:1}
