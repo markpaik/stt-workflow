@@ -14,6 +14,7 @@ it can never leave a stale entry pinning a name forever.
 import fcntl
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -24,11 +25,39 @@ _LOCK = config.PROJECT_DIR / "holds.lock"
 _lock_state = threading.local()
 
 
-def _apply(fn):
+def _load():
+    """(names, ok): the held names on disk, and False when the file is there
+    but is not a JSON list (a torn write, outside damage, a hand edit). Only
+    the strings are names: set() of a JSON string "abc" held 'a', 'b' and
+    'c', and of an object held its keys."""
     try:
-        cur = set(json.loads(PATH.read_text()))
-    except (FileNotFoundError, json.JSONDecodeError, TypeError):
-        cur = set()
+        raw = json.loads(PATH.read_text())
+    except FileNotFoundError:
+        return set(), True
+    except ValueError:  # bad JSON, or bytes that are not text
+        return set(), False
+    if not isinstance(raw, list):
+        return set(), False
+    return {n for n in raw if isinstance(n, str)}, True
+
+
+def _keep_aside():
+    """Move a damaged holds file to holds.json.bad before the next write
+    replaces it. A truncated file read as no holds, and the next hold()
+    wrote over it: every other hold was gone with no message."""
+    bad = PATH.with_suffix(".json.bad")
+    try:
+        os.replace(PATH, bad)
+        print(f"warning: {PATH.name} was not a list of names; kept it as "
+              f"{bad.name} and started a new one", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def _apply(fn):
+    cur, ok = _load()
+    if not ok:
+        _keep_aside()
     out, ret = fn(cur)
     tmp = PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(sorted(out), indent=2))
@@ -51,10 +80,7 @@ def _mutate(fn):
 
 
 def items() -> set:
-    try:
-        return set(json.loads(PATH.read_text()))
-    except (FileNotFoundError, json.JSONDecodeError, TypeError):
-        return set()
+    return _load()[0]
 
 
 def is_held(name: str) -> bool:

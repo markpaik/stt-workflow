@@ -13,6 +13,7 @@ without touching the queue, so the job simply waits for the next kick.
 import fcntl
 import json
 import os
+import sys
 import threading
 import time
 
@@ -53,11 +54,38 @@ def split_list(s: str) -> list:
 _lock_state = threading.local()
 
 
-def _apply(fn):
+def _load():
+    """(jobs, ok): the queued jobs on disk, and False when the file is there
+    but is not a JSON list (a torn write, outside damage, a hand edit). Only
+    the job objects are kept: a '{}' file made add() raise TypeError, so the
+    Run click failed instead of queueing."""
     try:
-        cur = json.loads(PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        cur = []
+        raw = json.loads(PATH.read_text())
+    except FileNotFoundError:
+        return [], True
+    except ValueError:  # bad JSON, or bytes that are not text
+        return [], False
+    if not isinstance(raw, list):
+        return [], False
+    return [j for j in raw if isinstance(j, dict)], True
+
+
+def _keep_aside():
+    """Move a damaged queue file to queued_jobs.json.bad before the next
+    write replaces it, so what it held can still be read back by hand."""
+    bad = PATH.with_suffix(".json.bad")
+    try:
+        os.replace(PATH, bad)
+        print(f"warning: {PATH.name} was not a list of jobs; kept it as "
+              f"{bad.name} and started an empty queue", file=sys.stderr, flush=True)
+    except OSError:
+        pass
+
+
+def _apply(fn):
+    cur, ok = _load()
+    if not ok:
+        _keep_aside()
     out, ret = fn(cur)
     # atomic: a kill mid-write (forced quit, the SIGKILL escalation in
     # stop_run itself) must never truncate this file — a truncated read
@@ -100,10 +128,7 @@ def add(job: dict) -> dict:
 
 
 def items() -> list:
-    try:
-        return json.loads(PATH.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    return _load()[0]
 
 
 def remove(at: float) -> bool:

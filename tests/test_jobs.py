@@ -38,6 +38,31 @@ def test_corrupt_queue_degrades_to_empty(sandbox):
     assert len(jobs.items()) == 1
 
 
+@pytest.mark.parametrize("text", ["{}", '"abc"', "123", "null"])
+def test_a_queue_file_of_the_wrong_shape_reads_empty_and_add_still_queues(sandbox, text, capsys):
+    """Valid JSON that is not a list made add() raise TypeError ('dict' +
+    'list'), so the Run click failed instead of queueing."""
+    jobs.PATH.write_text(text)
+    assert jobs.items() == []
+    got = jobs.add({"label": "ok"})
+    assert [j["label"] for j in jobs.items()] == ["ok"] and "at" in got
+    # the damaged file is kept beside the queue, not written over
+    assert jobs.PATH.with_suffix(".json.bad").read_text() == text
+    assert "queued_jobs.json.bad" in capsys.readouterr().err
+
+
+def test_entries_that_are_not_jobs_are_dropped(sandbox):
+    jobs.PATH.write_text('[1, "x", null, {"label": "A", "at": 5.0}]')
+    assert jobs.items() == [{"label": "A", "at": 5.0}]
+    assert jobs.remove(5.0) is True and jobs.items() == []
+
+
+def test_a_good_queue_file_is_never_set_aside(sandbox):
+    jobs.add({"label": "A"})
+    jobs.add({"label": "B"})
+    assert not jobs.PATH.with_suffix(".json.bad").exists()
+
+
 def test_clear_drops_everything(sandbox):
     jobs.add({"label": "A"})
     jobs.add({"label": "B"})

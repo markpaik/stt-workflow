@@ -249,11 +249,13 @@ def _stale_holds() -> list:
     from . import holds
     names = []
     try:
-        cur = json.loads(holds.PATH.read_text())
-    except (OSError, ValueError):
+        # holds' own reader: a file of the wrong shape holds no names (a
+        # JSON string iterated its letters here, a number raised)
+        cur = holds.items()
+    except OSError:
         return names
     dirs = config.source_dirs()
-    for n in cur or []:
+    for n in cur:
         if not any((d / n).exists() for d in dirs):
             names.append(n)
     return sorted(names)
