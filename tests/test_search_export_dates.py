@@ -169,6 +169,58 @@ def test_a_control_character_in_a_line_never_fails_the_word_export(sandbox, tmp_
     h.encode("utf-8")  # no lone surrogate left to fail the PDF page write
 
 
+def test_a_null_or_missing_field_never_fails_the_export(sandbox, tmp_path, monkeypatch):
+    """Export indexed d["display"], seg["start"] and duration_sec directly
+    and called .strip() on the text, so a hand-edited json with a null or
+    missing value failed with a raw TypeError, KeyError or ValueError. The
+    panel showed only its generic failure. Such a value now reads as
+    absent: the line, its timestamp or the meta part is left out."""
+    data = {"date": "Jan 5", "duration_sec": None,
+            "speakers": [{"id": "SPEAKER_00"}, {"display": None}, "Dana Fox",
+                         {"id": "SPEAKER_01", "display": "Sam Chen"}],
+            "segments": [{"text": "no start", "speaker": "SPEAKER_01"},
+                         {"start": None, "text": "null start", "speaker": "SPEAKER_01"},
+                         {"start": 1, "text": None, "speaker": "SPEAKER_01"},
+                         {"start": 2, "speaker": "SPEAKER_01"},
+                         "not a line",
+                         {"start": 3.0, "text": "kept", "speaker": "SPEAKER_01"}],
+            "words": []}
+    mfile("2026-03-03 Hand Edit", ".json").write_text(json.dumps(data))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-03 Hand Edit"))).paragraphs]
+    # the bad date falls back to the folder name's date, the null duration
+    # is left out, and only the speaker with a display is listed
+    assert "March 3, 2026  ·  Sam Chen" in text
+    assert text.count("Sam Chen") == 2       # two lines with no timestamp
+    assert "Sam Chen  [00:03]" in text
+    assert [t for t in text if t in ("no start", "null start", "kept")] == [
+        "no start", "null start", "kept"]
+    h = export.to_html("2026-03-03 Hand Edit")
+    assert h.count('<div class="seg">') == 3 and '<span class="ts">00:03</span>' in h
+
+    # nothing for the meta line at all: the Word file still writes
+    mfile("Bare Hand Edit", ".json").write_text(json.dumps(
+        {"duration_sec": "long", "speakers": None, "segments": None}))
+    assert export.to_docx("Bare Hand Edit").exists()
+
+
+@pytest.mark.parametrize("raw", ['{"segments": [{"start":', "[]", "null", "\udcff"])
+def test_an_unreadable_meeting_json_fails_the_export_with_its_own_message(sandbox, raw):
+    """A truncated json or one that is not an object failed with a raw
+    JSONDecodeError or AttributeError. It is a UserError now, and the panel
+    shows its text."""
+    from stt.errors import UserError
+    f = mfile("2026-03-04 Damaged", ".json")
+    if raw == "\udcff":
+        f.write_bytes(b"\xff\xfe{")
+    else:
+        f.write_text(raw)
+    for fn in (export.to_docx, export.to_html):
+        with pytest.raises(UserError, match="cannot be read"):
+            fn("2026-03-04 Damaged")
+
+
 def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     _mk_full(sandbox)
     monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))
