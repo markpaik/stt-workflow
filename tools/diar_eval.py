@@ -858,36 +858,48 @@ def load_current_baseline(out_root: Path):
     if not p.exists():
         return None, None
     try:
-        return name, json.loads(p.read_text())
-    except json.JSONDecodeError:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
         return None, None
+    # a baseline that parses but is no board ([1], "x") is no baseline
+    return (name, data) if isinstance(data, dict) else (None, None)
+
+
+def _obj(v) -> dict:
+    return v if isinstance(v, dict) else {}
 
 
 def compute_deltas(baseline: dict, board: dict, name: str):
-    """Headline + per-source + per-band accuracy movements vs the baseline."""
+    """Headline + per-source + per-band accuracy movements vs the baseline.
+
+    The baseline is read with .get chains: a hand-edited or partial file
+    with no "headline" or "run" raised KeyError after the whole scoring
+    run, before the scoreboard was written, and the run's work was lost.
+    A section it lacks gives no old value."""
     metrics = {}
 
     def _add(key, old, new):
         if old is not None or new is not None:
             metrics[key] = (old, new)
 
-    _add("overall", baseline["headline"]["turn_accuracy_overall"],
+    old_sources = _obj(baseline.get("sources"))
+    _add("overall", _obj(baseline.get("headline")).get("turn_accuracy_overall"),
          board["headline"]["turn_accuracy_overall"])
     for src in ("reviews", "stereo", "synth"):
-        b_old = (baseline["sources"].get(src) or {})
+        b_old = _obj(old_sources.get(src))
         b_new = (board["sources"].get(src) or {})
         _add(src, b_old.get("accuracy"), b_new.get("accuracy"))
         for label in BAND_LABELS:
-            ob = (b_old.get("by_band") or {}).get(label, {})
+            ob = _obj(_obj(b_old.get("by_band")).get(label))
             nb = (b_new.get("by_band") or {}).get(label, {})
             if ob.get("n") or nb.get("n"):
                 _add(f"{src} {label}", ob.get("accuracy"), nb.get("accuracy"))
-    if (baseline["sources"].get("synth") or {}).get("frame_der_like_mean") is not None:
-        _add("synth frame DER-like",
-             baseline["sources"]["synth"]["frame_der_like_mean"],
+    old_der = _obj(old_sources.get("synth")).get("frame_der_like_mean")
+    if old_der is not None:
+        _add("synth frame DER-like", old_der,
              (board["sources"].get("synth") or {}).get("frame_der_like_mean"))
     return {"baseline_name": name,
-            "baseline_date": baseline["run"]["date"],
+            "baseline_date": _obj(baseline.get("run")).get("date"),
             "metrics": metrics}
 
 

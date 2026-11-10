@@ -326,3 +326,24 @@ def test_scoreboard_handles_empty_sources(tmp_path):
     assert board["headline"]["turn_accuracy_overall"] is None
     assert board["headline"]["n_labeled_turns"] == 0
     assert (run_dir / "scoreboard.md").exists()
+
+
+def test_a_partial_or_non_object_baseline_still_writes_the_scoreboard(tmp_path):
+    """compute_deltas indexed baseline["headline"] and baseline["run"], so a
+    partial baseline raised "KeyError: 'headline'" after the whole scoring
+    run, before scoreboard.json was written. A baseline that parses but is
+    not an object ([1]) is no baseline."""
+    deltas = diar_eval.compute_deltas(
+        {"sources": {"synth": {"by_band": [1]}}, "run": {"date": "x"}},
+        {"headline": {"turn_accuracy_overall": None}, "sources": {}, "run": {}}, "n")
+    assert deltas == {"baseline_name": "n", "baseline_date": "x", "metrics": {}}
+    out_root = tmp_path / "evalout"
+    bdir = out_root / "baselines"
+    bdir.mkdir(parents=True)
+    (bdir / "CURRENT").write_text("old\n")
+    empty = {"stereo": diar_eval.aggregate_rows([])}
+    for stored in ({"sources": {}}, {"headline": 3, "run": []}, [1], "x"):
+        (bdir / "old.json").write_text(json.dumps(stored))
+        run_dir, board, _ = diar_eval.write_scoreboard(out_root, "2026-07-15", empty)
+        assert (run_dir / "scoreboard.json").exists()
+        assert (run_dir / "scoreboard.md").exists()
