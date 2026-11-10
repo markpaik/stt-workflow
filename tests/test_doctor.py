@@ -151,7 +151,36 @@ def test_fix_repairs_and_journals_then_undo_restores(lib):
     assert dry["restored"] and _manifest() == m
     u = doctor.undo(r["run"], dry_run=False)
     assert not u["kept"]
-    assert _tree(config.PROJECT_DIR) == before
+    # every file is back but the stale stop flag, which undo never restores
+    flag = str(control.STOP_FLAG.relative_to(config.PROJECT_DIR))
+    assert u["skipped"] == [str(control.STOP_FLAG)]
+    assert _tree(config.PROJECT_DIR) == {k: v for k, v in before.items() if k != flag}
+
+
+def test_undo_says_what_it_cannot_undo_and_never_restores_a_stop_flag(
+        sandbox, monkeypatch, tmp_path, capsys):
+    """undo printed 'restored 3 file(s)' after a fix that also rotated a
+    log, as if the whole run were back, and it put the stale stopping.flag
+    back, so the next check reported stale_stop_flag again."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setattr(config, "LOG_DIR", sandbox / "logs")
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 1000)
+    logs = config.LOG_DIR
+    logs.mkdir(exist_ok=True)
+    (logs / "big.log").write_bytes(b"x" * 12000)
+    control.STOP_FLAG.write_text("x")
+    holds.PATH.write_text(json.dumps(["Not Here.m4a"]))
+    r = doctor.fix(dry_run=False, registry=False)
+    assert any(d.startswith("rotated 1 log") for d in r["done"])
+    assert not control.STOP_FLAG.exists()
+    capsys.readouterr()
+    assert doctor_cli.main(["undo", r["run"], "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "not restored: stopping.flag" in out
+    assert "not undone: rotated 1 log(s)" in out and ".gz" in out
+    assert not control.STOP_FLAG.exists()
+    assert json.loads(holds.PATH.read_text()) == ["Not Here.m4a"]
+    assert "stale_stop_flag" not in {f.kind for f in doctor.check(registry=False)}
 
 
 def test_undo_keeps_a_file_changed_since(lib):
