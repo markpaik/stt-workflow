@@ -523,7 +523,13 @@ def frame_metrics(truth_turns, segments, duration, hop=0.01):
     """DER-style frame accounting with KNOWN identities (no permutation
     search): at each 10 ms frame, the predicted name must be one of the truth
     speakers active there. Returns miss / false-alarm / confusion rates over
-    truth speech time, plus their sum (der_like)."""
+    truth speech time, plus their sum (der_like).
+
+    An unnamed cluster ("name": None) is speech with no identity: on truth
+    speech it is a miss, not a wrong name, and on silence a false alarm.
+    _norm_name(None) is "", which is not None, so it read as confusion.
+    Every segment over a frame is read: the first one alone scored a frame
+    as confusion when a later overlapping segment named the speaker."""
     n = max(1, int(duration / hop))
     miss = fa = err = speech = 0
     # precompute sorted spans for scanning
@@ -532,14 +538,15 @@ def frame_metrics(truth_turns, segments, duration, hop=0.01):
     for i in range(n):
         t = (i + 0.5) * hop
         active = {nm for a, b, nm in t_idx if a <= t < b}
-        pred = next((nm for a, b, nm in s_idx if a <= t < b), None)
+        cover = [nm for a, b, nm in s_idx if a <= t < b]
+        named = {nm for nm in cover if nm}
         if active:
             speech += 1
-            if pred is None:
+            if not named:
                 miss += 1
-            elif pred not in active:
+            elif not named & active:
                 err += 1
-        elif pred is not None:
+        elif cover:
             fa += 1
     if not speech:
         return {"miss": None, "false_alarm": None, "confusion": None,

@@ -177,6 +177,25 @@ def test_span_speaker_majority_overlap():
     assert diar_eval.span_speaker(segs, 10.0, 11.0) is None    # no overlap at all
 
 
+def test_frame_metrics_reads_an_unnamed_cluster_as_miss_and_every_overlap():
+    """_norm_name(None) is "", which is not None, so an unnamed segment over
+    truth speech read as confusion 1.0 instead of miss 1.0. Only the first
+    covering segment was read, so a correct overlapping second segment
+    still scored the frame as confusion."""
+    truth = [{"start": 0, "end": 2, "speaker": "Ann"}]
+    unnamed = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": None}], 2)
+    assert unnamed == {"miss": 1.0, "false_alarm": 0.0, "confusion": 0.0,
+                       "der_like": 1.0}
+    both = [{"start": 0, "end": 2, "name": "Bob"}, {"start": 0, "end": 2, "name": "Ann"}]
+    assert diar_eval.frame_metrics(truth, both, 2)["der_like"] == 0.0
+    wrong = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": "Bob"}], 2)
+    assert wrong["confusion"] == 1.0 and wrong["miss"] == 0.0
+    # an unnamed segment over silence still claims speech: a false alarm
+    quiet = diar_eval.frame_metrics(truth, [{"start": 0, "end": 2, "name": "Ann"},
+                                            {"start": 2, "end": 3, "name": None}], 3)
+    assert quiet["false_alarm"] == 0.5 and quiet["miss"] == 0.0
+
+
 def test_aggregate_rows_bands_and_confusions():
     rows = [
         {"meeting": "M", "dur": 0.2, "truth": "A", "predicted": "B", "correct": False},
