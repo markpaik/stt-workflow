@@ -184,8 +184,9 @@ two-step.
 **Activity.** Process all new, Import files, Pause or Resume, Stop
 (two-step), the four run options for the next manual run, then Needs
 attention, Running now, Queued runs with Cancel, Waiting (Process, Hold,
-two-step Delete), Failed (full error text, Retry, Dismiss), and Finished
-recently. Chips switch to Running, Waiting, Failed, History, Duplicates.
+two-step Delete), Failed (full error text, Retry, Dismiss), Finished
+recently, and Removed from Voice Memos (the memos the delete after ingest
+moved in the last 14 days, with any manual delete that waits). Chips switch to Running, Waiting, Failed, History, Duplicates.
 
 **Speakers.** Unknown voices, most meetings first, each with play, Name (the
 voice sheet), Hide, and up to two "Same voice as Speaker N · 0.72" Link

@@ -157,8 +157,10 @@ A recording can come from three places:
   rules: recorded on or after `STT_VOICEMEMOS_SINCE`, at least 3 minutes
   long, unchanged for 5 minutes, never copied before, and not in Recently
   Deleted. It reads a private copy of the Voice Memos database and never
-  writes to the library. The memo's start time becomes the meeting date, and
-  a title you typed in Voice Memos becomes the meeting title.
+  writes a file in the library. The memo's start time becomes the meeting
+  date, and a title you typed in Voice Memos becomes the meeting title. The
+  memo stays in Voice Memos unless you turn on
+  [removing memos after ingest](#removing-memos-from-voice-memos).
 - **A file.** Drop audio or video anywhere on the panel, use Import files on
   the Activity page, or put a file in the watched folder (iCloud Drive's
   `Voice Recordings` by default). Anything ffmpeg reads works.
@@ -193,6 +195,87 @@ so every file name in the folder stays under the 255-byte limit of macOS.
 Recordings lists every meeting by day and month with its title, date,
 length, people, and gist. A recording under a minute shows its length in
 seconds ("48 sec").
+
+### Removing memos from Voice Memos
+
+With `STT_VM_DELETE_AFTER_INGEST=1` in `stt.env`, the batch moves each memo
+it has stored to Recently Deleted in Voice Memos. It never erases a memo for
+good. Recently Deleted keeps the memo as long as the **Clear Deleted**
+setting in Voice Memos says (30 days by default), and you can recover it
+there. The setting is off by default.
+
+Once per batch run, after the descriptions are written, the batch moves a
+memo only when all of these hold:
+
+- the sync copied it, and the batch stored that copy;
+- its meeting is still in the library, and the stored audio is there and
+  runs within 2 seconds of the memo's own length;
+- the memo is still in Voice Memos and not in Recently Deleted;
+- its title is not blank, and no other memo has the same title, either live
+  or in Recently Deleted (letter case and extra spaces do not count).
+
+The batch reads a fresh copy of the Voice Memos database right before each
+delete and again after it. A delete counts only when that memo is now in
+Recently Deleted and every other memo is where it was. A memo whose title
+is blank or shared waits for you to delete it by hand. A failed try waits
+30 minutes, then 2 hours, then 8 hours. After the fourth failure the memo
+waits for you too. If any other memo goes missing during a delete, every
+delete stops until you check Voice Memos and run
+`./run.sh py tools/vm_delete.py --clear-halt`.
+
+The batch log (`logs/stt.out.log`) gets one line for each memo it moves,
+such as `Voice Memos: moved "Budget Review" to Recently Deleted (stored as
+2026-11-03 Budget Review)`. The Activity page lists the memos moved in the
+last 14 days under "Removed from Voice Memos", with any memo that waits for
+a manual delete. A run into a folder other than the library never deletes.
+The real Shortcut runs only when the sync reads this Mac's own Voice Memos
+library, so a demo home under `STT_HOME` never deletes either.
+
+The batch deletes through a Shortcut, so the Voice Memos app makes each
+change itself. Build it once:
+
+1. Open the Shortcuts app and make a new shortcut. Name it
+   `STT Delete Voice Memo`. Another name works if you set
+   `STT_VM_DELETE_SHORTCUT` to it.
+2. In the shortcut's details, turn on input so the first block reads
+   **Receive Text input**. The batch passes the memo's title as a text file.
+3. Add **Get Text from Input**, with **Shortcut Input** as its input.
+4. Add **Find Recordings** (Voice Memos). Add the filter **Name** **is**,
+   and choose the **Text** from step 3 as its value. Leave sorting and the
+   limit off.
+5. Add **Count**, counting **Items** in **Recordings** from step 4.
+6. Add **If**: **Count** **is** **1**. Inside the If, add
+   **Delete Recording** (Voice Memos) with **Recordings** from step 4. Leave
+   the Otherwise branch empty.
+7. After **End If**, add **Text** holding only the **Count** variable, then
+   **Stop and Output** that **Text**.
+
+Then let it run without a prompt, and keep deleted memos recoverable:
+
+1. In Shortcuts, open Settings, then Advanced, and turn on
+   **Allow Deleting Without Confirmation**.
+2. In Voice Memos, open Settings and check that **Clear Deleted** is a
+   number of days. With **Immediately**, a delete erases the memo at once,
+   and the batch stops every delete when it sees a memo leave the database.
+3. Test it once on a throwaway memo. Record a few seconds in Voice Memos,
+   title it `STT delete test`, and run:
+
+   ```bash
+   printf 'STT delete test' > /tmp/stt-title.txt
+   shortcuts run "STT Delete Voice Memo" --input-path /tmp/stt-title.txt --output-path /tmp/stt-count.txt
+   cat /tmp/stt-count.txt
+   ```
+
+   It should print `1`, and the memo should be in Recently Deleted. If
+   Shortcuts or Voice Memos asks for permission, choose **Always Allow**. A
+   prompt that nobody answers makes the batch time out after 60 seconds.
+4. Preview the step with `./run.sh py tools/vm_delete.py`. It lists every
+   memo the sync copied and what the next pass would do, and it never runs
+   the Shortcut. `--apply` runs one pass now, even with the setting off.
+5. Set `STT_VM_DELETE_AFTER_INGEST=1` in `stt.env`.
+
+The first pass also moves memos stored before you turned the setting on,
+at most 5 per run.
 
 ### Naming speakers
 
@@ -426,10 +509,11 @@ appearance. The panel never displays a saved key again. It shows only that
 a key exists.
 
 An unreadable `STT_ASR_BACKEND`, `STT_DIARIZER`, `STT_SPEAKRS_AHC`,
-`STT_SPEAKRS_TIMEOUT_SEC`, `STT_OLLAMA_URL`, or `STT_LLM_QUIET_HOURS` prints
-one warning that names it, and the code falls back as the tables below say.
-`./run.sh py tools/doctor.py check` lists a bad `STT_ASR_BACKEND`,
-`STT_OLLAMA_URL`, or `STT_LLM_QUIET_HOURS` as `bad_setting`.
+`STT_SPEAKRS_TIMEOUT_SEC`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`, or
+`STT_VM_DELETE_AFTER_INGEST` prints one warning that names it, and the code
+falls back as the tables below say. `./run.sh py tools/doctor.py check`
+lists a bad `STT_ASR_BACKEND`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`, or
+`STT_VM_DELETE_AFTER_INGEST` as `bad_setting`.
 
 ### Folders and sources
 
@@ -442,6 +526,8 @@ one warning that names it, and the code falls back as the tables below say.
 | `STT_VOICEMEMOS_SYNC` | `1` | `0` turns the Voice Memos sync off |
 | `STT_VOICEMEMOS_SINCE` | `2026-11-02` | The sync copies memos recorded on or after this day |
 | `STT_VOICEMEMOS_PLACES` | empty | Comma-separated place names that Voice Memos uses as default titles here, so they are not read as typed titles |
+| `STT_VM_DELETE_AFTER_INGEST` | `0` | `1` moves each memo the batch has stored to Recently Deleted in Voice Memos ([Removing memos from Voice Memos](#removing-memos-from-voice-memos)). Any value other than `0` or `1` prints a warning and stays off. `STT_VOICEMEMOS_SYNC=0` turns it off too |
+| `STT_VM_DELETE_SHORTCUT` | `STT Delete Voice Memo` | The name of the Shortcut that does the delete |
 | `STT_MOVE_AFTER_SUCCESS` | `1` | `0` keeps the originals in the watched folder |
 | `STT_MIC_SPEAKER` | empty | Your name, so the recorder's microphone channel is labeled as you |
 
@@ -511,6 +597,7 @@ journal outside the repo (`~/Library/Application Support/com.stt-workflow/migrat
 | `registry_doctor.py` | Checks and repairs the voice registries alone |
 | `rebuild_voiceprints.py` | Rebuilds the voiceprint registry from meeting caches after a loss |
 | `purge.py` | Removes one meeting from every store: folder, manifest, search index, voice samples, and unknown voices heard only there |
+| `vm_delete.py` | Lists every memo the Voice Memos sync copied and what the delete after ingest would do with it, and never runs the Shortcut. `--apply` runs one pass now, and `--clear-halt` resumes deletes after a stop |
 | `fix_dates.py` | Corrects dates that a better source contradicts (a Voice Memos start time, a short typed date) |
 | `backfill_keys.py` | Adds missing store keys (`title`, `source_name`, `audio_fp`, `date_source`, `recorded_at`) |
 | `restamp_folders.py` | Adds the date to folders that predate the date-in-name rule |
@@ -537,6 +624,13 @@ never the checkout's own, and exports land in `$STT_HOME/exports`.
   Full Disk Access. A memo shorter than 3 minutes, one still recording, one
   in Recently Deleted, or one from before `STT_VOICEMEMOS_SINCE` is skipped
   on purpose.
+- **A stored memo stays in Voice Memos.** Run `./run.sh py
+  tools/vm_delete.py` to see why. A `voicememos_shortcut_missing` finding
+  from the doctor means the Shortcut is not installed under its name. A
+  `voicememos_manual_delete` finding counts memos to delete by hand, most
+  often because two memos share a title. A `voicememos_delete_halted`
+  finding means a delete left another memo missing: check Voice Memos and
+  its Recently Deleted, then run `tools/vm_delete.py --clear-halt`.
 - **Speaker separation is slow.** The speakrs helper or its models are
   missing, so the pipeline fell back to pyannote. Install Rust, then re-run
   `./init.sh`, or build `native/speakrs` and run
