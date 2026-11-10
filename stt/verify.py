@@ -145,15 +145,21 @@ def run(wav, primary_words, primary_engine, progress=None):
 def apply_flags(segments, regs):
     """Flag every segment a disagreement region touches and attach the second
     engine's candidate text so the review dialog can offer it."""
+    found = [[] for _ in segments]
+    for r in regs:
+        ov = [min(seg["end"], r["end"]) - max(seg["start"], r["start"])
+              for seg in segments]
+        # A region flags the segments it lies in (overlap > 0). Only a region
+        # that lies in none flags the segments it touches (overlap == 0): a
+        # zero-width pure insertion, which computes exactly 0 against the
+        # segment it sits inside, or an insertion in the gap between two
+        # lines. ">= 0" for every region also flagged both neighbours of a
+        # region that only touched them at an end point.
+        inside = [i for i, o in enumerate(ov) if o > 0]
+        for i in inside or [i for i, o in enumerate(ov) if o >= 0]:
+            found[i].append(r)
     n = 0
-    for seg in segments:
-        # >= 0, not > 0: a zero-width region (a pure insertion with no
-        # inter-word gap, r["start"] == r["end"]) always computes an overlap
-        # of exactly 0 against ANY segment it sits inside — never negative
-        # unless it's genuinely outside the segment — so a strict > 0 check
-        # let every zero-width disagreement escape flagging entirely.
-        hits = [r for r in regs
-                if min(seg["end"], r["end"]) - max(seg["start"], r["start"]) >= 0]
+    for seg, hits in zip(segments, found):
         if not hits or seg.get("reviewed"):
             continue
         if FLAG not in seg.setdefault("flags", []):

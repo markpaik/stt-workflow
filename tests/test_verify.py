@@ -189,3 +189,21 @@ def test_a_second_engine_that_stops_early_flags_no_tail(monkeypatch, capsys):
     # a few unheard words at the end are a disagreement, not a stopped engine
     assert verify.heard(primary, primary[:-2]) == primary
     assert verify.heard(primary, []) == primary
+
+
+def test_apply_flags_skips_a_neighbour_that_only_touches_the_region():
+    """The overlap test was >= 0 for every region, so a region that lies in
+    one segment also flagged both neighbours that end or start at its edge.
+    A region that lies in no segment still flags the ones it touches."""
+    def segs():
+        return [{"start": 0.0, "end": 5.0, "text": "a"},
+                {"start": 5.0, "end": 9.0, "text": "b"},
+                {"start": 9.0, "end": 12.0, "text": "c"}]
+    s = segs()
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 9.0, "ours": "x", "theirs": "y"}]) == 1
+    assert [x.get("flags") for x in s] == [None, [verify.FLAG], None]
+    s = segs()                                      # zero width on a shared edge
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 5.0, "ours": "", "theirs": "y"}]) == 2
+    assert [bool(x.get("flags")) for x in s] == [True, True, False]
+    s = [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 6.0, "end": 9.0, "text": "b"}]
+    assert verify.apply_flags(s, [{"start": 5.0, "end": 6.0, "ours": "", "theirs": "y"}]) == 2
