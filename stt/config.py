@@ -519,16 +519,10 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"
 
 def _env_file() -> dict:
     """Parse stt.env (the persisted settings file) fresh — long-running processes
-    (the GUI) call these instead of the import-time constants above."""
-    p = PROJECT_DIR / "stt.env"
-    kv = {}
-    if p.exists():
-        for ln in p.read_text().splitlines():
-            s = ln.strip()
-            if s and not s.startswith("#") and "=" in s:
-                k, v = s.split("=", 1)
-                kv[k.strip()] = v.strip()
-    return kv
+    (the GUI) call these instead of the import-time constants above. The
+    rules (quotes, comments, repeats) are stt/envfile.py's."""
+    from . import envfile
+    return envfile.parse(PROJECT_DIR / "stt.env")
 
 
 def source_dir() -> Path:

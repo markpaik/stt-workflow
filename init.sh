@@ -13,7 +13,7 @@
 #   6. Models           — optional pre-download (~3 GB) so night one isn't slow
 #   7. Optional extras  — local LLM for summaries; automation (LaunchAgents)
 set -uo pipefail
-BASE="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVF="$BASE/stt.env"
 
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -23,7 +23,30 @@ fail()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 ask()   { local a; read -r -p "  → $1 " a </dev/tty; echo "$a"; }
 yes_no() { local a; a="$(ask "$1 [Y/n]")"; [[ ! "$a" =~ ^[Nn] ]]; }
 
-env_get() { [ -f "$ENVF" ] && grep -E "^$1=" "$ENVF" | head -1 | cut -d= -f2- || true; }
+# stt.env is read by stt/envfile.py's rules: keys and values trimmed, one
+# pair of matching quotes around a value removed, a later line wins.
+_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+_unquote() {
+  local v; v="$(_trim "$1")"
+  if [ "${#v}" -ge 2 ]; then
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+  fi
+  printf '%s' "$v"
+}
+_env_key() {  # the key of one stt.env line, or nothing for a comment or a blank
+  local line; line="$(_trim "$1")"
+  case "$line" in ''|\#*) return 0 ;; esac
+  [ "${line#*=}" = "$line" ] && return 0
+  _trim "${line%%=*}"
+}
+env_get() {
+  local line out=""
+  [ -f "$ENVF" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ "$(_env_key "$line")" = "$1" ] && out="$(_unquote "${line#*=}")"
+  done < "$ENVF"
+  printf '%s' "$out"
+}
 env_set() {  # env_set KEY VALUE — update-or-append, preserving other lines
   touch "$ENVF"; chmod 600 "$ENVF"
   if grep -qE "^$1=" "$ENVF"; then
@@ -32,6 +55,9 @@ env_set() {  # env_set KEY VALUE — update-or-append, preserving other lines
     echo "$1=$2" >> "$ENVF"
   fi
 }
+
+# sourced (the tests load the helpers above): stop before the setup steps
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 bold "STT Workflow — first-run setup"
 echo "  Everything runs on this Mac; nothing is uploaded unless you later add a"

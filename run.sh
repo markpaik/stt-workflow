@@ -11,12 +11,26 @@ export PYTHONPATH="$BASE"
 # pipefail runs the text after the first space as a command and aborts.
 # Under STT_HOME (a demo or test home) the settings file is $STT_HOME/stt.env,
 # as stt/config.py says: the checkout's file names the REAL library folders.
+# The rules are stt/envfile.py's: keys and values trimmed, one pair of
+# matching quotes around a value removed, a key that is not a shell name
+# skipped (export would abort the script under set -e).
 ENVDIR="${STT_PROJECT_DIR:-${STT_HOME:-$BASE}}"
+_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+_unquote() {
+  local v; v="$(_trim "$1")"
+  if [ "${#v}" -ge 2 ]; then
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+  fi
+  printf '%s' "$v"
+}
 if [ -f "$ENVDIR/stt.env" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
+    line="$(_trim "$line")"
     case "$line" in ''|\#*) continue ;; esac
     [ "${line#*=}" = "$line" ] && continue  # no '=' -> not an assignment
-    export "${line%%=*}=${line#*=}"
+    key="$(_trim "${line%%=*}")"
+    case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+    export "$key=$(_unquote "${line#*=}")"
   done < "$ENVDIR/stt.env"
 fi
 

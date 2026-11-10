@@ -2,7 +2,7 @@
 # Install/manage the launchd agents (nightly batch + menu-bar app).
 # Plists are GENERATED here with your paths — nothing personal lives in the repo.
 set -euo pipefail
-BASE="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 U="$(id -u)"
 AGENTS="$HOME/Library/LaunchAgents"
 BATCH_LABEL="com.stt-workflow.batch"
@@ -10,22 +10,41 @@ GUI_LABEL="com.stt-workflow.menubar"
 BATCH_PLIST="$AGENTS/$BATCH_LABEL.plist"
 GUI_PLIST="$AGENTS/$GUI_LABEL.plist"
 
+_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+_unquote() {
+  local v; v="$(_trim "$1")"
+  if [ "${#v}" -ge 2 ]; then
+    case "$v" in \"*\"|\'*\') v="${v:1:${#v}-2}" ;; esac
+  fi
+  printf '%s' "$v"
+}
+
+env_get() {  # env_get KEY: the value stt.env gives KEY, by stt/envfile.py's rules
+  local f="$BASE/stt.env" line key out=""
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(_trim "$line")"
+    case "$line" in ''|\#*) continue ;; esac
+    [ "${line#*=}" = "$line" ] && continue
+    key="$(_trim "${line%%=*}")"
+    [ "$key" = "$1" ] && out="$(_unquote "${line#*=}")"   # a later line wins
+  done < "$f"
+  printf '%s' "$out"
+}
+
 source_dir() {
-  local d=""
-  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_ICLOUD_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  local d; d="$(env_get STT_ICLOUD_DIR)"
   echo "${d:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings}"
 }
 
 recordings_dir() {
-  local d=""
-  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_RECORDINGS_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  local d; d="$(env_get STT_RECORDINGS_DIR)"
   echo "${d:-$HOME/Library/Application Support/com.stt-workflow/recordings}"
 }
 
 voicememos_dir() {
   # the Voice Memos library on this Mac (read only; stt/voicememos.py)
-  local d=""
-  [ -f "$BASE/stt.env" ] && d="$(grep -E '^STT_VOICEMEMOS_DIR=' "$BASE/stt.env" | cut -d= -f2- || true)"
+  local d; d="$(env_get STT_VOICEMEMOS_DIR)"
   echo "${d:-$HOME/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings}"
 }
 
@@ -111,6 +130,9 @@ write_gui_plist() {
 </plist>
 EOF
 }
+
+# sourced (the tests load the functions above): stop before the commands
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
   install-agent)
