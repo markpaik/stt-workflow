@@ -149,7 +149,8 @@ def undo(run_id: str, fields=None, store=None, journal_dir=None, dry_run=True) -
     """Remove each journaled key whose current value still equals the value
     this run wrote. A key changed since keeps the change."""
     store = Path(store) if store else config.meetings_dir()
-    entries = [e for e in fj.entries(run_id, journal_dir)
+    entries = [e for e in fj.entries(run_id, journal_dir, valid=fj.field_entry,
+                                     tool="backfill_keys")
                if not fields or e["field"] in fields]
     by_id = fj.bases_by_id(store)
     live = set(config.meeting_bases(store))

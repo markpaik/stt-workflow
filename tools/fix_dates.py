@@ -148,7 +148,8 @@ def undo(run_id: str, store=None, journal_dir=None, dry_run=True) -> dict:
     by_id = fj.bases_by_id(store)
     live = set(config.meeting_bases(store))
     restored, kept, missing, skipped = [], [], [], []
-    for e in reversed(fj.entries(run_id, journal_dir)):
+    for e in reversed(fj.entries(run_id, journal_dir, valid=fj.date_entry,
+                                 tool="fix_dates")):
         base = by_id.get(e.get("meeting_id")) or (e["base"] if e["base"] in live else None)
         if base is None:
             missing.append({"base": e["base"]})

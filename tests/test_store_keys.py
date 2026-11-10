@@ -423,6 +423,29 @@ def test_the_date_fix_restamps_the_folder_and_records_the_source(dated):
     assert fix_dates.plan() == []
 
 
+def test_an_undo_given_another_tools_journal_is_no_such_run(dated, capsys):
+    """Every journal sits in config.migration_dir() and every run id is a
+    plain name, so 'fix_dates --undo amnesty-1' read an amnesty journal:
+    e["new"]["date"] on a string raised TypeError, and 'backfill_keys
+    --undo fixdates-1' raised KeyError 'field'. Each undo now refuses a
+    journal of another shape, as it refuses an unknown run."""
+    from stt import fieldjournal as fj
+    mig = config.migration_dir()
+    mig.mkdir(parents=True, exist_ok=True)
+    base = config.meeting_bases()[0]
+    (mig / "amnesty-1.jsonl").write_text(json.dumps(
+        {"run": "amnesty-1", "meeting_id": None, "base": base, "field": "route",
+         "old": {"$missing": True}, "new": "native"}) + "\n")
+    r = fix_dates.apply()
+    for call in (lambda: fix_dates.undo("amnesty-1"),
+                 lambda: backfill_keys.undo(r["run"])):
+        with pytest.raises(fj.NoSuchRun, match="is not a journal of"):
+            call()
+    assert fix_dates.main(["--undo", "amnesty-1"]) == 1
+    assert "amnesty-1 is not a journal of fix_dates" in capsys.readouterr().err
+    assert fix_dates.undo(r["run"])["restored"]            # its own still undoes
+
+
 def test_the_date_fix_undo_puts_the_old_date_and_folder_back(dated):
     before = {b: _load(b) for b in config.meeting_bases()}
     r = fix_dates.apply()

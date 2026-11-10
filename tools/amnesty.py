@@ -229,7 +229,8 @@ def apply(store=None, journal_dir=None, run_id=None) -> dict:
 
 def _journal_entries(run_id: str, journal_dir=None) -> list:
     from stt import fieldjournal
-    return fieldjournal.entries(run_id, journal_dir)
+    return fieldjournal.entries(run_id, journal_dir, valid=fieldjournal.field_entry,
+                                tool="amnesty")
 
 
 def _bases_by_id(store=None) -> dict:
