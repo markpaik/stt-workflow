@@ -32,6 +32,10 @@ env_get() {  # env_get KEY: the value stt.env gives KEY, by stt/envfile.py's rul
   printf '%s' "$out"
 }
 
+# A path goes into the plist XML as text: '&', '<' and '>' must be escaped,
+# or a folder named "R & D" made a plist launchctl rejects.
+xml() { printf '%s' "$1" | /usr/bin/sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
 source_dir() {
   local d; d="$(env_get STT_ICLOUD_DIR)"
   echo "${d:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings}"
@@ -51,6 +55,7 @@ voicememos_dir() {
 write_batch_plist() {
   mkdir -p "$AGENTS" "$BASE/logs"
   mkdir -p "$(recordings_dir)"   # launchd can only watch a path that exists
+  local X; X="$(xml "$BASE")"
   cat > "$BATCH_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,14 +66,14 @@ write_batch_plist() {
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/caffeinate</string><string>-i</string><string>-s</string>
-    <string>$BASE/.venv/bin/python</string>
-    <string>$BASE/run_batch.py</string>
+    <string>$X/.venv/bin/python</string>
+    <string>$X/run_batch.py</string>
   </array>
-  <key>WorkingDirectory</key><string>$BASE</string>
+  <key>WorkingDirectory</key><string>$X</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>PYTHONPATH</key><string>$BASE</string>
+    <key>PYTHONPATH</key><string>$X</string>
     <key>PYTORCH_ENABLE_MPS_FALLBACK</key><string>1</string>
   </dict>
   <!-- Layered triggers (the in-code flock makes them all safe):
@@ -83,16 +88,16 @@ write_batch_plist() {
   <key>StartInterval</key><integer>600</integer>
   <key>WatchPaths</key>
   <array>
-    <string>$(source_dir)</string>
-    <string>$(recordings_dir)</string>
+    <string>$(xml "$(source_dir)")</string>
+    <string>$(xml "$(recordings_dir)")</string>
     <!-- Voice Memos sync: a new memo wakes the batch, which copies it under
          the allow-list. The library is read, never written. -->
-    <string>$(voicememos_dir)</string>
+    <string>$(xml "$(voicememos_dir)")</string>
   </array>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$BASE/logs/stt.out.log</string>
-  <key>StandardErrorPath</key><string>$BASE/logs/stt.err.log</string>
+  <key>StandardOutPath</key><string>$X/logs/stt.out.log</string>
+  <key>StandardErrorPath</key><string>$X/logs/stt.err.log</string>
   <!-- No ProcessType or LowPriorityIO: a Nov 2026 A/B on one ~19-minute file
        under launchd measured speaker separation about 2.3x slower with them
        (1423 s and 1447 s) than without (627 s). No Nice either: the batch
@@ -104,6 +109,7 @@ EOF
 
 write_gui_plist() {
   mkdir -p "$AGENTS" "$BASE/logs"
+  local X; X="$(xml "$BASE")"
   cat > "$GUI_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,20 +118,20 @@ write_gui_plist() {
   <key>Label</key><string>$GUI_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$BASE/.venv/bin/python</string>
-    <string>$BASE/gui/menubar.py</string>
+    <string>$X/.venv/bin/python</string>
+    <string>$X/gui/menubar.py</string>
   </array>
-  <key>WorkingDirectory</key><string>$BASE</string>
+  <key>WorkingDirectory</key><string>$X</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>PYTHONPATH</key><string>$BASE</string>
+    <key>PYTHONPATH</key><string>$X</string>
   </dict>
   <!-- Start at login; restart on crash, but respect a clean Quit (exit 0). -->
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>$BASE/logs/gui.out.log</string>
-  <key>StandardErrorPath</key><string>$BASE/logs/gui.err.log</string>
+  <key>StandardOutPath</key><string>$X/logs/gui.out.log</string>
+  <key>StandardErrorPath</key><string>$X/logs/gui.err.log</string>
 </dict>
 </plist>
 EOF

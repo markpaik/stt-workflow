@@ -109,3 +109,57 @@ def test_setup_sh_reads_a_quoted_watched_folder(tmp_path):
                        env=_clean_env(HOME=str(tmp_path / "home")))
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "/Users/x/My Recordings"
+
+
+# ---------- the generated launchd plists ----------
+
+def _write_plists(base: Path, home: Path, env_text: str = ""):
+    """Source setup.sh from a copy at `base` and write both plists into a
+    throwaway HOME. launchctl is never called: only the writers run."""
+    base.mkdir(parents=True)
+    shutil.copy(REPO / "setup.sh", base / "setup.sh")
+    if env_text:
+        (base / "stt.env").write_text(env_text)
+    sh = f'source "{base}/setup.sh"; write_batch_plist; write_gui_plist'
+    r = subprocess.run(["/bin/bash", "-c", sh], capture_output=True, text=True,
+                       env=_clean_env(HOME=str(home)))
+    assert r.returncode == 0, r.stderr
+    agents = home / "Library" / "LaunchAgents"
+    return (agents / "com.stt-workflow.batch.plist",
+            agents / "com.stt-workflow.menubar.plist")
+
+
+def test_a_path_with_an_ampersand_makes_valid_plists(tmp_path):
+    """setup.sh wrote paths into the plist XML unescaped. A checkout or a
+    watched folder named 'R & D' made a plist that plutil -lint rejects
+    ('unknown ampersand-escape sequence'), so launchctl would not load the
+    nightly batch or the menu bar."""
+    import plistlib
+    base = tmp_path / "R & D <stt>"
+    src = tmp_path / "Recordings & Notes"
+    rec = tmp_path / "rec <1>"
+    batch, gui = _write_plists(base, tmp_path / "home",
+                               f"STT_ICLOUD_DIR={src}\nSTT_RECORDINGS_DIR={rec}\n")
+    for p in (batch, gui):
+        r = subprocess.run(["/usr/bin/plutil", "-lint", str(p)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+    b = plistlib.loads(batch.read_bytes())
+    assert b["ProgramArguments"][3] == f"{base}/.venv/bin/python"
+    assert b["WorkingDirectory"] == str(base)
+    assert b["EnvironmentVariables"]["PYTHONPATH"] == str(base)
+    assert b["WatchPaths"][:2] == [str(src), str(rec)]
+    assert b["StandardErrorPath"] == f"{base}/logs/stt.err.log"
+    g = plistlib.loads(gui.read_bytes())
+    assert g["ProgramArguments"] == [f"{base}/.venv/bin/python", f"{base}/gui/menubar.py"]
+
+
+def test_a_plain_path_still_makes_the_same_plists(tmp_path):
+    import plistlib
+    base = tmp_path / "stt"
+    batch, gui = _write_plists(base, tmp_path / "home")
+    b = plistlib.loads(batch.read_bytes())
+    assert b["Label"] == "com.stt-workflow.batch"
+    assert b["WorkingDirectory"] == str(base)
+    assert b["WatchPaths"][0].endswith("com~apple~CloudDocs/Voice Recordings")
+    assert plistlib.loads(gui.read_bytes())["Label"] == "com.stt-workflow.menubar"
