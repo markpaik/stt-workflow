@@ -29,14 +29,25 @@ FIELD_SEP = "\x1e"
 
 
 def join_list(items) -> str:
-    return FIELD_SEP.join(items)
+    items = list(items)
+    s = FIELD_SEP.join(items)
+    # one item has no FIELD_SEP, so split_list would split it on its commas:
+    # 'Budget, Q3.m4a' alone became 'Budget' and ' Q3.m4a', which match no
+    # file. A FIELD_SEP at the end marks it as one name.
+    if len(items) == 1 and "," in s:
+        s += FIELD_SEP
+    return s
 
 
 def split_list(s: str) -> list:
     """Parse a --files/--paths value. Prefers FIELD_SEP (what spawn_args()
-    emits); falls back to a plain comma so a human typing the flag by hand
-    (per this project's documented CLI usage) still works."""
-    return s.split(FIELD_SEP) if FIELD_SEP in s else s.split(",")
+    emits; one at the end marks a single name); falls back to a plain comma
+    so a human typing the flag by hand (per this project's documented CLI
+    usage) still works."""
+    if FIELD_SEP not in s:
+        return s.split(",")
+    parts = s.split(FIELD_SEP)
+    return parts[:-1] if parts[-1] == "" else parts
 
 
 _lock_state = threading.local()

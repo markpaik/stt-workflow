@@ -1,5 +1,7 @@
 """jobs: the panel's queued-run store — a Redo clicked mid-batch must wait
 visibly, never vanish on the single-instance lock."""
+import pytest
+
 from stt import jobs
 
 
@@ -97,6 +99,17 @@ def test_join_list_survives_a_comma_in_a_real_filename():
     joined = jobs.join_list(["Meeting, Part 1.m4a", "Normal.m4a"])
     assert jobs.split_list(joined) == ["Meeting, Part 1.m4a", "Normal.m4a"]
 
+
+@pytest.mark.parametrize("items", [["Budget, Q3.m4a"], ["a,b,c.m4a", "d.m4a"],
+                                   ["Plain.m4a"], ["/x/Budget, Q3.m4a"]])
+def test_a_one_item_list_with_a_comma_round_trips(items):
+    """join_list of one item added no FIELD_SEP, so split_list fell back to
+    commas: a Redo of 'Budget, Q3.m4a' alone asked for 'Budget' and
+    ' Q3.m4a', and the chosen file did not run."""
+    assert jobs.split_list(jobs.join_list(items)) == items
+    args = jobs.spawn_args({"at": 1.0, "files": items})
+    assert jobs.split_list(args[args.index("--files") + 1]) == items
+    assert jobs.split_list("a.m4a,b.m4a") == ["a.m4a", "b.m4a"]
 
 def test_spawn_args_comma_filename_round_trips_through_real_argparse(sandbox):
     """End-to-end: spawn_args() output must survive being handed to
