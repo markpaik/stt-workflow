@@ -158,6 +158,32 @@ def test_a_resync_makes_no_duplicate_even_after_the_batch_removed_the_copy(sandb
     assert r["counts"].get("already") == 1 and _staged() == []
 
 
+def test_a_sync_stopped_mid_loop_never_stages_a_memo_twice(sandbox, monkeypatch):
+    """The state was saved once, after the whole loop. A sync stopped after
+    one copy left that file staged with no record, and the next sync copied
+    the same memo again as 'Budget Review (2)'."""
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"},
+          {"start": "2026-11-04 09:00:00", "title": "Staff Huddle"}])
+    real = voicememos.shutil.copyfile
+    calls = []
+
+    def stop_on_second(a, b, *k, **kw):
+        if str(a).endswith(".m4a"):          # a memo, not the database copy
+            calls.append(a)
+        if len(calls) == 2:
+            raise KeyboardInterrupt          # Stop, or a kill, mid-sync
+        return real(a, b, *k, **kw)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", stop_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        voicememos.sync(now=NOW)
+    assert len(voicememos.load_state()["staged"]) == 1
+    monkeypatch.setattr(voicememos.shutil, "copyfile", real)
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"already": 1, "copied": 1}
+    assert _staged() == ["2026-11-03 Budget Review.m4a",
+                         "2026-11-04 Staff Huddle.m4a"]
+
+
 def test_a_blocked_memo_never_comes_back(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-LEAK"}])
     voicememos.block("U-LEAK")

@@ -321,6 +321,13 @@ def _write_state_last(d, status, detail=None, counts=None, app=None):
     _save_state(d)
 
 
+def _note_staged(uuid, ent: dict):
+    """Record one staged memo in the saved state, read fresh from disk."""
+    d = load_state()
+    d["staged"][uuid] = ent
+    _save_state(d)
+
+
 def _app_present(container: Path) -> bool:
     """True when the Voice Memos group container (the parent of Recordings)
     exists on this Mac. A missing library there means the app moved or
@@ -524,8 +531,12 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
             if isinstance(e, PermissionError):
                 denied += 1
             continue
-        state["staged"][row["uuid"]] = {
-            "name": name, "at": datetime.now().isoformat(timespec="seconds")}
+        # saved NOW, not once after the loop: a sync stopped after this copy
+        # (Stop, a kill, a crash) left the file staged with no record, and the
+        # next sync copied the same memo again under a " (2)" name
+        ent = {"name": name, "at": datetime.now().isoformat(timespec="seconds")}
+        state["staged"][row["uuid"]] = ent
+        _note_staged(row["uuid"], ent)
         staged.append(name)
         counts["copied"] = counts.get("copied", 0) + 1
     if denied and not staged and not counts.get("would_copy"):
