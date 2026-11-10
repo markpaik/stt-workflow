@@ -11,7 +11,7 @@ results in a local web panel at `http://127.0.0.1:8737`.
 It was built for meetings that cannot go to a cloud service: one-on-ones,
 interviews, personnel conversations.
 
-<img src="docs/img/library-light.png" width="1200" alt="Recordings: the library grouped into Today, Yesterday, This week, and months, each row with its title, length, people, and one-line gist">
+<img src="docs/img/library-light.png" width="1200" alt="Recordings: the library grouped into Today, Yesterday, This week, and months, each row with its title, time, length, people, and one-line gist">
 
 The screenshots in this file come from a synthetic library
 (`tools/demo_seed.py`). Every name, title, and line in them is invented.

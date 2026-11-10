@@ -75,3 +75,20 @@ def test_the_enroll_numbers_are_the_code_defaults():
     assert (f"fewer than {_default('STT_UNKNOWN_MIN_RELIABLE_TURNS')} turns of "
             f"{_default('STT_REFINE_MIN_DUR')} seconds or more") in text
     assert f"below {_default('STT_ENROLL_STACK_MIN')} against" in text
+
+
+def test_every_screenshot_the_readme_shows_is_in_docs_img_and_none_is_stray():
+    """The eight screenshots are retaken from a demo home whenever the
+    panel changes. A renamed or dropped capture left a broken image on
+    GitHub, and a stray file shipped a picture nobody reviewed. The sizes
+    stay the ones the README's width attributes were set for."""
+    import struct
+    SIZES = {(2880, 1920), (2880, 2000), (780, 1688)}
+    shown = set(re.findall(r'<img src="(docs/img/[\w-]+\.png)"', README))
+    on_disk = {f"docs/img/{p.name}" for p in (REPO / "docs" / "img").glob("*.png")}
+    assert shown and shown == on_disk, shown ^ on_disk
+    for rel in sorted(shown):
+        head = (REPO / rel).read_bytes()[:24]
+        assert head[:8] == b"\x89PNG\r\n\x1a\n", rel
+        # the capture sizes at 2x: 1440x960 and 1440x1000 desktop, 390x844 phone
+        assert struct.unpack(">II", head[16:24]) in SIZES, rel
