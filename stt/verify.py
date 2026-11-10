@@ -195,11 +195,27 @@ def save_sidecar(base: str, regs, engine: str, dest_dir=None):
     os.replace(tmp, p)
 
 
+def _region_ok(r) -> bool:
+    return (isinstance(r, dict)
+            and all(isinstance(r.get(k), (int, float)) and not isinstance(r.get(k), bool)
+                    for k in ("start", "end"))
+            and all(isinstance(r.get(k), str) for k in ("ours", "theirs")))
+
+
 def load_sidecar(base: str):
+    """The sidecar as {"engine", "regions"}, or None. A file that does not
+    read (bad bytes, bad JSON, not an object) is None, and a region of the
+    wrong shape is dropped. Only bad JSON was caught: bad UTF-8, a list, or
+    "regions": null raised in relabel and stopped that meeting's relabel."""
     p = sidecar_path(base)
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):            # UnicodeDecodeError and JSONDecodeError too
         return None
+    if not isinstance(d, dict):
+        return None
+    regs = d.get("regions")
+    d["regions"] = [r for r in regs if _region_ok(r)] if isinstance(regs, list) else []
+    return d

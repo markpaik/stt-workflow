@@ -223,3 +223,24 @@ def test_a_curly_apostrophe_or_a_digit_comma_is_the_same_word():
         assert verify.regions(W(ours), W(theirs)) == [], (ours, theirs)
     assert verify._norm("1,2,3") == "1 2 3"          # a list keeps its commas apart
     assert verify.regions(W("we can't go"), W("we can go")) != []
+
+
+def test_a_sidecar_of_the_wrong_shape_never_stops_a_relabel(sandbox):
+    """load_sidecar caught only bad JSON. Bad UTF-8, a list, or a null
+    "regions" raised in relabel, and that meeting's relabel stopped."""
+    good = {"start": 0.4, "end": 0.8, "ours": "reviewed", "theirs": "renewed"}
+    p = mfile("Mtg", ".verify.json")
+    for raw, want in [(b"\xff\xfe{bad", None), (b"[1,2]", None), (b'"x"', None),
+                      (b'{"engine":"x","regions":null}', []),
+                      (b'{"engine":"x","regions":{"a":1}}', []),
+                      (json.dumps({"engine": "x", "regions": [
+                          good, 3, None, {"start": "a", "end": 1, "ours": "", "theirs": ""},
+                          {"start": 1, "end": 2}]}).encode(), [good])]:
+        p.write_bytes(raw)
+        vc = verify.load_sidecar("Mtg")                     # what relabel does
+        if want is None:
+            assert vc is None, raw
+            continue
+        assert vc["regions"] == want, raw
+        segs = [{"start": 0.0, "end": 2.0, "text": "We reviewed the dashboard", "flags": []}]
+        assert verify.apply_flags(segs, vc.get("regions", [])) == len(want)
