@@ -106,7 +106,8 @@ def _batch_lock_held() -> bool:
 
 
 def batch_running() -> bool:
-    return bool(status.read().get("running")) or _batch_lock_held()
+    """A dead batch's stale running flag does not count (status.batch_running)."""
+    return status.batch_running() or _batch_lock_held()
 
 
 def busy_reason():

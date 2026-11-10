@@ -98,7 +98,8 @@ def prompt_version() -> str:
 
 # ---------------------------------------------------------- batch guards ---
 def batch_running() -> bool:
-    return bool(status.read().get("running"))
+    """A dead batch's stale running flag does not count (status.batch_running)."""
+    return status.batch_running()
 
 
 def busy_reason():

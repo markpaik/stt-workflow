@@ -225,6 +225,20 @@ def test_apply_refuses_while_the_batch_runs(lib):
     assert rt.main(["--apply"]) == 2
 
 
+def test_apply_runs_after_a_batch_died_with_its_running_flag_set(lib):
+    """A hard kill or a power loss skips end_run, so status.json keeps
+    running true with a dead pid. --apply trusted the flag alone and
+    refused until the next batch ran."""
+    import subprocess
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()
+    rt.dry_run(log=lambda *_: None)
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert rt.busy_reason() is None
+    r = rt.apply(log=lambda *_: None)
+    assert r["ok"], r
+
+
 def test_apply_skips_a_meeting_a_person_renamed_since_the_dry_run(lib):
     rt.dry_run(log=lambda *_: None)
     assert summarize.rename_meeting("Robin Check-in 10-5 10012026", "Robin Chat")["ok"]

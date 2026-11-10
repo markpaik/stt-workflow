@@ -567,3 +567,22 @@ def test_entries_with_no_owner_recorded_still_lock(sandbox):
     for bad in ("x", -1, 0):
         base = _leave_active(bad, None)
         assert status.meeting_active(base), bad
+
+
+def test_a_killed_batchs_running_flag_is_not_a_running_batch(sandbox):
+    """Only end_run clears `running`, so a hard kill or a power loss left
+    it true with a dead pid. retitle_all and iso_rename read the flag
+    alone and refused until the next batch started."""
+    import json
+    import os
+    gone = _dead_pid()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": gone, "pgid": gone}))
+    assert not status.batch_running()
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": gone, "pgid": None}))
+    assert not status.batch_running()
+    # alive, a surviving worker in its group, or no proof either way: running
+    for pid, pgid in ((os.getpid(), None), (gone, os.getpgid(0)), (None, None), ("x", None)):
+        status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": pid, "pgid": pgid}))
+        assert status.batch_running(), (pid, pgid)
+    status.STATUS_PATH.write_text(json.dumps({"running": False, "pid": os.getpid()}))
+    assert not status.batch_running()

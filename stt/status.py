@@ -233,6 +233,16 @@ def active_now() -> dict:
     return act
 
 
+def batch_running(d=None) -> bool:
+    """Does status.json say a batch runs, and is that batch still alive?
+    Only end_run clears `running`, so a SIGKILL, a crash or a power loss
+    left it true, and every tool that refuses while a batch runs refused
+    until the next batch started. A flag with no pid, or one whose pid or
+    group cannot be checked, still counts as running (_owner_gone)."""
+    d = read() if d is None else d
+    return bool(d.get("running")) and not _owner_gone(d)
+
+
 def meeting_active(base: str) -> bool:
     """Is the batch writing meeting `base` RIGHT NOW? Guards every folder move
     (rename/archive/delete) against racing a run. Active entries are keyed by

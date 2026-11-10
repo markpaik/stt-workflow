@@ -589,6 +589,22 @@ def test_apply_refuses_while_the_batch_or_a_relabel_runs(lib, monkeypatch):
     assert not ir.journal_path().exists()
 
 
+def test_apply_runs_after_a_batch_died_with_its_running_flag_set(lib):
+    """A hard kill or a power loss skips end_run, so status.json keeps
+    running true with a dead pid. --apply trusted the flag alone and
+    refused until the next batch ran."""
+    import subprocess
+
+    from stt import status
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()
+    ir.plan(log=lambda *_: None)
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    assert ir.busy_reason() is None
+    r = ir.apply(log=lambda *_: None)
+    assert r["ok"], r
+
+
 def test_apply_skips_a_meeting_renamed_since_the_dry_run(lib):
     ir.plan(log=lambda *_: None)
     assert summarize.rename_meeting("Drifted 08052026", "Someone Renamed It")["ok"]
