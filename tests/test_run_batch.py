@@ -1306,6 +1306,18 @@ def test_the_dry_run_names_an_empty_file_it_skips(sandbox, monkeypatch, capsys):
     assert "lock.m4a" not in out              # an Office lock file is no recording
 
 
+def test_files_naming_an_empty_file_says_it_is_empty(sandbox, monkeypatch, capsys):
+    """--files zero.m4a printed "not found in source: zero.m4a" for a file
+    that is there and has no bytes."""
+    from stt import config
+    (config.ICLOUD_DIR / "zero.m4a").write_bytes(b"")
+    assert _run_main(monkeypatch, "--files", "zero.m4a,Nope.m4a") == 0
+    err = capsys.readouterr().err
+    assert "zero.m4a is empty (0 bytes), skipped" in err
+    assert "not found in source: Nope.m4a" in err
+    assert "not found in source: zero.m4a" not in err
+
+
 def test_iter_audio_skips_empty_files(sandbox):
     """A 0-byte file (a failed export, a copy still being created) is not a
     recording. The batch never picks it, and the panel never lists it."""

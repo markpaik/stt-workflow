@@ -943,8 +943,13 @@ def main():
     # looked like a success. It counts as skipped.
     found |= {p.name for p in explicit_paths}
     missing = sorted(wanted - found) if wanted is not None else []
+    empty = {p.name for folder in config.source_dirs(source) if Path(folder).is_dir()
+             for p in Path(folder).iterdir() if p.name in missing and _empty_audio(p)}
     for name in missing:
-        print(f"   not found in source: {name}", file=sys.stderr, flush=True)
+        # an empty file is there, so "not found" sent the owner looking for it
+        why = "is empty (0 bytes), skipped" if name in empty else None
+        print(f"   {name} {why}" if why else f"   not found in source: {name}",
+              file=sys.stderr, flush=True)
 
     # shortest first: a short recording never waits behind multi-hour board
     # meetings that happen to sort first by name (stt.queue_order)
