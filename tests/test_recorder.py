@@ -304,6 +304,43 @@ def test_recover_orphans_keeps_a_live_recording(sandbox, monkeypatch):
     assert status.recording() == live               # the live recording untouched
 
 
+def test_a_stray_caf_a_live_recorder_writes_is_not_finalized(sandbox):
+    """status.json can lose the recording entry while a capture runs. The
+    stray-CAF sweep then skipped only the path status named, so it
+    transcoded a partial copy and deleted the CAF under a recorder that kept
+    writing to it. A CAF a live stt-recorder names is not a stray."""
+    import sys
+    import time
+    live = _stereo_caf(config.recordings_dir() / ".rec-live77.caf")
+    dead = _stereo_caf(config.recordings_dir() / ".rec-dead77.caf")
+    # a stand-in recorder: its command line names the binary and the CAF
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                             "/x/STT Recorder.app/Contents/MacOS/stt-recorder", str(live)])
+    try:
+        for _ in range(50):
+            if recorder._caf_has_live_writer(live):
+                break
+            time.sleep(0.1)
+        assert status.recording() is None
+        names = recorder.recover_orphans()
+        assert len(names) == 1 and not dead.exists()   # the true stray goes
+        assert live.exists(), "the live capture's CAF must stay"
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not recorder._caf_has_live_writer(live)
+    assert len(recorder.recover_orphans()) == 1 and not live.exists()
+
+
+def test_a_failed_writer_check_keeps_the_stray_caf(sandbox, monkeypatch):
+    caf = _stereo_caf(config.recordings_dir() / ".rec-unsure.caf")
+
+    def _fork_failed(*a, **k):
+        raise OSError("pgrep: fork failed")
+    monkeypatch.setattr(recorder.subprocess, "run", _fork_failed)
+    assert recorder._caf_has_live_writer(caf) is True
+    assert recorder.recover_orphans() == [] and caf.exists()
+
 def test_finalize_drops_caf_before_publishing_so_a_crash_cannot_duplicate(sandbox, monkeypatch):
     """C2: if the machine dies between the transcode and publishing the m4a, no
     CAF may survive for recover_orphans to re-finalize into a DUPLICATE meeting.

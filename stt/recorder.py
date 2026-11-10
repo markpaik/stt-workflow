@@ -90,6 +90,29 @@ def _recorder_identity(pid):
     return "stt-recorder" in cmd
 
 
+def _caf_has_live_writer(caf) -> bool:
+    """True when a live stt-recorder names this CAF on its command line, or
+    when the check itself fails. Only an explicit "no recorder writes it"
+    is False: a stray CAF is finalized and DELETED on False, and a recorder
+    still writing to it would lose the rest of its audio."""
+    try:
+        # pgrep reads an extended regex: '[.]' is a literal dot
+        r = subprocess.run(["/usr/bin/pgrep", "-f", Path(caf).name.replace(".", "[.]")],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode not in (0, 1):   # 1 is "no match"; anything else failed
+        return True
+    for tok in r.stdout.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid != os.getpid() and _recorder_identity(pid) is not False:
+            return True
+    return False
+
+
 def _recorder_running(pid) -> bool:
     """True only when pid is live AND actually our recorder. A bare os.kill(pid,
     0) reads a RECYCLED pid as a live recording — which would refuse every new
@@ -480,6 +503,10 @@ def recover_orphans() -> list:
         active_caf = (status.recording() or {}).get("caf")
         for caf in staging.glob(".rec-*.caf"):
             if str(caf) == active_caf:
+                continue
+            # status.json can lose the entry of a capture that is still
+            # running: its CAF is not a stray while a recorder writes it
+            if _caf_has_live_writer(caf):
                 continue
             r = finalize(caf, None)
             if r.get("ok"):
