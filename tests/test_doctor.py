@@ -5,6 +5,7 @@ under their caps."""
 import gzip
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -275,6 +276,61 @@ def test_an_appending_writer_keeps_writing_to_the_same_file(sandbox, monkeypatch
         fh.write("after\n")
         fh.flush()
     assert log.read_text() == "after\n"
+
+
+def _seed_generations(logs, name="a.log"):
+    for i in (1, 2, 3):
+        (logs / f"{name}.{i}.gz").write_bytes(gzip.compress(f"old{i}\n".encode()))
+
+
+def _generations(logs, name="a.log"):
+    return [gzip.decompress((logs / f"{name}.{i}.gz").read_bytes()) for i in (1, 2, 3)]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes a read-only file")
+def test_a_log_the_batch_cannot_write_keeps_every_generation(sandbox):
+    """rotate() shifted the generations, then failed at the truncate. The log
+    stayed over the cap and each run shifted again: after three runs every
+    generation held the same copy and old1 to old3 were gone."""
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"X" * 50)
+    log.chmod(0o444)
+    try:
+        for _ in range(3):
+            with pytest.raises(PermissionError):
+                housekeeping.rotate(log, 10, 3)
+        assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+        assert sorted(p.name for p in logs.iterdir()) == [
+            "a.log", "a.log.1.gz", "a.log.2.gz", "a.log.3.gz"]
+    finally:
+        log.chmod(0o644)
+    assert housekeeping.rotate(log, 10, 3) is True       # writable again: it rotates
+    assert _generations(logs) == [b"X" * 50, b"old1\n", b"old2\n"]
+
+
+def test_a_failed_copy_moves_no_generation_and_leaves_no_temp(sandbox, monkeypatch):
+    """A full disk fails the gzip copy: nothing shifts, the log keeps its lines."""
+    import errno
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"Y" * 50)
+
+    def full(path, mode="rb", *a, **k):
+        if "w" in mode:
+            open(path, "wb").close()             # the temp exists, then the disk fills
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return gzip.GzipFile(path, mode)
+    monkeypatch.setattr(housekeeping.gzip, "open", full)
+    with pytest.raises(OSError):
+        housekeeping.rotate(log, 10, 3)
+    assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+    assert log.read_bytes() == b"Y" * 50
+    assert not list(logs.glob("*.tmp"))
 
 
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):

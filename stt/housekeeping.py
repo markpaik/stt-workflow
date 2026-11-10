@@ -29,22 +29,27 @@ LOG_KEEP = 3
 CALIBRATION_MAX_BYTES = config.env_int("STT_CALIBRATION_MAX_BYTES", 10 * 1000 * 1000)
 
 
-def _gz_copy(src: Path, dst: Path) -> None:
-    tmp = dst.with_name(dst.name + ".tmp")
-    with open(src, "rb") as fi, gzip.open(tmp, "wb") as fo:
-        shutil.copyfileobj(fi, fo)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, dst)
-
-
-def _truncate(p: Path) -> None:
-    with open(p, "r+b") as fh:
-        fh.truncate(0)
+def _gz_write(src: Path, tmp: Path) -> None:
+    """Gzip `src` into `tmp` (mode 600). A failure leaves no `tmp`."""
+    try:
+        with open(src, "rb") as fi, gzip.open(tmp, "wb") as fo:
+            shutil.copyfileobj(fi, fo)
+        os.chmod(tmp, 0o600)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
     """Rotate one file when it is at or over `max_bytes`. Returns whether
-    it rotated (or would, on a dry run)."""
+    it rotated (or would, on a dry run).
+
+    Every step that can fail comes before the generations move: the file
+    is opened for writing (a log the batch cannot write fails here) and
+    copied to a temporary gzip (a full disk fails here). The old order
+    shifted the generations first and then failed at the truncate. The log
+    stayed over the cap, the next run shifted again, and after `keep` runs
+    every generation held the same copy and the older history was gone."""
     p = Path(path)
     try:
         if p.stat().st_size < max_bytes:
@@ -54,12 +59,15 @@ def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
     if dry_run:
         return True
     gens = [p.with_name(f"{p.name}.{i}.gz") for i in range(1, keep + 1)]
-    gens[-1].unlink(missing_ok=True)
-    for i in range(keep - 1, 0, -1):
-        if gens[i - 1].exists():
-            os.replace(gens[i - 1], gens[i])
-    _gz_copy(p, gens[0])
-    _truncate(p)
+    tmp = gens[0].with_name(gens[0].name + ".tmp")
+    with open(p, "r+b") as fh:
+        _gz_write(p, tmp)
+        gens[-1].unlink(missing_ok=True)
+        for i in range(keep - 1, 0, -1):
+            if gens[i - 1].exists():
+                os.replace(gens[i - 1], gens[i])
+        os.replace(tmp, gens[0])
+        fh.truncate(0)
     return True
 
 
