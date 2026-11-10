@@ -1604,8 +1604,14 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             # the title this folder already carries, typed again on the
             # same date, moves nothing: an old folder that still holds a
             # colon keeps it until the title really changes. A twin whose
-            # plain name is free is the exception (above).
-            if (title is not None and not plain_free
+            # plain name is free is the exception (above). So is a typed
+            # future stamp: canonical() keeps it in the title, and
+            # title_of() removed it, so 'Demo 12312027' on '... Demo' read
+            # as the same title and the save dropped the typed date.
+            from datetime import date as _now
+            kept_stamp = bool(typed and typed != d.get("date")
+                              and typed > _now.today().isoformat())
+            if (title is not None and not plain_free and not kept_stamp
                     and d.get("date") == date_before
                     and dates.is_iso_form(base)
                     and dates.meeting_date(base) == d.get("date")

@@ -371,6 +371,28 @@ def test_a_future_typed_date_kept_in_the_title_says_so(sandbox):
     assert r["ok"] and "note" not in r
 
 
+@pytest.mark.parametrize("stamp_form", ["{t} {mmddyyyy}", "{iso} {t}"])
+def test_a_future_stamp_added_to_the_current_title_is_kept(sandbox, stamp_form):
+    """title_of() removes the stamp, so 'Assessment Platform Demo
+    12312027' on '... Assessment Platform Demo' read as the title the
+    folder already carries. The save moved nothing and stored the old
+    title, while the note said the date stays in the title."""
+    from datetime import date as _d
+    y = _d.today().year + 1
+    t = "Assessment Platform Demo"
+    typed = stamp_form.format(t=t, mmddyyyy=f"1231{y}", iso=f"{y}-12-31")
+    _m(f"2026-01-15 {t}", date="2026-01-15", title=t)
+    r = summarize.rename_meeting(f"2026-01-15 {t}", typed)
+    assert r["ok"] and r["base"] == f"2026-01-15 {typed}"
+    assert f"{y}-12-31 is in the future" in r["note"]
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert (d["date"], d["title"]) == ("2026-01-15", typed)
+    # the same title typed again is a no-op, and the folder stays
+    r = summarize.rename_meeting(r["base"], typed)
+    assert r["ok"] and r["base"] == f"2026-01-15 {typed}"
+    assert config.meeting_bases() == [f"2026-01-15 {typed}"]
+
+
 def test_the_date_picker_beats_a_typed_stamp(sandbox):
     _m("Voice Memo 9", date="2026-07-20")
     r = summarize.apply_meeting_edits("Voice Memo 9", title="Board Prep 07092026",
