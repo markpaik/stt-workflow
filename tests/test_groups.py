@@ -259,6 +259,26 @@ def test_an_override_survives_a_rename_and_a_group_under_two_leaves(sandbox):
     assert groups.current() == []
 
 
+def test_an_override_holds_when_the_dominant_spelling_changes(sandbox):
+    """The key hashes the most common word set. Two new meetings in the
+    other spelling flipped it, the stored key matched no group, and the
+    excluded meeting came back with no notice."""
+    _mk("Budget Alpha 01012026", mid="m1")
+    _mk("Budget Alpha 01022026", mid="m2")
+    _mk("Budget Alpha Beta 01032026", mid="m3")
+    key = _group_of("Budget Alpha 01012026")
+    groups.set_override("m3", key)
+    assert _group_of("Budget Alpha Beta 01032026") is None
+    _mk("Budget Alpha Beta 01042026", mid="m4")
+    _mk("Budget Alpha Beta 01052026", mid="m5")
+    (g,) = groups.current()
+    assert g["key"] != key                      # the dominant spelling moved
+    assert g["count"] == 4 and "Budget Alpha Beta 01032026" not in g["bases"]
+    # the undo names the key it stored, and brings the meeting back
+    groups.set_override("m3", key, exclude=False)
+    assert "Budget Alpha Beta 01032026" in groups.current()[0]["bases"]
+
+
 def test_purge_scope_reads_the_override_shape(sandbox):
     from tools import purge
     _mk("Grant Writing 10012026", mid="m1")

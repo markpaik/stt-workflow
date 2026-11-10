@@ -39,6 +39,8 @@ leaves the meeting out of that group, and a group that falls under two
 meetings leaves the list. Undo removes the key again. A group key is a hash
 of the cluster's most common word set (or its people and hour), so it holds
 while members come and go, and changes only when the dominant spelling does.
+A correction holds through that change: a title group answers to the key of
+each word set it holds, so the key the correction stored still finds it.
 
 Use count: `group_usage.jsonl` in PROJECT_DIR gets one line per group open
 or group question, {at, event}, with no title and no key, for the one-month
@@ -465,7 +467,11 @@ def compute(rows: list, me=None, overrides=None) -> list:
         # the dominant spelling names the key: most members, then fewest words
         dom = max((sigs[i] for i in idx),
                   key=lambda s: (len(sig_members[s]), -len(s), sorted(s)))
-        out.append({"kind": "title", "sig": dom, "members": members})
+        # an override names the key it saw. It holds for every word set the
+        # cluster still holds, so a flip of the dominant spelling never
+        # brings an excluded meeting back
+        out.append({"kind": "title", "sig": dom, "members": members,
+                    "keys": {_key("t", sigs[i]) for i in idx}})
 
     # 2. people and hour for meetings with no strong title word
     leftovers = []
@@ -497,8 +503,9 @@ def compute(rows: list, me=None, overrides=None) -> list:
     for g in out:
         key = (_key("t", g["sig"]) if g["kind"] == "title"
                else _key("p", g["sig"]))
+        keys = g.get("keys") or {key}
         members = [b for b in g["members"]
-                   if key not in overrides.get(meeting_key(by_base[b]), ())]
+                   if not keys & set(overrides.get(meeting_key(by_base[b]), ()))]
         if len(members) < MIN_SIZE:
             continue
         rs = sorted((by_base[b] for b in members),
