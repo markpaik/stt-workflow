@@ -824,6 +824,19 @@ def test_the_doctor_names_an_unreadable_diarizer_setting(sandbox, monkeypatch):
     assert not [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
 
 
+def test_the_doctor_names_a_shell_style_line_that_sets_nothing(sandbox, monkeypatch):
+    """stt.env is not shell. 'export STT_DIARIZER=pyannote' read as the key
+    'export STT_DIARIZER', run.sh and setup.sh skipped the line, and the
+    setting stayed at its default with no word anywhere."""
+    _no_diar_env(monkeypatch)
+    (sandbox / "stt.env").write_text(
+        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_PUNCTUATE=1\n_OK_2=x\n")
+    bad = {f.subject: f.detail for f in doctor.check(registry=False)
+           if f.kind == "bad_setting"}
+    assert set(bad) == {"export STT_DIARIZER", "MY KEY"}
+    assert "no 'export'" in bad["export STT_DIARIZER"]
+
+
 def test_stt_env_example_lists_every_diarizer_setting():
     text = (Path(__file__).resolve().parent.parent / "stt.env.example").read_text()
     for name in ("STT_DIARIZER", "STT_SPEAKRS_AHC", "STT_SPEAKRS_TIMEOUT_SEC",

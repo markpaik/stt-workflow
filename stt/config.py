@@ -718,6 +718,14 @@ def setting_problems() -> list:
     replaced by its default. The doctor lists them: a typo there used to
     change behavior with no word anywhere."""
     out = []
+    # a key that is not a shell name ('export STT_X', 'MY KEY') sets
+    # nothing: run.sh, setup.sh and init.sh skip the line, and no reader
+    # asks for it by that name, so a shell-style line was ignored unsaid
+    for key in _env_file():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            out.append((key, "is not a setting name, so every reader skips "
+                             "this line: write KEY=VALUE, with no 'export' "
+                             "and no space in the key"))
     raw = _quiet_raw()
     if raw:
         try:
