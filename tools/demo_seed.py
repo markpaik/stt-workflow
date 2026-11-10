@@ -103,15 +103,26 @@ def _store_keys(base: str, iso: str, meta: dict, wav: Path, spec: dict) -> dict:
 
     A source name that carries the meeting's date is a typed date. Any
     other arrived as a synced memo, whose recorder start time is the true
-    start: the clip's length before it was processed, on the same day."""
-    from stt import dupes
+    start: the clip's length before it was processed, on the same day.
+
+    A recorder name ('YYYY-MM-DD Recording HHMM', recorder.final_name)
+    says when the capture started: provenance dates it 'recorder' at that
+    time, and so does the seed. Derived from the processing time instead,
+    Home showed 'Recording 1430' at 3:01 PM, and 'Recording 0915' read as
+    a typed date with no time."""
+    from stt import dupes, provenance
     src = meta["source_file"]
+    stem = Path(src).stem
+    native = provenance._NATIVE.match(stem)
     ds = spec.get("date_source") or (
-        "typed" if dates.meeting_date(Path(src).stem) == iso else "recorder")
+        "recorder" if native else
+        "typed" if dates.meeting_date(stem) == iso else "recorder")
     rec = None
     if ds == "recorder":
         done = datetime.fromisoformat(meta["processed_at"])
         start = done - timedelta(seconds=float(meta["duration_sec"]) + 120)
+        if native:
+            start = datetime.fromisoformat(f"{iso}T{native[1]}:{native[2]}:00")
         if start.date().isoformat() != iso:
             start = datetime.fromisoformat(f"{iso}T09:00:00")
         rec = start.astimezone().isoformat(timespec="seconds")

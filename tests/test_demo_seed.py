@@ -275,3 +275,24 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
                          env=env, cwd=str(REPO), capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "clean: nothing to report" in out.stdout
+
+
+def test_a_recorder_meeting_starts_at_the_time_its_name_says(tmp_path):
+    """recorder.final_name names a capture 'YYYY-MM-DD Recording HHMM' by
+    its start, and provenance dates such a name 'recorder' at that time.
+    The seed took the start from the processing time instead, so Home and
+    the README screenshots showed 'Recording 1430' at 3:01 PM, and it read
+    'Recording 0915' as a typed date with no time."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    today = demo_seed.date.today().isoformat()
+    for base, start in ((f"{today} Recording 1430", f"{today}T14:30"),
+                        ("2026-07-10 Recording 0915", "2026-07-10T09:15")):
+        d = json.loads((home / "meetings" / base / f"{base}.json").read_text())
+        assert d["date_source"] == "recorder", base
+        assert d["recorded_at"][:16] == start, base
+    # a memo with no time in its name still starts before it was processed
+    j = next((home / "meetings").glob("*Reading Partner Kickoff/*Kickoff.json"))
+    d = json.loads(j.read_text())
+    assert d["recorded_at"][:10] == d["date"]
+    assert d["recorded_at"][11:16] < d["processed_at"][11:16]
