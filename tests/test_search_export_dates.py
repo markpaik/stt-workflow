@@ -230,6 +230,24 @@ def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     assert a != b and b.exists()  # second export gets " (1)" suffix
 
 
+@pytest.mark.parametrize("title", ["x" * 237, "é" * 118], ids=["ascii", "two-byte"])
+def test_a_second_export_of_a_name_near_the_limit_still_fits(sandbox, tmp_path, monkeypatch, title):
+    """A folder name of about 248 bytes fits its own .json, so the first
+    export fit too. The " (1)" of the second export pushed the file name
+    past 255 bytes, and the export failed with a raw OSError."""
+    base = "2026-01-07 " + title
+    mfile(base, ".json").write_text(json.dumps(
+        {"segments": [{"start": 1, "text": "hi", "speaker": "S1"}], "speakers": []}))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    outs = [export.to_docx(base) for _ in range(3)]
+    assert len(set(outs)) == 3 and all(o.exists() for o in outs)
+    assert outs[0].name == base + ".docx"
+    for n, o in enumerate(outs[1:], 1):
+        assert len(o.name.encode()) <= export.NAME_MAX
+        assert o.name.endswith(f" ({n}).docx") and o.name.startswith("2026-01-07 ")
+        o.name.encode("utf-8").decode("utf-8")  # never cut inside a character
+
+
 def test_export_lands_under_stt_home_not_the_real_downloads(sandbox, tmp_path, monkeypatch):
     """A sandboxed panel (STT_HOME set) must never write a transcript copy to
     the real ~/Downloads, which is often cloud-synced."""

@@ -133,15 +133,23 @@ def export_dir() -> Path:
     return Path.home() / "Downloads"
 
 
+NAME_MAX = 255   # bytes in one file name on macOS
+
+
 def _out_path(base: str, ext: str) -> Path:
+    """A new file in export_dir(): "<base>.<ext>", else "<base> (n).<ext>".
+    The name is cut to fit NAME_MAX bytes with its suffix: a folder name
+    near the limit fits its own "<base>.json", and the " (1)" of a second
+    export pushed it past, which raised a raw OSError."""
     d = export_dir()
     d.mkdir(parents=True, exist_ok=True)
-    out = d / f"{base}.{ext}"
-    n = 1
-    while out.exists():
-        out = d / f"{base} ({n}).{ext}"
+    n = 0
+    while True:
+        tail = f" ({n}).{ext}" if n else f".{ext}"
+        out = d / (config.cap_name(base, NAME_MAX - len(tail.encode())) + tail)
+        if not out.exists():
+            return out
         n += 1
-    return out
 
 
 def to_docx(base: str) -> Path:
