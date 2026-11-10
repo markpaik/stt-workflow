@@ -61,7 +61,7 @@ def _atomic_write(p: Path, text: str):
 # ---------------------------------------------------------------- files -----
 
 CHUNK = 1024 * 1024          # head and tail bytes folded into a fingerprint
-_fp_cache = {}               # (path, size, mtime) -> fingerprint or None
+_fp_cache = {}               # (path, size, mtime) -> fingerprint (never None)
 
 
 def cache_path():
@@ -122,7 +122,13 @@ def fingerprint(path):
             fp = h.hexdigest()
     except OSError:
         fp = None
-    _fp_cache[key] = fp
+    # only a real fingerprint is cached. A None comes from a dataless iCloud
+    # file, an empty file or a read error, and each one can end without the
+    # size or mtime moving: an iCloud download keeps both. A cached None then
+    # hid the 'identical' proof from the long-lived panel until a restart.
+    # Not caching it costs one stat per poll for that file.
+    if fp is not None:
+        _fp_cache[key] = fp
     return fp
 
 

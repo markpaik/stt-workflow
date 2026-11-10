@@ -43,6 +43,24 @@ def test_fingerprint_never_reads_a_dataless_icloud_file(sandbox, monkeypatch):
     assert dupes.fingerprint(p) is None
 
 
+def test_a_dataless_file_gets_its_fingerprint_once_the_download_ends(sandbox, monkeypatch):
+    """An iCloud download keeps the size and the mtime, so the cache key does
+    not move. A cached None hid the 'identical' proof from the long-lived
+    panel until a restart."""
+    from stt import icloud
+    p = sandbox / "cloud.m4a"
+    p.write_bytes(b"y" * 4096)
+    real = icloud._fully_present
+    dupes._fp_cache.clear()
+    monkeypatch.setattr(icloud, "_fully_present", lambda _p: False)
+    assert dupes.fingerprint(p) is None
+    monkeypatch.setattr(icloud, "_fully_present", real)    # download done
+    fp = dupes.fingerprint(p)
+    assert fp is not None
+    dupes._fp_cache.clear()
+    assert dupes.fingerprint(p) == fp
+
+
 # ------------------------------------------------------- source duplicates --
 
 def _meeting(base, source_file, audio=b"", text="", dur=600.0):
