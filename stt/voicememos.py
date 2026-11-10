@@ -463,6 +463,12 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
     counts, staged = {}, []
     all_titles = [r.get("title") for r in rows]
     blocked = set(state["blocked"])
+    # a denial on ONE memo's file (its stat or its copy) no longer stops the
+    # loop: the database read worked, so the other memos still copy, and the
+    # denied one is retried on the next run. Only when every memo it tried
+    # was denied and nothing copied is the sync "denied" (Full Disk Access
+    # is then the likely cause).
+    denied = 0
     for row in rows:
         if row.get("uuid") in blocked:
             counts["blocked"] = counts.get("blocked", 0) + 1
@@ -473,10 +479,9 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         try:
             ok, why, start, from_path = eligible(row, now, since, container)
         except PermissionError:
-            if not dry_run:
-                _write_state_last(state, "denied", "file stat", counts)
-            return {"status": "denied", "staged": staged, "counts": counts,
-                    "detail": None}
+            denied += 1
+            counts["copy_failed"] = counts.get("copy_failed", 0) + 1
+            continue
         if not ok:
             counts[why] = counts.get(why, 0) + 1
             continue
@@ -514,14 +519,17 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
             tmp.unlink(missing_ok=True)
             counts["copy_failed"] = counts.get("copy_failed", 0) + 1
             if isinstance(e, PermissionError):
-                _write_state_last(state, "denied", "file read")
-                return {"status": "denied", "staged": staged, "counts": counts,
-                        "detail": None}
+                denied += 1
             continue
         state["staged"][row["uuid"]] = {
             "name": name, "at": datetime.now().isoformat(timespec="seconds")}
         staged.append(name)
         counts["copied"] = counts.get("copied", 0) + 1
+    if denied and not staged and not counts.get("would_copy"):
+        if not dry_run:
+            _write_state_last(state, "denied", "file read", counts)
+        return {"status": "denied", "staged": staged, "counts": counts,
+                "detail": None}
     if not dry_run:
         _write_state_last(state, "ok", None, counts)
     return {"status": "ok", "staged": staged, "counts": counts, "detail": None}

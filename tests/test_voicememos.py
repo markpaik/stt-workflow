@@ -303,6 +303,50 @@ def test_a_denied_file_stat_is_recorded(sandbox, monkeypatch):
     assert voicememos.load_state()["last"]["status"] == "denied"
 
 
+@pytest.mark.parametrize("where", ["copy", "stat"])
+def test_a_denied_read_of_one_memo_file_lets_the_others_copy(sandbox, monkeypatch, where):
+    """The database read worked and one memo's audio was denied. The sync
+    returned "denied" at that memo, so every later memo waited a run and
+    the doctor said to grant Full Disk Access. The one memo now counts as
+    copy_failed, the others copy, and the sync is "ok"."""
+    import pathlib
+    from pathlib import Path
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Locked Memo", "uuid": "U-L"},
+          {"start": "2026-11-04 09:00:00", "title": "Budget Review"},
+          {"start": "2026-11-05 09:00:00", "title": "Staff Huddle"}])
+    first = voicememos.read_rows(voicememos.container_dir())[0]["path"]
+    real_copy, real_stat = voicememos.shutil.copyfile, pathlib.Path.stat
+
+    def copyfile(src, dst, *a, **k):
+        if Path(src).name == first:
+            raise PermissionError("denied")
+        return real_copy(src, dst, *a, **k)
+
+    def stat(self, *a, **k):
+        if self.name == first:
+            raise PermissionError("denied")
+        return real_stat(self, *a, **k)
+    if where == "copy":
+        monkeypatch.setattr(voicememos.shutil, "copyfile", copyfile)
+    else:
+        monkeypatch.setattr(pathlib.Path, "stat", stat)
+    r = voicememos.sync(now=NOW)
+    # put back ONLY the two fakes: monkeypatch.undo() would also drop the
+    # sandbox fixture's patches and point the sync at the real library
+    monkeypatch.setattr(pathlib.Path, "stat", real_stat)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", real_copy)
+    assert r["status"] == "ok"
+    assert _staged() == ["2026-11-04 Budget Review.m4a", "2026-11-05 Staff Huddle.m4a"]
+    assert r["counts"] == {"copied": 2, "copy_failed": 1}
+    kinds = {f.kind: f.detail for f in doctor.check(registry=False)}
+    assert "voicememos_denied" not in kinds
+    assert kinds["voicememos_skipped"] == "copy_failed 1"
+    # the denied memo was not marked staged, so the next run tries it again
+    assert voicememos.container_dir() == sandbox / "vm_container"
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"copied": 1, "already": 2}
+
+
 def test_a_sync_that_raises_is_recorded_by_the_batch(sandbox, monkeypatch):
     def boom(**k):
         raise RuntimeError("synthetic")
