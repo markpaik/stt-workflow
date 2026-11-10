@@ -239,12 +239,12 @@ else
   echo "       https://huggingface.co/pyannote/speaker-diarization-community-1"
   echo "       → click 'Agree and access repository' (and any dependency repos listed)"
   echo "    2. Create a READ token: https://hf.co/settings/tokens"
-  TOK="$(ask "Paste your hf_… token (or Enter to skip — transcription-only until set):")"
+  TOK="$(ask "Paste your hf_… token (or Enter to skip — the batch does not run until it is set):")"
   if [ -n "$TOK" ]; then
     env_set HF_TOKEN "$TOK"
     ok "token saved to stt.env (git-ignored, chmod 600)"
   else
-    warn "skipped — transcripts will have no speaker labels until HF_TOKEN is set in stt.env"
+    warn "skipped — the batch stops at its start until HF_TOKEN is set in stt.env"
   fi
 fi
 

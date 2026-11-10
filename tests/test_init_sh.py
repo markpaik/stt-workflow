@@ -46,3 +46,19 @@ def test_init_stops_before_step_one_without_a_terminal():
     block = INIT[guard:INIT.index("fi\n", guard)]
     assert "exit 1" in block and "ssh -t" in block
     assert "bold " not in INIT[src:guard] and "yes_no" not in INIT[src:guard]
+
+
+def test_the_skipped_token_text_matches_what_the_batch_does():
+    """init.sh said a skipped token meant 'transcription-only' and
+    'transcripts will have no speaker labels'. run_batch.py prints
+    'Diarization needs a HuggingFace token' and returns 2 at its start,
+    and the README says the batch stops there."""
+    batch = (REPO / "run_batch.py").read_text()
+    gate = batch[batch.index("not config.resolve_hf_token()"):][:200]
+    assert "Diarization needs a HuggingFace token" in gate and "return 2" in gate
+    assert "without a token the batch stops at its start" in " ".join(
+        (REPO / "README.md").read_text().split())
+    for stale in ("transcription-only", "no speaker labels"):
+        assert stale not in INIT
+    assert "the batch does not run until it is set" in INIT
+    assert "the batch stops at its start until HF_TOKEN is set" in INIT
