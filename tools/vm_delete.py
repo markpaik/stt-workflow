@@ -23,7 +23,6 @@ the database), look at Voice Memos and its Recently Deleted first, then run
 --clear-halt.
 """
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -90,23 +89,14 @@ def _setting_lines():
 
 
 def _batch_running() -> bool:
-    """True while status.json says a batch runs and that batch's pid is
-    alive. A hard kill or a power loss skips end_run, so the flag stayed
-    true with a dead pid, and --apply refused until the next batch ran. A
-    flag with no pid, or a pid that cannot be checked, still counts."""
-    st = status.read()
-    if not st.get("running"):
-        return False
-    pid = st.get("pid")
-    if not pid:
-        return True
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except (OSError, ValueError, TypeError):
-        return True
-    return True
+    """True while status.json says a batch runs and that batch is alive:
+    its pid, or its process group (status.batch_running, as every other
+    tool reads it). A hard kill or a power loss skips end_run, so the flag
+    stayed true with a dead pid, and --apply refused until the next batch
+    ran. This copy checked only the pid, so a --parallel worker that
+    outlived a killed parent read as no batch here. A flag with no pid, or
+    a pid that cannot be checked, still counts."""
+    return status.batch_running()
 
 
 def main(argv=None) -> int:

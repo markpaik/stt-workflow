@@ -773,6 +773,23 @@ def test_apply_runs_after_a_batch_died_with_its_running_flag_set(vm, capsys):
     assert _tool("--apply") == 2
 
 
+def test_apply_refuses_while_a_worker_of_a_killed_batch_lives(vm, capsys):
+    """vm_delete had its own copy of the batch check, with the pid test
+    only. A --parallel worker that outlived a killed parent read as no
+    batch here and as a running batch in every other tool
+    (status.batch_running checks the process group too)."""
+    from stt import status
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()                                  # the parent: gone
+    status.STATUS_PATH.write_text(json.dumps(
+        {"running": True, "pid": dead.pid, "pgid": os.getpgid(0)}))  # its group: alive
+    assert status.batch_running()
+    assert _tool("--apply") == 2 and vm.calls() == []
+    assert "A batch is running" in capsys.readouterr().out
+
+
 def test_clear_halt_from_the_tool(vm, capsys):
     voicememos._set_halt("synthetic stop", "U-1")
     assert _tool("--clear-halt") == 0
