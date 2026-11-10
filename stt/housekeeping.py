@@ -17,6 +17,7 @@ known cost of this method.
 The batch calls rotate_all() at start. The doctor's `fix` calls it too.
 Each function takes a dry_run flag and then only reports.
 """
+import fcntl
 import gzip
 import os
 import shutil
@@ -45,6 +46,11 @@ def _gz_write(src: Path, tmp: Path) -> None:
         raise
 
 
+def _due(size: int, max_bytes: int) -> bool:
+    """An empty file holds nothing to keep, whatever the cap."""
+    return size > 0 and size >= max_bytes
+
+
 def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
     """Rotate one file when it is at or over `max_bytes`. Returns whether
     it rotated (or would, on a dry run).
@@ -57,17 +63,26 @@ def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
     every generation held the same copy and the older history was gone."""
     p = Path(path)
     try:
-        size = p.stat().st_size
+        if not _due(p.stat().st_size, max_bytes):
+            return False
     except OSError:
-        return False
-    # an empty file holds nothing to keep, whatever the cap
-    if size == 0 or size < max_bytes:
         return False
     if dry_run:
         return True
     gens = [p.with_name(f"{p.name}.{i}.gz") for i in range(1, keep + 1)]
     tmp = gens[0].with_name(gens[0].name + ".tmp")
     with open(p, "r+b") as fh:
+        # one rotation of a file at a time. The batch and the doctor's fix
+        # both rotate, and two at once shared the one temporary gzip: one
+        # os.replace took it and the other raised FileNotFoundError.
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False                    # the other rotation does this file
+        except OSError:
+            pass                            # no lock on this filesystem
+        if not _due(os.fstat(fh.fileno()).st_size, max_bytes):
+            return False                    # rotated while this one opened it
         _gz_write(p, tmp)
         gens[-1].unlink(missing_ok=True)
         for i in range(keep - 1, 0, -1):

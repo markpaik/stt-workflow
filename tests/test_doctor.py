@@ -404,6 +404,41 @@ def test_an_empty_file_never_rotates_and_keeps_every_generation(sandbox):
     assert _generations(logs) == [b"X", b"old1\n", b"old2\n"]
 
 
+def test_two_rotations_of_one_file_at_once_do_not_collide(sandbox):
+    """The batch and the doctor's fix both rotate. Two rotations at once
+    shared name.1.gz.tmp: one os.replace took it and the other raised
+    FileNotFoundError, which cost the rest of that pass."""
+    import fcntl
+    import threading
+    logs = sandbox / "logs"
+    logs.mkdir()
+    log = logs / "x.log"
+    log.write_bytes(b"DATA\n" * 100)
+    with open(log, "rb") as held:                  # another rotation holds it
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert housekeeping.rotate(log, 10, 3) is False
+    assert sorted(p.name for p in logs.iterdir()) == ["x.log"]
+    assert log.stat().st_size == 500
+    for _ in range(20):
+        log.write_bytes(b"DATA\n" * 100)
+        for g in logs.glob("*.gz"):
+            g.unlink()
+        start, results = threading.Barrier(2), []
+
+        def go():
+            start.wait()
+            try:
+                results.append(housekeeping.rotate(log, 10, 3))
+            except Exception as e:
+                results.append(e)
+        ts = [threading.Thread(target=go) for _ in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        assert sorted(results) == [False, True], results
+        assert sorted(p.name for p in logs.iterdir()) == ["x.log", "x.log.1.gz"]
+        assert gzip.decompress((logs / "x.log.1.gz").read_bytes()) == b"DATA\n" * 100
+
+
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
     monkeypatch.setattr(housekeeping, "CALIBRATION_MAX_BYTES", 50)
     cal = config.CALIBRATION_LOG
