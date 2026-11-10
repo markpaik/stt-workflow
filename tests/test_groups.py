@@ -134,6 +134,19 @@ def test_one_series_groups_whatever_the_week_s_topic(sandbox):
         "sam c", "weekly", "check"}
     assert groups.title_words("Roof Repair – Bids") == {"roof", "repair", "bids"}
 
+def test_two_people_s_check_ins_on_one_topic_stay_apart(sandbox):
+    """Each 1:1 series is its own group. A topic both weeks share ('Goals
+    Review') once gave the pair a word overlap of 0.67, and one group held
+    two people's meetings."""
+    _mk("2026-01-01 Robin Weekly Check-in – Goals Review", mid="m1")
+    _mk("2026-01-08 Sam Weekly Check-in – Goals Review", mid="m2")
+    assert groups.current() == []
+    _mk("2026-01-15 Robin Weekly Check-in – Hiring", mid="m3")
+    (g,) = groups.current()
+    assert g["name"] == "Robin Weekly Check-in" and g["count"] == 2
+    assert "2026-01-08 Sam Weekly Check-in – Goals Review" not in g["bases"]
+
+
 def test_a_single_meeting_has_no_group_and_nothing_moves(sandbox):
     _mk("Science Fair 10012026")
     _mk("Snow Day 10022026")
