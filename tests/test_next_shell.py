@@ -301,26 +301,46 @@ def test_the_frame_loads_figtree_from_the_font_route():
     assert "--sans:'Figtree',-apple-system" in page
 
 
-def _surface_rows():
-    text = DESIGN.read_text(encoding="utf-8")
-    sec = text[text.index("### Where the 20 classic surfaces went"):]
-    rows = re.findall(r"^\|\s*(\d+)\s*\|([^|]*)\|([^|]*)\|\s*(\w+)\s*\|\s*`([^`]+)`\s*\|$", sec, re.M)
-    return [(int(n), name.strip(), where.strip(), st, tok) for n, name, where, st, tok in rows]
-
-
-def test_design_md_places_every_one_of_the_20_surfaces():
-    rows = _surface_rows()
-    assert [r[0] for r in rows] == list(range(1, 21))
-    assert {r[3] for r in rows} <= {"moves", "retires", "stays"}
-    # only the two surfaces outside 4C's reach may stay: the menu-bar app
-    # (not part of the page) and the reader (Phase 4D rebuilds it)
-    assert {r[1] for r in rows if r[3] == "stays"} <= {"Menu-bar app", "Reader"}
+# The panel's surfaces, each with a token from the frame's script or markup
+# that carries it (the 2026-11-01 panel audit numbered them, and the old
+# surface map in gui/DESIGN.md placed each one before the classic page went).
+SURFACE_TOKENS = (
+    ("Menu-bar look mark", "/api/seen"),
+    ("Sidebar top", 'class="side-top"'),
+    ("Status pill", "function pillText"),
+    ("Activity run controls", "'run-all'"),
+    ("Recordings filter and chips", "function filtered"),
+    ("Said in", "function palResults"),
+    ("Running now", "function activeRowHTML"),
+    ("Needs you", "function needsCard"),
+    ("Recordings by day and month", "function recListHTML"),
+    ("Folded months", 'data-act="fold"'),
+    ("Meeting page", "function meetingView"),
+    ("One content column", 'class="page"'),
+    ("Row menu", "function rowMenu"),
+    ("Selection bar", "function renderBulk"),
+    ("Settings page", "function settingsView"),
+    ("Voice sheet", "function vsHTML"),
+    ("Key sheet", "const KEYS"),
+    ("Drop overlay", 'class="drop"'),
+    ("Setup check", "function setupCard"),
+    ("Tab title", "function tabTitle"),
+)
 
 
 def test_each_surface_token_is_present_in_the_frame():
+    assert len(SURFACE_TOKENS) == 20
     page = _compose_next()
-    missing = [(n, tok) for n, _, _, _, tok in _surface_rows() if tok not in page]
+    missing = [(name, tok) for name, tok in SURFACE_TOKENS if tok not in page]
     assert not missing, missing
+
+
+def test_design_md_names_classic_only_as_the_redirect():
+    # the old page is deleted, so DESIGN.md describes it nowhere; the one
+    # line left says what a /classic bookmark gets
+    lines = [ln for ln in DESIGN.read_text(encoding="utf-8").splitlines()
+             if "classic" in ln.lower()]
+    assert len(lines) == 1 and "`GET /classic` answers 302 to `/`" in lines[0], lines
 
 
 def test_frame_routes_cover_the_pages_and_no_nav_entry_is_dead():
