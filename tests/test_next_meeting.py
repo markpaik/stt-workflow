@@ -1155,8 +1155,8 @@ def test_meeting_rows_carry_the_location_note(running_server):
 
 
 def test_every_page_route_is_origin_gated(running_server):
-    for path in ("/", "/next", "/classic"):
-        assert _get(running_server, path)[0] == 200, path
+    for path, ok in (("/", 200), ("/next", 200), ("/classic", 302)):
+        assert _get(running_server, path)[0] == ok, path
         assert _get(running_server, path, {"Origin": "https://evil.example.com"})[0] == 403, path
 
 

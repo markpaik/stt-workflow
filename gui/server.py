@@ -2318,20 +2318,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
-            if u.path in ("/", "/next", "/classic"):
-                # The 4D swap: `/` serves the new shell, and `/classic` keeps
-                # the old page for 30 days (a temporary route the owner
-                # approved; a later commit deletes it with app.js). `/next`,
-                # the 4C preview address, still answers with the new shell so
-                # a bookmark to it keeps working until that same commit. The
-                # retired `ui` query param is ignored. Every page reads the
-                # same API, and no GET here writes anything.
-                body = (_page_html() if u.path == "/classic" else _next_html()).encode()
+            if u.path in ("/", "/next"):
+                # `/` serves the panel. `/next`, the Phase 4C preview address,
+                # serves the same page, so a bookmark to it keeps working. The
+                # retired `ui` query param is ignored, and no GET here writes
+                # anything.
+                body = _next_html().encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif u.path == "/classic":
+                # The old page is deleted. A bookmark to it lands on the panel
+                # instead of a 404. The Location is relative, and a browser
+                # keeps the #m/<base> fragment across the redirect, which the
+                # panel reads as the same deep link.
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             elif u.path == "/api/state":
                 self._json(gather_state())
             elif u.path == "/api/dupes":
@@ -3682,14 +3688,10 @@ def start_server():
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _FONT_DIR = _STATIC_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
-# The classic page, served at /classic for 30 days after the 4D swap.
-_PAGE_PARTS = ("page.html", "app.css", "app.js")
-_page_cache: dict = {"mtimes": None, "html": None}
-# The new shell (plan Phases 4C and 4D), served at /: a second parts tuple,
-# composed the same way, with its own markers. Its script is several small
-# plain files joined in this fixed order, with no import lines and no build
-# step: the frame, then the meeting page, then the voice sheet, then the
-# library views (Groups and Ask).
+# The panel (plan Phases 4C and 4D), served at /: a skeleton, a stylesheet,
+# and several small plain scripts joined in this fixed order, with no import
+# lines and no build step: the frame, then the meeting page, then the voice
+# sheet, then the library views (Groups and Ask).
 _NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js",
                "next-library.js")
 _next_cache: dict = {"mtimes": None, "html": None}
@@ -3704,10 +3706,6 @@ def _compose(parts, css_marker, js_marker):
     return page.replace(css_marker, css).replace(js_marker, "\n".join(js))
 
 
-def _compose_page():
-    return _compose(_PAGE_PARTS, "/*@APP_CSS@*/", "//@APP_JS@")
-
-
 def _compose_next():
     return _compose(_NEXT_PARTS, "/*@NEXT_CSS@*/", "//@NEXT_JS@")
 
@@ -3720,10 +3718,6 @@ def _cached(parts, cache, compose):
         cache["html"] = compose()
         cache["mtimes"] = mtimes
     return cache["html"]
-
-
-def _page_html():
-    return _cached(_PAGE_PARTS, _page_cache, _compose_page)
 
 
 def _next_html():

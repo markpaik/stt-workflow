@@ -54,18 +54,6 @@ def _get(port, path):
     return status, ctype, body
 
 
-def test_classic_serves_the_old_shell_and_ignores_the_ui_param(running_server):
-    # since the 4D swap this page serves at /classic for 30 days, and / is the
-    # new shell (tests/test_next_shell.py). The retired ui query flag is
-    # ignored no matter its value, so a stale bookmark still gets the page.
-    expected = _compose(STATIC).encode()
-    for path in ("/classic", "/classic?ui=stale-bookmark", "/classic?anything=else"):
-        status, ctype, body = _get(running_server, path)
-        assert status == 200
-        assert "text/html" in ctype
-        assert body == expected, f"{path} is not the shell"
-
-
 def test_new_shell_has_all_seven_state_hooks():
     page = _compose(STATIC)
     for st in ("recording", "waiting", "held", "processing",

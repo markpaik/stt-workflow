@@ -1,5 +1,5 @@
-"""The new shell's frame (plan Phase 4C), served at / since the 4D swap,
-with the classic page kept at /classic for 30 days.
+"""The panel's frame (plan Phase 4C), served at / since the 4D swap. A
+request for /classic, the deleted old page, redirects to /.
 
 The routes, the read-only search endpoint, the token contrast, the type
 floor, the 20-surface table in gui/DESIGN.md, and the frame's pure logic run
@@ -71,17 +71,28 @@ def _meeting(base, text, **extra):
 
 # ------------------------------------------------------------------ routes ---
 
-def test_root_serves_the_new_shell_and_classic_keeps_the_old_page(running_server):
-    # the 4D swap: / is the new shell, /classic the old page for 30 days, and
-    # the 4C preview address /next still answers with the new shell
+def _location(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    r = conn.getresponse()
+    out = (r.status, r.getheader("Location"), r.read())
+    conn.close()
+    return out
+
+
+def test_root_serves_the_shell_and_classic_redirects_to_it(running_server):
+    # / is the panel, and the 4C preview address /next still answers with it
     for path in ("/", "/next", "/?ui=stale-bookmark"):
         status, ctype, body = _get(running_server, path)
         assert status == 200 and ctype.startswith("text/html"), path
         assert body == _compose_next().encode(), path
     html = _get(running_server, "/")[2].decode()
     assert "@NEXT_CSS@" not in html and "@NEXT_JS@" not in html
-    status, _, classic = _get(running_server, "/classic")
-    assert status == 200 and b'id="processBtn"' in classic and b'id="side"' not in classic
+    # the old page is deleted: a bookmark to /classic lands on /, never a 404,
+    # and the redirect carries no page of its own
+    for path in ("/classic", "/classic?ui=stale-bookmark"):
+        status, where, body = _location(running_server, path)
+        assert (status, where, body) == (302, "/", b""), path
 
 
 def test_next_frame_reloads_from_disk_without_a_restart(sandbox, tmp_path, monkeypatch):
@@ -119,7 +130,7 @@ def test_get_routes_the_frame_reads_never_write_a_meeting(running_server):
     _meeting("Orchard Survey 10202026", "We counted the pear trees by the north fence.")
     j = config.meeting_file("Orchard Survey 10202026", ".json")
     before = j.read_bytes()
-    for path in ("/", "/next", "/classic", "/api/state", "/api/search?q=pear",
+    for path in ("/", "/next", "/api/state", "/api/search?q=pear",
                  "/api/search_meetings?q=pear", "/api/transcript?base=Orchard%20Survey%2010202026",
                  "/api/review?base=Orchard%20Survey%2010202026",
                  "/api/voice_lines?base=Orchard%20Survey%2010202026&speaker=Speaker%201",
