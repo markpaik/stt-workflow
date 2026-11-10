@@ -244,3 +244,34 @@ def test_wipe_only_removes_a_home_it_built(tmp_path):
     # with --wipe on our own marked home: rebuilds cleanly
     demo_seed.main(["--dir", str(target), "--wipe"])
     assert config.meeting_file  # sanity: module intact
+
+
+def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
+    """Each seeded meeting lacked the store keys the pipeline writes (title,
+    source_name, audio_fp, date_source, recorded_at) and its meeting_id,
+    and unknowns.json had no `next`, so a fresh home failed `doctor.py
+    check` with missing_keys on every meeting and a registry_stale_next.
+    The seed also used to build folder names with a colon the sanitizer
+    never writes. The check runs in a fresh interpreter under STT_HOME, as
+    the finding's repro did."""
+    from stt import provenance
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    for j in sorted((home / "meetings").glob("*/*.json")):
+        if j.name.endswith(".reviews.json"):
+            continue
+        d = json.loads(j.read_text())
+        assert next(iter(d)) == "meeting_id" and len(d["meeting_id"]) == 16, j
+        assert all(k in d for k in provenance.KEYS), j
+        assert d["title"] and d["audio_fp"], j
+        if d["recorded_at"]:
+            assert d["date_source"] == "recorder" and d["recorded_at"][:10] == d["date"]
+        assert ":" not in j.parent.name, j
+    reg = json.loads((home / "voiceprints" / "unknowns.json").read_text())
+    assert reg["next"] == unknowns.next_floor(reg)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean: nothing to report" in out.stdout

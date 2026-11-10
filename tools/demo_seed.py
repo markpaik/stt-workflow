@@ -22,7 +22,9 @@ invented colleagues), and so is every title, number, and line. Titles follow
 the series catalog (stt/series.py), and each described meeting carries the
 current description fields: a gist, Decisions, Open questions, and topic
 tags. Three meetings are dated relative to the day the home is built, so Home
-shows a title to set, draft titles, and a voice to name. The tool
+shows a title to set, draft titles, and a voice to name. Each meeting
+carries its meeting_id and the store keys a real first write gives it, so a
+fresh home is doctor-clean (`tools/doctor.py check`). The tool
 REFUSES to run without --dir, and REFUSES any --dir that overlaps a real,
 configured data folder — it can only ever write inside its own target.
 """
@@ -93,6 +95,31 @@ def _words_for(text: str, start: float, end: float, speaker_id: str):
     return out
 
 
+def _store_keys(base: str, iso: str, meta: dict, wav: Path, spec: dict) -> dict:
+    """The store keys the pipeline writes at a meeting's first write
+    (provenance.KEYS, docs/store-contract.md). Without them a fresh demo
+    home failed `tools/doctor.py check` with one missing_keys finding per
+    meeting, so every screenshot and QA run started from findings.
+
+    A source name that carries the meeting's date is a typed date. Any
+    other arrived as a synced memo, whose recorder start time is the true
+    start: the clip's length before it was processed, on the same day."""
+    from stt import dupes
+    src = meta["source_file"]
+    ds = spec.get("date_source") or (
+        "typed" if dates.meeting_date(Path(src).stem) == iso else "recorder")
+    rec = None
+    if ds == "recorder":
+        done = datetime.fromisoformat(meta["processed_at"])
+        start = done - timedelta(seconds=float(meta["duration_sec"]) + 120)
+        if start.date().isoformat() != iso:
+            start = datetime.fromisoformat(f"{iso}T09:00:00")
+        rec = start.astimezone().isoformat(timespec="seconds")
+    return {"title": dates.title_of(base), "source_name": src,
+            "audio_fp": dupes.fingerprint(wav), "date_source": ds,
+            "recorded_at": rec}
+
+
 def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
     """Write one meeting folder (<base>/<base>.json/.txt/.wav [+ .reviews.json])
     through the REAL output writers. Returns bookkeeping for registries/history."""
@@ -147,6 +174,9 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
     src_mtime = round(os.path.getmtime(wav), 3)
 
     meta = {
+        # first key, as config.backfill_meeting_ids writes it (id_of reads
+        # a bounded head of the file)
+        "meeting_id": config.new_meeting_id(),
         "source_file": spec.get("source_file", f"{title}.m4a"),
         "source_mtime": src_mtime,
         "date": iso,
@@ -162,10 +192,11 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "overlap_spans": [[s["start"], s["end"]] for s in segments if s["overlap"]],
         "refine_stats": {"reassigned": 0, "smoothed": 0, "flagged": sum(1 for s in segments if s["flags"])},
     }
+    meta.update(_store_keys(base, iso, meta, wav, spec))
     if spec.get("category"):
         meta["category"] = spec["category"]
     meta["reviewed"] = bool(reviewed)
-    for k in ("title_state", "title_source", "arrived_at", "date_source"):
+    for k in ("title_state", "title_source", "arrived_at"):
         if spec.get(k):
             meta[k] = spec[k]
     for k in ("ai_title", "ai_summary"):
@@ -242,7 +273,11 @@ def write_voiceprints(home: Path, sources_seen: dict, unknown_meetings: dict):
         if info.get("archived"):
             entry["archived"] = True
         speakers[uid] = entry
-    (vp / "unknowns.json").write_text(json.dumps({"speakers": speakers}, indent=2))
+    # `next` past the highest id, as unknowns.mint_uid keeps it: without it
+    # the doctor reported registry_stale_next on every fresh demo home
+    from stt import unknowns
+    reg = {"next": unknowns.next_floor({"speakers": speakers}), "speakers": speakers}
+    (vp / "unknowns.json").write_text(json.dumps(reg, indent=2))
     return registry, speakers
 
 
