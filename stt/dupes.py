@@ -213,6 +213,8 @@ def source_duplicates(files, meetings, man=None, dest_dir=None, live=None) -> di
     # Gated on liveness: records outlive their meetings (deletions before the
     # delete_meeting scrub existed left dead records behind).
     for key, rec in (man.get("processed") or {}).items():
+        if not isinstance(rec, dict):
+            continue                 # a hand-edited record that is not an object
         fp, size = rec.get("fp"), rec.get("size")
         base = _record_base(rec)
         if not base:

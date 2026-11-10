@@ -2,6 +2,7 @@
 import contextlib
 import fcntl
 import json
+import math
 import os
 import shutil
 import sys
@@ -69,31 +70,47 @@ def update():
 _warned = {"damaged": False}
 
 
+_UNREADABLE = ("is not readable, so every source reads as new "
+               "(tools/doctor.py check names it)")
+
+
 def _read():
-    """(manifest, damaged): the manifest on disk, and True when the file is
-    there but cannot be read as one (a truncated file, outside damage, a
-    hand edit). A damaged file reads as an empty manifest."""
+    """(manifest, problem): the manifest on disk, and why it is damaged, or
+    None. A damaged file is one that is there but cannot be read as one (a
+    truncated file, outside damage, a hand edit).
+
+    A file that is not JSON, or JSON that is not an object holding a
+    "processed" object ('null', '[]', '42', {"processed": null}), reads as
+    an empty manifest: each made load() or is_processed() raise, and that
+    stopped the batch. A "failed" value that is not an object reads as none.
+    A record that is not an object stays, so a write keeps it for a person
+    to repair (tools/doctor.py names it manifest_bad_record), and every
+    reader skips it."""
     try:
         raw = config.MANIFEST_PATH.read_bytes()
     except FileNotFoundError:
-        return {"processed": {}}, False
+        return {"processed": {}}, None
     try:
         m = json.loads(raw)
     except ValueError:              # bad JSON, or bytes that are not UTF-8
-        return {"processed": {}}, True
+        return {"processed": {}}, _UNREADABLE
+    if not isinstance(m, dict) or not isinstance(m.get("processed", {}), dict):
+        return {"processed": {}}, _UNREADABLE
     m.setdefault("processed", {})   # a malformed file must not blank the queue
-    return m, False
+    if "failed" in m and not isinstance(m["failed"], dict):
+        m["failed"] = {}
+        return m, "holds a failure list that is not an object, so it is skipped"
+    return m, None
 
 
 def load() -> dict:
     with locked():
-        m, damaged = _read()
-        if damaged and not _warned["damaged"]:
+        m, problem = _read()
+        if problem and not _warned["damaged"]:
             # once per process: the panel loads the manifest on every poll
             _warned["damaged"] = True
-            print(f"warning: {config.MANIFEST_PATH.name} is not readable, so "
-                  "every source reads as new. tools/doctor.py check names it, "
-                  "and the next write keeps a copy of it", file=sys.stderr, flush=True)
+            print(f"warning: {config.MANIFEST_PATH.name} {problem}. The next "
+                  "write keeps a copy of it", file=sys.stderr, flush=True)
         return m
 
 
@@ -113,8 +130,8 @@ def _keep_aside():
         shutil.copy2(src, bad)
     except OSError:
         return
-    print(f"warning: {src.name} was not readable; kept a copy as {bad.name} "
-          "before writing a new one. Its processed records are in that copy",
+    print(f"warning: {src.name} was damaged; kept a copy as {bad.name} "
+          "before writing a new one. Its records are in that copy",
           file=sys.stderr, flush=True)
 
 
@@ -130,12 +147,24 @@ def save(m: dict):
 
 
 def is_processed(m: dict, key: str, mtime: float) -> bool:
-    rec = m["processed"].get(key)
-    if rec is None or abs(rec.get("mtime", 0) - mtime) >= 1.0:
+    """True when source `key` with this mtime has a record whose outputs
+    still exist. A record of the wrong shape (an mtime that is null or
+    text, outputs that are not a list) is no record: it raised TypeError,
+    and that stopped the batch."""
+    rec = (m.get("processed") or {}).get(key)
+    if not isinstance(rec, dict):
         return False
+    try:
+        was = float(rec.get("mtime", 0))
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(was) or abs(was - mtime) >= 1.0:
+        return False
+    outs = rec.get("outputs")
+    outs = outs if isinstance(outs, list) else []
     # self-healing: if the transcript outputs were deleted, the work no longer
     # exists — treat the file as new so it can be reprocessed
-    core = [o for o in rec.get("outputs", []) if o.endswith((".txt", ".json"))]
+    core = [o for o in outs if isinstance(o, str) and o.endswith((".txt", ".json"))]
     if core and not all(Path(o).exists() for o in core):
         return False
     return True
@@ -163,7 +192,9 @@ def retarget(old_dir, new_dir, old_base=None, new_base=None):
             m = load()
             changed = False
             for rec in m["processed"].values():
-                outs = rec.get("outputs") or []
+                outs = rec.get("outputs") if isinstance(rec, dict) else None
+                if not isinstance(outs, list):
+                    continue
                 new = []
                 for o in outs:
                     p = Path(o)

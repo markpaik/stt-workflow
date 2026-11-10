@@ -341,7 +341,8 @@ def delete_meeting(base: str) -> dict:
         with manifest.locked():
             m = manifest.load()
             stale = [k for k, rec in m.get("processed", {}).items()
-                     if any(str(o).endswith(".json") and Path(o).stem == base
+                     if isinstance(rec, dict)
+                     and any(str(o).endswith(".json") and Path(o).stem == base
                             and Path(o).parent == target
                             for o in rec.get("outputs") or [])]
             src_names += [k for k in stale if k not in src_names]

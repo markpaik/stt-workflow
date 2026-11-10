@@ -102,6 +102,8 @@ def manifest_names(manifest: dict) -> dict:
     The manifest key IS the raw name, and its outputs follow every rename."""
     out = {}
     for key, rec in ((manifest or {}).get("processed") or {}).items():
+        if not isinstance(rec, dict):
+            continue                 # a hand-edited record that is not an object
         for o in rec.get("outputs") or []:
             if str(o).endswith(".json"):
                 out[str(o)] = key
