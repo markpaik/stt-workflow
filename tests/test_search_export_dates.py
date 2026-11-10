@@ -144,6 +144,31 @@ def test_export_labels_a_line_from_the_roster_never_the_raw_id(sandbox, tmp_path
     assert not any("SPEAKER_" in t for t in text)
 
 
+def test_a_control_character_in_a_line_never_fails_the_word_export(sandbox, tmp_path, monkeypatch):
+    """python-docx refuses a string with a NUL or another XML-illegal
+    character. One such character from a paste or an ASR artifact failed the
+    Word export with a raw ValueError while the PDF of the same meeting
+    printed. Both formats now drop the character and keep the line."""
+    data = {"date": "2026-03-02", "duration_sec": 60,
+            "speakers": [{"id": "SPEAKER_00", "display": "Dana\x07 Fox"}],
+            "segments": [{"start": 1.0, "end": 2.0, "speaker": "SPEAKER_00",
+                          "text": "bad \x00\x0b char\ufffe here\ud800"},
+                         {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_00",
+                          "text": "\x00\x01"}],
+            "words": []}
+    mfile("2026-03-02 Ctrl\x1f Chars", ".json").write_text(json.dumps(data))
+    monkeypatch.setenv("STT_EXPORT_DIR", str(tmp_path / "out"))
+    from docx import Document
+    text = [p.text for p in Document(str(export.to_docx("2026-03-02 Ctrl\x1f Chars"))).paragraphs]
+    assert "bad  char here" in text and "Dana Fox  [00:01]" in text
+    assert "2026-03-02 Ctrl Chars" in text
+    # a line that held nothing else is dropped like an empty line
+    assert sum(t.startswith("Dana Fox") for t in text) == 1
+    h = export.to_html("2026-03-02 Ctrl\x1f Chars")
+    assert "bad  char here" in h and "\x00" not in h and "\x0b" not in h
+    h.encode("utf-8")  # no lone surrogate left to fail the PDF page write
+
+
 def test_docx_no_clobber(sandbox, tmp_path, monkeypatch):
     _mk_full(sandbox)
     monkeypatch.setattr(export.Path, "home", staticmethod(lambda: tmp_path))

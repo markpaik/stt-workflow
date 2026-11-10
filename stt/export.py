@@ -9,6 +9,7 @@ headless mode — no extra Python dependencies. Everything stays on-device.
 import html
 import json
 import os
+import re
 import subprocess
 import tempfile
 from datetime import datetime
@@ -24,6 +25,18 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # panel and the .txt show. The roster names a voice below the minting floor
 # ("Voice 9") while its lines carry only the raw diarizer id, which must
 # never reach a shared file.
+
+
+# what XML 1.0 forbids: C0 controls but tab, newline and return, lone
+# surrogates, and the two noncharacters. python-docx refuses a string that
+# holds one (ValueError), so one stray NUL from a paste or an ASR artifact
+# failed the whole Word export while the PDF of the same meeting printed.
+# Both formats drop them, so the two files agree.
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _clean(s: str) -> str:
+    return _XML_ILLEGAL.sub("", s)
 
 
 def _load(base: str) -> dict:
@@ -81,17 +94,17 @@ def to_docx(base: str) -> Path:
 
     d = _load(base)
     doc = Document()
-    doc.add_heading(base, level=1)
-    meta = doc.add_paragraph(_meta_line(base, d))
+    doc.add_heading(_clean(base), level=1)
+    meta = doc.add_paragraph(_clean(_meta_line(base, d)))
     meta.runs[0].font.color.rgb = RGBColor(0x6E, 0x6E, 0x73)
     meta.runs[0].font.size = Pt(10)
 
     roster = output.roster_labels(d.get("speakers"))
     for seg in d.get("segments", []):
-        text = seg.get("text", "").strip()
+        text = _clean(seg.get("text", "")).strip()
         if not text:
             continue
-        who = output.line_label(seg, roster)
+        who = _clean(output.line_label(seg, roster))
         p = doc.add_paragraph()
         r = p.add_run(f"{who}  [{_fmt_ts(seg['start'])}]"
                       + ("  ⚠" if seg.get("flags") else ""))
@@ -108,10 +121,10 @@ def to_html(base: str) -> str:
     rows = []
     roster = output.roster_labels(d.get("speakers"))
     for seg in d.get("segments", []):
-        text = seg.get("text", "").strip()
+        text = _clean(seg.get("text", "")).strip()
         if not text:
             continue
-        who = output.line_label(seg, roster)
+        who = _clean(output.line_label(seg, roster))
         warn = ' <span class="warn">uncertain</span>' if seg.get("flags") else ""
         rows.append(
             f'<div class="seg"><div class="who">{html.escape(who)}'
@@ -127,8 +140,8 @@ h1{{font-size:17pt;margin:0 0 4px}}
 .ts{{color:#86868b;font-weight:400}}
 .warn{{color:#c93400;font-weight:400;font-size:8pt}}
 .txt{{margin-top:1px}}
-</style></head><body><h1>{html.escape(base)}</h1>
-<div class="meta">{html.escape(_meta_line(base, d))}</div>
+</style></head><body><h1>{html.escape(_clean(base))}</h1>
+<div class="meta">{html.escape(_clean(_meta_line(base, d)))}</div>
 {''.join(rows)}</body></html>"""
 
 
