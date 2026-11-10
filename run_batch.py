@@ -721,7 +721,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
-            "diarizer": res.get("diarizer")}
+            "diarizer": res.get("diarizer"), "asr_engine": res.get("asr_engine")}
 
 
 def _descendants(pid: int) -> list:
@@ -1101,8 +1101,11 @@ def main():
                 # now processed, so clearing it cannot pin a stale name. A hold
                 # placed DURING the run was never honored and must survive.
                 holds.release(res["key"])
+            # the engine that ran: stt.env is read fresh, so a model
+            # switched mid-run named a model this process never loaded
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
-                         rates.current_asr_key(), n_active=n_active,
+                         rates.engine_key(res.get("asr_engine"))
+                         or rates.current_asr_key(), n_active=n_active,
                          diarizer=res.get("diarizer"))
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))

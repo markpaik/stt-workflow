@@ -665,4 +665,5 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "base": base, "txt": txt_path, "json": json_path, "emb": saved_emb,
         "duration_sec": dur, "n_speakers": len(labels), "identified": named,
         "diarizer": (diar or {}).get("engine"),
+        "asr_engine": asr_out.get("engine"),  # the engine that ran (rates.engine_key)
     }

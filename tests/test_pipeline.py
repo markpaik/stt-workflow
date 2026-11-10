@@ -67,6 +67,7 @@ def test_diarized_run_writes_a_loadable_embeddings_cache(sandbox, monkeypatch):
 
     emb_path = config.meeting_file("2026-05-01 Diarized Meeting", ".emb.npz")
     assert res["emb"] == emb_path and emb_path.exists()
+    assert res["asr_engine"] == "fake-asr"  # rates files the seconds under it
     with np.load(emb_path) as z:  # a truncated/mis-suffixed write would not load
         assert sorted(z.files) == ["SPEAKER_00", "SPEAKER_01"]
     # the diar cache landed too, and no temp artifact was left behind

@@ -302,3 +302,25 @@ def test_the_backend_setting_is_read_through_its_own_check(sandbox):
     assert rates.stage_secs("transcribing", 3600, 1) == whisper
     _env("STT_ASR_BACKEND=mlx-whisper\n")
     assert rates.stage_secs("transcribing", 3600, 1) == 3600 / config.EST_RATES["asr"]["parakeet"]
+
+
+def test_an_engine_name_maps_to_the_model_key_it_ran_as():
+    assert rates.engine_key(config.PARAKEET_MODEL) == "parakeet"
+    assert rates.engine_key("mlx-whisper/large-v3") == "mlxwhisper:large-v3"
+    assert rates.engine_key("mlx-whisper/large-v3-turbo") == "mlxwhisper:turbo"
+    assert rates.engine_key("elevenlabs/scribe_v1") == "cloud:scribe"
+    assert rates.engine_key("openai/gpt-4o-transcribe") == "cloud:openai"
+    assert rates.engine_key("mistral/voxtral-mini") == "cloud:voxtral"
+    assert rates.engine_key(None) is None and rates.engine_key("") is None
+
+
+def test_every_cloud_provider_has_its_engine_prefix():
+    """A provider added to asr_cloud without a prefix here would be filed
+    under parakeet."""
+    from pathlib import Path
+
+    from stt import asr_cloud
+    assert set(rates._CLOUD_ENGINES.values()) == set(asr_cloud.PROVIDERS)
+    src = (Path(asr_cloud.__file__)).read_text()
+    for head in rates._CLOUD_ENGINES:
+        assert f'"engine": f"{head}/' in src, head

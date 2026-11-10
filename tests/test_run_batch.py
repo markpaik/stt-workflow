@@ -452,6 +452,82 @@ def test_rate_sample_tags_true_concurrency_not_stale_worker_count(sandbox, monke
     assert (100.0, 1) in recorded  # the fix: solo retry tagged n_active=1, not 2
 
 
+def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
+    """The key was read from stt.env when the file finished. The batch
+    keeps the engine it loaded at start, so a model switched in the panel
+    mid-run (and a strict file run locally under a cloud setting) filed its
+    seconds under a model that did not run."""
+    import signal
+    import sys
+    from pathlib import Path
+
+    from stt import config, rates, summarize
+
+    engines = {"A.m4a": "mlx-whisper/large-v3", "B.m4a": config.PARAKEET_MODEL,
+               "C.m4a": None}
+    for name in engines:
+        (config.ICLOUD_DIR / name).write_bytes(b"\x00" * 64)
+    # the panel switched the model to turbo after this run started
+    (config.PROJECT_DIR / "stt.env").write_text(
+        "STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+
+    def stub(src_str, dest_str, opts):
+        name = Path(src_str).name
+        return {"ok": True, "key": name, "mtime": Path(src_str).stat().st_mtime,
+                "outputs": [], "summary": "s", "who": "", "duration_sec": 600.0,
+                "stage_secs": {"transcribing": 60.0}, "asr_engine": engines[name]}
+
+    monkeypatch.setattr(run_batch, "process_one", stub)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    recorded = {}
+    real = rates.record
+    monkeypatch.setattr(rates, "record", lambda dur, ss, key, n_active=1, **k: (
+        recorded.__setitem__(len(recorded), key), real(dur, ss, key, n_active, **k)))
+    monkeypatch.setattr(sys, "argv",
+                        ["run_batch.py", "--no-diarize", "--source", str(config.ICLOUD_DIR),
+                         "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    # a result that names no engine (an older worker) keeps the setting
+    assert sorted(recorded.values()) == ["mlxwhisper:large-v3", "mlxwhisper:turbo",
+                                         "parakeet"]
+    rates._cache.update(sig=None, learned=None)
+    assert set(rates.learned()["asr"]) == {"mlxwhisper:large-v3@1", "mlxwhisper:turbo@1",
+                                          "parakeet@1"}
+
+
+def test_process_one_passes_on_the_engine_process_file_ran(sandbox, monkeypatch):
+    from pathlib import Path
+
+    from stt import config, icloud, pipeline
+
+    src = config.source_dir()
+    src.mkdir(parents=True, exist_ok=True)
+    audio_src = src / "Sync 05012026.m4a"
+    audio_src.write_bytes(b"REAL AUDIO BYTES")
+
+    def fake_process_file(s, dest_dir=None, **kw):
+        base = Path(s).stem
+        config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+        j = config.meeting_file(base, ".json", dest_dir)
+        j.write_text("{}")
+        t = config.meeting_file(base, ".txt", dest_dir)
+        t.write_text("x")
+        return {"base": base, "txt": t, "json": j, "emb": None,
+                "duration_sec": 1.0, "n_speakers": 1, "identified": [],
+                "asr_engine": "mlx-whisper/turbo"}
+    monkeypatch.setattr(pipeline, "process_file", fake_process_file)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": False}
+    res = run_batch.process_one(str(audio_src), str(config.MEETINGS_DIR), opts)
+    assert res["asr_engine"] == "mlx-whisper/turbo"
+
+
 def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
     """The per-file pass: drafts for a meeting without an ai_summary, no-ops
     for one that already has it, and never leaves a stale 'summarizing' entry

@@ -63,6 +63,28 @@ def whisper_variant(v) -> str:
     return VARIANT_ALIASES.get(v, v)
 
 
+# the engine prefix of each cloud provider's transcripts (stt/asr_cloud.py
+# writes "elevenlabs/<model>"), and the provider it names
+_CLOUD_ENGINES = {"elevenlabs": "scribe", "openai": "openai", "mistral": "voxtral"}
+
+
+def engine_key(engine):
+    """The model key of the engine that wrote a transcript (the "engine" an
+    ASR module returns, such as "mlx-whisper/turbo"), or None when none is
+    named. A finished file's seconds are learned under this. The setting
+    read at the end of the file named a model that did not run when the
+    model was switched in the panel mid-run, when a strict file ran locally
+    under a cloud setting, and when a cloud run fell back to Parakeet."""
+    if not isinstance(engine, str) or not engine:
+        return None
+    head, _, tail = engine.partition("/")
+    if head == "mlx-whisper":
+        return f"mlxwhisper:{whisper_variant(tail)}"
+    if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
+        return f"cloud:{_CLOUD_ENGINES[head]}"
+    return "parakeet"
+
+
 def current_asr_key() -> str:
     kv = config._env_file()
     # the setting's own check, as pipeline._load_asr reads it: case and
