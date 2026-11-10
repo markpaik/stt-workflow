@@ -484,3 +484,26 @@ def test_the_dupes_endpoint_publishes_whether_a_scan_has_run(sandbox):
     assert dupes.cache_scanned() is True
     src = (_srv.Path(_srv.__file__).resolve().parent / "server.py").read_text()
     assert '"scanned": dupes.cache_scanned()' in src
+
+
+def test_a_cache_file_of_the_wrong_shape_reads_empty_and_the_scan_repairs_it(sandbox):
+    """dupes_cache.json is valid JSON of the wrong shape (a list, null, a
+    pair or a sketch with the wrong fields). Every reader raised
+    AttributeError, the scan that would rewrite the file raised too, and
+    the cache stayed broken until someone deleted it."""
+    body = _words(400)
+    _meeting("Standup 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("Standup 05022026", "b.m4a", text=body, dur=600.0)
+    d = config.meetings_dir()
+    for payload in ("[]", "null", '"x"', '{"sketches": [], "pairs": {}}',
+                    '{"pairs": [5, null, {"a": 1, "b": "B"}], "sig": "s"}',
+                    '{"sketches": {"Standup 05012026": {"mtime": "x", "words": 1,'
+                    ' "hashes": 5}, "Standup 05022026": 7}}'):
+        dupes.cache_path().write_text(payload)
+        assert dupes.cached_pairs(d) == [], payload
+        dupes.cache_truncated(), dupes.cache_scanned(), dupes.cache_is_current(d)
+        pairs = dupes.similar_meetings(dest_dir=d)
+        assert [(p["a"], p["b"]) for p in pairs] == \
+            [("Standup 05012026", "Standup 05022026")], payload
+        # the scan saved a good file over the bad one
+        assert dupes.cache_is_current(d) and len(dupes.cached_pairs(d)) == 1, payload

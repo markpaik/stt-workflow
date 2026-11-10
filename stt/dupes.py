@@ -275,14 +275,41 @@ def library_signature(dest_dir=None) -> str:
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
+def _is_num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _good_pair(p) -> bool:
+    return (isinstance(p, dict) and isinstance(p.get("a"), str)
+            and isinstance(p.get("b"), str) and _is_num(p.get("score")))
+
+
+def _good_sketch(v) -> bool:
+    """A cached per-meeting entry that similar_meetings can use as it is."""
+    return (isinstance(v, dict) and _is_num(v.get("mtime"))
+            and _is_num(v.get("words")) and _is_num(v.get("dur") or 0.0)
+            and isinstance(v.get("hashes"), list)
+            and all(isinstance(h, int) for h in v["hashes"]))
+
+
 def _load_cache() -> dict:
+    """The last scan, or an empty one. Valid JSON of the wrong shape (a list,
+    null, a pair or a sketch with the wrong fields) raised AttributeError in
+    every reader, and the scan that would rewrite the file raised too, so
+    the cache stayed broken until someone deleted it. Each part of the wrong
+    shape now reads as empty, and the next scan saves a good file."""
     try:
         c = json.loads(cache_path().read_text())
-        c.setdefault("sketches", {})
-        c.setdefault("pairs", [])
-        return c
     except (OSError, ValueError):
+        c = None
+    if not isinstance(c, dict):
         return {"sketches": {}, "pairs": [], "sig": None}
+    sk = c.get("sketches")
+    c["sketches"] = ({b: v for b, v in sk.items() if _good_sketch(v)}
+                     if isinstance(sk, dict) else {})
+    pairs = c.get("pairs")
+    c["pairs"] = [p for p in pairs if _good_pair(p)] if isinstance(pairs, list) else []
+    return c
 
 
 def _save_cache(c: dict):
@@ -419,10 +446,10 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
         except OSError:
             continue
         prev = old.get(base)
-        # "words" is required: an entry cached by an older build carries no
-        # word count, and the length gate below needs one whenever the
-        # duration is missing
-        if prev and abs(prev.get("mtime", 0) - mtime) < 1.0 and "words" in prev:
+        # "words" is required (_good_sketch): an entry cached by an older
+        # build carries no word count, and the length gate below needs one
+        # whenever the duration is missing
+        if prev and abs(prev["mtime"] - mtime) < 1.0:
             sketches[base] = prev["hashes"]
             durs[base] = prev.get("dur") or 0.0
             lens[base] = prev.get("words") or 0
