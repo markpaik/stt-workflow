@@ -688,3 +688,33 @@ def test_the_page_names_an_icon_and_favicon_ico_is_no_404(running_server):
     assert html.index('rel="icon"') < html.index("</head>")
     status, _, body = _get(running_server, "/favicon.ico")
     assert (status, body) == (204, b"")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_speaker_actions_share_one_right_edge():
+    """A named row ends with a More button hidden until hover, so its
+    Samples button ended 40px left of Name, Hide and Restore in the other
+    sections. Those rows now end with a slot of the More button's width,
+    shown only where the More button is hidden."""
+    out = _run_node("""
+S={unknowns:[{uid:'U1',display:'Speaker 1',meetings:['m1']},{uid:'U2',display:'Speaker 2',meetings:['m1'],archived:true}],
+ enrolled:[{name:'Ana Ortiz',samples:2,sources:['m1']}],mic_speaker:null};
+console.log(JSON.stringify({html:speakersView()}));
+""")
+    rails = re.findall(r'<div class="rail">(.*?)</div></div>', out["html"], re.S)
+    assert len(rails) == 3
+    ends = [re.findall(r"<(button|span)\b[^>]*>", r)[-1] for r in rails]
+    unknown = next(r for r in rails if 'data-act="hide-voice"' in r)
+    hidden = next(r for r in rails if 'data-act="unhide-voice"' in r)
+    named = next(r for r in rails if 'data-act="spk-menu"' in r)
+    for r in (unknown, hidden):
+        assert r.rstrip().endswith('<span class="rail-slot" aria-hidden="true"></span>')
+    assert "rail-slot" not in named and named.rstrip().endswith("</button>")
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    assert ".rail-slot{display:none}" in css
+    hover = css[css.index("@media (hover:hover) and (min-width:900px)"):]
+    hover = hover[:hover.index("\n}")]
+    assert ".row>.rail>.icon-btn{opacity:0}" in hover
+    assert ".rail-slot{display:block;width:32px;flex:none}" in hover
+    assert re.search(r"\.icon-btn\{[^}]*width:32px", css)
+    assert len(ends) == 3

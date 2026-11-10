@@ -333,6 +333,12 @@ async function loadDupes(){const r=await api('/api/dupes').catch(()=>({pairs:[]}
  if(r.scanning)setTimeout(()=>{if(UI.route==='activity'&&UI.actTab==='dupes'){UI.dupes=null;render(true);}},2500);}
 
 /* ------------------------------------------------------------ speakers ---- */
+// A named person's row ends with a More button that stays hidden until the
+// row is hovered (next.css), so its Samples button sat 40px left of the
+// other sections' Name, Hide and Restore. This empty slot holds the same
+// place at the end of those rows, so every section's text buttons share
+// one right edge. It is shown only where the hidden button is.
+const RAIL_SLOT='<span class="rail-slot" aria-hidden="true"></span>';
 function speakersView(){
  const unk=(S.unknowns||[]).filter(u=>!u.archived).sort((a,b)=>(b.meetings||[]).length-(a.meetings||[]).length);
  const hidden=(S.unknowns||[]).filter(u=>u.archived);
@@ -341,7 +347,7 @@ function speakersView(){
  const unkRow=u=>{const n=(u.meetings||[]).length;const look=(u.looks_like||[])[0];const same=(u.suggested||[]).filter(x=>x&&x.uid).slice(0,2);
   return `<div class="row static" data-row tabindex="0" id="v-${esc(u.uid)}"><div style="min-width:0"><div class="row-title">${esc(u.display)}</div><div class="meta">In ${plural(n,'meeting')}${look?` · Looks like <span class="nb">${esc(look.name)} · <span class="mono">${(+look.score).toFixed(2)}</span></span>`:''}</div>
    ${same.length?`<div class="tools">${same.map(x=>`<button class="btn plain" type="button" data-act="link-voice" data-src="${esc(u.uid)}" data-dst="${esc(x.uid)}">Same voice as ${esc(x.display)} · <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('')}</div>`:''}</div>
-   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}" data-base="${esc((u.meetings||[])[0]||'')}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
+   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}" data-base="${esc((u.meetings||[])[0]||'')}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button>${RAIL_SLOT}</div></div>`;};
  const others=enr.map(e=>e.name);
  const enrRow=e=>{const conf=UI.confirm==='rm:'+e.name;const open=UI.openSamples===e.name;const mine=S.mic_speaker===e.name;
   return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(e.name)}${mine?'<span class="chip draft">Your voice</span>':''}</div><div class="meta">${plural(e.samples||0,'voice sample')}${(e.sources||[]).length?' · from '+plural(e.sources.length,'meeting'):''}</div>
@@ -353,7 +359,7 @@ function speakersView(){
  return `<div class="head"><div><h1>Speakers</h1><p class="meta">Your voice library stays on this Mac and carries names across meetings. Public meetings never ask.</p></div></div>
   <div class="stack sections"><section><div class="eyebrow">Unknown voices <span class="n">${unk.length}</span></div><div class="stack">${unk.map(unkRow).join('')||'<div class="none-line sub">Every voice has a name.</div>'}</div></section>
   <section><div class="eyebrow">Named people <span class="n">${enr.length}</span></div><div class="stack">${enr.map(enrRow).join('')}</div></section>
-  ${hidden.length?`<section><div class="eyebrow">Hidden voices <span class="n">${hidden.length}</span></div><div class="stack">${hidden.map(u=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(u.display)}</div><div class="meta">In ${plural((u.meetings||[]).length,'meeting')}</div></div><div class="rail"><button class="btn quiet" type="button" data-act="unhide-voice" data-uid="${esc(u.uid)}">Restore</button></div></div>`).join('')}</div></section>`:''}</div>`;
+  ${hidden.length?`<section><div class="eyebrow">Hidden voices <span class="n">${hidden.length}</span></div><div class="stack">${hidden.map(u=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(u.display)}</div><div class="meta">In ${plural((u.meetings||[]).length,'meeting')}</div></div><div class="rail"><button class="btn quiet" type="button" data-act="unhide-voice" data-uid="${esc(u.uid)}">Restore</button>${RAIL_SLOT}</div></div>`).join('')}</div></section>`:''}</div>`;
 }
 function renameForm(e){const N=UI.naming;
  return `<div class="name-form"><div class="ask-line"><input type="text" id="rn-in" value="${esc(N.value!=null?N.value:e.name)}" aria-label="New name for ${esc(e.name)}" autocomplete="off"><button class="btn primary" type="button" data-act="rn-save" ${N.busy?'disabled':''}>Rename</button><button class="btn plain" type="button" data-act="vcancel">Cancel</button></div>${N.err?`<div class="err">${esc(N.err)}</div>`:''}</div>`;}

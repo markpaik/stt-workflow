@@ -186,9 +186,11 @@ h2{font-size:var(--fs-sub);font-weight:600;line-height:1.3}
 .prog i{display:block;height:100%;background:var(--accent)}
 .row.static{cursor:default}
 .row.static:hover{background:transparent}
+.rail-slot{display:none}
 @media (hover:hover) and (min-width:900px){
   .row>.rail>.icon-btn{opacity:0}
   .row:hover>.rail>.icon-btn,.row:focus-within>.rail>.icon-btn{opacity:1}
+  .rail-slot{display:block;width:32px;flex:none}
 }
 .err{font-size:var(--fs-meta);color:var(--rec-text)}
 
