@@ -85,3 +85,50 @@ def test_the_headless_panel_says_its_port_is_in_use_in_one_line(tmp_path):
     assert "Traceback" not in r.stderr
     assert f"not started: port {port} is in use" in r.stderr
     assert "STT_PANEL_PORT" in r.stderr
+
+
+class _Menu:
+    def __init__(self):
+        self.titles = []
+
+    def clear(self):
+        self.titles = []
+
+    def add(self, it):
+        self.titles.append(getattr(it, "title", None))
+
+
+class _FakeBar:
+    """Just enough of STTMenuBar for _render: a menu that records titles,
+    and a no-op for every callback it wires."""
+    _frame = 0
+    _panel_error = None
+
+    def __init__(self):
+        self.menu = _Menu()
+
+    def __getattr__(self, name):
+        return lambda *a: None
+
+
+def _note_line(sandbox_state, text, ok):
+    bar = _FakeBar()
+    s = dict(sandbox_state, recorder_note={"ok": ok, "text": text})
+    menubar.STTMenuBar._render(bar, s)
+    return [t for t in bar.menu.titles if t and t[:1] in "✓⚠" and text[:10] in t]
+
+
+def test_the_recorder_note_keeps_its_text_past_a_dot(sandbox):
+    """The note went through _short, which drops everything after the last
+    dot (a file extension). A start error that names an app or a path lost
+    its tail, and a note that ends in a period lost the period."""
+    s = menubar.gather()
+    err = "Could not start: STT Recorder.app is missing"
+    assert _note_line(s, err, False) == ["⚠  " + err]
+    ok = "Saved “Q3 v2.1 review” — processing; it will appear soon."
+    assert _note_line(s, ok, True) == ["✓  " + ok]
+    long = "Could not start: could not launch the recorder ([Errno 13] x.app)" * 2
+    [line] = _note_line(s, long, False)
+    assert line == "⚠  " + long[:63] + "…"
+    # a file name in the queue still drops its extension
+    assert menubar._short("Budget Review.m4a") == "Budget Review"

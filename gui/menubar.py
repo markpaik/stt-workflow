@@ -33,9 +33,17 @@ STAGE_LABEL = {
 }
 
 
+def _clip(text, n):
+    """Free text cut to n characters, with an ellipsis when it is cut."""
+    text = str(text or "")
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 def _short(name, n=34):
-    name = name.rsplit(".", 1)[0]
-    return name if len(name) <= n else name[: n - 1] + "…"
+    """A file name without its extension, cut to n characters. For file
+    names only: free text goes through _clip, since a dot inside a note
+    ('STT Recorder.app') is no extension."""
+    return _clip(name.rsplit(".", 1)[0], n)
 
 
 def _pid_alive(pid):
@@ -317,7 +325,7 @@ class STTMenuBar(rumps.App):
         note = s.get("recorder_note")
         if note:  # the last recording's outcome, until the next start supersedes it
             items.append(_disabled(("✓  " if note.get("ok") else "⚠  ")
-                                   + _short(note.get("text", ""), 64)))
+                                   + _clip(note.get("text", ""), 64)))
 
         # --- controls ---
         items.append(rumps.separator)
