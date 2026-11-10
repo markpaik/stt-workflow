@@ -36,6 +36,7 @@ A reader may rely on these keys in `<base>.json`.
 | `ai_next_steps` | Removed 2026-11-05. Older meetings may still hold the list. Every summary run deletes it | A summary run deletes it |
 | `ai_summary_parts` | 1 when the summary read the transcript in one prompt, else how many parts the model noted first. Absent on a summary from before Phase 4G | With `ai_summary` |
 | `location_note` | The default place name Voice Memos gave a synced memo (a street address or a listed place), kept as a note because it is not a title | Never, once written |
+| `manual_next` | The number the next person added by hand to a line takes (`MANUAL_n`). A line edit drops a hand-added person once no line names them, and that number is never handed out again | A line edit adds or drops a hand-added person |
 | `vm_uuid` | The Voice Memos id of a synced memo. A purge blocks it so the sync never copies it again, and the delete after ingest moves a memo only while a library meeting carries its id | Never, once written |
 
 Old code can ignore any key it does not know. A meeting from before a key simply lacks it, and every reader must accept that.
