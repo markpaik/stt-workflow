@@ -25,9 +25,13 @@ from pathlib import Path
 
 from . import config
 
-LOG_MAX_BYTES = config.env_int("STT_LOG_MAX_BYTES", 10 * 1000 * 1000)
+# a cap of 0 or less rotated every file on every run, empty ones too: an
+# empty gzip took name.1.gz and pushed the real history one step closer to
+# deletion. A cap below 1 byte warns and keeps the default.
+LOG_MAX_BYTES = config.env_int("STT_LOG_MAX_BYTES", 10 * 1000 * 1000, minimum=1)
 LOG_KEEP = 3
-CALIBRATION_MAX_BYTES = config.env_int("STT_CALIBRATION_MAX_BYTES", 10 * 1000 * 1000)
+CALIBRATION_MAX_BYTES = config.env_int("STT_CALIBRATION_MAX_BYTES", 10 * 1000 * 1000,
+                                       minimum=1)
 
 
 def _gz_write(src: Path, tmp: Path) -> None:
@@ -53,9 +57,11 @@ def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
     every generation held the same copy and the older history was gone."""
     p = Path(path)
     try:
-        if p.stat().st_size < max_bytes:
-            return False
+        size = p.stat().st_size
     except OSError:
+        return False
+    # an empty file holds nothing to keep, whatever the cap
+    if size == 0 or size < max_bytes:
         return False
     if dry_run:
         return True

@@ -201,9 +201,13 @@ def env_float(name, default):
                        lambda v: not math.isnan(v), "a number")
 
 
-def env_int(name, default):
-    """A whole-number setting read at import, by _env_number's rules."""
-    return _env_number(name, int(default), int, lambda v: True, "a whole number")
+def env_int(name, default, minimum=None):
+    """A whole-number setting read at import, by _env_number's rules. With
+    `minimum`, a smaller value is refused like a typo."""
+    if minimum is None:
+        return _env_number(name, int(default), int, lambda v: True, "a whole number")
+    return _env_number(name, int(default), int, lambda v: v >= minimum,
+                       f"a whole number of {minimum} or more")
 
 
 # --- Models ---

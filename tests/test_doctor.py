@@ -372,6 +372,38 @@ def test_a_leftover_temp_gzip_is_not_a_log(sandbox, monkeypatch):
     assert gzip.decompress((logs / "c.log.1.gz").read_bytes()) == b"C" * 50
 
 
+@pytest.mark.parametrize("name", ["STT_LOG_MAX_BYTES", "STT_CALIBRATION_MAX_BYTES"])
+@pytest.mark.parametrize("raw", ["0", "-5"])
+def test_a_cap_below_one_byte_keeps_the_default(tmp_path, name, raw):
+    """A cap of 0 or less rotated every file on every run."""
+    import subprocess
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), name: raw})
+    r = subprocess.run([sys.executable, "-c", "from stt import housekeeping as h; "
+                        "print(h.LOG_MAX_BYTES, h.CALIBRATION_MAX_BYTES)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "10000000 10000000"
+    assert name in r.stderr and "using 10000000" in r.stderr
+
+
+def test_an_empty_file_never_rotates_and_keeps_every_generation(sandbox):
+    """At a cap of 0 an empty log rotated into an empty name.1.gz, and the
+    real history moved one step closer to deletion."""
+    logs = sandbox / "logs"
+    logs.mkdir()
+    _seed_generations(logs)
+    log = logs / "a.log"
+    log.write_bytes(b"")
+    for _ in range(3):
+        assert housekeeping.rotate(log, 0, 3) is False
+    assert _generations(logs) == [b"old1\n", b"old2\n", b"old3\n"]
+    log.write_bytes(b"X")
+    assert housekeeping.rotate(log, 0, 3) is True       # a file with bytes still rotates
+    assert _generations(logs) == [b"X", b"old1\n", b"old2\n"]
+
+
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
     monkeypatch.setattr(housekeeping, "CALIBRATION_MAX_BYTES", 50)
     cal = config.CALIBRATION_LOG
