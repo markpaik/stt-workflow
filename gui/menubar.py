@@ -131,6 +131,20 @@ def _fmt_hms(secs):
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def start_panel():
+    """Start the control panel. None when it serves, else the one-line
+    reason it could not (its port is taken). The menu-bar app keeps
+    running without it: a port in use raised out of __init__, and launchd
+    (KeepAlive on a crash) restarted the app into the same error."""
+    import sys
+    try:
+        panel.start_server()
+        return None
+    except panel.PortInUse as e:
+        print(f"control panel not started: {e}", file=sys.stderr, flush=True)
+        return str(e)
+
+
 class STTMenuBar(rumps.App):
     def __init__(self):
         super().__init__("STT", icon=ICON, template=True, quit_button=None)
@@ -139,7 +153,7 @@ class STTMenuBar(rumps.App):
         self._stall_warned = None  # caf path already warned about (once per capture)
         self._rec_cache = None     # last known live recording, for the 1s clock tick
         self._busy_cache = ""      # spinner suffix while a batch runs alongside
-        panel.start_server()  # local control panel at http://127.0.0.1:8737
+        self._panel_error = start_panel()  # local control panel at http://127.0.0.1:8737
         try:  # a recording orphaned by a crash/forced quit: salvage its audio
             saved = recorder.recover_orphans()
             if saved:
@@ -308,6 +322,8 @@ class STTMenuBar(rumps.App):
         # --- controls ---
         items.append(rumps.separator)
         items.append(rumps.MenuItem("Open Control Panel…", callback=self.open_panel))
+        if getattr(self, "_panel_error", None):
+            items.append(_disabled(f"⚠  Panel not started: port {panel.PORT} is in use"))
         if s["running"]:
             items.append(rumps.MenuItem("Stop processing", callback=self.stop_run))
         else:
