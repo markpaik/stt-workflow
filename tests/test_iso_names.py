@@ -86,6 +86,41 @@ def test_canonical_moves_a_typed_stamp_to_the_front():
     assert dates.canonical("Plain", None) == "Plain"
 
 
+@pytest.mark.parametrize("name", ["2026-07-10", "07102026", "20260710", "2026-07-10 (2)",
+                                  " 2026-07-10 "])
+def test_a_name_that_is_only_a_date_gets_one_date_and_a_default_title(name):
+    """restamp and canonical used the old date as the title when a name was
+    only a date: '2026-07-11 2026-07-10' and '2026-07-11 07102026'. The
+    name now holds one date and a default title, which still asks for a
+    real one (titles.is_label is False for it)."""
+    from stt import titles
+    for got in (dates.restamp(name.strip(), "2026-07-11"),
+                dates.canonical(name, "2026-07-11"),
+                dates.canonical(name, "2026-07-10")):
+        assert got.endswith(" Recording") and got.count("2026-07-1") == 1, got
+        assert dates.restamp(got, got[:10]) == got            # idempotent
+        assert not titles.is_label(got)
+    assert dates.restamp("2026-07-10", "2026-07-10") == "2026-07-10 Recording"
+    assert dates.restamp("07102026", "2026-07-11", untitled="Voice Memo") == \
+        "2026-07-11 Voice Memo"
+    # a date with words keeps its words, as before
+    assert dates.restamp("2026-07-10 Weekly", "2026-07-11") == "2026-07-11 Weekly"
+    assert dates.restamp("Recording 07112026 1814", "2026-07-11") == "2026-07-11 Recording 1814"
+
+
+def test_a_folder_named_only_a_date_moves_to_one_date(sandbox):
+    """A re-date of a folder named only a date ('2026-07-10', from before
+    the panel refused such a title) gave '2026-07-11 2026-07-10'."""
+    _m("2026-07-10", date="2026-07-10")
+    r = summarize.set_meeting_date("2026-07-10", "2026-07-11")
+    assert r["ok"], r
+    assert r["base"] == "2026-07-11 Recording"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == "Recording"
+    from stt import doctor
+    assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+
+
 def test_a_rename_keeps_title_equal_to_the_folder_without_its_date(sandbox):
     _m("Weekly Check-in 08032026", date="2026-08-03")
     r = summarize.rename_meeting("Weekly Check-in 08032026", "Kim Weekly Check-in – Plans")
