@@ -256,3 +256,25 @@ def test_init_skips_the_download_when_the_weights_are_there(tmp_path):
         [c for c in calls if "local_files_only" in c]
     assert not any("Download the Qwen3-8B" in c for c in calls)
     assert "already downloaded" in out
+
+
+def test_every_example_setting_reads_as_its_value_once_uncommented(tmp_path):
+    """stt.env.example put comments after the values ('1  # 0 to keep
+    iCloud originals'). The reader keeps a '#' after a value, so a line
+    with only its leading '# ' removed read as a bad value: the doctor
+    named three as bad_setting, and STT_MOVE_AFTER_SUCCESS turned moves
+    off without a word. Each comment now sits on its own line."""
+    import re
+    from stt import envfile
+    example = (Path(__file__).resolve().parent.parent / "stt.env.example").read_text()
+    lines = [ln[2:] for ln in example.splitlines()
+             if re.match(r"# [A-Z][A-Z0-9_]*=", ln)]
+    assert len(lines) >= 10
+    f = tmp_path / "stt.env"
+    f.write_text("\n".join(lines) + "\n")
+    for key, value in envfile.parse(f).items():
+        assert "#" not in value and value == value.strip(), (key, value)
+    parsed = envfile.parse(f)
+    assert parsed["STT_MOVE_AFTER_SUCCESS"] == "1"
+    assert parsed["STT_SPEAKRS_AHC"] == "0.55"
+    assert parsed["STT_DIARIZER"] == "speakrs"
