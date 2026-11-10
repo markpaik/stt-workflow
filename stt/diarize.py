@@ -316,6 +316,17 @@ def _run_speakrs(wav_path, progress):
             pass
 
 
+def _speaker_hint(v):
+    """A speaker-count hint as a whole number above 0, else None."""
+    if isinstance(v, bool):
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 and n == v else None
+
+
 def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
             allowed_names=None, num_speakers=None, min_speakers=None,
             max_speakers=None, context="", progress=None) -> dict:
@@ -323,7 +334,15 @@ def diarize(wav_path, voiceprints=None, do_refine=None, strict=None, words=None,
         do_refine = config.REFINE
     pipe = _get_pipeline()  # the embedder serves naming + per-turn embeddings under both engines
     raw = None
+    # a speaker count is a hint only when it is a whole number above 0: a 0
+    # (or a blank a caller passed through) used to count as one, and moved
+    # the file to the slow CPU engine with no word
+    num_speakers, min_speakers, max_speakers = (
+        _speaker_hint(v) for v in (num_speakers, min_speakers, max_speakers))
     hints = any(v is not None for v in (num_speakers, min_speakers, max_speakers))
+    if hints and config.DIARIZER == "speakrs":
+        print("   speaker-count hint given — speakrs takes none, so pyannote "
+              "separates this file")
     ready, why = (speakrs_diar.available() if config.DIARIZER == "speakrs" and not hints
                   else (False, ""))
     if why:
