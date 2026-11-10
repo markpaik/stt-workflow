@@ -22,15 +22,16 @@ ENGINES = ("parakeet", "mlxwhisper:large-v3", "mlxwhisper:turbo")
 
 
 def _asr_module(engine: str):
+    # only the listed engines: any "mlxwhisper:<text>" set <text> as the
+    # Whisper model, and the child loaded (or fetched) that repo or folder
+    if engine not in ENGINES:
+        raise ValueError(f"unknown engine {engine!r} (choose from {ENGINES})")
     if engine == "parakeet":
         from . import asr_parakeet
         return asr_parakeet
-    if engine.startswith("mlxwhisper"):
-        variant = engine.split(":", 1)[1] if ":" in engine else "large-v3"
-        os.environ["STT_WHISPER_MLX_MODEL"] = variant
-        from . import asr_mlxwhisper
-        return asr_mlxwhisper
-    raise ValueError(f"unknown engine {engine!r} (choose from {ENGINES})")
+    os.environ["STT_WHISPER_MLX_MODEL"] = engine.split(":", 1)[1]
+    from . import asr_mlxwhisper
+    return asr_mlxwhisper
 
 
 def meeting_audio(base: str):

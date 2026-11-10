@@ -506,6 +506,20 @@ def test_retranscribe_engine_selection(sandbox):
     assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "bogus")["error"]
 
 
+def test_retranscribe_loads_no_whisper_model_it_does_not_list(sandbox, monkeypatch):
+    """Any "mlxwhisper:<text>" set <text> as the Whisper model, so a request
+    could make the child load or fetch any repo or folder. "mlxwhisper:"
+    crashed with a raw FileNotFoundError."""
+    from stt import retranscribe
+    monkeypatch.setenv("STT_WHISPER_MLX_MODEL", "turbo")
+    for engine in ("mlxwhisper:example-org/model", "mlxwhisper:", "mlxwhisper",
+                   "mlxwhisper:/tmp/folder", "Parakeet", "cloud:scribe"):
+        with pytest.raises(ValueError, match="unknown engine"):
+            retranscribe._asr_module(engine)
+        assert "unknown engine" in retranscribe.retranscribe("Mtg", 0, 1, engine)["error"]
+    assert os.environ["STT_WHISPER_MLX_MODEL"] == "turbo"
+
+
 @pytest.mark.skipif(not (shutil.which(audio.FFMPEG) or os.path.exists(audio.FFMPEG)),
                     reason="ffmpeg not installed")
 def test_retranscribe_refuses_a_span_that_is_no_stretch_of_the_recording(sandbox, monkeypatch):
