@@ -65,7 +65,9 @@ def test_missing_status_file_reads_empty(sandbox):
 
 def test_estimate_progress_verifying_stage(sandbox):
     """Verify runs report a 'verifying' stage — ETA must keep working there,
-    and the extra pass must appear in the total only when actually verifying."""
+    and the extra pass must appear in the total only when actually verifying.
+    A cloud transcript has a second engine (Parakeet). A Parakeet one has none."""
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
     plain, _ = status.estimate_progress({"stage": "transcribing", "duration": 600, "progress": 1.0})
     f, eta = status.estimate_progress({"stage": "verifying", "duration": 600, "progress": 0.5})
     assert f is not None and 0 < f < 1 and eta > 0
@@ -97,7 +99,9 @@ def test_no_diarize_run_never_budgets_diarizing_time(sandbox):
 def test_verify_mode_known_up_front_no_progress_jump(sandbox):
     """A verify-mode file must show verifying's time in its ETA from the very
     first stage, not just once "verifying" itself starts — otherwise the
-    percentage jumps backward the instant verifying begins."""
+    percentage jumps backward the instant verifying begins. Under a cloud
+    engine, the one setting that still has a second engine."""
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
     entry_early = {"stage": "transcribing", "duration": 600, "progress": 0.0, "verify": True}
     entry_at_verify = {"stage": "verifying", "duration": 600, "progress": 0.0, "verify": True}
     f_early, _ = status.estimate_progress(entry_early)
@@ -193,11 +197,30 @@ def test_verify_timings_calibrate_the_secondary_engine(sandbox):
     to the machine instead of staying on factory defaults forever."""
     from stt import rates
 
-    # 600s of audio, primary parakeet: verify ran on whisper turbo for 60s
-    rates.record(600.0, {"transcribing": 10.0, "verifying": 60.0}, "parakeet")
+    # 600s of audio, primary cloud: verify ran on Parakeet for 20s
+    rates.record(600.0, {"transcribing": 10.0, "verifying": 20.0}, "cloud:scribe")
     L = rates.learned()
-    assert L["asr"]["parakeet@1"] == 60.0          # 600/10 primary
-    assert L["asr"]["mlxwhisper:turbo@1"] == 10.0  # 600/60 from the verify pass
+    assert L["asr"]["cloud:scribe@1"] == 60.0      # 600/10 primary
+    assert L["asr"]["parakeet@1"] == 30.0          # 600/20 from the verify pass
+
+
+def test_a_verify_run_with_no_second_engine_budgets_no_verifying(sandbox):
+    """A Parakeet transcript has no second local engine, so its verify run
+    runs no verifying stage. The ETA budgeted one at Whisper's rate, and a
+    stray verifying sample was learned as Whisper's speed."""
+    from stt import rates
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    est = status.stage_estimates(3600.0, verify=True)
+    assert "verifying" not in est
+    assert est == status.stage_estimates(3600.0, verify=False)
+    assert status.stage_tail("verifying") == rates.DEFAULT_TAIL
+    rates.record(600.0, {"transcribing": 10.0, "verifying": 60.0}, "parakeet")
+    assert set(rates.learned()["asr"]) == {"parakeet@1"}
+    assert rates.learned()["asr"]["parakeet@1"] == 60.0   # the primary run only
+    # a cloud setting keeps a verifying stage, budgeted at Parakeet's rate
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
+    est = status.stage_estimates(3600.0, verify=True)
+    assert est["verifying"] == rates.stage_secs("transcribing", 3600.0, 1, "parakeet")
 
 
 def test_set_stage_concurrent_no_lost_update(sandbox):

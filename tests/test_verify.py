@@ -97,16 +97,40 @@ def test_apply_flags_still_excludes_regions_genuinely_outside_a_segment():
     assert segments[0]["flags"] == []
 
 
-def test_secondary_engine_is_architecturally_different():
-    assert verify.secondary_engine("mlx-community/parakeet-tdt-0.6b-v2") == ("mlxwhisper", "turbo")
-    assert verify.secondary_engine("mlx-whisper/large-v3") == ("parakeet", None)
+CLOUD = "elevenlabs/scribe_v2"     # a cloud transcript: Parakeet is its second opinion
+
+
+def test_the_second_opinion_is_a_local_engine_that_did_not_write_the_transcript():
+    """Whisper was the second engine for a Parakeet transcript. With
+    Parakeet the only local engine, a Parakeet transcript has none, and a
+    cloud transcript still gets Parakeet. A cloud engine is never the
+    second opinion: the pass would upload the whole meeting."""
+    assert verify.LOCAL_ENGINES == ("parakeet",)
+    for own in ("mlx-community/parakeet-tdt-0.6b-v3", "parakeet", config.PARAKEET_MODEL):
+        assert verify.secondary_engine(own) is None, own
+    for own in (CLOUD, "cloud:scribe", "openai/whisper-1", "mistral/voxtral-mini-latest"):
+        assert verify.secondary_engine(own) == "parakeet", own
+
+
+def test_a_second_local_engine_needs_one_line(monkeypatch):
+    """The shape stays open for another local engine: listing it makes it
+    the second opinion for a Parakeet transcript."""
+    monkeypatch.setattr(verify, "LOCAL_ENGINES", ("parakeet", "other-local"))
+    assert verify.secondary_engine(config.PARAKEET_MODEL) == "other-local"
+    assert verify.secondary_engine(CLOUD) == "parakeet"
+
+
+def test_run_with_no_second_engine_raises_and_loads_no_model():
+    import pytest
+    with pytest.raises(ValueError, match="no second local engine"):
+        verify.run("dummy.wav", PRIMARY, config.PARAKEET_MODEL)
 
 
 def test_sidecar_roundtrip(sandbox):
     regs = [{"start": 1.0, "end": 2.0, "ours": "a", "theirs": "b"}]
-    verify.save_sidecar("Mtg", regs, "mlx-whisper/turbo")
+    verify.save_sidecar("Mtg", regs, config.PARAKEET_MODEL)
     got = verify.load_sidecar("Mtg")
-    assert got["engine"] == "mlx-whisper/turbo" and got["regions"] == regs
+    assert got["engine"] == config.PARAKEET_MODEL and got["regions"] == regs
     assert verify.load_sidecar("Nothing") is None
     # a corrupt sidecar degrades to None, never a crash
     mfile("Bad", ".verify.json").write_text("{nope")
@@ -138,18 +162,17 @@ def test_failed_secondary_engine_flags_nothing(monkeypatch):
     """A second engine that returns almost nothing has failed — flagging the
     whole transcript as 'disagreement' would be noise. Drive verify.run()
     itself so the 30%-floor guard is exercised, not just the region math it
-    protects: a Parakeet primary routes the second opinion through mlxwhisper,
+    protects: a cloud primary routes the second opinion through Parakeet,
     which we stub to return a single word (1 << 0.3*6)."""
-    from stt import asr_mlxwhisper
+    from stt import asr_parakeet
     sec = [{"start": 0.0, "end": 0.4, "word": "ok"}]
-    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+    monkeypatch.setattr(asr_parakeet, "transcribe",
                         lambda wav, progress=None: {"words": sec,
-                                                    "engine": "mlx-whisper/turbo"})
-    regs, engine = verify.run("dummy.wav", PRIMARY,
-                              "mlx-community/parakeet-tdt-0.6b-v2")
+                                                    "engine": config.PARAKEET_MODEL})
+    regs, engine = verify.run("dummy.wav", PRIMARY, CLOUD)
     # below the floor: run() returns NO regions even though the raw math on the
     # same inputs would emit a giant spurious deletion — that gap is the guard.
-    assert regs == [] and engine == "mlx-whisper/turbo"
+    assert regs == [] and engine == config.PARAKEET_MODEL
     assert verify.regions(PRIMARY, sec) != []
 
 
@@ -157,15 +180,14 @@ def test_working_secondary_engine_flags_real_disagreement(monkeypatch):
     """The other side of the floor: a second engine that returns ENOUGH words
     (>= 30% of primary) which genuinely disagree must yield real regions — so a
     removed or inverted floor comparison fails one of these two tests."""
-    from stt import asr_mlxwhisper
+    from stt import asr_parakeet
     sec = _w([(0.0, 0.4, "We"), (0.4, 0.8, "renewed"), (0.8, 1.2, "the"),
               (1.2, 1.8, "dashboard")])  # 4 words >= 0.3*6; "renewed" disagrees
-    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+    monkeypatch.setattr(asr_parakeet, "transcribe",
                         lambda wav, progress=None: {"words": sec,
-                                                    "engine": "mlx-whisper/turbo"})
-    regs, engine = verify.run("dummy.wav", PRIMARY,
-                              "mlx-community/parakeet-tdt-0.6b-v2")
-    assert engine == "mlx-whisper/turbo"
+                                                    "engine": config.PARAKEET_MODEL})
+    regs, engine = verify.run("dummy.wav", PRIMARY, CLOUD)
+    assert engine == config.PARAKEET_MODEL
     assert any(r["theirs"] == "renewed" for r in regs)
 
 
@@ -173,15 +195,15 @@ def test_a_second_engine_that_stops_early_flags_no_tail(monkeypatch, capsys):
     """A second engine that crashed or dropped its last chunk still passed the
     30% floor, and the whole unheard tail became one region: every segment
     in it was flagged. Only the part it reached is compared now."""
-    from stt import asr_mlxwhisper
+    from stt import asr_parakeet
     words = "we will review the attendance numbers for every school this week and next".split()
     primary = _w([(2.0 * i, 2.0 * i + 1.5, w) for i, w in enumerate(words)])
     sec = [dict(w) for w in primary[:6]]          # it stopped after "numbers"
     sec[2]["word"] = "renew"                        # one real disagreement it heard
-    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+    monkeypatch.setattr(asr_parakeet, "transcribe",
                         lambda wav, progress=None: {"words": sec,
-                                                    "engine": "mlx-whisper/turbo"})
-    regs, _ = verify.run("dummy.wav", primary, "mlx-community/parakeet-tdt-0.6b-v3")
+                                                    "engine": config.PARAKEET_MODEL})
+    regs, _ = verify.run("dummy.wav", primary, CLOUD)
     assert regs == [{"start": 4.0, "end": 5.5, "ours": "review", "theirs": "renew"}]
     assert "not compared" in capsys.readouterr().out
     # the raw alignment still makes the tail one region: run() is the guard

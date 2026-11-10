@@ -221,10 +221,10 @@ def _samples(rows, diarizer: str = None) -> dict:
             # the verify pass IS a transcription by the secondary engine —
             # its timing calibrates that engine's rate like any primary run
             from . import verify as _verify
-            backend, variant = _verify.secondary_engine(r.get("asr", "parakeet"))
-            sec_key = f"{backend}:{variant}" if variant else backend
-            buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
-                (d, secs["verifying"]))
+            sec_key = _verify.secondary_engine(r.get("asr", "parakeet"))
+            if sec_key:
+                buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
+                    (d, secs["verifying"]))
         if secs.get("writing"):
             buckets["writing"].append((d, secs["writing"]))
     return buckets

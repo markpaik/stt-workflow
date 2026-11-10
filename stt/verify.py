@@ -12,6 +12,12 @@ candidates and the audio cued) is the arbiter.
 Regions are persisted to <base>.verify.json so relabel — which rebuilds
 segments from the diarization cache — can re-flag them; review decisions then
 clear them exactly like any other flag.
+
+The second engine is a LOCAL engine that did not write the transcript
+(LOCAL_ENGINES). A cloud engine is never used: the pass would send the whole
+meeting off the Mac. Parakeet is the only local engine, so a Parakeet
+transcript has no second opinion, and the pass adds no flags to it. A cloud
+transcript gets Parakeet as its second opinion.
 """
 import difflib
 import json
@@ -96,12 +102,34 @@ def regions(primary_words, secondary_words):
     return out
 
 
-def secondary_engine(primary_engine: str):
-    """The most architecturally-different available engine: Parakeet (TDT) vs
-    Whisper turbo (encoder-decoder). Returns (backend, whisper_variant|None)."""
-    if "parakeet" in (primary_engine or ""):
-        return "mlxwhisper", "turbo"
-    return "parakeet", None
+# The local engines a second opinion can come from, each named by its
+# stt.rates key. A new local engine goes here and in _module().
+LOCAL_ENGINES = ("parakeet",)
+NO_SECOND_ENGINE = ("verify: no second local engine for a Parakeet transcript, "
+                    "so the second-opinion pass adds no flags")
+
+
+def _own_key(engine) -> str:
+    """The stt.rates key of the engine that wrote a transcript: the engine
+    an ASR module returns ("mlx-community/parakeet-tdt-0.6b-v3") or a key
+    already ("parakeet", "cloud:scribe")."""
+    e = str(engine or "")
+    return "parakeet" if "parakeet" in e else e
+
+
+def secondary_engine(primary_engine):
+    """The local engine for a second opinion on a transcript that
+    `primary_engine` wrote, or None when no other local engine exists."""
+    own = _own_key(primary_engine)
+    return next((e for e in LOCAL_ENGINES if e != own), None)
+
+
+def _module(engine):
+    """The ASR module of a LOCAL_ENGINES key."""
+    if engine == "parakeet":
+        from . import asr_parakeet
+        return asr_parakeet
+    raise ValueError(f"no local engine {engine!r}")
 
 
 def heard(primary_words, secondary_words):
@@ -118,27 +146,14 @@ def heard(primary_words, secondary_words):
 
 
 def run(wav, primary_words, primary_engine, progress=None):
-    """Transcribe `wav` with the second engine and return (regions, engine_name)."""
-    import os
-
+    """Transcribe `wav` with the second engine and return (regions, engine_name).
+    The caller checks secondary_engine() first: with no second engine this
+    raises ValueError."""
     from . import sanitize
-    backend, variant = secondary_engine(primary_engine)
-    if backend == "mlxwhisper":
-        from . import asr_mlxwhisper as asr
-        # the variant env var is read at call time — restore it afterwards so the
-        # NEXT file's primary Whisper run doesn't silently inherit "turbo"
-        prev = os.environ.get("STT_WHISPER_MLX_MODEL")
-        os.environ["STT_WHISPER_MLX_MODEL"] = variant
-        try:
-            out = asr.transcribe(wav, progress=progress)
-        finally:
-            if prev is None:
-                os.environ.pop("STT_WHISPER_MLX_MODEL", None)
-            else:
-                os.environ["STT_WHISPER_MLX_MODEL"] = prev
-    else:
-        from . import asr_parakeet as asr
-        out = asr.transcribe(wav, progress=progress)
+    second = secondary_engine(primary_engine)
+    if second is None:
+        raise ValueError(NO_SECOND_ENGINE)
+    out = _module(second).transcribe(wav, progress=progress)
     sec_words, _ = sanitize.collapse_repeats(out["words"])
     if len(sec_words) < 0.3 * max(len(primary_words), 1):
         # the second engine clearly failed on this audio — flagging the entire

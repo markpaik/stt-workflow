@@ -496,7 +496,11 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         speakers = output.build_speakers(labels, names)
 
         verify_engine, verify_regions = None, None
-        if do_verify and words:
+        second = verify.secondary_engine(asr_out["engine"]) if do_verify and words else None
+        if do_verify and words and second is None:
+            # nothing to compare with: the run is the same as one without verify
+            config._warn_once(("STT_VERIFY", "no second engine"), verify.NO_SECOND_ENGINE)
+        if second:
             report("verifying", 0.0)
             try:
                 verify_regions, verify_engine = verify.run(

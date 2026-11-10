@@ -338,14 +338,17 @@ def stage_estimates(duration: float, n_active: int = 1, verify: bool = False,
     }
     if diarize:
         est["diarizing"] = rates.stage_secs("diarizing", duration, n_active, asr)
-    if verify:
+    second = _verify_engine(asr) if verify else None
+    if second:
+        # a verify run with no second engine runs no verifying stage
         est["verifying"] = rates.stage_secs("transcribing", duration, n_active,
-                                            _verify_engine(asr))
+                                            second)
     return est
 
 
 def _verify_engine(asr):
-    return "mlxwhisper:turbo" if asr == "parakeet" else "parakeet"
+    from . import verify
+    return verify.secondary_engine(asr)
 
 
 def stage_tail(stage: str, n_active: int = 1) -> float:
@@ -355,7 +358,9 @@ def stage_tail(stage: str, n_active: int = 1) -> float:
     from . import rates
     asr = rates.current_asr_key()
     if stage == "verifying":
-        return rates.stage_tail("transcribing", n_active, _verify_engine(asr))
+        second = _verify_engine(asr)
+        return (rates.stage_tail("transcribing", n_active, second) if second
+                else rates.DEFAULT_TAIL)
     if stage == "downloading":
         return rates.DEFAULT_TAIL
     return rates.stage_tail(stage, n_active, asr)
