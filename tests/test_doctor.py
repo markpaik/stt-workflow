@@ -419,3 +419,72 @@ def test_check_reports_a_folder_with_no_json_or_an_unreadable_one(sandbox, monke
     monkeypatch.setattr(doctor, "_batch_running", lambda: True)
     kinds = {f.kind for f in doctor.check(registry=False)}
     assert "folder_without_json" not in kinds and "unreadable_json" in kinds
+
+
+# ---------- the speaker engine ----------
+
+def _no_diar_env(monkeypatch):
+    for k in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "STT_DIARIZER", "STT_SPEAKRS_AHC",
+              "STT_SPEAKRS_TIMEOUT_SEC"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_the_doctor_says_when_there_is_no_hugging_face_token(sandbox, monkeypatch):
+    """Both engines need the gated pyannote embedder, and the batch stops at
+    its start without a token. The doctor said nothing about it."""
+    from stt import speakrs_diar
+    _no_diar_env(monkeypatch)
+    monkeypatch.setattr(config, "HF_TOKEN", None)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: None)
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
+    kinds = {f.kind: f for f in doctor.check(registry=False)}
+    assert "diarizer_no_token" in kinds
+    assert "HF_TOKEN" in kinds["diarizer_no_token"].detail
+    (sandbox / "stt.env").write_text("HF_TOKEN=hf_synthetic\n")
+    assert "diarizer_no_token" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_the_doctor_says_when_speakrs_falls_back_to_pyannote(sandbox, monkeypatch):
+    """A missing helper or model set showed only as a warning line per file
+    in the log. The doctor names it once, and says nothing when pyannote
+    is the engine the owner picked."""
+    from stt import speakrs_diar
+    _no_diar_env(monkeypatch)
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "hf_synthetic")
+    monkeypatch.setattr(speakrs_diar, "available",
+                        lambda: (False, "speakrs helper not built (x); run init.sh"))
+    found = [f for f in doctor.check(registry=False) if f.kind == "diarizer_fallback"]
+    assert len(found) == 1 and "run init.sh" in found[0].detail
+    assert "slower pyannote path" in found[0].detail
+    (sandbox / "stt.env").write_text("STT_DIARIZER=pyannote\n")
+    assert "diarizer_fallback" not in {f.kind for f in doctor.check(registry=False)}
+    (sandbox / "stt.env").write_text("")
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
+    monkeypatch.setattr(speakrs_diar, "SANDBOX_EXEC", str(sandbox / "no-sandbox-exec"))
+    found = [f for f in doctor.check(registry=False) if f.kind == "diarizer_fallback"]
+    assert len(found) == 1 and "no-sandbox-exec missing" in found[0].detail
+
+
+def test_the_doctor_names_an_unreadable_diarizer_setting(sandbox, monkeypatch):
+    """STT_DIARIZER, STT_SPEAKRS_AHC and STT_SPEAKRS_TIMEOUT_SEC warned at
+    import and fell back, but the doctor's bad_setting list left them out."""
+    _no_diar_env(monkeypatch)
+    (sandbox / "stt.env").write_text(
+        "STT_DIARIZER=speakr\nSTT_SPEAKRS_AHC=abc\nSTT_SPEAKRS_TIMEOUT_SEC=0\n")
+    bad = {f.subject: f.detail for f in doctor.check(registry=False)
+           if f.kind == "bad_setting"}
+    assert set(bad) == {"STT_DIARIZER", "STT_SPEAKRS_AHC", "STT_SPEAKRS_TIMEOUT_SEC"}
+    assert "using speakrs" in bad["STT_DIARIZER"]
+    assert "using 0.55" in bad["STT_SPEAKRS_AHC"]
+    assert "using 3600" in bad["STT_SPEAKRS_TIMEOUT_SEC"]
+    (sandbox / "stt.env").write_text(
+        "STT_DIARIZER=Pyannote\nSTT_SPEAKRS_AHC=0.6\nSTT_SPEAKRS_TIMEOUT_SEC=900\n")
+    assert not [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+
+
+def test_stt_env_example_lists_every_diarizer_setting():
+    text = (Path(__file__).resolve().parent.parent / "stt.env.example").read_text()
+    for name in ("STT_DIARIZER", "STT_SPEAKRS_AHC", "STT_SPEAKRS_TIMEOUT_SEC",
+                 "STT_SPEAKRS_BIN", "STT_SPEAKRS_MODELS", "HF_TOKEN"):
+        assert f"{name}=" in text, name
+    assert "BOTH engines" in text

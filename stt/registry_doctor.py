@@ -235,8 +235,10 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
             out.append(Finding("invalid", uid,
                                f"sample file {meta.get('file')} missing", False))
             continue
+        bad = False
         for i, row in enumerate(arr):
             if _bad_row(row):
+                bad = True
                 out.append(Finding("invalid", f"{uid}[{i}]",
                                    "not a finite unit vector", False))
         if lib.bases:
@@ -248,6 +250,13 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
                                        True))
         if meta.get("dropped"):
             continue        # a tombstone is not a speaker: never merged, never split
+        if bad:
+            # a NaN or non-unit row scores -1.0 against everything, so the
+            # stack also read as a "split" and as a "duplicate" of a healthy
+            # voice. --fix then merged the bad row INTO that voice, and a
+            # second run split it off again. The invalid finding is the one
+            # report: a person repairs it, and no merge or split touches it.
+            continue
         worst = unknowns.min_pairwise(arr)
         if worst < unknowns.LINK_STACK_MIN:
             out.append(Finding("split", uid,

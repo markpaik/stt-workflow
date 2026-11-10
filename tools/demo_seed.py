@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np  # a core repo dependency (identify.py); the real loaders need it
 
-from stt import config, dates, output, speaker_text  # real writers/helpers — never invent a schema
+from stt import config, dates, output, speaker_text, unknowns  # real writers/helpers — never invent a schema
 
 # --- synthetic cast (the ONLY person names that may appear) ---
 OWNER = "Morgan Ellis"
@@ -284,9 +284,10 @@ def write_voiceprints(home: Path, sources_seen: dict, unknown_meetings: dict):
         if info.get("archived"):
             entry["archived"] = True
         speakers[uid] = entry
-    # `next` past the highest id, as unknowns.mint_uid keeps it: without it
-    # the doctor reported registry_stale_next on every fresh demo home
-    from stt import unknowns
+    # "next" is the monotonic counter the real store keeps (unknowns.
+    # heal_next, past the highest id as mint_uid keeps it): without it the
+    # doctor reported registry_stale_next and registry_doctor reported
+    # stale_next and exited 1 on every fresh demo home
     reg = {"next": unknowns.next_floor({"speakers": speakers}), "speakers": speakers}
     (vp / "unknowns.json").write_text(json.dumps(reg, indent=2))
     return registry, speakers

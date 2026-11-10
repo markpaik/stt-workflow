@@ -205,3 +205,38 @@ def test_segments_with_unreadable_arrays_still_fall_back(tmp_path, monkeypatch):
     (tmp_path / "src" / "clusters.i32").write_bytes(b"")
     with pytest.raises(speakrs_diar.SpeakrsUnavailable):
         speakrs_diar.run(tmp_path / "x.wav")
+
+
+@pytest.mark.parametrize("hint", [0, -1, None, True, "2", 2.5])
+def test_a_zero_or_unusable_speaker_count_is_no_hint(monkeypatch, capsys, hint):
+    """num_speakers=0 counted as a hint ('is not None'), so the file went to
+    the slow pyannote path with no message. Only a whole number above 0 is
+    a hint now, and nothing else reaches pyannote as one."""
+    monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(diarize, "_get_pipeline", lambda: object())
+    monkeypatch.setattr(speakrs_diar, "available", lambda: (True, ""))
+    monkeypatch.setattr(diarize, "_run_speakrs", lambda *a: {
+        "labels": [], "overlaps": [], "centroids": {}, "raw_turns": [],
+        "engine": speakrs_diar.ENGINE})
+    monkeypatch.setattr(diarize, "_pyannote_raw",
+                        lambda *a: pytest.fail("no usable hint, so speakrs runs"))
+    monkeypatch.setattr(diarize, "_embed_turns", lambda *a, **k: ([], 0))
+    out = diarize.diarize("x.wav", voiceprints={}, num_speakers=hint)
+    assert out["engine"].startswith("speakrs")
+    assert "hint" not in capsys.readouterr().out
+
+
+def test_a_real_speaker_count_says_it_moves_the_file_to_pyannote(monkeypatch, capsys):
+    monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(diarize, "_get_pipeline", lambda: object())
+    seen = {}
+
+    def raw(pipe, wav, n, lo, hi, progress):
+        seen.update(n=n, lo=lo, hi=hi)
+        return {"labels": [], "overlaps": [], "centroids": {}, "raw_turns": [],
+                "engine": "pyannote"}
+    monkeypatch.setattr(diarize, "_pyannote_raw", raw)
+    monkeypatch.setattr(diarize, "_embed_turns", lambda *a, **k: ([], 0))
+    diarize.diarize("x.wav", voiceprints={}, min_speakers=0, max_speakers=4)
+    assert seen == {"n": None, "lo": None, "hi": 4}
+    assert "speaker-count hint given" in capsys.readouterr().out

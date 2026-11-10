@@ -52,16 +52,13 @@ def _env_file_dir(repo=None) -> Path:
 
 def _load_env_file(repo=None):
     """Load KEY=VALUE lines from stt.env BEFORE importing the package (config reads
-    env at import). launchd does not read ~/.zshrc."""
-    p = _env_file_dir(repo) / "stt.env"
-    if not p.exists():
-        return
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+    env at import). launchd does not read ~/.zshrc. The parsing rules are
+    stt/envfile.py's (it imports nothing from the package), so a quoted
+    value loses its quotes here as it does in config._env_file. A variable
+    already set in the environment wins."""
+    from stt import envfile
+    for k, v in envfile.parse(_env_file_dir(repo) / "stt.env").items():
+        os.environ.setdefault(k, v)
 
 
 _load_env_file()

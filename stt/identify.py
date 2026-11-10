@@ -187,17 +187,22 @@ def _name_key(name: str) -> str:
     return " ".join(str(name).split()).casefold()
 
 
-_RESERVED = re.compile(r"U\d+", re.IGNORECASE)
+_RESERVED = re.compile(r"U\d+|(?:speaker|voice)\s+\d+", re.IGNORECASE)
 
 
 def reserved_name(name) -> bool:
     """'U007' is an unknown voice's id, and its samples live in U007.npy in
-    this same folder. A person by that name would share the file."""
-    return bool(_RESERVED.fullmatch(str(name or "").strip()))
+    this same folder. A person by that name would share the file.
+
+    'Speaker 7' and 'Voice 3' are the labels an unknown voice shows
+    (unknowns.display) and a meeting-only cluster shows. A person enrolled
+    as 'Speaker 7' looked like unknown U007 everywhere, and speaker_text
+    reads such a label as no name at all."""
+    return bool(_RESERVED.fullmatch(" ".join(str(name or "").split())))
 
 
-RESERVED_ERROR = ("Names like U7 or U007 are reserved for unknown voices. "
-                  "Pick a different name.")
+RESERVED_ERROR = ("Names like U7, Speaker 7 or Voice 3 are reserved for unknown "
+                  "voices. Pick a different name.")
 
 
 def canonical_name(name: str, reg: dict = None) -> str:

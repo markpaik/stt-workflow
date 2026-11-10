@@ -3658,6 +3658,25 @@ def check_updates():
     return {"models": out}
 
 
+class PortInUse(RuntimeError):
+    """The panel's port is taken: another panel, or another program, is
+    listening on 127.0.0.1:PORT. The message is one line for a person."""
+
+
+def _bind(port):
+    """The panel's HTTP server on 127.0.0.1:`port`. A port in use raises
+    PortInUse (one line) instead of the OSError traceback that ended a
+    second panel, and that the menu-bar app did not catch at all."""
+    import errno
+    try:
+        return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE:
+            raise
+        raise PortInUse(f"port {port} is in use: another control panel (or another "
+                        f"program) already listens on 127.0.0.1:{port}") from None
+
+
 def start_server():
     global RELABEL_QUEUE
     try:
@@ -3674,13 +3693,15 @@ def start_server():
         config.backfill_meeting_ids(config.archive_dir())
     except Exception:
         pass  # same contract: never block the panel on a migration
+    # bind first: with the port taken, no relabel worker starts for a panel
+    # that cannot serve a request
+    srv = _bind(PORT)
     # the one relabel worker for this process. Every naming, rename, merge and
     # queued follow-up goes through it from here on, instead of spawning a
     # child that reloads the models this process already has warm.
     if RELABEL_QUEUE is None:
         RELABEL_QUEUE = jobqueue.RelabelQueue()
     RELABEL_QUEUE.start()
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv
@@ -3744,7 +3765,12 @@ if __name__ == "__main__":
     # module for the menu bar or the tests is unaffected.
     config.private_umask()
     PORT = int(os.environ.get("STT_PANEL_PORT", str(PORT)))
-    start_server()
+    try:
+        start_server()
+    except PortInUse as e:
+        print(f"STT control panel not started: {e}. Stop the other one, or set "
+              "STT_PANEL_PORT to a free port.", file=sys.stderr)
+        sys.exit(1)
     print(f"STT control panel: http://127.0.0.1:{PORT}/   "
           f"(STT_HOME={config.STT_HOME or '(real data — none set)'})")
     print("Ctrl-C to stop.")

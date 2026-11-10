@@ -66,16 +66,23 @@ def _words_from_segments(segments):
     """Word timings synthesized from segment timings (for providers that
     return only segment granularity): tokens spread evenly inside their
     segment. Coarser than true word timestamps but keeps every downstream
-    consumer (diarization merge, review edits) working on the same schema."""
+    consumer (diarization merge, review edits) working on the same schema.
+
+    Every word stays inside its segment with end >= start. A reversed
+    segment (end before start) is read as zero length at its start. A
+    segment too short for 0.01 s a word gives its last words zero length
+    at the segment end: the end was clamped and the start was not, so
+    'a b c' in a zero-length segment ended before it began."""
     out = []
     for s in segments:
         toks = str(s.get("text", "")).split()
         if not toks:
             continue
-        t0, t1 = float(s["start"]), float(s["end"])
+        t0 = float(s["start"])
+        t1 = max(t0, float(s["end"]))
         step = max(0.01, (t1 - t0) / len(toks))
         for i, tok in enumerate(toks):
-            out.append({"start": round(t0 + i * step, 3),
+            out.append({"start": round(min(t1, t0 + i * step), 3),
                         "end": round(min(t1, t0 + (i + 1) * step), 3),
                         "word": tok})
     return out

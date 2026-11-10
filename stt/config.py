@@ -47,15 +47,6 @@ def _home_default(sub: str, hard_default) -> str:
 
 
 # --- Paths ---
-ICLOUD_DIR = Path(os.environ.get("STT_ICLOUD_DIR", _home_default(
-    "source", HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")))
-MEETINGS_DIR = Path(os.environ.get("STT_MEETINGS_DIR",
-                                   _home_default("meetings", HOME / "Projects/brain/meetings")))
-# where the on-device meeting recorder drops finished captures — a LOCAL folder
-# (not iCloud): these calls are sensitive and the files are large, so they never
-# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
-RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
-    "recordings", HOME / "Library/Application Support/com.stt-workflow/recordings")))
 # The state root: manifest, status/history, holds, queue, voiceprints, stt.env,
 # work/, logs/ all hang off this. Defaults to STT_HOME when set (so all of that
 # state travels with the demo home), else this checkout. Code and static assets
@@ -63,6 +54,32 @@ RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
 # repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   _HOME or Path(__file__).resolve().parent.parent))
+# The transcripts folder when nothing names one: the same default init.sh
+# offers. It was the owner's own library path, so a fresh clone that skipped
+# init.sh wrote meetings there, and init.sh and the code disagreed.
+DEFAULT_MEETINGS_DIR = HOME / "Documents/Meeting Transcripts"
+
+
+def _folder(env_name: str, sub: str, hard_default) -> Path:
+    """An import-time folder setting: the environment, then stt.env, then
+    the STT_HOME or hard default. stt.env is read here too because a
+    process launchd starts (the menu bar and its panel) never has it in its
+    environment: config.MEETINGS_DIR there was the default, wherever the
+    library really is. The functions below (meetings_dir and the rest) read
+    stt.env fresh on every call."""
+    from . import envfile
+    v = os.environ.get(env_name) or envfile.parse(PROJECT_DIR / "stt.env").get(env_name)
+    return Path(v or _home_default(sub, hard_default))
+
+
+ICLOUD_DIR = _folder("STT_ICLOUD_DIR", "source",
+                     HOME / "Library/Mobile Documents/com~apple~CloudDocs/Voice Recordings")
+MEETINGS_DIR = _folder("STT_MEETINGS_DIR", "meetings", DEFAULT_MEETINGS_DIR)
+# where the on-device meeting recorder drops finished captures — a LOCAL folder
+# (not iCloud): these calls are sensitive and the files are large, so they never
+# round-trip the cloud. Watched by the batch agent as a second WatchPaths entry.
+RECORDINGS_DIR = _folder("STT_RECORDINGS_DIR", "recordings",
+                         HOME / "Library/Application Support/com.stt-workflow/recordings")
 # The checkout itself: run.sh, .venv and the code. A spawned command starts
 # from here, never from PROJECT_DIR, which under STT_HOME is a data home with
 # no run.sh in it: the panel's run sat queued while spawned.log said
@@ -145,20 +162,32 @@ def migration_dir() -> Path:
         return _HOME / "migration"
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
+# the import-time number settings _env_number reads, by name: (default,
+# cast, valid, rule). setting_problems() checks the same rules for the doctor.
+_NUMBER_SETTINGS = {}
+
+
+def _number_ok(raw, cast, valid) -> bool:
+    """True when `raw` is empty (the default) or parses and keeps the rule."""
+    if raw is None or not str(raw).strip():
+        return True
+    try:
+        return bool(valid(cast(str(raw).strip())))
+    except ValueError:
+        return False
+
+
 def _env_number(name, default, cast, valid, rule):
     """An import-time number setting from the environment. An empty value
     means the default. A value that does not parse, or that breaks `rule`,
     prints a warning that names the setting and keeps the default: a typo
     in stt.env must never stop every command that imports this module."""
+    _NUMBER_SETTINGS[name] = (default, cast, valid, rule)
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
-    try:
-        v = cast(raw.strip())
-        if valid(v):
-            return v
-    except ValueError:
-        pass
+    if _number_ok(raw, cast, valid):
+        return cast(raw.strip())
     print(f"warning: {name}={raw!r} is not {rule}; using {default}",
           file=sys.stderr, flush=True)
     return default
@@ -183,20 +212,26 @@ DIARIZATION_MODEL = os.environ.get(
 DIARIZERS = ("speakrs", "pyannote")
 
 
+def _diarizer_problem(raw):
+    """(engine, None) for a usable STT_DIARIZER value, else (speakrs, why).
+    Case and spaces are ignored, and an empty value is the default."""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return DIARIZERS[0], None
+    if v not in DIARIZERS:
+        return DIARIZERS[0], (f"{raw!r} is not one of {' or '.join(DIARIZERS)}; "
+                              f"using {DIARIZERS[0]}")
+    return v, None
+
+
 def _diarizer_setting() -> str:
     """STT_DIARIZER, checked: diarize() runs speakrs only on an exact
     "speakrs", so a typo ("speakr") used to switch every file to the slow
     CPU engine with no message. An unknown value warns and keeps the
     default; an empty one is the default."""
-    raw = os.environ.get("STT_DIARIZER", "")
-    v = raw.strip().lower()
-    if not v:
-        return DIARIZERS[0]
-    if v not in DIARIZERS:
-        print(f"warning: STT_DIARIZER={raw!r} is not one of "
-              f"{' or '.join(DIARIZERS)}; using {DIARIZERS[0]}",
-              file=sys.stderr, flush=True)
-        return DIARIZERS[0]
+    v, why = _diarizer_problem(os.environ.get("STT_DIARIZER", ""))
+    if why:
+        print(f"warning: STT_DIARIZER={why}", file=sys.stderr, flush=True)
     return v
 
 
@@ -501,16 +536,10 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"
 
 def _env_file() -> dict:
     """Parse stt.env (the persisted settings file) fresh — long-running processes
-    (the GUI) call these instead of the import-time constants above."""
-    p = PROJECT_DIR / "stt.env"
-    kv = {}
-    if p.exists():
-        for ln in p.read_text().splitlines():
-            s = ln.strip()
-            if s and not s.startswith("#") and "=" in s:
-                k, v = s.split("=", 1)
-                kv[k.strip()] = v.strip()
-    return kv
+    (the GUI) call these instead of the import-time constants above. The
+    rules (quotes, comments, repeats) are stt/envfile.py's."""
+    from . import envfile
+    return envfile.parse(PROJECT_DIR / "stt.env")
 
 
 def source_dir() -> Path:
@@ -667,6 +696,13 @@ def _quiet_raw():
     return _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
 
 
+def diarizer_now() -> str:
+    """The speaker engine a run started now would use: STT_DIARIZER from
+    stt.env (read fresh), then the environment, checked like DIARIZER."""
+    return _diarizer_problem(_env_file().get("STT_DIARIZER")
+                             or os.environ.get("STT_DIARIZER"))[0]
+
+
 def setting_problems() -> list:
     """[(setting, why)] for each stt.env value that cannot be read and is
     replaced by its default. The doctor lists them: a typo there used to
@@ -688,6 +724,14 @@ def setting_problems() -> list:
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:
         out.append(("STT_ASR_BACKEND", why))
+    _, why = _diarizer_problem(_env_file().get("STT_DIARIZER")
+                               or os.environ.get("STT_DIARIZER"))
+    if why:
+        out.append(("STT_DIARIZER", why))
+    for name, (default, cast, valid, rule) in _NUMBER_SETTINGS.items():
+        raw = _env_file().get(name) or os.environ.get(name)
+        if not _number_ok(raw, cast, valid):
+            out.append((name, f"{raw!r} is not {rule}; using {default}"))
     from . import voicememos
     why = voicememos.delete_setting_problem()
     if why:
@@ -1172,6 +1216,7 @@ def backfill_meeting_ids(dest_dir=None) -> int:
     from . import review
     d = Path(dest_dir) if dest_dir else meetings_dir()
     n = 0
+    stamped = []
     for base in meeting_bases(d):
         j = meeting_file(base, ".json", d)
         if id_of(base, d):
@@ -1188,9 +1233,17 @@ def backfill_meeting_ids(dest_dir=None) -> int:
             tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False))
             os.replace(tmp, j)
             n += 1
+            stamped.append(base)
     if dest_dir is None or Path(dest_dir).resolve() == meetings_dir().resolve():
         rebuild_meetings_index(dest_dir)
         prune_lock_files(dest_dir)
+    elif stamped:
+        # the stamp above held each meeting's lock under its BASE (it had no
+        # id yet), and from now on it locks under the id. The live pass
+        # sweeps those, but an archive pass left one base-named lock per
+        # archived meeting, which the registry doctor reported as an
+        # orphan_lock on every fresh demo home. Drop just those.
+        drop_meeting_locks(stamped)
     return n
 
 

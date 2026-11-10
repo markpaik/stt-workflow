@@ -4,7 +4,7 @@ This is what the meeting store promises to the programs that read it: the panel,
 
 ## Layout
 
-- The store is one folder, `~/Projects/brain/meetings` by default (`config.meetings_dir()`, or `STT_MEETINGS_DIR`, or `STT_HOME/meetings`).
+- The store is one folder, `~/Documents/Meeting Transcripts` by default (`config.meetings_dir()`, or `STT_MEETINGS_DIR`, or `STT_HOME/meetings`).
 - A meeting is the folder `<store>/<base>/` that holds `<base>/<base>.json`. The store is one level deep. There are no year folders.
 - A folder with no `<base>.json`, or one whose json is not readable, is no meeting: no reader lists it. `tools/doctor.py check` reports each one (`folder_without_json`, `unreadable_json`), and the batch's start-up sweep removes a folder that holds neither a json nor audio.
 - Readers skip every folder whose name starts with a dot. `.archive/` holds archived meetings, and `.locks/` holds lock files.

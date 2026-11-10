@@ -464,12 +464,8 @@ def run_stereo(dest_dir=None):
 # ======================================================= source 3: synth ====
 
 def _hf_token_from_env_file():
-    p = REPO / "stt.env"
-    if p.exists():
-        for ln in p.read_text().splitlines():
-            if ln.strip().startswith("HF_TOKEN="):
-                return ln.split("=", 1)[1].strip()
-    return None
+    from stt import envfile
+    return envfile.parse(REPO / "stt.env").get("HF_TOKEN") or None
 
 
 def panel_busy(port: int) -> bool:

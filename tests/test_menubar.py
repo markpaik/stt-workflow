@@ -38,3 +38,50 @@ def test_change_schedule_dead_code_removed():
     was unreachable (no menu item ever called it) and has been removed."""
     assert not hasattr(menubar.STTMenuBar, "change_schedule")
     assert not hasattr(menubar.STTMenuBar, "_write_schedule")
+
+
+def _busy_port():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    return s, s.getsockname()[1]
+
+
+def test_a_panel_port_in_use_leaves_the_menu_bar_running(sandbox, monkeypatch):
+    """start_server raised OSError out of STTMenuBar.__init__ when the port
+    was taken (a second app, or a headless panel left running). launchd
+    restarts a crashed menu bar, into the same error. start_panel returns
+    the reason instead, and no relabel worker starts for a panel that
+    cannot serve."""
+    from gui import server as panel
+    sock, port = _busy_port()
+    try:
+        monkeypatch.setattr(panel, "PORT", port)
+        monkeypatch.setattr(panel, "RELABEL_QUEUE", None)
+        why = menubar.start_panel()
+        assert why and f"port {port} is in use" in why
+        assert panel.RELABEL_QUEUE is None
+    finally:
+        sock.close()
+
+
+def test_the_headless_panel_says_its_port_is_in_use_in_one_line(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    sock, port = _busy_port()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(STT_HOME=str(tmp_path / "home"), STT_PANEL_PORT=str(port),
+               STT_OLLAMA_URL="off", PYTHONPATH=str(repo))
+    try:
+        r = subprocess.run([sys.executable, "-m", "gui.server"], capture_output=True,
+                           text=True, env=env, cwd=str(repo), timeout=60)
+    finally:
+        sock.close()
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert f"not started: port {port} is in use" in r.stderr
+    assert "STT_PANEL_PORT" in r.stderr

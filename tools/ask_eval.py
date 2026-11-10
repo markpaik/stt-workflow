@@ -166,8 +166,13 @@ def _guard():
     if not home:
         sys.exit("refused: set STT_HOME to a scratch home")
     h = Path(home).expanduser().resolve()
-    real = [Path.home() / "Projects/brain/meetings",
-            Path(__file__).resolve().parent.parent]
+    # the real library: the checkout's own stt.env names it, else the
+    # default transcripts folder. Read straight from the file: under
+    # STT_HOME, config resolves every folder inside the scratch home.
+    from stt import config, envfile
+    repo = Path(__file__).resolve().parent.parent
+    lib = envfile.parse(repo / "stt.env").get("STT_MEETINGS_DIR")
+    real = [config.DEFAULT_MEETINGS_DIR, repo] + ([Path(lib).expanduser()] if lib else [])
     for r in real:
         r = r.resolve()
         if h == r or r in h.parents or h in r.parents:

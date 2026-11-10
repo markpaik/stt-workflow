@@ -29,6 +29,11 @@ from .errors import UserError
 MODEL = "mlx-community/Qwen3-8B-4bit"
 # mlx-lm lives in its OWN venv (.venv-llm): its transformers pin conflicts with the
 # audio stack's. We shell out rather than import.
+# This is the one code path that keys off PROJECT_DIR and not CODE_DIR, on
+# purpose. Without STT_HOME the two are the same checkout. Under STT_HOME (a
+# demo, a QA sandbox, a test) it points inside the scratch home, where no
+# .venv-llm exists, so a sandboxed run never starts the real 8B model: with
+# Ollama off too, its descriptions are skipped instead of loading ~5 GB.
 LLM_PY = config.PROJECT_DIR / ".venv-llm" / "bin" / "python"
 
 _RUNNER = r"""

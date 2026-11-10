@@ -80,6 +80,7 @@ tools/vm_delete.py --clear-halt. The real `shortcuts` binary acts on the
 real library, so it runs only when the sync reads the real container.
 """
 import json
+import math
 import os
 import re
 import shutil
@@ -94,6 +95,13 @@ from . import config, dates, titles
 
 GO_LIVE = "2026-11-02"
 MIN_SECONDS = 180.0
+# the reasons a memo is held back that the doctor lists (voicememos_skipped):
+# short (under MIN_SECONDS), no_duration (the database has no length for
+# it), in_progress (still recording or just written), not_local (an iCloud
+# placeholder not downloaded yet), empty (a zero-byte file), no_start,
+# no_file, copy_failed, outside_library (a path that leaves the container)
+SKIP_REASONS = ("short", "no_duration", "in_progress", "not_local", "empty",
+                "no_start", "no_file", "copy_failed", "outside_library")
 STABLE_SECONDS = 300.0
 TABLE = "ZCLOUDRECORDING"
 NEEDED_COLUMNS = ("ZUNIQUEID", "ZPATH", "ZDATE", "ZDURATION", "ZENCRYPTEDTITLE")
@@ -348,10 +356,14 @@ def eligible(row: dict, now: float, since: str, container: Path):
         return False, "no_start", None, False
     if start.date().isoformat() < since:
         return False, "before_go_live", start, from_path
+    # a NULL or unreadable ZDURATION is its own reason: it read as 0 s and
+    # was counted as "short", which tells the owner nothing true
     try:
-        dur = float(row.get("duration") or 0)
+        dur = float(row.get("duration"))
     except (TypeError, ValueError):
-        dur = 0.0
+        dur = math.nan
+    if not math.isfinite(dur):
+        return False, "no_duration", start, from_path
     if dur < MIN_SECONDS:
         return False, "short", start, from_path
     f = container / row["path"]
@@ -370,7 +382,11 @@ def eligible(row: dict, now: float, since: str, container: Path):
         return False, "in_progress", start, from_path
     if now - (start.timestamp() + dur) < STABLE_SECONDS:
         return False, "in_progress", start, from_path
-    if st.st_size == 0 or st.st_blocks * 512 < st.st_size:
+    if st.st_size == 0:
+        # a zero-byte file holds no audio at all: not an iCloud placeholder
+        # (one of those has a size and no blocks), so "not_local" misled
+        return False, "empty", start, from_path
+    if st.st_blocks * 512 < st.st_size:
         return False, "not_local", start, from_path
     return True, "ok", start, from_path
 
@@ -378,10 +394,13 @@ def eligible(row: dict, now: float, since: str, container: Path):
 def _staged_name(row, start, typed, stage: Path) -> str:
     stem = _safe(row.get("title")) if typed else ""
     stem = stem or "Voice Memo"
-    # a typed title often carries its own date. The name holds ONE date,
-    # the true start, in front ('YYYY-MM-DD <title>'): a typed stamp (either
-    # form) or a date inside the title is removed, and the start goes in
-    # front. So the folder name and the stored date always agree.
+    # a typed title often carries its own date. The start goes in front
+    # ('YYYY-MM-DD <title>'), so the folder name and the stored date always
+    # agree. dates.restamp removes the typed stamps it knows: a leading ISO
+    # date, a trailing 8-digit date, or else the first 8-digit date that
+    # stands as its own word. Any other date in the title stays, because it
+    # is part of what the person typed ('Notes 2026-10-05 sync' becomes
+    # '2026-11-07 Notes 2026-10-05 sync').
     name = dates.restamp(stem, start.date().isoformat())
     cand, i = name, 2
     while ((stage / f"{cand}.m4a").exists()
@@ -447,6 +466,12 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
     counts, staged = {}, []
     all_titles = [r.get("title") for r in rows]
     blocked = set(state["blocked"])
+    # a denial on ONE memo's file (its stat or its copy) no longer stops the
+    # loop: the database read worked, so the other memos still copy, and the
+    # denied one is retried on the next run. Only when every memo it tried
+    # was denied and nothing copied is the sync "denied" (Full Disk Access
+    # is then the likely cause).
+    denied = 0
     for row in rows:
         if row.get("uuid") in blocked:
             counts["blocked"] = counts.get("blocked", 0) + 1
@@ -457,10 +482,9 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         try:
             ok, why, start, from_path = eligible(row, now, since, container)
         except PermissionError:
-            if not dry_run:
-                _write_state_last(state, "denied", "file stat", counts)
-            return {"status": "denied", "staged": staged, "counts": counts,
-                    "detail": None}
+            denied += 1
+            counts["copy_failed"] = counts.get("copy_failed", 0) + 1
+            continue
         if not ok:
             counts[why] = counts.get(why, 0) + 1
             continue
@@ -498,14 +522,17 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
             tmp.unlink(missing_ok=True)
             counts["copy_failed"] = counts.get("copy_failed", 0) + 1
             if isinstance(e, PermissionError):
-                _write_state_last(state, "denied", "file read")
-                return {"status": "denied", "staged": staged, "counts": counts,
-                        "detail": None}
+                denied += 1
             continue
         state["staged"][row["uuid"]] = {
             "name": name, "at": datetime.now().isoformat(timespec="seconds")}
         staged.append(name)
         counts["copied"] = counts.get("copied", 0) + 1
+    if denied and not staged and not counts.get("would_copy"):
+        if not dry_run:
+            _write_state_last(state, "denied", "file read", counts)
+        return {"status": "denied", "staged": staged, "counts": counts,
+                "detail": None}
     if not dry_run:
         _write_state_last(state, "ok", None, counts)
     return {"status": "ok", "staged": staged, "counts": counts, "detail": None}
@@ -535,8 +562,7 @@ def doctor_findings() -> list:
                     "sync copies nothing until the reader is updated"))
     counts = last.get("counts") or {}
     skipped = {k: v for k, v in counts.items()
-               if k in ("short", "in_progress", "not_local", "no_start", "no_file",
-                        "copy_failed", "outside_library")}
+               if k in SKIP_REASONS}
     if skipped and st == "ok":
         out.append(("voicememos_skipped",
                     ", ".join(f"{k} {v}" for k, v in sorted(skipped.items()))))

@@ -47,8 +47,40 @@ def test_stt_home_backwards_compatible():
     # "STT_workflow" once and is "stt_workflow" now, and a worktree is named
     # for its branch. PROJECT_DIR defaults to the folder holding stt/.
     assert Path(p["project"]).name == REPO.name
-    assert "Projects/brain/meetings" in p["meetings"]      # real default, not under a home
+    # the neutral default init.sh offers, never a person's own library path
+    assert p["meetings"] == str(Path.home() / "Documents/Meeting Transcripts")
     assert Path(p["voiceprints"]).name == "voiceprints"
+
+
+def test_the_default_transcripts_folder_is_the_one_init_offers():
+    """config.py defaulted to the owner's own library path while init.sh
+    offered ~/Documents/Meeting Transcripts. One neutral default now, and
+    no code path names a person's folder."""
+    import re
+    init = (REPO / "init.sh").read_text()
+    m = re.search(r'^DEFAULT_DST="\$HOME/([^"]+)"$', init, re.M)
+    assert m and Path.home() / m.group(1) == config.DEFAULT_MEETINGS_DIR
+    for d in ("stt", "gui", "tools"):
+        for f in (REPO / d).rglob("*.py"):
+            assert "Projects/brain" not in f.read_text(), f
+    for f in ("init.sh", "setup.sh", "run.sh", "run_batch.py", "stt.env.example"):
+        assert "Projects/brain" not in (REPO / f).read_text(), f
+
+
+def test_a_process_without_stt_env_in_its_environment_reads_the_folders_from_it(tmp_path):
+    """launchd starts the menu bar (and its panel) without stt.env in the
+    environment, so config.MEETINGS_DIR there was the default wherever the
+    library really was. The import-time folders now read stt.env too, and
+    a variable set in the environment still wins."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "stt.env").write_text(f'STT_MEETINGS_DIR="{tmp_path}/lib"\n'
+                                  f"STT_ICLOUD_DIR={tmp_path}/src\n")
+    p = _run_config({"STT_PROJECT_DIR": str(proj)})
+    assert p["meetings"] == str(tmp_path / "lib")
+    assert p["source"] == str(tmp_path / "src")
+    p = _run_config({"STT_PROJECT_DIR": str(proj), "STT_MEETINGS_DIR": str(tmp_path / "env")})
+    assert p["meetings"] == str(tmp_path / "env")
 
 
 def test_stt_home_redirects_every_state_path(tmp_path):
@@ -163,6 +195,17 @@ def test_speaker_store_loads(seeded):
     assert review.find_voice_clips(uid, sp[uid]["meetings"][0], n=1)
 
 
+def test_a_fresh_seed_passes_the_registry_doctor(seeded, monkeypatch):
+    """unknowns.json had no "next" key, so registry_doctor reported the
+    fresh seed as stale_next and exited 1: the doctor's exit-status gate
+    could not be shown on the demo."""
+    from stt import registry_doctor
+    monkeypatch.setattr(config, "MEETINGS_INDEX_PATH", seeded / "meetings_index.json")
+    raw = json.loads((seeded / "voiceprints" / "unknowns.json").read_text())
+    assert raw["next"] == unknowns.next_floor(raw)
+    assert registry_doctor.check(seeded / "voiceprints", seeded / "meetings") == []
+
+
 def test_history_has_success_and_failure(seeded):
     rows = status.history()
     assert len(rows) >= 8
@@ -253,7 +296,9 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     check` with missing_keys on every meeting and a registry_stale_next.
     The seed also used to build folder names with a colon the sanitizer
     never writes. The check runs in a fresh interpreter under STT_HOME, as
-    the finding's repro did."""
+    the finding's repro did. The two diarizer findings speak about the
+    machine (a Hugging Face token, a built speakrs helper), not the home,
+    so the check runs on a machine that has both settled."""
     from stt import provenance
     home = tmp_path / "demo_home"
     demo_seed.build(home)
@@ -270,7 +315,8 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     reg = json.loads((home / "voiceprints" / "unknowns.json").read_text())
     assert reg["next"] == unknowns.next_floor(reg)
     env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
-    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO),
+                "HF_TOKEN": "hf_synthetic", "STT_DIARIZER": "pyannote"})
     out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
                          env=env, cwd=str(REPO), capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr
@@ -315,3 +361,23 @@ def test_a_fresh_demo_home_is_registry_doctor_clean(tmp_path):
     assert out.returncode == 0, out.stdout + out.stderr
     assert "clean — nothing to report" in out.stdout
     assert {p.name: p.stat().st_mtime_ns for p in vp.iterdir()} == before
+
+
+def test_a_sandbox_never_finds_the_real_mlx_model(tmp_path):
+    """Code resolves from the checkout (config.CODE_DIR: run.sh, .venv,
+    the menu-bar icon). The MLX model's own environment is the exception:
+    under STT_HOME it resolves inside the home, so a demo or QA run with
+    Ollama off never loads the real 8B model."""
+    home = tmp_path / "home"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(PYTHONPATH=str(REPO), STT_HOME=str(home), STT_OLLAMA_URL="off")
+    code = ("import json; from stt import config, summarize; "
+            "print(json.dumps({'llm': str(summarize.LLM_PY), "
+            "'code': str(config.CODE_DIR), 'local': summarize.backend_available('local')}))")
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=str(REPO),
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    p = json.loads(out.stdout.strip().splitlines()[-1])
+    assert p["llm"] == str(home / ".venv-llm" / "bin" / "python")
+    assert p["code"] == str(REPO)
+    assert p["local"] is False
