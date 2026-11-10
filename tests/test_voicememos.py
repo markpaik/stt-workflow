@@ -84,6 +84,33 @@ def test_the_allow_list_copies_only_finished_long_new_memos(sandbox):
             c["not_local"]) == (1, 1, 1, 1, 1)
 
 
+def test_a_zero_byte_file_and_a_missing_length_have_their_own_reasons(sandbox):
+    """A zero-byte memo counted as "not_local" (an iCloud placeholder has a
+    size and no blocks, not size 0), and a NULL ZDURATION read as 0 s and
+    counted as "short". Both are held back, under a reason that says what
+    is wrong, and the doctor line names them."""
+    c = _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review"},
+              {"start": "2026-11-04 09:00:00", "title": "Empty One", "uuid": "U-E"},
+              {"start": "2026-11-05 09:00:00", "title": "No Length", "uuid": "U-N"}])
+    conn = sqlite3.connect(str(c / voicememos.DB_NAME))
+    path = conn.execute("SELECT ZPATH FROM ZCLOUDRECORDING WHERE ZUNIQUEID='U-E'"
+                        ).fetchone()[0]
+    conn.execute("UPDATE ZCLOUDRECORDING SET ZDURATION=NULL WHERE ZUNIQUEID='U-N'")
+    conn.commit()
+    conn.close()
+    f = c / path
+    mt = f.stat().st_mtime
+    f.write_bytes(b"")
+    os.utime(f, (mt, mt))
+
+    r = voicememos.sync(now=NOW)
+    assert r["status"] == "ok"
+    assert _staged() == ["2026-11-03 Budget Review.m4a"]
+    assert r["counts"] == {"copied": 1, "empty": 1, "no_duration": 1}
+    lines = {f.kind: f.detail for f in doctor.check(registry=False)}
+    assert lines["voicememos_skipped"] == "empty 1, no_duration 1"
+
+
 def test_no_marker_is_required_and_a_default_title_is_no_label(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "New Recording 4"}])
     voicememos.sync(now=NOW)
