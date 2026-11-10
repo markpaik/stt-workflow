@@ -410,6 +410,25 @@ def test_a_date_changed_after_the_fix_survives_undo(dated):
     assert (d["date"], d["date_source"]) == ("2026-09-16", "manual")
 
 
+def test_a_title_set_after_the_fix_survives_undo(dated, capsys):
+    """Undo renamed the folder to the journaled name, which carries the
+    title from before the run, so a title set after the run was lost. The
+    undo now puts the old date in front of the current title."""
+    r = fix_dates.apply()
+    e = summarize.apply_meeting_edits("2026-09-14 Weekly Sync 9.14", title="Offsite Prep 9.14")
+    assert e["ok"] and e["base"] == "2026-09-14 Offsite Prep 9.14"
+    dry = fix_dates.undo(r["run"])
+    assert {"base": "2026-09-14 Offsite Prep 9.14", "title_kept": True} in dry["restored"]
+    fix_dates.main(["--undo", r["run"], "--apply"])
+    assert "1 of those keep the title set after the run" in capsys.readouterr().out
+    d = _load("2026-09-29 Offsite Prep 9.14")
+    assert (d["title"], d["date"]) == ("Offsite Prep 9.14", "2026-09-29")
+    assert not any("Weekly Sync" in b for b in config.meeting_bases())
+    # the meetings nobody retitled come back under their journaled names
+    assert "2026-09-29 Site Visit 9.17" in config.meeting_bases()
+    assert "2026-10-29 Planning Talk" in config.meeting_bases()
+
+
 # ---------- apply_meeting_edits upkeep ----------
 
 def test_a_panel_date_edit_is_manual_and_keeps_the_title_key(sandbox):
