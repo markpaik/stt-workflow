@@ -33,8 +33,18 @@ STOP_TAIL_WORDS = 5
 STOP_SLACK = MERGE_GAP
 
 
+# curly and modifier apostrophes read as the straight one. A curly one became
+# a space, so "don\u2019t" split into "don t" and flagged against "don't".
+_APOSTROPHES = str.maketrans({"\u2019": "'", "\u2018": "'", "\u02bc": "'"})
+
+
 def _norm(text: str) -> str:
-    text = re.sub(r"[^\w\s']", " ", text.lower())
+    text = text.lower().translate(_APOSTROPHES)
+    # a comma between digit groups goes: "1,000" against "1000" is one number
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
+    text = re.sub(r"[^\w\s']", " ", text)
+    # an apostrophe at a word's edge is a quote mark, not part of the word
+    text = re.sub(r"(?<!\w)'|'(?!\w)", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 

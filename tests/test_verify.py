@@ -207,3 +207,19 @@ def test_apply_flags_skips_a_neighbour_that_only_touches_the_region():
     assert [bool(x.get("flags")) for x in s] == [True, True, False]
     s = [{"start": 0.0, "end": 5.0, "text": "a"}, {"start": 6.0, "end": 9.0, "text": "b"}]
     assert verify.apply_flags(s, [{"start": 5.0, "end": 6.0, "ours": "", "theirs": "y"}]) == 2
+
+
+def test_a_curly_apostrophe_or_a_digit_comma_is_the_same_word():
+    """A curly apostrophe became a space, so "don’t" read as "don t" and
+    flagged against "don't". "1,000" read as "1 000" against "1000"."""
+    def W(text):
+        return _w([(0.5 * i, 0.5 * i + 0.4, w) for i, w in enumerate(text.split())])
+    for ours, theirs in [("we don't know", "we don’t know"),
+                         ("we don’t know", "we don't know"),
+                         ("paid 1,000 dollars", "paid 1000 dollars"),
+                         ("paid 1,000,000 dollars", "paid 1000000 dollars"),
+                         ("he said ‘fine’ twice", "he said fine twice"),
+                         ("he said 'fine' twice", "he said fine twice")]:
+        assert verify.regions(W(ours), W(theirs)) == [], (ours, theirs)
+    assert verify._norm("1,2,3") == "1 2 3"          # a list keeps its commas apart
+    assert verify.regions(W("we can't go"), W("we can go")) != []
