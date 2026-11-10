@@ -769,6 +769,11 @@ def merge(uid_src: str, uid_dst: str) -> bool:
         s, d = _samples(reg, uid_src), _samples(reg, uid_dst)
         if d is None:
             return False
+        if s is not None and s.shape[1] != d.shape[1]:
+            # stacks from two embedding sizes (a model change) are not one
+            # voice's samples: np.vstack raised ValueError here. Refused, as
+            # promote() refuses the same case, with nothing changed.
+            return False
         if s is not None:
             arr = np.vstack([d, s])[-MAX_SAMPLES:]
             _save_npy(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)

@@ -362,3 +362,21 @@ def test_a_hand_edited_entry_never_stops_assign(sandbox, entry):
         assert unknowns.load()["speakers"]["U002"]["meetings"] == ["M1", "M0"]
     else:
         assert set(reg["speakers"]) == {"U002"}
+
+
+def test_a_merge_across_embedding_sizes_is_refused_with_nothing_changed(sandbox):
+    """merge() called np.vstack on stacks of 128 and 256 dimensions and
+    raised ValueError. promote() returns False for the same case. merge()
+    now refuses too, and both voices stay as they were."""
+    e = _basis(seed=46)
+    small = np.random.default_rng(46).normal(size=128)
+    _seed_unknown("U001", [e[0]], ["M1"])
+    _seed_unknown("U002", [small / np.linalg.norm(small)], ["M2"])
+    before = {u: (config.VOICEPRINTS_DIR / f"{u}.npy").read_bytes() for u in ("U001", "U002")}
+    assert unknowns.merge("U002", "U001") is False
+    assert unknowns.merge("U001", "U002") is False
+    reg = unknowns.load()
+    assert set(reg["speakers"]) == {"U001", "U002"}
+    assert reg["speakers"]["U001"]["meetings"] == ["M1"]
+    for u, raw in before.items():
+        assert (config.VOICEPRINTS_DIR / f"{u}.npy").read_bytes() == raw
