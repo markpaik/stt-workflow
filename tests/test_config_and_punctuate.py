@@ -142,6 +142,24 @@ def test_punctuate_keeps_punctuation_inside_a_token(sandbox, monkeypatch):
         "The rate is 3.5 percent."
 
 
+def test_the_last_period_of_an_abbreviation_stays_before_the_models_mark():
+    """The rebuild put the model's mark after an inner-punctuation token
+    in place of the original's: 'e.g.' with the model's ',' came back as
+    'e.g,'. An abbreviation's last period is part of the word. A number's
+    is not: '3.5.' still takes the model's comma."""
+    r = punctuate._restore_inner_punct
+    assert r("The U s. team e. g, Ana agreed.", "the U.S. team, e.g. Ana, agreed") == \
+        "The U.S. team e.g., Ana agreed."
+    assert r("In the U s.", "in the U.S.") == "In the U.S."
+    assert r("Met at 9 a m. then left", "met at 9 a.m. then left") == \
+        "Met at 9 a.m. then left"
+    assert r("See Ph d, and more", "see Ph.D. and more") == "See Ph.D., and more"
+    assert r("It was 3 5, then", "it was 3.5. then") == "It was 3.5, then"
+    # an original mark after the abbreviation stays when the model puts none
+    assert r("Bring snacks e g fruit", "bring snacks, e.g., fruit") == \
+        "Bring snacks e.g., fruit"
+
+
 def test_inner_punct_rebuild_refuses_pieces_that_do_not_line_up():
     """A defensive path: output whose pieces do not match the original's count
     keeps the original text, never a half-rebuilt line."""
