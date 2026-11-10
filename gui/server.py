@@ -271,7 +271,7 @@ def write_schedule(hh, mm):
 def _est_duration(p: Path):
     """Audio seconds for a queued file: stt.queue_order.duration, the same
     helper run_batch orders its picks by (exact when local, size-based for
-    dataless iCloud files, cached by path and mtime)."""
+    dataless iCloud files, cached by path, mtime, size and presence)."""
     return queue_order.duration(p)
 
 
