@@ -231,6 +231,22 @@ def test_stopping_flag_marks_intentional_stops(sandbox):
     assert not control.stopping_recently()
 
 
+def test_a_stop_flag_from_the_future_is_not_recent(sandbox):
+    """A clock stepped back after a Stop gives the flag a future mtime. A
+    negative age was always under the window, so the self-heal and the
+    re-queue stayed off for the whole step."""
+    import os
+    import time
+    control.mark_stopping()
+    t = time.time() + 5 * 3600
+    os.utime(control.STOP_FLAG, (t, t))
+    assert not control.stopping_recently()
+    t = time.time() + 2                 # a small step stays inside the window
+    os.utime(control.STOP_FLAG, (t, t))
+    assert control.stopping_recently()
+    control.clear_stopping()
+
+
 def test_snapshot_caches(sandbox, monkeypatch):
     calls = {"n": 0}
     real = control._parent_pids

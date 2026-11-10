@@ -56,9 +56,14 @@ def clear_stopping():
 
 
 def stopping_recently(within: float = STOP_WINDOW) -> bool:
-    """True if a Stop was requested in the last `within` seconds."""
+    """True if a Stop was requested in the last `within` seconds.
+
+    The age is taken both ways. A clock stepped back after a Stop (an NTP
+    fix, a manual change) gave the flag a future mtime, and a negative age
+    is always under the window: the panel's self-heal and the re-queue of
+    an interrupted job stayed off for the whole size of the step."""
     try:
-        return (time.time() - STOP_FLAG.stat().st_mtime) < within
+        return abs(time.time() - STOP_FLAG.stat().st_mtime) < within
     except OSError:
         return False
 
