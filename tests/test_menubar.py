@@ -132,3 +132,12 @@ def test_the_recorder_note_keeps_its_text_past_a_dot(sandbox):
     assert line == "⚠  " + long[:63] + "…"
     # a file name in the queue still drops its extension
     assert menubar._short("Budget Review.m4a") == "Budget Review"
+
+
+def test_a_queued_job_label_keeps_its_text_past_a_dot(sandbox):
+    """The queued-job line went through _short, which drops everything
+    after the last dot, so 'Budget.m4a +2 more' showed as 'Budget'."""
+    bar = _FakeBar()
+    s = dict(menubar.gather(), queued_jobs=[{"label": "Budget.m4a +2 more", "at": 1.0}])
+    menubar.STTMenuBar._render(bar, s)
+    assert any(t and t.startswith("↻  Budget.m4a +2 more  —") for t in bar.menu.titles)

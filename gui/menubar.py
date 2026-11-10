@@ -280,7 +280,9 @@ class STTMenuBar(rumps.App):
         qj = s.get("queued_jobs", [])
         qj_status = "starts after current run" if active else "starting…"
         for j in qj[:8]:
-            items.append(_disabled(f"↻  {_short(j.get('label') or 'run', 30)}  —  {qj_status}"))
+            # a job label is free text ('Budget.m4a +2 more'): _short took
+            # everything after its last dot for an extension
+            items.append(_disabled(f"↻  {_clip(j.get('label') or 'run', 30)}  —  {qj_status}"))
         for f in s["queued"][:8]:
             items.append(_disabled(f"○  {_short(f)}  —  queued"))
         if len(s["queued"]) > 8:
