@@ -2252,3 +2252,27 @@ def test_a_dropped_voice_cannot_be_named_back_to_life(running_server, monkeypatc
     assert unknowns.promote("U007", "Ghost") is False
     assert "Ghost" not in identify.load_registry()
     assert unknowns.load()["speakers"]["U007"].get("dropped"), "the tombstone stays"
+
+
+
+def test_naming_a_voice_speaker_7_is_refused_while_u007_shows_that_label(
+        running_server, monkeypatch):
+    """POST /api/name {"uid": "U012", "name": "Speaker 7"} enrolled a person
+    whose name matched unknown U007's display label."""
+    import numpy as np
+
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    rng = np.random.default_rng(9)
+    speakers = {}
+    for uid in ("U007", "U012"):
+        v = rng.normal(size=256)
+        np.save(config.VOICEPRINTS_DIR / f"{uid}.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+        speakers[uid] = {"file": f"{uid}.npy", "meetings": ["M"]}
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 13, "speakers": speakers}))
+    st, body = _post(running_server, "/api/name",
+                     {"uid": "U012", "name": "Speaker 7", "confirm": True})
+    assert body == {"ok": False, "error": identify.RESERVED_ERROR}
+    assert "Speaker 7" in identify.RESERVED_ERROR
+    assert "Speaker 7" not in identify.load_registry()

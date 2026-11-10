@@ -630,10 +630,13 @@ def _seed_unknown(uid, vec):
         {"next": 8, "speakers": {uid: {"file": f"{uid}.npy", "meetings": ["m"]}}}))
 
 
-@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 "])
+@pytest.mark.parametrize("reserved", ["U007", "u007", " U12 ", "Speaker 7",
+                                      "speaker  7", "VOICE 3", " Voice 12 "])
 def test_an_unknown_id_is_never_a_person_name(sandbox, reserved):
     """People and unknown voices share one folder. A person named 'U007'
-    took the unknown's U007.npy, and promoting the unknown later deleted it."""
+    took the unknown's U007.npy, and promoting the unknown later deleted it.
+    'Speaker 7' and 'Voice 3' are the labels an unknown and a meeting-only
+    cluster show: a person by that name looked like unknown U007."""
     from stt import config
     _seed_unknown("U007", _near(1, 0))
     before = np.load(config.VOICEPRINTS_DIR / "U007.npy").copy()
@@ -730,3 +733,11 @@ def test_doctor_finds_and_tightens_files_from_before_the_umask(sandbox):
         assert stat.S_IMODE(p.stat().st_mode) == 0o600, p.name
     assert stat.S_IMODE(example.stat().st_mode) == 0o644
     assert config.loose_private_paths() == []
+
+
+@pytest.mark.parametrize("ok", ["Speaker", "Speaker Seven", "Voice of Reason",
+                                "Speaker 7 Jr", "Uma 7"])
+def test_a_name_that_only_starts_like_a_label_is_allowed(sandbox, ok):
+    assert identify.reserved_name(ok) is False
+    identify.enroll(ok, _near(0, 0))
+    assert ok in identify.load_registry()
