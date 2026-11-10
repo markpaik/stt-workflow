@@ -167,3 +167,25 @@ def test_working_secondary_engine_flags_real_disagreement(monkeypatch):
                               "mlx-community/parakeet-tdt-0.6b-v2")
     assert engine == "mlx-whisper/turbo"
     assert any(r["theirs"] == "renewed" for r in regs)
+
+
+def test_a_second_engine_that_stops_early_flags_no_tail(monkeypatch, capsys):
+    """A second engine that crashed or dropped its last chunk still passed the
+    30% floor, and the whole unheard tail became one region: every segment
+    in it was flagged. Only the part it reached is compared now."""
+    from stt import asr_mlxwhisper
+    words = "we will review the attendance numbers for every school this week and next".split()
+    primary = _w([(2.0 * i, 2.0 * i + 1.5, w) for i, w in enumerate(words)])
+    sec = [dict(w) for w in primary[:6]]          # it stopped after "numbers"
+    sec[2]["word"] = "renew"                        # one real disagreement it heard
+    monkeypatch.setattr(asr_mlxwhisper, "transcribe",
+                        lambda wav, progress=None: {"words": sec,
+                                                    "engine": "mlx-whisper/turbo"})
+    regs, _ = verify.run("dummy.wav", primary, "mlx-community/parakeet-tdt-0.6b-v3")
+    assert regs == [{"start": 4.0, "end": 5.5, "ours": "review", "theirs": "renew"}]
+    assert "not compared" in capsys.readouterr().out
+    # the raw alignment still makes the tail one region: run() is the guard
+    assert verify.regions(primary, sec)[-1]["ours"].startswith("for every school")
+    # a few unheard words at the end are a disagreement, not a stopped engine
+    assert verify.heard(primary, primary[:-2]) == primary
+    assert verify.heard(primary, []) == primary

@@ -24,6 +24,13 @@ FLAG = "possible:engine_disagreement"
 # worth a human's time (them/him, can/could etc. still flag)
 FILLERS = {"um", "uh", "uhh", "mm", "mhm", "mmhmm", "hmm", "huh", "ah", "oh", "er"}
 MERGE_GAP = 0.8  # disagreement regions closer than this merge into one review item
+# A second engine that stops early (a crash mid-file, a dropped last chunk)
+# leaves the primary's tail with nothing to align against, and regions() made
+# that whole tail one disagreement: every segment in it was flagged. When this
+# many primary words or more start over STOP_SLACK seconds after the second
+# engine's last word, the tail is not compared.
+STOP_TAIL_WORDS = 5
+STOP_SLACK = MERGE_GAP
 
 
 def _norm(text: str) -> str:
@@ -87,6 +94,19 @@ def secondary_engine(primary_engine: str):
     return "parakeet", None
 
 
+def heard(primary_words, secondary_words):
+    """The primary words the second engine's output reaches: all of them,
+    unless the second engine stopped early. Then only the words that start
+    by the end of its last word."""
+    if not secondary_words:
+        return primary_words
+    last = max(w["end"] for w in secondary_words)
+    past = sum(1 for w in primary_words if w["start"] > last + STOP_SLACK)
+    if past < STOP_TAIL_WORDS:
+        return primary_words
+    return [w for w in primary_words if w["start"] <= last]
+
+
 def run(wav, primary_words, primary_engine, progress=None):
     """Transcribe `wav` with the second engine and return (regions, engine_name)."""
     import os
@@ -114,7 +134,12 @@ def run(wav, primary_words, primary_engine, progress=None):
         # the second engine clearly failed on this audio — flagging the entire
         # transcript as "disagreement" would be noise, not signal
         return [], out["engine"]
-    return regions(primary_words, sec_words), out["engine"]
+    reached = heard(primary_words, sec_words)
+    if len(reached) < len(primary_words):
+        print(f"   second opinion stopped at {max(w['end'] for w in sec_words):.0f}s: the "
+              f"{len(primary_words) - len(reached)} words after it are not "
+              "compared", flush=True)
+    return regions(reached, sec_words), out["engine"]
 
 
 def apply_flags(segments, regs):
