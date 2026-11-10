@@ -203,3 +203,56 @@ def test_init_updates_a_key_in_place_and_appends_a_new_one(tmp_path):
                     start="A=1\nSTT_MEETINGS_DIR=/old\nSTT_MEETINGS_DIR_X=keep\nB=2")
     assert envf.read_text() == ("A=1\nSTT_MEETINGS_DIR=/new/meetings\n"
                                 "STT_MEETINGS_DIR_X=keep\nB=2\nNEW_KEY=v\n")
+
+
+# ---------- init.sh's local model step ----------
+
+def _run_llm_step(tmp_path, cached: bool):
+    """setup_local_llm() from a copy of init.sh, with a fake uv and a fake
+    .venv-llm python that log their arguments. Nothing is installed or
+    downloaded, and Ollama is not on the PATH."""
+    shutil.copy(REPO / "init.sh", tmp_path / "init.sh")
+    bin_ = tmp_path / "fakebin"
+    bin_.mkdir()
+    log = tmp_path / "calls.log"
+    fake_py = ("#!/bin/bash\n"
+               f'echo "py $*" >> "{log}"\n'
+               + ('exit 0\n' if cached else
+                  'case "$*" in *local_files_only*) exit 1 ;; esac\nexit 0\n'))
+    (bin_ / "uv").write_text(
+        "#!/bin/bash\n"
+        f'echo "uv $*" >> "{log}"\n'
+        'if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; '
+        f"cat > \"$d/bin/python\" <<'PYEOF'\n{fake_py}PYEOF\n"
+        'chmod +x "$d/bin/python"; fi\n')
+    (bin_ / "uv").chmod(0o755)
+    sh = (f'source "{tmp_path}/init.sh"; '
+          f'yes_no() {{ echo "ask $1" >> "{log}"; return 0; }}; setup_local_llm')
+    r = subprocess.run(["/bin/bash", "-c", sh], capture_output=True, text=True,
+                       env=_clean_env(HOME=str(tmp_path / "home"),
+                                      PATH=f"{bin_}:/usr/bin:/bin"))
+    assert r.returncode == 0, r.stderr
+    return r.stdout, log.read_text().splitlines()
+
+
+def test_init_downloads_the_fallback_weights_it_promises(tmp_path):
+    """The prompt said '~4.5 GB, fully offline' but init.sh installed only
+    the mlx-lm package: the Qwen3-8B weights came down on the first
+    description. It now offers the download, of the model summarize.py
+    runs, and names Ollama's model as the preferred one."""
+    from stt import summarize
+    out, calls = _run_llm_step(tmp_path, cached=False)
+    assert any(c.startswith("uv venv --python 3.12") for c in calls)
+    assert any("mlx-lm" in c for c in calls if c.startswith("uv pip install"))
+    downloads = [c for c in calls if c.startswith("py ") and "local_files_only" not in c]
+    assert len(downloads) == 1 and f"d('{summarize.MODEL}')" in downloads[0]
+    assert summarize.OLLAMA_MODEL in out and "ollama pull" in out
+    assert "fully offline" not in (REPO / "init.sh").read_text()
+
+
+def test_init_skips_the_download_when_the_weights_are_there(tmp_path):
+    out, calls = _run_llm_step(tmp_path, cached=True)
+    assert [c for c in calls if c.startswith("py ")] == \
+        [c for c in calls if "local_files_only" in c]
+    assert not any("Download the Qwen3-8B" in c for c in calls)
+    assert "already downloaded" in out
