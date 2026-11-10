@@ -922,7 +922,12 @@ records of what people said.
   The doctor reports them as `loose_mode`, and `tools/doctor.py fix --apply`
   makes them owner-only.
 - `.gitignore` keeps voiceprints, transcripts, audio, tokens, and runtime
-  state out of git. Check it before you change output paths.
+  state out of git. It ignores every audio and video type the pipeline
+  reads. Check it before you change output paths.
+- `sh tools/install_precommit_hook.sh` installs a pre-commit hook that
+  refuses a staged recording, voiceprint array, history log or database,
+  even one added with `git add -f`. Run it once in each clone. Worktrees
+  share it.
 - Word and PDF exports leave the data home. Treat them as shared copies.
 - Know your local recording-consent law (one-party or all-party) and your
   workplace's policy before you record routinely.

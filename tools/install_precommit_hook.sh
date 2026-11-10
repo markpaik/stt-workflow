@@ -32,7 +32,7 @@ cat > "$tmp" <<'HOOK'
 # stt-workflow data-file guard. Installed by tools/install_precommit_hook.sh.
 bad=$(git diff --cached --name-only --diff-filter=ACMRT -z \
     | tr '\0' '\n' \
-    | grep -iE '(\.npz|\.jsonl|\.db(-[^/]*|\.bak)?|\.(m4a|m4b|wav|mp3|aif|aiff|aac|caf|flac|ogg|opus|amr|mp4|mov|webm))$' \
+    | grep -iE '(\.npz|\.jsonl|\.db(-[^/]*|\.bak)?|\.(m4a|m4b|m4v|wav|mp3|aif|aiff|aac|caf|flac|ogg|opus|amr|wma|mp4|mov|webm|mkv|avi))$' \
     || true)
 if [ -n "$bad" ]; then
     echo "Commit refused. These staged files can hold private data:" >&2

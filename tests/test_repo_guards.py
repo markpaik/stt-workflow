@@ -56,6 +56,23 @@ def test_root_rules_stay_at_the_root(path):
     assert _git(REPO, "check-ignore", "-q", "--no-index", path, check=False).returncode == 1
 
 
+# every type the pipeline reads, and two more ffmpeg reads (.aif, .amr)
+from stt import config as _config  # noqa: E402
+
+MEDIA = sorted(_config.AUDIO_EXTS | _config.VIDEO_EXTS | {".aif", ".amr"})
+
+
+@pytest.mark.parametrize("ext", MEDIA)
+def test_every_audio_and_video_type_is_ignored(ext):
+    """README says .gitignore keeps audio out of git, and the pipeline reads
+    every AUDIO_EXTS type. .opus, .flac, .aac, .ogg, .webm, .caf, .mkv,
+    .avi, .m4v, .wma and .m4b were trackable, so 'git add .' staged a
+    recording dropped in the checkout."""
+    for path in (f"x{ext}", f"sub/Meeting{ext}"):
+        assert _git(REPO, "check-ignore", "-q", "--no-index", path,
+                    check=False).returncode == 0, path
+
+
 def test_no_tracked_file_matches_a_root_rule():
     tracked = _git(REPO, "ls-files").stdout.splitlines()
     assert _git(REPO, "check-ignore", "--no-index", *tracked, check=False).stdout == ""
@@ -92,6 +109,15 @@ def test_hook_refuses_data_files(hooked, name):
     assert r.returncode == 1
     assert name in r.stderr
     assert _git(hooked, "rev-parse", "-q", "--verify", "HEAD", check=False).returncode != 0
+
+
+@pytest.mark.parametrize("ext", MEDIA)
+def test_hook_refuses_every_audio_and_video_type(hooked, ext):
+    """The hook lacked .mkv, .avi, .m4v and .wma, which the pipeline reads."""
+    name = f"sub/Meeting{ext.upper()}"
+    r = _commit(hooked, name)
+    assert r.returncode == 1
+    assert name in r.stderr
 
 
 @pytest.mark.parametrize("name", ["x.py", "x.json", "sub/notes.md", "db/x.txt", "x.dmg",

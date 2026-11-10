@@ -17,14 +17,29 @@ hf_token*
 # Voiceprints are BIOMETRIC data — never commit any of it
 voiceprints/
 
-# Real meeting content: audio, reference transcripts, QA material
+# Real meeting content: audio, reference transcripts, QA material.
+# Every type the pipeline reads (stt/config.py AUDIO_EXTS) is here, plus
+# .aif and .amr, and the pre-commit hook refuses the same list.
 qa/
 *.m4a
+*.m4b
+*.m4v
 *.wav
 *.mp3
+*.aac
+*.aif
 *.aiff
+*.amr
+*.caf
+*.flac
+*.ogg
+*.opus
+*.wma
 *.mp4
 *.mov
+*.webm
+*.mkv
+*.avi
 
 # Runtime state (contains meeting names and processing history)
 manifest.json
