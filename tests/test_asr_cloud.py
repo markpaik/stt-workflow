@@ -89,6 +89,31 @@ def test_voxtral_synthesizes_words_from_segments(sandbox, fake_upload, monkeypat
     assert starts == sorted(starts)
 
 
+@pytest.mark.parametrize("seg", [
+    {"start": 1.0, "end": 1.0, "text": "a b c"},          # zero length
+    {"start": 2.0, "end": 1.0, "text": "x y"},            # reversed
+    {"start": 3.0, "end": 3.02, "text": "p q r s t u"},  # under 0.01 s a word
+])
+def test_segment_words_never_end_before_they_start(seg):
+    """The step had a 0.01 s floor and the end was clamped to the segment
+    end, but the start was not: a zero-length or reversed segment gave
+    words that end before they start. Every word now sits inside its
+    segment, starts stay in order, and end >= start."""
+    ws = asr_cloud._words_from_segments([seg])
+    t0 = seg["start"]
+    t1 = max(seg["start"], seg["end"])
+    assert [w["word"] for w in ws] == seg["text"].split()
+    for w in ws:
+        assert t0 <= w["start"] <= w["end"] <= t1
+    starts = [w["start"] for w in ws]
+    assert starts == sorted(starts)
+
+
+def test_a_normal_segment_spreads_its_words_as_before():
+    ws = asr_cloud._words_from_segments([{"start": 0.0, "end": 3.0, "text": "a b c"}])
+    assert [(w["start"], w["end"]) for w in ws] == [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)]
+
+
 def test_missing_key_is_a_clear_error_not_a_crash(sandbox, monkeypatch):
     monkeypatch.setattr(config, "ASR_BACKEND", "cloud:scribe")
     monkeypatch.delenv("STT_ELEVENLABS_KEY", raising=False)
