@@ -184,6 +184,48 @@ def test_a_sync_stopped_mid_loop_never_stages_a_memo_twice(sandbox, monkeypatch)
                          "2026-11-04 Staff Huddle.m4a"]
 
 
+def test_a_block_and_an_ingest_note_saved_during_a_sync_survive_it(sandbox, monkeypatch):
+    """sync() saved the copy of the state it read at its start. A block()
+    from tools/purge.py, or an ingest note, saved while the copy loop ran
+    was lost: the purged memo could come back, and the delete step lost
+    its proof."""
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-A"}])
+    voicememos.sync(now=NOW)
+    _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-A"},
+          {"start": "2026-11-04 09:00:00", "title": "Staff Huddle", "uuid": "U-B"}])
+    real = voicememos.shutil.copyfile
+
+    def other_writers(a, b, *k, **kw):
+        if str(a).endswith(".m4a"):
+            assert voicememos.block("U-PURGED")
+            assert voicememos.note_ingested("U-A", "k", "2026-11-03 Budget Review")
+        return real(a, b, *k, **kw)
+    monkeypatch.setattr(voicememos.shutil, "copyfile", other_writers)
+    r = voicememos.sync(now=NOW)
+    assert r["counts"] == {"already": 1, "copied": 1}
+    st = voicememos.load_state()
+    assert st["blocked"] == ["U-PURGED"]
+    assert st["staged"]["U-A"]["ingested"]["key"] == "k"
+    assert set(st["staged"]) == {"U-A", "U-B"} and st["last"]["status"] == "ok"
+
+
+def test_a_state_change_waits_for_the_state_lock(sandbox):
+    """Two processes change the state with a read, a change and a save. The
+    lock makes that one step, so neither save drops the other's change."""
+    import fcntl
+    import threading
+    lock = voicememos.state_path().with_name(voicememos.STATE_LOCK_NAME)
+    done = threading.Event()
+    with open(lock, "a+") as fh:          # another process holds the lock
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        t = threading.Thread(target=lambda: (voicememos.block("U-1"), done.set()))
+        t.start()
+        assert not done.wait(0.3), "block() saved while another writer held the lock"
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    t.join(5)
+    assert done.is_set() and voicememos.load_state()["blocked"] == ["U-1"]
+
+
 def test_a_blocked_memo_never_comes_back(sandbox):
     _lib([{"start": "2026-11-03 09:00:00", "title": "Budget Review", "uuid": "U-LEAK"}])
     voicememos.block("U-LEAK")

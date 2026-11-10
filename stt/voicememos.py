@@ -79,6 +79,7 @@ database, every delete stops (`delete_halt`) until the owner clears it with
 tools/vm_delete.py --clear-halt. The real `shortcuts` binary acts on the
 real library, so it runs only when the sync reads the real container.
 """
+import contextlib
 import json
 import math
 import os
@@ -107,6 +108,7 @@ TABLE = "ZCLOUDRECORDING"
 NEEDED_COLUMNS = ("ZUNIQUEID", "ZPATH", "ZDATE", "ZDURATION", "ZENCRYPTEDTITLE")
 DB_NAME = "CloudRecordings.db"
 STATE_NAME = "voicememos_state.json"
+STATE_LOCK_NAME = "voicememos_state.lock"
 SIDECAR_SUFFIX = ".vm.json"
 _CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
 # the file name Voice Memos gives a recording: its local start time, then
@@ -185,17 +187,49 @@ def _save_state(d: dict):
     os.replace(tmp, p)
 
 
+@contextlib.contextmanager
+def _state_lock():
+    """One state change at a time across processes. The batch's sync, a
+    purge (block) and a delete pass each read, change and save this file.
+    Without the lock, each one saved the copy it read, and the last save
+    dropped what the others wrote in between. Blocking: every holder reads
+    and writes one small file. Never nest it: a second open in the same
+    process waits on the first."""
+    import fcntl
+    p = state_path().with_name(STATE_LOCK_NAME)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _update_state(change):
+    """Read the saved state, apply change(d) and save it, as one step under
+    the state lock. change returns False to skip the save. Returns what
+    change returned."""
+    with _state_lock():
+        d = load_state()
+        r = change(d)
+        if r is not False:
+            _save_state(d)
+        return r
+
+
 def block(uuid: str) -> bool:
     """Never copy this memo again (tools/purge.py calls it). Returns True
     when the id was newly blocked."""
     if not uuid:
         return False
-    d = load_state()
-    if uuid in d["blocked"]:
-        return False
-    d["blocked"].append(uuid)
-    _save_state(d)
-    return True
+
+    def change(d):
+        if uuid in d["blocked"]:
+            return False
+        d["blocked"].append(uuid)
+        return True
+    return _update_state(change)
 
 
 # ---------- reading the database ----------
@@ -313,19 +347,24 @@ def _safe(s: str) -> str:
 
 # ---------- the sync ----------
 
-def _write_state_last(d, status, detail=None, counts=None, app=None):
-    d["last"] = {"at": datetime.now().isoformat(timespec="seconds"),
-                 "status": status, "detail": detail, "counts": counts or {}}
+def _write_state_last(status, detail=None, counts=None, app=None):
+    """Record how the sync ended. It changes only "last" in a fresh read, so
+    a block or an ingest note saved during the sync stays."""
+    last = {"at": datetime.now().isoformat(timespec="seconds"),
+            "status": status, "detail": detail, "counts": counts or {}}
     if app is not None:
-        d["last"]["app_present"] = bool(app)
-    _save_state(d)
+        last["app_present"] = bool(app)
+
+    def change(d):
+        d["last"] = last
+    _update_state(change)
 
 
 def _note_staged(uuid, ent: dict):
     """Record one staged memo in the saved state, read fresh from disk."""
-    d = load_state()
-    d["staged"][uuid] = ent
-    _save_state(d)
+    def change(d):
+        d["staged"][uuid] = ent
+    _update_state(change)
 
 
 def _app_present(container: Path) -> bool:
@@ -342,11 +381,10 @@ def record_failure(exc: BaseException) -> None:
     """Record a sync that raised, so the doctor reports it. The batch calls
     this when sync() itself fails. A denial is recorded as `denied`."""
     try:
-        d = load_state()
         if isinstance(exc, PermissionError):
-            _write_state_last(d, "denied", exc.__class__.__name__)
+            _write_state_last("denied", exc.__class__.__name__)
         else:
-            _write_state_last(d, "error", exc.__class__.__name__)
+            _write_state_last("error", exc.__class__.__name__)
     except Exception:
         pass
 
@@ -428,7 +466,7 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
     state = load_state()
     if not enabled():
         if not dry_run:
-            _write_state_last(state, "disabled")
+            _write_state_last("disabled")
         return {"status": "disabled", "staged": [], "counts": {}, "detail": None}
     # Path.exists() re-raises PermissionError (Python 3.12), and macOS can
     # refuse the stat itself inside the guarded container. Every probe here
@@ -448,23 +486,23 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
             except OSError:
                 pass
         if not dry_run:
-            _write_state_last(state, status, None, None,
+            _write_state_last(status, None, None,
                               app=_app_present(container))
         return {"status": status, "staged": [], "counts": {}, "detail": None}
     try:
         rows = read_rows(container)
     except SchemaChanged as e:
         if not dry_run:
-            _write_state_last(state, "schema", str(e))
+            _write_state_last("schema", str(e))
         return {"status": "schema", "staged": [], "counts": {}, "detail": str(e)}
     except PermissionError as e:
         if not dry_run:
-            _write_state_last(state, "denied", e.__class__.__name__)
+            _write_state_last("denied", e.__class__.__name__)
         return {"status": "denied", "staged": [], "counts": {}, "detail": None}
     except (OSError, sqlite3.Error) as e:
         # a copy taken while the app wrote can be torn: try again next run
         if not dry_run:
-            _write_state_last(state, "error", e.__class__.__name__)
+            _write_state_last("error", e.__class__.__name__)
         return {"status": "error", "staged": [], "counts": {},
                 "detail": e.__class__.__name__}
 
@@ -541,11 +579,11 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         counts["copied"] = counts.get("copied", 0) + 1
     if denied and not staged and not counts.get("would_copy"):
         if not dry_run:
-            _write_state_last(state, "denied", "file read", counts)
+            _write_state_last("denied", "file read", counts)
         return {"status": "denied", "staged": staged, "counts": counts,
                 "detail": None}
     if not dry_run:
-        _write_state_last(state, "ok", None, counts)
+        _write_state_last("ok", None, counts)
     return {"status": "ok", "staged": staged, "counts": counts, "detail": None}
 
 
@@ -669,43 +707,51 @@ def note_ingested(uuid, key, base, meeting_id=None, source="batch") -> bool:
     recorded."""
     if not uuid:
         return False
-    d = load_state()
-    ent = d["staged"].get(uuid)
-    if not isinstance(ent, dict):
-        return False
-    ent["ingested"] = {"at": _now_iso(), "key": key, "base": base,
-                       "meeting_id": meeting_id, "from": source}
-    _save_state(d)
-    return True
+    rec = {"at": _now_iso(), "key": key, "base": base,
+           "meeting_id": meeting_id, "from": source}
+
+    def change(d):
+        ent = d["staged"].get(uuid)
+        if not isinstance(ent, dict):
+            return False
+        ent["ingested"] = rec
+        return True
+    return _update_state(change)
 
 
 def _set_delete(uuid, rec: dict):
-    d = load_state()
-    d["delete"][uuid] = rec
-    _save_state(d)
+    def change(d):
+        d["delete"][uuid] = rec
+    _update_state(change)
 
 
 def _set_halt(reason: str, uuid=None):
-    d = load_state()
-    d["delete_halt"] = {"at": _now_iso(), "reason": reason, "uuid": uuid}
-    _save_state(d)
+    halt = {"at": _now_iso(), "reason": reason, "uuid": uuid}
+
+    def change(d):
+        d["delete_halt"] = halt
+    _update_state(change)
 
 
 def clear_halt():
     """Clear a stop (tools/vm_delete.py --clear-halt). Returns the record
     that was cleared, or None."""
-    d = load_state()
-    was = d.pop("delete_halt", None)
-    if was is not None:
-        _save_state(d)
-    return was
+    was = []
+
+    def change(d):
+        was.append(d.pop("delete_halt", None))
+        return was[0] is not None
+    _update_state(change)
+    return was[0]
 
 
 def _write_delete_last(status, counts=None, detail=None):
-    d = load_state()
-    d["delete_last"] = {"at": _now_iso(), "status": status,
-                        "counts": counts or {}, "detail": detail}
-    _save_state(d)
+    last = {"at": _now_iso(), "status": status,
+            "counts": counts or {}, "detail": detail}
+
+    def change(d):
+        d["delete_last"] = last
+    _update_state(change)
 
 
 def shortcut_status() -> tuple:
@@ -1264,9 +1310,9 @@ def _manual_title(u, prev, why, title, base, out, warn):
 
 
 def _forget_delete(uuid):
-    d = load_state()
-    if d["delete"].pop(uuid, None) is not None:
-        _save_state(d)
+    def change(d):
+        return d["delete"].pop(uuid, None) is not None
+    _update_state(change)
 
 
 def delete_doctor_findings() -> list:
