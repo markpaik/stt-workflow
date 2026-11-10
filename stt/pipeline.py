@@ -15,7 +15,12 @@ from . import (audio, channels, config, diarcache, diarize, identify, merge,
 
 
 def _load_asr(strict=False):
-    backend = config.ASR_BACKEND
+    # read through the setting's own check, so a value set after the config
+    # loaded (code that assigns config.ASR_BACKEND) warns as a typo in
+    # stt.env does, never runs Parakeet with no word
+    backend, why = config._asr_problem(config.ASR_BACKEND)
+    if why:
+        config._warn_once(("STT_ASR_BACKEND", why), f"STT_ASR_BACKEND={why}")
     if backend.startswith("cloud:"):
         if strict:
             # sensitive recordings NEVER leave the machine, whatever the

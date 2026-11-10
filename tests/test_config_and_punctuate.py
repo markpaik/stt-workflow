@@ -409,3 +409,20 @@ def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
     assert config.setting_problems() == []
     from stt import asr_cloud
     assert set(config.CLOUD_ASR) == set(asr_cloud.PROVIDERS)
+
+
+@pytest.mark.parametrize("value, mod, warns", [
+    ("garbage", "stt.asr_parakeet", True),
+    ("cloud:bogus", "stt.asr_parakeet", True),
+    (" MLXWhisper ", "stt.asr_mlxwhisper", False),
+    ("parakeet", "stt.asr_parakeet", False)])
+def test_a_backend_set_after_load_is_checked_too(sandbox, monkeypatch, capsys,
+                                                value, mod, warns):
+    """The warning fired only when the config loaded. Code that set
+    config.ASR_BACKEND afterward ran Parakeet with no word, and
+    'cloud:bogus' reached the cloud module."""
+    from stt import pipeline
+    monkeypatch.setattr(config, "ASR_BACKEND", value)
+    assert pipeline._load_asr().__name__ == mod
+    err = capsys.readouterr().err
+    assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
