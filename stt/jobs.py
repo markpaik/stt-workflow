@@ -44,7 +44,10 @@ def split_list(s: str) -> list:
     """Parse a --files/--paths value. Prefers FIELD_SEP (what spawn_args()
     emits; one at the end marks a single name); falls back to a plain comma
     so a human typing the flag by hand (per this project's documented CLI
-    usage) still works."""
+    usage) still works. An empty value is no names: join_list([]) gave
+    '', and ''.split(',') is [''], one empty name."""
+    if not s:
+        return []
     if FIELD_SEP not in s:
         return s.split(",")
     parts = s.split(FIELD_SEP)

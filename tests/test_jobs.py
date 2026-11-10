@@ -117,6 +117,13 @@ def test_split_list_prefers_field_sep_falls_back_to_comma():
     assert jobs.split_list("a,b") == ["a", "b"]  # human-typed CLI convenience
 
 
+def test_an_empty_list_round_trips_as_no_names():
+    """split_list(join_list([])) gave [''], one empty name, not []."""
+    assert jobs.join_list([]) == ""
+    assert jobs.split_list(jobs.join_list([])) == []
+    assert jobs.split_list("") == []
+
+
 def test_join_list_survives_a_comma_in_a_real_filename():
     """A filename containing a literal comma (plausible for a renamed voice-
     memo export) must round-trip through spawn_args() -> argparse intact,
