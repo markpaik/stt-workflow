@@ -1,8 +1,10 @@
 """Central configuration. Override most values via environment variables."""
 import contextlib
 import fcntl
+import math
 import os
 import re
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -61,6 +63,11 @@ RECORDINGS_DIR = Path(os.environ.get("STT_RECORDINGS_DIR", _home_default(
 # repo no matter where PROJECT_DIR points.
 PROJECT_DIR = Path(os.environ.get("STT_PROJECT_DIR",
                                   _HOME or Path(__file__).resolve().parent.parent))
+# The checkout itself: run.sh, .venv and the code. A spawned command starts
+# from here, never from PROJECT_DIR, which under STT_HOME is a data home with
+# no run.sh in it: the panel's run sat queued while spawned.log said
+# ".../run.sh: No such file or directory".
+CODE_DIR = Path(__file__).resolve().parent.parent
 VOICEPRINTS_DIR = Path(os.environ.get("STT_VOICEPRINTS_DIR",
                                       PROJECT_DIR / "voiceprints"))
 MANIFEST_PATH = PROJECT_DIR / "manifest.json"
@@ -138,6 +145,25 @@ def migration_dir() -> Path:
         return _HOME / "migration"
     return HOME / "Library/Application Support/com.stt-workflow/migration"
 
+def _env_number(name, default, cast, valid, rule):
+    """An import-time number setting from the environment. An empty value
+    means the default. A value that does not parse, or that breaks `rule`,
+    prints a warning that names the setting and keeps the default: a typo
+    in stt.env must never stop every command that imports this module."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        v = cast(raw.strip())
+        if valid(v):
+            return v
+    except ValueError:
+        pass
+    print(f"warning: {name}={raw!r} is not {rule}; using {default}",
+          file=sys.stderr, flush=True)
+    return default
+
+
 # --- Models ---
 # Parakeet TDT 0.6B v3 (Nov 2026 swap from v2): closer to Scribe v2 in a shadow test, keeps fillers, ~15% slower.
 PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
@@ -154,10 +180,32 @@ DIARIZATION_MODEL = os.environ.get(
 # centroids (centroid naming, unknown ids, enroll --audio) come from the engine
 # that ran: under speakrs, its Core ML port of the same WeSpeaker embedder
 # (cosine 0.995-1.000 to pyannote's centroids in the bakeoff).
-DIARIZER = os.environ.get("STT_DIARIZER", "speakrs").strip().lower()
+DIARIZERS = ("speakrs", "pyannote")
+
+
+def _diarizer_setting() -> str:
+    """STT_DIARIZER, checked: diarize() runs speakrs only on an exact
+    "speakrs", so a typo ("speakr") used to switch every file to the slow
+    CPU engine with no message. An unknown value warns and keeps the
+    default; an empty one is the default."""
+    raw = os.environ.get("STT_DIARIZER", "")
+    v = raw.strip().lower()
+    if not v:
+        return DIARIZERS[0]
+    if v not in DIARIZERS:
+        print(f"warning: STT_DIARIZER={raw!r} is not one of "
+              f"{' or '.join(DIARIZERS)}; using {DIARIZERS[0]}",
+              file=sys.stderr, flush=True)
+        return DIARIZERS[0]
+    return v
+
+
+DIARIZER = _diarizer_setting()
 # AHC merge threshold. speakrs' default 0.6 merged two late speakers into the
 # main one in a 4-hour meeting; 0.55 kept them apart and changed nothing else.
-SPEAKRS_AHC = float(os.environ.get("STT_SPEAKRS_AHC", "0.55"))
+SPEAKRS_AHC = _env_number("STT_SPEAKRS_AHC", 0.55, float,
+                          lambda v: math.isfinite(v) and v >= 0,
+                          "a finite number 0 or above")
 SPEAKRS_BIN = Path(os.environ.get(
     "STT_SPEAKRS_BIN",
     Path(__file__).resolve().parent.parent / "native/speakrs/target/release/stt-speakrs"))
@@ -168,7 +216,8 @@ SPEAKRS_MODELS_REV = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8"
 SPEAKRS_MODELS = Path(os.environ.get(
     "STT_SPEAKRS_MODELS",
     HOME / "Library/Application Support/com.stt-workflow/speakrs-models" / SPEAKRS_MODELS_REV))
-SPEAKRS_TIMEOUT_SEC = int(os.environ.get("STT_SPEAKRS_TIMEOUT_SEC", "3600"))
+SPEAKRS_TIMEOUT_SEC = _env_number("STT_SPEAKRS_TIMEOUT_SEC", 3600, int,
+                                  lambda v: v > 0, "a whole number of seconds above 0")
 
 # Turn-level recluster after speakrs (stt/recluster.py): a turn whose own
 # pyannote embedding fits another cluster's centroid better than its own (by
@@ -189,14 +238,58 @@ RECLUSTER_MOVE_MIN_DUR = float(os.environ.get("STT_RECLUSTER_MOVE_MIN_DUR", "0.3
 RECLUSTER_DST_MIN_SECS = float(os.environ.get("STT_RECLUSTER_DST_MIN_SECS", "120"))
 RECLUSTER_ITERS = int(os.environ.get("STT_RECLUSTER_ITERS", "2"))
 
-# ASR backend: "parakeet" (default, native MLX) or "whisperx" (CPU, robustness hedge)
-ASR_BACKEND = os.environ.get("STT_ASR_BACKEND", "parakeet")
+# ASR backend: "parakeet" (default, native MLX), "mlxwhisper" (Whisper on the
+# GPU, the variant in STT_WHISPER_MLX_MODEL), or "cloud:<provider>".
+ASR_BACKENDS = ("parakeet", "mlxwhisper")
+CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
+
+
+def _asr_problem(raw):
+    """(backend, None) for a usable STT_ASR_BACKEND value, else
+    ("parakeet", why). Case and spaces are ignored. pipeline._load_asr runs
+    Whisper only on an exact "mlxwhisper", so a typo ('mlx-whisper',
+    'whisper', or the 'whisperx' an older stt.env.example named) ran
+    Parakeet with no message."""
+    v = str(raw or "").strip().lower()
+    if not v:
+        return ASR_BACKENDS[0], None
+    if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
+        return v, None
+    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet, mlxwhisper, or cloud:"
+                             f"{'/'.join(CLOUD_ASR)}; using parakeet")
+
+
+def _asr_backend_setting() -> str:
+    raw = os.environ.get("STT_ASR_BACKEND", "")
+    v, why = _asr_problem(raw)
+    if why:
+        print(f"warning: STT_ASR_BACKEND={why}", file=sys.stderr, flush=True)
+    return v
+
+
+ASR_BACKEND = _asr_backend_setting()
 
 # --- Audio (video containers welcome too — ffmpeg extracts the audio track) ---
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".caf", ".m4b", ".flac",
               ".mov", ".m4v", ".webm", ".mkv", ".avi", ".ogg", ".opus", ".wma", ".aiff"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 SAMPLE_RATE = 16000
+
+
+def is_source_audio(p) -> bool:
+    """True when a file in a watched folder is a recording the batch takes:
+    an audio or video type, not a hidden file, not an Office owner/lock
+    file ("~$name"), and not empty. A 0-byte file (a failed export, a copy
+    still being made) is skipped until it has bytes. The batch, the panel's
+    queue and the menu bar share this test, so the panel never lists a file
+    the batch will not pick."""
+    p = Path(p)
+    if p.suffix.lower() not in AUDIO_EXTS or p.name.startswith((".", "~$")):
+        return False
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
 
 # --- Speaker naming (cosine similarity of pyannote embeddings) ---
 # Start ~0.5-0.65 and tune on real audio. Higher = stricter (fewer false names).
@@ -428,6 +521,24 @@ def meetings_dir() -> Path:
     return Path(_env_file().get("STT_MEETINGS_DIR") or MEETINGS_DIR)
 
 
+def is_live_store(d) -> bool:
+    """True when folder `d` is the meetings library (meetings_dir()). A run
+    that writes somewhere else (a test or demo dest) must never touch the
+    library's index, or its meetings by name.
+
+    Two folders that both exist compare as files (os.path.samefile): APFS
+    folds letter case and resolve() does not, so '~/projects/...' and
+    '~/Projects/...' read as two folders and a run into the library wrote
+    no descriptions."""
+    try:
+        a, b = Path(d), meetings_dir()
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
+
+
 def recordings_dir() -> Path:
     return Path(_env_file().get("STT_RECORDINGS_DIR") or RECORDINGS_DIR)
 
@@ -464,10 +575,10 @@ def mic_speaker() -> str | None:
 
 # --- Local LLM hardware limits (the owner's rule: keep the fan quiet) ---
 # Every local LLM run (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback) runs at
-# lowered priority: before each call the Ollama processes are reniced to
-# STT_LLM_NICE and put on background QoS (`taskpolicy -b`, which also lowers
-# their GPU priority), and the MLX subprocess starts under
-# `taskpolicy -b nice -n STT_LLM_NICE`. A loop over many meetings
+# lowered priority: before each call the Ollama processes are set to nice
+# STT_LLM_NICE (an absolute value, never an increment) and put on background
+# QoS (`taskpolicy -b`, which also lowers their GPU priority), and the MLX
+# subprocess starts at nice STT_LLM_NICE under `taskpolicy -b`. A loop over many meetings
 # (tools/retitle_all.py, the batch's summary sweeps) rests after each
 # meeting. Inside STT_LLM_QUIET_HOURS (default 07:00-22:00) it rests
 # STT_LLM_REST_RATIO (default 1.0) times the wall time the meeting took,
@@ -507,25 +618,83 @@ def llm_rest_min_sec() -> float:
 
 
 def _hm(s: str) -> int:
-    h, m = s.strip().split(":")
-    h, m = int(h), int(m)
+    """Minutes since midnight for 'HH:MM' or a bare hour ('10')."""
+    h, _, m = s.strip().partition(":")
+    h, m = int(h), int(m or 0)
     if not (0 <= h <= 24 and 0 <= m < 60):
         raise ValueError(s)
     return h * 60 + m
 
 
+def quiet_window(raw: str):
+    """(start, end) in minutes since midnight for an STT_LLM_QUIET_HOURS
+    value. The two times are joined by '-', an en or em dash, or 'to', with
+    or without spaces ('10:00–12:00', '10-12', '10:00 to 12:00'). A time is
+    'HH:MM' or a bare hour. Raises ValueError for anything else. The same
+    time at both ends is all day (llm_quiet_now): quiet hours only make the
+    model rest longer, so the reading that rests more is the safe one."""
+    parts = re.split(r"\s*(?:-|\u2013|\u2014|\bto\b)\s*", str(raw or "").strip(),
+                     flags=re.I)
+    if len(parts) != 2:
+        raise ValueError(raw)
+    return _hm(parts[0]), _hm(parts[1])
+
+
+_setting_warned = set()
+
+
+def _warn_once(key, msg: str):
+    """One warning per process for each unreadable value of a setting that
+    is read fresh on every call: a loop must not print it every meeting."""
+    if key not in _setting_warned:
+        _setting_warned.add(key)
+        print(f"warning: {msg}", file=sys.stderr, flush=True)
+
+
+def _warn_setting(name: str, raw, rule: str, using):
+    _warn_once((name, raw), f"{name}={raw!r} is not {rule}; using {using}")
+
+
+def _quiet_raw():
+    return _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
+
+
+def setting_problems() -> list:
+    """[(setting, why)] for each stt.env value that cannot be read and is
+    replaced by its default. The doctor lists them: a typo there used to
+    change behavior with no word anywhere."""
+    out = []
+    raw = _quiet_raw()
+    if raw:
+        try:
+            quiet_window(raw)
+        except ValueError:
+            out.append(("STT_LLM_QUIET_HOURS",
+                        f"{raw!r} is not a window such as 07:00-22:00; "
+                        f"using {LLM_QUIET_HOURS_DEFAULT}"))
+    from . import summarize
+    why = summarize.ollama_url_problem()
+    if why:
+        out.append(("STT_OLLAMA_URL", why))
+    _, why = _asr_problem(_env_file().get("STT_ASR_BACKEND")
+                          or os.environ.get("STT_ASR_BACKEND"))
+    if why:
+        out.append(("STT_ASR_BACKEND", why))
+    return out
+
+
 def llm_quiet_now(now=None) -> bool:
     """True inside STT_LLM_QUIET_HOURS ("HH:MM-HH:MM", may wrap midnight).
-    An unreadable value falls back to the default window."""
+    An unreadable value warns once and falls back to the default window."""
     from datetime import datetime as _dt
     now = now or _dt.now()
-    raw = _env_file().get("STT_LLM_QUIET_HOURS") or os.environ.get("STT_LLM_QUIET_HOURS")
+    raw = _quiet_raw()
     try:
-        a, b = (raw or LLM_QUIET_HOURS_DEFAULT).split("-")
-        start, end = _hm(a), _hm(b)
+        start, end = quiet_window(raw or LLM_QUIET_HOURS_DEFAULT)
     except ValueError:
-        a, b = LLM_QUIET_HOURS_DEFAULT.split("-")
-        start, end = _hm(a), _hm(b)
+        _warn_setting("STT_LLM_QUIET_HOURS", raw, "a window such as 07:00-22:00",
+                      LLM_QUIET_HOURS_DEFAULT)
+        start, end = quiet_window(LLM_QUIET_HOURS_DEFAULT)
     t = now.hour * 60 + now.minute
     if start == end:
         return True
@@ -560,9 +729,30 @@ def llm_rest(work_sec: float, log=None, sleep=None) -> float:
 # The folder AND the files carry the meeting name, so a rename in the GUI
 # renames both and everything stays greppable/openable from Finder.
 
-AUDIO_SUFFIXES = (".m4a", ".mp4", ".wav", ".mp3", ".aiff", ".mov")
+# a meeting's stored audio: every type the batch ingests, since a non-video
+# source is stored under its own suffix (<base>.flac). One list: the order
+# only says which copy meeting_audio() prefers when a folder holds two.
+_AUDIO_PREFERRED = (".m4a", ".mp4", ".wav", ".mp3", ".aiff", ".mov")
+AUDIO_SUFFIXES = _AUDIO_PREFERRED + tuple(sorted(AUDIO_EXTS - set(_AUDIO_PREFERRED)))
 # sidecar jsons that are NOT a meeting's main transcript
 _SIDECAR_JSON = (".reviews.json", ".verify.json", ".reviews.superseded.json")
+
+
+# A meeting's folder name is also the stem of every file in it, and the
+# longest artifact name adds about 40 bytes (".reviews.superseded.unmerged-
+# <time>"), plus a " (NN)" twin suffix. macOS allows 255 bytes per name, so
+# a folder name made from a source file name is capped well under that.
+MAX_BASE_BYTES = 120
+
+
+def cap_name(name: str, limit: int = MAX_BASE_BYTES) -> str:
+    """`name` cut to at most `limit` UTF-8 bytes, never inside a character,
+    with no trailing space, dot, dash or underscore left by the cut."""
+    raw = str(name).encode("utf-8")
+    if len(raw) <= limit:
+        return name
+    cut = raw[:limit].decode("utf-8", "ignore")
+    return cut.rstrip(" .-_") or cut
 
 
 def meeting_dir(base: str, dest_dir=None) -> Path:

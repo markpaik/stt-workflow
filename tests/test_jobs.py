@@ -114,3 +114,20 @@ def test_onetime_flag_round_trips_to_spawn_args(sandbox):
     assert "--one-time-speakers" in args
     args = jobs.spawn_args({"at": 1.0, "files": ["A.m4a"]})
     assert "--one-time-speakers" not in args
+
+
+def test_a_spawned_job_runs_the_checkouts_run_sh_not_the_data_homes(sandbox):
+    """Under STT_HOME the data home holds no run.sh. A run from the panel
+    answered {ok: true}, sat queued, and spawned.log said '.../run.sh: No
+    such file or directory'. Every spawn starts from the checkout."""
+    from pathlib import Path
+
+    from gui import menubar, server
+    from stt import config, jobs
+    assert config.CODE_DIR == Path(jobs.__file__).resolve().parent.parent
+    assert config.CODE_DIR != config.PROJECT_DIR      # the sandbox data home
+    argv = jobs.spawn_args({"at": 1.0})
+    assert argv[3] == str(config.CODE_DIR / "run.sh")
+    assert Path(argv[3]).is_file()
+    assert server.RUN_SH == config.CODE_DIR / "run.sh"
+    assert Path(menubar.ICON).is_file()

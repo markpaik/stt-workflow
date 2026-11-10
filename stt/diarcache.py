@@ -50,24 +50,63 @@ def save(path, raw_turns, turn_embeddings, cent_emb, overlaps=None, dim=256,
     os.replace(tmp, path)
 
 
+class Unreadable(ValueError):
+    """A cache file that is there but cannot be read: truncated, garbage, or
+    the wrong shape. A ValueError, so every caller's existing
+    `except (OSError, ValueError, KeyError)` catches it. The message names
+    the kind of failure and never the path: a panel error used to carry
+    "Failed to interpret file PosixPath('/Users/...diar.npz') as a pickle"."""
+
+
+def _open(path):
+    """np.load, with every way an unreadable archive fails as Unreadable. A
+    missing file stays an OSError: callers tell "no cache" from "bad cache".
+    A truncated file raises zipfile.BadZipFile, garbage raises
+    pickle.UnpicklingError, and neither is an OSError or a ValueError."""
+    try:
+        return np.load(path, allow_pickle=True)
+    except OSError:
+        raise
+    except Exception as e:
+        raise Unreadable(f"unreadable diarization cache ({type(e).__name__})") from None
+
+
+def _read(path, parse):
+    """parse(npz) under the same rule: a missing array or a bad shape is an
+    unreadable cache, not a KeyError or an IndexError from deep inside."""
+    d = _open(path)
+    try:
+        return parse(d)
+    except Exception as e:
+        raise Unreadable(f"unreadable diarization cache ({type(e).__name__})") from None
+    finally:
+        close = getattr(d, "close", None)
+        if close is not None:
+            close()     # an NpzFile holds its file open until closed
+
+
 def load(path):
-    d = np.load(path, allow_pickle=True)
-    raw_turns = [{"start": float(s), "end": float(e), "cluster": str(c)}
-                 for s, e, c in zip(d["starts"], d["ends"], d["clusters"])]
-    turn_embeddings = [None if not np.isfinite(row).all() else np.asarray(row, float)
-                       for row in d["tembs"]]
-    cent_emb = {str(l): np.asarray(v, float)
-                for l, v in zip(d["cent_labels"], d["cent_vecs"])}
-    overlaps = ([(float(s), float(e)) for s, e in d["overlaps"]]
-                if "overlaps" in d.files else [])  # older caches predate overlap data
-    return raw_turns, turn_embeddings, cent_emb, overlaps
+    def parse(d):
+        raw_turns = [{"start": float(s), "end": float(e), "cluster": str(c)}
+                     for s, e, c in zip(d["starts"], d["ends"], d["clusters"])]
+        turn_embeddings = [None if not np.isfinite(row).all() else np.asarray(row, float)
+                           for row in d["tembs"]]
+        cent_emb = {str(l): np.asarray(v, float)
+                    for l, v in zip(d["cent_labels"], d["cent_vecs"])}
+        overlaps = ([(float(s), float(e)) for s, e in d["overlaps"]]
+                    if "overlaps" in d.files else [])  # older caches predate overlap data
+        return raw_turns, turn_embeddings, cent_emb, overlaps
+    return _read(path, parse)
 
 
 def load_channel(path):
     """Channel-aware extras from a cache: {mode, mic_speaker, spans, embs}.
     Empty (mode None) for normal recordings and pre-feature caches, so relabel
     treats them as mono."""
-    d = np.load(path, allow_pickle=True)
+    return _read(path, _parse_channel)
+
+
+def _parse_channel(d):
     if "channel_mode" not in d.files:
         return {"mode": None, "mic_speaker": None, "spans": [], "embs": []}
     mode = str(d["channel_mode"]) or None

@@ -73,6 +73,42 @@ def _read_json(path: Path, default):
         return default
 
 
+_UNREADABLE = object()
+
+
+def _read_store(path: Path, default):
+    """A registry file, or `default` when it is not there, or _UNREADABLE
+    when it is there and cannot be read. A missing registry is a library
+    nobody enrolled in yet. A corrupt one reads as empty everywhere else
+    (identify.load_registry warns and carries on), so this is the one place
+    that says so in a report."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError):
+        return _UNREADABLE
+
+
+def _corrupt(name: str, who: str) -> Finding:
+    return Finding("corrupt", name,
+                   f"cannot be read, so every {who} reads as gone. Restore "
+                   f"{name}.bak, or rebuild it with tools/rebuild_voiceprints.py",
+                   False)
+
+
+def _entry_problem(meta, list_key):
+    """Why one registry entry cannot be checked, or None. Each shape here
+    crashed the doctor with an AttributeError or a TypeError."""
+    if not isinstance(meta, dict):
+        return "registry entry is not an object"
+    if not isinstance(meta.get("file"), str) or not meta.get("file"):
+        return "registry entry names no voiceprint file"
+    if not isinstance(meta.get(list_key) or [], list):
+        return f"'{list_key}' is not a list"
+    return None
+
+
 def _bad_row(row) -> bool:
     return not np.isfinite(row).all() or abs(np.linalg.norm(row) - 1.0) > 1e-3
 
@@ -109,12 +145,21 @@ def _dead_ref(base, mid, lib: Library) -> bool:
 
 def _check_named(vp: Path, lib: Library) -> list:
     out = []
-    reg = _read_json(vp / "registry.json", {})
-    if not isinstance(reg, dict):
-        return out
+    reg = _read_store(vp / "registry.json", {})
+    if reg is _UNREADABLE or not isinstance(reg, dict):
+        return [_corrupt("registry.json", "enrolled person")]
     stacks = {}
     for name, meta in reg.items():
-        arr = _stack(vp / meta.get("file", ""))
+        why = _entry_problem(meta, "sources")
+        if why:
+            out.append(Finding("invalid", name, why, False))
+            continue
+        try:
+            arr = _stack(vp / meta["file"])
+        except Exception:
+            out.append(Finding("invalid", name, f"voiceprint file {meta['file']} "
+                               "cannot be read", False))
+            continue
         if arr is None:
             out.append(Finding("invalid", name,
                                f"voiceprint file {meta.get('file')} missing", False))
@@ -160,10 +205,10 @@ def _check_named(vp: Path, lib: Library) -> list:
 
 def _check_unknowns(vp: Path, lib: Library) -> list:
     out = []
-    raw = _read_json(vp / "unknowns.json", {"speakers": {}})
+    raw = _read_store(vp / "unknowns.json", {"speakers": {}})
     speakers = raw.get("speakers") if isinstance(raw, dict) else None
-    if not isinstance(speakers, dict):
-        return out
+    if raw is _UNREADABLE or not isinstance(speakers, dict):
+        return [_corrupt("unknowns.json", "unknown voice")]
     try:
         nxt = int(raw.get("next", 1))
     except (TypeError, ValueError):
@@ -176,7 +221,16 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
                            True))
     stacks = {}
     for uid, meta in speakers.items():
-        arr = _stack(vp / meta.get("file", ""))
+        why = _entry_problem(meta, "meetings")
+        if why:
+            out.append(Finding("invalid", uid, why, False))
+            continue
+        try:
+            arr = _stack(vp / meta["file"])
+        except Exception:
+            out.append(Finding("invalid", uid, f"sample file {meta['file']} "
+                               "cannot be read", False))
+            continue
         if arr is None:
             out.append(Finding("invalid", uid,
                                f"sample file {meta.get('file')} missing", False))
@@ -211,6 +265,32 @@ def _check_unknowns(vp: Path, lib: Library) -> list:
     return out
 
 
+def _check_files(vp: Path) -> list:
+    """A .npy no registry entry points at. After a lost or corrupt registry
+    and one new enrollment the report said "clean" while five people's
+    voiceprints sat unreferenced. Never fixable: the file may be the only
+    copy of someone's voice, and only a person can say whose."""
+    claimed = set()
+    for path, key in (("registry.json", None), ("unknowns.json", "speakers")):
+        d = _read_store(vp / path, {})
+        if isinstance(d, dict) and key:
+            d = d.get(key)
+        if not isinstance(d, dict):
+            continue
+        for meta in d.values():
+            if isinstance(meta, dict) and isinstance(meta.get("file"), str):
+                claimed.add(meta["file"].casefold())
+    try:
+        files = sorted(vp.glob("*.npy"))
+    except OSError:
+        return []
+    return [Finding("unreferenced_file", p.name,
+                    "no registry entry points at this voiceprint file (a lost "
+                    "registry, or a rename that stopped halfway); it may be "
+                    "someone's only copy, so it is left alone", False)
+            for p in files if p.name.casefold() not in claimed]
+
+
 def check(voiceprints_dir=None, meetings_dir=None) -> list:
     """Every defect the registries currently carry. Reads only.
 
@@ -224,6 +304,7 @@ def check(voiceprints_dir=None, meetings_dir=None) -> list:
     out = []
     out += _check_named(vp, lib)
     out += _check_unknowns(vp, lib)
+    out += _check_files(vp)
     for f in config.orphan_lock_files(md):
         out.append(Finding("orphan_lock", f.name,
                            "lock file for a meeting that no longer locks under "

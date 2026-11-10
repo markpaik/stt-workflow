@@ -165,3 +165,97 @@ def test_load_and_save_each_take_the_lock_on_their_own(sandbox):
         assert not saved.wait(0.3), "a bare save() must wait on a held lock too"
     t2.join(5)
     assert manifest.load()["processed"] == {"x": 1}
+
+
+# ---------- a source that keeps failing is set aside ----------
+
+def _src(d, name="bad.m4a", data=b"x" * 64):
+    p = d / name
+    p.write_bytes(data)
+    return p
+
+
+def test_three_failures_of_an_unchanged_file_park_it(sandbox):
+    p = _src(sandbox)
+    for n in (1, 2):
+        rec = manifest.record_failure(p.name, p, "boom")
+        assert rec["count"] == n and not rec["parked"]
+        assert not manifest.is_parked(manifest.load(), p.name, p)
+    rec = manifest.record_failure(p.name, p, "boom")
+    assert rec["count"] == manifest.FAIL_PARK_AFTER and rec["parked"]
+    assert manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_an_unreadable_file_is_parked_at_the_first_failure(sandbox):
+    p = _src(sandbox)
+    manifest.record_failure(p.name, p, "ffmpeg could not decode bad.m4a: x",
+                            unreadable=True)
+    assert manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_a_changed_file_is_no_longer_parked(sandbox):
+    """A copy that was still being written fails, then completes: the new
+    size and mtime make it a new file, and the count starts again."""
+    p = _src(sandbox)
+    manifest.record_failure(p.name, p, "x", unreadable=True)
+    p.write_bytes(b"y" * 128)
+    os.utime(p, (5000.0, 5000.0))
+    assert not manifest.is_parked(manifest.load(), p.name, p)
+    assert manifest.record_failure(p.name, p, "x")["count"] == 1
+
+
+def test_a_downloaded_placeholder_is_no_longer_parked(sandbox, monkeypatch):
+    """An iCloud placeholder that failed to download keeps its size and
+    mtime once it downloads. Its blocks change, so it is not parked."""
+    from stt import icloud
+    p = _src(sandbox)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: False)
+    for _ in range(manifest.FAIL_PARK_AFTER):
+        manifest.record_failure(p.name, p, "iCloud file did not fully materialize")
+    assert manifest.is_parked(manifest.load(), p.name, p)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: True)
+    assert not manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_a_half_downloaded_placeholder_is_unparked_once_it_completes(
+        sandbox, monkeypatch):
+    """A download that timed out halfway has blocks on disk, so it is not
+    "dataless". The old signature recorded dataless=False, the finished
+    download read the same, and the file stayed parked for good."""
+    from stt import icloud
+    p = _src(sandbox)
+    monkeypatch.setattr(icloud, "is_dataless", lambda path: False)  # has blocks
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: False)
+    for _ in range(manifest.FAIL_PARK_AFTER):
+        manifest.record_failure(p.name, p, "iCloud file did not fully materialize")
+    assert manifest.is_parked(manifest.load(), p.name, p)
+    monkeypatch.setattr(icloud, "_fully_present", lambda path: True)  # all bytes
+    assert not manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_an_older_failure_record_still_reads(sandbox):
+    """A record written before the change holds "dataless", not "partial"."""
+    p = _src(sandbox)
+    st = p.stat()
+    with manifest.update() as m:
+        m.setdefault("failed", {})[p.name] = {
+            "mtime": round(st.st_mtime, 3), "size": st.st_size,
+            "dataless": False, "count": 3, "parked": True}
+    assert manifest.is_parked(manifest.load(), p.name, p)
+
+
+def test_a_success_clears_the_failure_record(sandbox):
+    p = _src(sandbox)
+    manifest.record_failure(p.name, p, "x", unreadable=True)
+    manifest.record(p.name, p.stat().st_mtime, _outputs(sandbox))
+    m = manifest.load()
+    assert p.name not in m.get("failed", {})
+    assert not manifest.is_parked(m, p.name, p)
+
+
+def test_a_missing_file_is_never_parked(sandbox):
+    p = _src(sandbox)
+    manifest.record_failure(p.name, p, "x", unreadable=True)
+    p.unlink()
+    assert not manifest.is_parked(manifest.load(), p.name, p)
+    assert manifest.record_failure(p.name, p, "x") == {}

@@ -159,7 +159,80 @@ def mark(m: dict, key: str, mtime: float, outputs: list, fp=None, size=None):
         if size:
             rec["size"] = size
     m["processed"][key] = rec
+    # a success ends any run of failures for this name
+    (m.get("failed") or {}).pop(key, None)
     return rec
+
+
+# ---------- a source that keeps failing is set aside ----------
+#
+# A file that fails stays in the watched folder, and nothing marks it
+# processed, so every automatic run (the folder watch, the 10-minute run,
+# the nightly run) tried it again and wrote one more failure to the
+# history. m["failed"][name] counts the failures of ONE unchanged file:
+# the same mtime, size and download state. A file is set aside ("parked")
+# after FAIL_PARK_AFTER of them, or at the first one when ffmpeg cannot
+# read it (audio.UnreadableAudio: the same bytes fail the same way). A
+# parked file is skipped by automatic runs until it changes. Naming it
+# (Retry, --files) or --force still runs it, and a success clears it. A
+# failure that is the Mac's, not the file's (a full disk: audio.WriteFailed),
+# is never counted (run_batch._machine_at_fault).
+
+FAIL_PARK_AFTER = 3
+
+
+def _signature(path):
+    """(mtime, size, partial) of a source file. A placeholder that
+    downloads keeps its mtime and size, so its download state is part of
+    the signature: a failed download is retried once the bytes arrive.
+    `partial` is True until every byte is on disk. A download that timed
+    out halfway has blocks, so "no blocks at all" (icloud.is_dataless)
+    stayed the same when it finished, and the file stayed parked."""
+    from . import icloud
+    st = Path(path).stat()
+    return round(st.st_mtime, 3), st.st_size, not icloud._fully_present(path)
+
+
+def _same(rec: dict, sig) -> bool:
+    mtime, size, partial = sig
+    # a record from before "partial" holds "dataless", the older test
+    was = rec.get("partial", rec.get("dataless"))
+    try:
+        return (abs(float(rec.get("mtime", 0)) - mtime) < 1.0
+                and rec.get("size") == size and bool(was) == partial)
+    except (TypeError, ValueError):
+        return False
+
+
+def record_failure(key: str, path, error: str = "", unreadable: bool = False) -> dict:
+    """Count one failure of source `key` (the file at `path`), as a locked
+    read-modify-write. Returns the record, or {} when the file is gone."""
+    try:
+        sig = _signature(path)
+    except OSError:
+        return {}
+    with update() as m:
+        failed = m.setdefault("failed", {})
+        prev = failed.get(key)
+        n = (int(prev.get("count", 0)) if isinstance(prev, dict) and _same(prev, sig) else 0) + 1
+        rec = {"mtime": sig[0], "size": sig[1], "partial": sig[2], "count": n,
+               "parked": bool(unreadable) or n >= FAIL_PARK_AFTER,
+               "error": str(error or "")[:300],
+               "at": datetime.now().isoformat(timespec="seconds")}
+        failed[key] = rec
+        return rec
+
+
+def is_parked(m: dict, key: str, path) -> bool:
+    """True when source `key` is set aside: its failures parked it and the
+    file at `path` has not changed since."""
+    rec = (m.get("failed") or {}).get(key)
+    if not isinstance(rec, dict) or not rec.get("parked"):
+        return False
+    try:
+        return _same(rec, _signature(path))
+    except OSError:
+        return False
 
 
 def record(key: str, mtime: float, outputs: list, fp=None, size=None) -> dict:

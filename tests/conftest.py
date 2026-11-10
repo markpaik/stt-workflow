@@ -50,6 +50,8 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ICLOUD_DIR", d / "source")
     monkeypatch.setattr(config, "RECORDINGS_DIR", d / "recordings")
     monkeypatch.setattr(config, "MIC_SPEAKER", None)  # don't inherit the real user's setting
+    # a bad setting warns once per process: each test starts with none said
+    monkeypatch.setattr(config, "_setting_warned", set())
     # the Voice Memos sync runs at every batch start: a sandbox run must read
     # a synthetic library, never the real one, even with STT_HOME unset
     monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(d / "vm_container"))

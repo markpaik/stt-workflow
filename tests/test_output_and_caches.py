@@ -26,6 +26,90 @@ def test_txt_marks_fragile_segments(sandbox):
     assert not (sandbox / "t.txt.tmp").exists()  # atomic write cleaned up
 
 
+def test_a_header_under_a_minute_gives_seconds(sandbox):
+    """round(2 / 60, 1) printed '0.0 min' for a 2 s clip and '0.1 min' for
+    5 s. Under a minute the header gives whole seconds, and both header
+    readers take that form."""
+    from stt import summarize
+    h = output.txt_header("2026-11-08 Clip", 2.4, [])
+    assert h == "2026-11-08 Clip  |  2 sec  |  0 speaker(s)"
+    assert output.txt_header("x", 59.4, []).startswith("x  |  59 sec  |")
+    assert output.txt_header("x", 59.6, []).startswith("x  |  1.0 min  |")   # never '60 sec'
+    assert output.txt_header("x", 60.0, []).startswith("x  |  1.0 min  |")
+    p = sandbox / "t.txt"
+    p.write_text(h + "\n\n[00:00] Voice 1: hi\n")
+    assert output.refresh_txt_header(p, "2026-11-09 Clip")
+    assert p.read_text().startswith("2026-11-09 Clip  |  2 sec  |  0 speaker(s)\n")
+    assert summarize._TXT_HEADER.sub("", p.read_text(), count=1) == "[00:00] Voice 1: hi\n"
+
+
+def test_the_batch_history_gives_seconds_under_a_minute(sandbox, monkeypatch):
+    """The header said '2 sec', but results.jsonl, the console and the
+    panel's recent list still said '0 speaker(s), 0.0 min'."""
+    assert output.length_text(2.4) == "2 sec"
+    assert output.length_text(59.6) == "1.0 min"
+    assert output.length_text(None) == "0 sec"
+    import run_batch
+    from stt import config, icloud, pipeline
+    config.source_dir().mkdir(parents=True, exist_ok=True)
+    src = config.source_dir() / "Clip 05012026.m4a"
+    src.write_bytes(b"AUDIO")
+
+    def fake_process_file(s, dest_dir=None, **kw):
+        base = "2026-05-01 Clip"
+        config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+        j = config.meeting_file(base, ".json", dest_dir)
+        j.write_text("{}")
+        t = config.meeting_file(base, ".txt", dest_dir)
+        t.write_text("x")
+        return {"base": base, "txt": t, "json": j, "emb": None,
+                "duration_sec": 2.4, "n_speakers": 0, "identified": []}
+    monkeypatch.setattr(pipeline, "process_file", fake_process_file)
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    opts = {"do_diarize": False, "strict": False, "verify": False,
+            "track_unknowns": True, "allowed": None, "do_move": False}
+    r = run_batch.process_one(str(src), str(config.MEETINGS_DIR), opts)
+    assert r["summary"] == "0 speaker(s), 2 sec"
+
+
+def test_lines_with_no_diarization_read_speaker(sandbox, monkeypatch, tmp_path):
+    """--no-diarize wrote every line as 'Voice ?', which reads like a fault.
+    Nothing told the voices apart, so each line reads 'Speaker'."""
+    import json
+    import subprocess
+
+    from stt import config, pipeline
+    from stt.audio import FFMPEG
+    from tests.test_layout import _fake_asr
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    src = tmp_path / "Clip 08032026.m4a"
+    subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=2", "-ac", "1", "-c:a", "aac",
+                    str(src)], check=True, capture_output=True)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
+                                do_diarize=False, do_verify=False)
+    txt = config.meeting_file(res["base"], ".txt").read_text()
+    assert "Voice ?" not in txt
+    assert "] Speaker: hello from the pipeline" in txt
+    d = json.loads(config.meeting_file(res["base"], ".json").read_text())
+    assert {s.get("display") for s in d["segments"]} == {"Speaker"}
+    # an unassigned line in a diarized meeting keeps its own fallback
+    assert output.speaker_display(None, None) == "Voice ?"
+
+
+def test_a_transcript_with_no_speech_says_so(sandbox):
+    """A silent file wrote a header and an empty body, with no word on why."""
+    p = sandbox / "t.txt"
+    output.write_txt(p, [], header="h")
+    assert p.read_text() == "h\n\n\n\n(no speech detected)\n"
+    output.write_txt(p, [{"start": 0, "end": 1, "speaker": None, "text": "  "}], header="h")
+    assert p.read_text().endswith("(no speech detected)\n")
+    output.write_txt(p, [{"start": 0, "end": 1, "speaker": "S0", "name": "A",
+                          "text": "hi", "flags": []}], header="h")
+    assert "no speech" not in p.read_text()
+
+
 def test_txt_no_legend_when_all_clean(sandbox):
     p = sandbox / "t.txt"
     output.write_txt(p, [{"start": 0, "end": 1, "speaker": "S0", "name": "A",
@@ -108,6 +192,18 @@ def test_local_file_is_fully_present(sandbox):
 
 def test_missing_file_not_present(sandbox):
     assert not icloud._fully_present(sandbox / "nope.m4a")
+
+
+def test_materialize_returns_at_once_on_an_empty_file(sandbox):
+    """A 0-byte file is not an iCloud placeholder (a placeholder reports
+    its full size) and holds nothing to wait for. materialize() used to
+    poll it until the timeout, 900 s by default, with the batch lock held."""
+    import time
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    t0 = time.monotonic()
+    assert icloud.materialize(f, timeout=5, poll=0.1) is False
+    assert time.monotonic() - t0 < 1.0
     assert not icloud.is_dataless(sandbox / "nope.m4a")
 
 
@@ -408,3 +504,38 @@ def test_diarcache_channel_extras_roundtrip_and_backcompat(sandbox):
     diarcache.save(q, turns, [np.ones(8)], {"SPEAKER_00": np.ones(8)})
     mono = diarcache.load_channel(q)
     assert mono["mode"] is None and mono["spans"] == []
+
+
+def _corrupt_caches(tmp_path):
+    import numpy as np
+    good = tmp_path / "good.diar.npz"
+    diarcache.save(good, [{"start": 0.0, "end": 1.0, "cluster": "SPEAKER_00"}],
+                   [np.ones(4)], {"SPEAKER_00": np.ones(4)})
+    out = {}
+    out["truncated"] = tmp_path / "truncated.diar.npz"
+    out["truncated"].write_bytes(good.read_bytes()[:40])
+    out["garbage"] = tmp_path / "garbage.diar.npz"
+    out["garbage"].write_bytes(b"\x80\x04 not an archive at all" * 10)
+    out["empty"] = tmp_path / "empty.diar.npz"
+    out["empty"].write_bytes(b"")
+    wrong = tmp_path / "wrong.diar.npz"
+    np.savez(wrong, something=np.ones(3))
+    out["wrong shape"] = wrong
+    return out
+
+
+def test_an_unreadable_diar_cache_is_a_value_error_with_no_path(tmp_path):
+    """A truncated cache raised zipfile.BadZipFile and a garbage one
+    pickle.UnpicklingError. Neither is an OSError or a ValueError, so the
+    (OSError, ValueError, KeyError) guards at every call site missed them,
+    and the panel answered 500 with the server's absolute path."""
+    for kind, p in _corrupt_caches(tmp_path).items():
+        for fn in (diarcache.load, diarcache.load_channel):
+            if kind == "wrong shape" and fn is diarcache.load_channel:
+                continue   # no channel keys reads as a mono cache, by design
+            with pytest.raises(diarcache.Unreadable) as e:
+                fn(p)
+            assert isinstance(e.value, ValueError), kind
+            assert str(tmp_path) not in str(e.value) and "PosixPath" not in str(e.value)
+    with pytest.raises(FileNotFoundError):
+        diarcache.load(tmp_path / "missing.diar.npz")

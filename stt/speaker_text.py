@@ -117,10 +117,29 @@ def _first(display: str) -> str:
     return (display.split() or [""])[0]
 
 
+# A first name that is also a word ('Will', 'Mark', 'Hope', 'Bill', 'Grant')
+# starts a sentence as the verb when one of these follows it: 'Will the
+# board approve?', 'Mark the date', 'Hope this helps'. Mid-sentence the word
+# is lower case, so a capital there is the name.
+_SENTENCE_START = re.compile(r"(?:^|[.!?:;\n])[\s\"'“‘(*•-]*$")
+_VERB_NEXT = re.compile(
+    r"\s+(?:the|a|an|this|that|these|those|it|its|we|you|they|he|she|i|"
+    r"our|your|their|his|her|my|us|them|me|him|there|any|all|each|every|"
+    r"everyone|anyone|someone|no|not)\b", re.I)
+
+
+def _verb_use(text: str, m) -> bool:
+    """True when the first-name match `m` opens a sentence and a word that
+    follows a verb comes next: then it is the word, not the person."""
+    return bool(_SENTENCE_START.search(text[:m.start()])
+                and _VERB_NEXT.match(text, m.end()))
+
+
 def templatize(text: str, data: dict, labels: dict) -> str:
     """`text` with every speaker label of `data`'s roster replaced by a
     token. Full labels first (longest first, so 'Speaker 12' wins over
-    'Speaker 1'), then first names that only one named speaker carries."""
+    'Speaker 1'), then first names that only one named speaker carries. A
+    first name used as a verb at a sentence start stays text (_verb_use)."""
     if not text:
         return text
     disp = roster(data)
@@ -158,7 +177,13 @@ def templatize(text: str, data: dict, labels: dict) -> str:
     # first: a token written by an earlier label is never scanned again, so
     # a first name can never match inside a token that holds a full name
     rx = re.compile(r"(?<!\w)(" + "|".join(re.escape(p[0]) for p in pats) + r")(?!\w)")
-    return rx.sub(lambda m: table[m.group(1)], text)
+
+    def sub(m):
+        tok = table[m.group(1)]
+        if tok.startswith("⟦f:") and _verb_use(text, m):
+            return m.group(0)
+        return tok
+    return rx.sub(sub, text)
 
 
 def make(fields: dict, data: dict, raw_turns=None) -> dict:

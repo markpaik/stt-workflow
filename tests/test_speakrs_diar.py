@@ -161,3 +161,47 @@ def test_record_tags_the_engine_that_ran(tmp_path, monkeypatch):
     rates.record(600, {"diarizing": 20}, "parakeet", diarizer="speakrs-0.7.0-coreml ahc=0.55")
     rows = [json.loads(x) for x in (tmp_path / "rates.jsonl").read_text().splitlines()]
     assert [r["diar"] for r in rows] == ["pyannote", "speakrs"]
+
+
+def _silence_helper(tmp_path, monkeypatch):
+    """The helper's real output on 20 s of silence: no segments, chunk
+    embeddings present, and an EMPTY clusters file (hard_clusters_shape
+    [0, 0]) that cannot reshape to (chunks, speakers)."""
+    _fake_helper(tmp_path, monkeypatch, {
+        "emb_shape": [1, 2, 3], "hard_clusters_shape": [0, 0],
+        "pipeline_run_sec": 0.5, "segments": [], "exclusive_segments": []})
+    (tmp_path / "src" / "clusters.i32").write_bytes(b"")
+
+
+def test_silence_is_an_empty_result_not_a_failure(tmp_path, monkeypatch):
+    """Pure silence (a muted recording, a silent stereo channel) raised
+    SpeakrsUnavailable: 'cannot reshape array of size 0 into shape (12,3)'.
+    The file then ran pyannote on CPU and found nobody either."""
+    _silence_helper(tmp_path, monkeypatch)
+    r = speakrs_diar.run(tmp_path / "x.wav")
+    assert r["labels"] == [] and r["raw_turns"] == [] and r["overlaps"] == []
+    assert r["centroids"] == {} and r["engine"].startswith("speakrs")
+    assert not list((tmp_path / "work").iterdir())
+
+
+def test_silence_never_falls_back_to_pyannote(tmp_path, monkeypatch, capsys):
+    _silence_helper(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "DIARIZER", "speakrs")
+    monkeypatch.setattr(diarize, "_get_pipeline", lambda: object())
+    monkeypatch.setattr(diarize, "_pyannote_raw",
+                        lambda *a: pytest.fail("silence must not fall back to pyannote"))
+    monkeypatch.setattr(diarize, "_embed_turns", lambda *a, **k: ([], 0))
+    out = diarize.diarize(tmp_path / "x.wav", voiceprints={})
+    assert out["engine"].startswith("speakrs") and out["labels"] == []
+    assert "falling back" not in capsys.readouterr().out
+
+
+def test_segments_with_unreadable_arrays_still_fall_back(tmp_path, monkeypatch):
+    """Only an output with no speech at all is empty: speech with a broken
+    clusters file is a failed run, and pyannote takes over."""
+    _fake_helper(tmp_path, monkeypatch, {
+        "emb_shape": [1, 2, 3], "segments": [[0.0, 2.0, "SPEAKER_00"]],
+        "exclusive_segments": [[0.0, 2.0, "SPEAKER_00"]]})
+    (tmp_path / "src" / "clusters.i32").write_bytes(b"")
+    with pytest.raises(speakrs_diar.SpeakrsUnavailable):
+        speakrs_diar.run(tmp_path / "x.wav")

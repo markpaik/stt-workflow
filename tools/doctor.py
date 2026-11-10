@@ -74,7 +74,12 @@ def main(argv=None) -> int:
             print(f"  journal: {r['journal']}")
             print(f"  undo with: ./run.sh py tools/doctor.py undo {r['run']} --apply")
         return 0
-    r = doctor.undo(a.run, journal_dir=a.journal_dir, dry_run=not a.apply)
+    from stt import fieldjournal
+    try:
+        r = doctor.undo(a.run, journal_dir=a.journal_dir, dry_run=not a.apply)
+    except fieldjournal.NoSuchRun as e:
+        print(e, file=sys.stderr)
+        return 1
     word = "would restore" if r["dry_run"] else "restored"
     print(f"undo {a.run}: {word} {len(r['restored'])} file(s), "
           f"kept {len(r['kept'])} changed since")

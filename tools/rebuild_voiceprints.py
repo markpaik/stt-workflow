@@ -21,6 +21,27 @@ ap.add_argument("--apply", action="store_true",
                 help="actually enroll (default: dry-run, print the plan)")
 APPLY = ap.parse_args().apply
 
+
+def move_damaged_registry():
+    """A damaged registry.json is never written over (identify.
+    RegistryUnreadable), so a rebuild sets it aside first, under a name
+    that keeps its bytes. Returns the new path, or None."""
+    import time
+    p = config.VOICEPRINTS_DIR / "registry.json"
+    try:
+        identify.load_registry_for_write()
+        return None
+    except identify.RegistryUnreadable:
+        dst = p.with_suffix(f".json.corrupt-{int(time.time())}")
+        p.rename(dst)
+        return dst
+
+
+if APPLY:
+    moved = move_damaged_registry()
+    if moved:
+        print(f"registry.json could not be read: moved aside to {moved.name}")
+
 for base in config.meeting_bases():
     j = json.loads(config.meeting_file(base, ".json").read_text())
     named = {s["id"]: s["name"] for s in j.get("speakers", []) if s.get("name")}

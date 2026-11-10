@@ -109,6 +109,152 @@ def test_repeated_titles_on_one_day_get_the_twin_suffix(sandbox):
     assert d["title"] == "Kim Weekly Check-in"
 
 
+def test_saving_a_twin_under_its_own_title_keeps_its_number(sandbox):
+    """restamp() peels the ' (N)' suffix and _unique_base took the lowest
+    free number, so a no-op save moved '(3)' to '(2)' and renamed the
+    folder, its id and every reference. A twin saved under the title it
+    already has keeps its own number."""
+    from stt import archive
+    _m("2026-05-05 Race Name", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (3)", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (4)", date="2026-05-05", title="Race Name")
+    assert archive.archive_meeting("2026-05-05 Race Name")["ok"]      # (2) is free
+    for twin in ("2026-05-05 Race Name (3)", "2026-05-05 Race Name (4)"):
+        r = summarize.rename_meeting(twin, "Race Name")
+        assert r == {"ok": True, "renamed": [], "base": twin}
+        # the typed stamp, the Keep path and a re-sent date are all no-ops too
+        assert summarize.rename_meeting(twin, "2026-05-05 Race Name")["base"] == twin
+        assert summarize.apply_meeting_edits(twin, title="Race Name",
+                                             date="2026-05-05")["base"] == twin
+        assert summarize.apply_meeting_edits(twin, title="Race Name",
+                                             title_state="confirmed")["base"] == twin
+    # a case-only fix on a twin keeps the number as well
+    r = summarize.rename_meeting("2026-05-05 Race Name (3)", "race name")
+    assert r["base"] == "2026-05-05 race name (3)"
+    # a real change still takes the lowest free number
+    _m("2026-05-05 Other", date="2026-05-05", title="Other")
+    assert summarize.rename_meeting("2026-05-05 Other", "Race Name")["base"] == (
+        "2026-05-05 Race Name (2)")
+
+
+@pytest.mark.parametrize("typed,folder", [
+    ("Dana Fox 1:1", "Dana Fox 1-1"),
+    ("Standup 9:30", "Standup 9-30"),
+    ("Vendor Demo: Assessment Platform", "Vendor Demo - Assessment Platform"),
+    ("Q3/Q4 Planning", "Q3-Q4 Planning"),
+    ("Agenda:", "Agenda"),
+    ("Standup 9:30 01222026", "Standup 9-30"),
+])
+def test_a_colon_in_a_typed_title_is_kept_in_a_safe_form(sandbox, typed, folder):
+    """_sanitize_name deleted the colon, so '1:1' became '11' and read as
+    another meeting. On disk a colon or slash becomes a hyphen, and the
+    title the panel shows keeps what was typed."""
+    from gui import server as srv
+    _m("Voice Memo 1", date="2026-01-22")
+    r = summarize.rename_meeting("Voice Memo 1", typed)
+    assert r["ok"] and r["base"] == f"2026-01-22 {folder}"
+    shown = dates.title_of(typed) if typed != "Agenda:" else "Agenda:"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == shown
+    srv._meet_cache.clear()
+    meta = srv._meeting_meta(config.meeting_file(r["base"], ".json"), config.meetings_dir())
+    assert meta["title"] == shown
+
+
+def test_an_old_folder_that_kept_its_colon_is_no_doctor_finding(sandbox):
+    """A folder from before the sanitizer can hold a colon, with the same
+    title. The doctor compared the folder with the title's safe form only,
+    so it reported every such folder as a name mismatch."""
+    from stt import doctor
+    _m("2026-01-15 Vendor Demo: Assessment Platform", date="2026-01-15",
+       title="Vendor Demo: Assessment Platform")
+    assert not [f for f in doctor.check(registry=False) if f.kind == "name_mismatch"]
+    # saving the title it already has leaves that folder where it is
+    base = "2026-01-15 Vendor Demo: Assessment Platform"
+    assert summarize.rename_meeting(base, "Vendor Demo: Assessment Platform") == {
+        "ok": True, "renamed": [], "base": base}
+    # a real change still lands on the safe form
+    r = summarize.rename_meeting(base, "Vendor Demo: Scoring")
+    assert r["base"] == "2026-01-15 Vendor Demo - Scoring"
+
+
+def test_saving_a_colon_title_again_changes_nothing(sandbox):
+    from stt import doctor
+    _m("Voice Memo 1", date="2026-01-22")
+    base = summarize.rename_meeting("Voice Memo 1", "Dana Fox 1:1")["base"]
+    assert summarize.rename_meeting(base, "Dana Fox 1:1") == {
+        "ok": True, "renamed": [], "base": base}
+    # a date edit moves the folder and keeps the typed title
+    r = summarize.set_meeting_date(base, "2026-01-23")
+    assert r["base"] == "2026-01-23 Dana Fox 1-1"
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == "Dana Fox 1:1"
+    # the doctor reads the folder as the title's safe form, not a mismatch
+    assert not [f for f in doctor.check(registry=False)
+                if f.kind == "name_mismatch" and f.subject == r["base"]]
+    # the short-date reader sees the typed '1:1', never '1-1' as January 1
+    assert "short_typed" not in provenance.candidates(
+        r["base"], d, None, None, today="2026-02-01")
+    # a hyphen typed on purpose replaces the colon
+    r = summarize.rename_meeting(r["base"], "Dana Fox 1-1")
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert (r["renamed"], d["title"]) == ([], "Dana Fox 1-1")
+
+
+def test_a_long_typed_title_fits_a_folder_name(sandbox):
+    """names.file_title limits characters, not bytes: 120 CJK characters
+    and the date are 371 bytes, past a macOS name, so the rename failed
+    with ENAMETOOLONG and the generic 500. The folder name is now cut by
+    bytes, and the title shown stays whole."""
+    from stt import names
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly")
+    long = "会議" * 60
+    r = summarize.rename_meeting("2026-07-04 Weekly", long)
+    assert r["ok"], r
+    assert len(r["base"].encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert r["base"].startswith("2026-07-04 会議")
+    d = json.loads(config.meeting_file(r["base"], ".json").read_text())
+    assert d["title"] == long
+    # two long titles that share the cut form are twins
+    _m("2026-07-04 Other", date="2026-07-04", title="Other")
+    r2 = summarize.rename_meeting("2026-07-04 Other", long + "二")
+    assert r2["ok"] and r2["base"] == r["base"] + " (2)"
+    assert names.file_title(long) == long      # the characters are all kept
+    from stt import doctor
+    assert not [f for f in doctor.check(registry=False)
+                if f.kind == "name_mismatch" and f.subject.startswith("2026-07-04 会議")]
+
+
+def test_a_rename_leaves_no_orphan_lock(sandbox):
+    """The rename locked its destination by name, since the new name had no
+    id yet. The meeting locks by its id afterward, so 'doctor check' listed
+    the new name's lock file as registry_orphan_lock after every rename."""
+    from stt import registry_doctor
+    _m("2026-07-04 Weekly", date="2026-07-04", title="Weekly", mid="mid-1")
+    r = summarize.rename_meeting("2026-07-04 Weekly", "Plain Title")
+    assert r["base"] == "2026-07-04 Plain Title"
+    assert config.orphan_lock_files() == []
+    assert not [f for f in registry_doctor.check() if f.kind == "orphan_lock"]
+    locks = sorted(p.name for p in (config.meetings_dir() / ".locks").iterdir())
+    assert locks == ["mid-1.lock"]
+    # a meeting with no id yet still locks on its (new) name, and keeps it
+    _m("2026-07-05 Legacy", date="2026-07-05", title="Legacy")
+    r = summarize.rename_meeting("2026-07-05 Legacy", "Older")
+    assert config.orphan_lock_files() == []
+
+
+def test_a_twin_takes_the_plain_name_once_it_is_free(sandbox):
+    """The keep-the-number rule kept '(3)' even after the plain name was
+    deleted, so a twin could never drop its number. The number now stays
+    only while the plain name is taken, live or archived."""
+    from stt import archive
+    _m("2026-05-05 Race Name", date="2026-05-05", title="Race Name")
+    _m("2026-05-05 Race Name (3)", date="2026-05-05", title="Race Name")
+    assert archive.delete_meeting("2026-05-05 Race Name")["ok"]
+    r = summarize.rename_meeting("2026-05-05 Race Name (3)", "Race Name")
+    assert r["base"] == "2026-05-05 Race Name"
+
+
 @pytest.mark.parametrize("typed", ["Board Prep 07092026", "2026-07-09 Board Prep"])
 def test_a_title_typed_with_a_date_sets_the_date(sandbox, typed):
     _m("Voice Memo 9", date="2026-07-20")
@@ -275,6 +421,23 @@ def test_the_dry_run_lists_old_to_new_and_changes_nothing(lib, capsys):
     assert stat.S_IMODE(ir.plan_path().stat().st_mode) == 0o600
 
 
+def test_the_dry_run_flags_no_title_change_the_apply_step_keeps(sandbox,
+                                                               monkeypatch, tmp_path):
+    """A title '1:1' on a folder in the old form ('Kim 1-1 08032026')
+    keeps '1:1' when the apply step moves it, so the dry run's
+    "title changes: '1:1' -> '1-1'" flagged a change that never lands."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("Kim 1-1 08032026", date="2026-08-03", mid="mid-k", title="Kim 1:1")
+    assert ir.main([]) == 0
+    rows = {r["old_base"]: r for r in json.loads(ir.plan_path().read_text())["rows"]}
+    r = rows["Kim 1-1 08032026"]
+    assert r["new_base"] == "2026-08-03 Kim 1-1" and r["new_title"] == "Kim 1:1"
+    assert not any(f.startswith("title changes") for f in r["flags"])
+    assert ir.main(["--apply"]) == 0
+    d = json.loads(config.meeting_file("2026-08-03 Kim 1-1", ".json").read_text())
+    assert d["title"] == "Kim 1:1"
+
+
 def test_a_collision_with_an_iso_name_gets_the_twin_suffix(lib):
     _m("2026-08-03 Kim Weekly Check-in – Plans (3)", date="2026-08-03")
     _m("2026-08-09 Standup", date="2026-08-09")
@@ -405,3 +568,46 @@ def test_undo_takes_off_a_date_the_move_added(sandbox, monkeypatch, tmp_path):
 
     d = json.loads(j.read_text())
     assert "date" not in d and "date_source" not in d and "renamed_from" not in d
+
+
+def test_a_date_outside_2000_to_next_year_is_refused(sandbox):
+    """0001-01-01 was accepted and renamed the folder. A year outside
+    dates._valid's 2000-2099 is not read back as a stamp either, so the next
+    edit stacked a second one: '2999-01-01 1999-01-01 Board Prep Session'."""
+    from datetime import date
+    _m("2026-07-04 Board Prep Session", date="2026-07-04")
+    last = date.today().year + 1
+    for bad in ("0001-01-01", "1999-12-31", "2999-01-01", f"{last + 1}-01-01"):
+        r = summarize.set_meeting_date("2026-07-04 Board Prep Session", bad)
+        assert r == {"ok": False, "error": f"date should be between 2000 and {last}"}, bad
+        r = summarize.apply_meeting_edits("2026-07-04 Board Prep Session", date=bad)
+        assert r["ok"] is False
+    assert config.meeting_bases() == ["2026-07-04 Board Prep Session"]
+    # both ends of the range still land, and each edit replaces the stamp
+    r = summarize.set_meeting_date("2026-07-04 Board Prep Session", "2000-01-01")
+    assert r["ok"] and r["base"] == "2000-01-01 Board Prep Session"
+    r = summarize.set_meeting_date(r["base"], f"{last}-12-31")
+    assert r["ok"] and r["base"] == f"{last}-12-31 Board Prep Session"
+
+
+def test_the_classic_date_inputs_carry_the_same_range():
+    js = (Path(__file__).resolve().parent.parent / "gui/static/app.js").read_text()
+    # summarize.apply_meeting_edits takes 2000 to next year
+    assert js.count('min="2000-01-01" max="${new Date().getFullYear()+1}-12-31"') == 3
+
+
+def test_a_title_loses_bidi_controls_and_zero_width_spaces(sandbox):
+    """Rename accepted U+202E: the folder '2025-05-28 <U+202E>gnp.txt' showed
+    in Finder as '2025-05-28 txt.png'. A title strips the same characters a
+    person name refuses, and a line break becomes a space."""
+    _m("2025-05-28 Planning", date="2025-05-28")
+    r = summarize.rename_meeting("2025-05-28 Planning", "‮gnp.txt")
+    assert r["ok"] and r["base"] == "2025-05-28 gnp.txt"
+    r = summarize.rename_meeting(r["base"], "Budget​ Review⁦⁩")
+    assert r["base"] == "2025-05-28 Budget Review"
+    r = summarize.rename_meeting(r["base"], "Budget\nReview Notes\x85End")
+    assert r["base"] == "2025-05-28 Budget Review Notes End"
+    for f in config.meeting_dir(r["base"]).iterdir():
+        assert not any(c in f.name for c in "‮​⁦⁩\n")
+    # a joiner is part of real text and stays
+    assert summarize._sanitize_name("Caf‍e") == "Caf‍e"

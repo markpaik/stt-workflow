@@ -220,3 +220,24 @@ def test_a_review_edit_keeps_the_description_rendered(sandbox):
     after = _load(base)
     assert after["ai_gist"] == "Alice Chen opened."
     assert after["ai_summary"] == "Alice Chen opened."
+
+
+def test_a_first_name_that_is_a_word_at_a_sentence_start_stays_a_word():
+    """A speaker named 'Will Smith': 'Will the board approve?' turned into
+    'Bill the board approve?' after a rename to 'Bill Jones'. A capital
+    first name at the start of a sentence, followed by a word such as
+    'the', 'we' or 'this', is the verb ('Will', 'Mark', 'Hope'), not the
+    person. Used as a name, it still follows the rename."""
+    d = {"speakers": [{"id": "Will Smith", "name": "Will Smith", "display": "Will Smith"},
+                      {"id": "Priya Shah", "name": "Priya Shah", "display": "Priya Shah"}],
+         "segments": []}
+    text = ("Will the board approve? Will Smith asked. Will asked again. "
+            "Mark the date: Will we hear back? Then Will's plan wins.")
+    tmpl = speaker_text.make({"gist": text, "decisions": ["Will this hold?", "- Will owns it."]}, d)
+    d2 = {"speakers": [{"id": "Will Smith", "name": "Bill Jones", "display": "Bill Jones"},
+                       {"id": "Priya Shah", "name": "Priya Shah", "display": "Priya Shah"}],
+          "segments": []}
+    out = speaker_text.render(tmpl, d2)
+    assert out["ai_gist"] == ("Will the board approve? Bill Jones asked. Bill asked again. "
+                              "Mark the date: Will we hear back? Then Bill's plan wins.")
+    assert out["ai_decisions"] == ["Will this hold?", "- Bill owns it."]

@@ -496,7 +496,7 @@ def build(home: Path) -> dict:
         history.append({
             "name": b["source_file"], "ok": True,
             "summary": f"{b['n_speakers']} speaker(s), "
-                       f"{round(b['duration_sec'] / 60, 1)} min{who}",
+                       f"{output.length_text(b['duration_sec'])}{who}",
             "at": f"{b['iso']}T20:14:07",
         })
     history.insert(0, {

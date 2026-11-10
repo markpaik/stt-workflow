@@ -532,7 +532,7 @@ function bodyAndSlot(row){
       // the date is click-to-edit in place (old page parity); rowDateEdit
       // swaps it for a date input, /api/set_date re-stamps the folder
       if(row.date)bits.push(`<span class="rdate" title="Click to change the meeting date" onclick="rowDateEdit(event,'${escJs(row.id)}')">${shortDate(row.date)}</span>`);
-      if(row.minutes!=null)bits.push(row.minutes+' min');
+      if(row.minutes!=null)bits.push(durMin(row));
       if(row.speakers&&row.speakers.length)bits.push(esc(row.speakers.join(', ')));
       // Boardroom right rail, beneath the state pill: the category chip (or
       // the hollow untagged dot) and the review count as plain amber TEXT
@@ -678,9 +678,13 @@ function finishDotsHTML(row){
 // the unnamed voices as ONE teal count, the same finish.voices the Voices dot
 // and the strip show. A raw "Speaker N" or "Voice N" label never appears: a
 // board meeting's row listed 22 of them.
+// a recording's length: whole seconds under a minute ('22 sec', never '0 min')
+function durMin(row){const s=row.seconds!=null?Math.round(+row.seconds||0):null;return s!=null&&s<60?s+' sec':row.minutes+' min';}
 function peopleMetaBits(row){
   const bits=[],named=row.named||[],n=(row.finish&&row.finish.voices)||0;
-  if(row.minutes!=null)bits.push(row.minutes+' min');
+  // durMin's rule, inline: whole seconds under a minute, never "0 min"
+  const secs=row.seconds!=null?Math.round(+row.seconds||0):null;
+  if(row.minutes!=null)bits.push(secs!=null&&secs<60?secs+' sec':row.minutes+' min');
   if(named.length)bits.push(esc(named.slice(0,3).join(', '))
     +(named.length>3?` +${named.length-3}`:''));
   if(n>0)bits.push(`<span class="unn">${n} unnamed</span>`);
@@ -929,7 +933,7 @@ function sigOf(r){
   r.dup_of,r.dup_reason,r.dup_archived,
   r.review_substantial,r.review_minor,r.has_summary,r.summary,r.size_mb,r.est_minutes,
   r.est_detail,
-  r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,
+  r.held,r.error,r.suggested_title,r.suggested_date,r.paused,r.has_audio,r.minutes,r.seconds,
   (r.speakers||[]).join(','),(r.named||[]).join(','),
   // the finish record paints a To finish row's dots, and moves as voices are
   // named and flags checked while nothing else on the row changes
@@ -980,7 +984,7 @@ function drawTimeline(s){
   // the list. A meeting the chips filter out drops its lines too. SAID_TOP is
   // the line Enter in the search field opens.
   const byId=new Map(all.map(r=>[r.id,r]));
-  const live=HITS&&q.length>=3&&HITS.query===q?HITS:null;
+  const live=HITS&&q.length>=2&&HITS.query===q?HITS:null;
   const groups0=live?saidGroups(live.hits,base=>{
     const r=byId.get(base);
     if(!r)return base;
@@ -1000,7 +1004,8 @@ function drawTimeline(s){
   // empty states (quiet, centered), rendered inside the timeline under Now.
   // "No matches." only when the Said in group found nothing either.
   if((all.length===0||rows.length===0)&&!UPLOADS.length){
-    const empty=first?setup:said?'':'<p class="empty">No matches.</p>';
+    // a stop word alone ('is') is not searched: the note says so
+    const empty=first?setup:said?'':'<p class="empty">'+esc(live&&live.note||'No matches.')+'</p>';
     const sig=(first?'EMPTY':'NOMATCH:'+lfsig+':'+q)+'|'+tsig+'|'+fsig;
     $('#rail').hidden=true;
     if(tl.dataset.sig===sig)return;
@@ -1789,7 +1794,7 @@ function rowDateEdit(ev,id){
   const span=rowEl&&rowEl.querySelector('.rdate');
   if(!span||rowEl.querySelector('.dateinput'))return;    // already editing
   const cur=(rowById(id)||{}).date||'';
-  span.outerHTML=`<input type="date" class="dateinput" value="${esc(cur)}" aria-label="Meeting date">`;
+  span.outerHTML=`<input type="date" class="dateinput" value="${esc(cur)}" min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" aria-label="Meeting date">`;
   const inp=rowEl.querySelector('.dateinput');
   if(!inp)return;
   inp.focus();
@@ -2032,7 +2037,7 @@ function bulkDate(btn){                     // date input in a popover, never a 
     pop.innerHTML=`<div class="ppconfirm">
       <div class="ppctitle">Set the date for ${n} selected</div>
       <div class="ppcnote">The folder name is re-stamped to match. Each keeps its own name.</div>
-      <input class="ppinput" type="date" aria-label="New date for all selected">
+      <input class="ppinput" type="date" min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" aria-label="New date for all selected">
       <div class="ppcrow">
         <button class="btn mini" type="button" onclick="closePop()">Cancel</button>
         <button class="btn primary mini" type="button" onclick="bulkDateGo()">Set date</button>
@@ -2084,7 +2089,7 @@ function selAllShown(){
 }
 
 /* --------------------------------------------------------------- search ---- *
- * Debounced full-text (>=3 chars) into HITS; drawTimeline renders them as the
+ * Debounced full-text (>=2 chars, sent as typed so 'AI' searches as an acronym) into HITS; drawTimeline renders them as the
  * "Said in" group at the top of the list (docs/ui-refresh phase 4). A hit
  * opens the in-shell meeting page (#m/<base>) and seeks the audio to the
  * hit's moment via mSeek once the page is built; with two panes it opens in
@@ -2100,7 +2105,7 @@ let searchTimer=null;
 function scheduleSearch(){
   clearTimeout(searchTimer);
   const q=$('#search').value.trim();
-  if(q.length<3){if(HITS){HITS=null;render();}return;}
+  if(q.length<2){if(HITS){HITS=null;render();}return;}
   searchTimer=setTimeout(async()=>{
     let r;
     try{r=await api('/api/search?q='+encodeURIComponent(q));}catch(e){return;}
@@ -2457,7 +2462,7 @@ async function buildMeeting(base){
 // Lindqvist, Elena Ruiz, Voice 2, Speaker 72, Speaker 86, ..."
 function mMetaBits(m){
   const bits=m.date?[esc(shortDate(m.date))]:[];
-  return bits.concat(peopleMetaBits({minutes:m.minutes,named:m.named,
+  return bits.concat(peopleMetaBits({minutes:m.minutes,seconds:m.seconds,named:m.named,
     finish:{voices:Object.keys(m.unnamed_clusters||{}).length}}));
 }
 // the poll keeps that line current: a name saved on the page drops the
@@ -4446,7 +4451,7 @@ function fsTitleHTML(row){
       <input class="renameinput" id="fstitle" type="text" value="${esc(t)}" aria-label="Meeting title"
         onkeydown="fsTitleKey(event)">
       <input class="dateinput" id="fsdate" type="date" value="${esc(d)}" aria-label="Meeting date"
-        onkeydown="fsTitleKey(event)">
+        min="2000-01-01" max="${new Date().getFullYear()+1}-12-31" onkeydown="fsTitleKey(event)">
       <button class="btn primary mini" id="fsaccept" type="button" onclick="fsAccept()"
         title="Accept this title and date (Enter)">Accept</button>
       ${stem&&stem.trim().toLowerCase()!==t.trim().toLowerCase()
@@ -5764,7 +5769,7 @@ function dArchRender(){
     const arm=DRAWER.dconfirm==='adel:'+it.base;
     return `<div class="drow">
       <div class="grow"><div class="dname">${esc(it.title||it.base)}</div>
-        <div class="dsub">${esc(day)}${it.minutes?' &middot; '+it.minutes+' min':''}${
+        <div class="dsub">${esc(day)}${it.minutes!=null&&(it.minutes||it.seconds)?' &middot; '+durMin(it):''}${
           it.category?' &middot; '+(it.category==='work'?'Work':'Personal'):''}</div></div>
       <button class="iact" type="button" title="Bring it back into the library exactly as it was"
         onclick="dRestore('${escJs(it.base)}',this)">Restore</button>
@@ -5866,7 +5871,7 @@ function _dupeSide(side,other,score){
   const arm=DRAWER.dconfirm==='dupdel:'+side.base;
   return `<div class="dupside">
     <div class="grow"><div class="dname">${esc(side.title||side.base)}</div>
-      <div class="dsub">${esc(day)}${side.minutes?' &middot; '+side.minutes+' min':''}${
+      <div class="dsub">${esc(day)}${side.minutes!=null&&(side.minutes||side.seconds)?' &middot; '+durMin(side):''}${
         who?' &middot; '+esc(who):''}</div>
       ${side.source_file?`<div class="dsub">from ${esc(side.source_file)}</div>`:''}</div>
     <a class="dlink" href="#m/${encodeURIComponent(side.base)}"

@@ -93,6 +93,9 @@ def terms(question: str) -> list:
     return out[:MAX_TERMS]
 
 
+DAYS_MAX = 3650
+
+
 def scope_bases(scope: dict):
     """(bases or None for all, label, error). Scope kinds: all, group, days."""
     scope = scope if isinstance(scope, dict) else {}
@@ -106,14 +109,18 @@ def scope_bases(scope: dict):
             return set(), "A group that no longer exists", "that group no longer exists"
         return set(g["bases"]), g["name"], None
     if kind == "days":
-        try:
-            n = max(1, min(3650, int(scope.get("days") or 30)))
-        except (TypeError, ValueError):
-            return set(), "", "days should be a number"
+        # a whole number of days, 30 when left out. It was clamped before,
+        # so -5 and true read 'Last 1 days' and 99999999 'Last 3650 days':
+        # a label for a window nobody chose
+        n = scope.get("days", 30)
+        if (isinstance(n, bool) or not isinstance(n, (int, float))
+                or not 1 <= n <= DAYS_MAX or n != int(n)):
+            return set(), "", f"days should be a whole number from 1 to {DAYS_MAX}"
+        n = int(n)
         since = (date.today() - timedelta(days=n)).isoformat()
         rows = search.facet_rows()
         return ({r["base"] for r in rows if (r.get("day") or "") >= since},
-                f"Last {n} days", None)
+                f"Last {n} day" + ("" if n == 1 else "s"), None)
     return set(), "", f"unknown scope '{kind}'"
 
 
@@ -362,6 +369,16 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _message(question: str, result: dict) -> dict:
+    """One exchange as a thread stores it."""
+    return {"q": question, "a": result.get("answer", ""),
+            "nothing_found": bool(result.get("nothing_found")),
+            "citations": result.get("citations") or [],
+            "hits": result.get("hits") or [],
+            "left_out": result.get("left_out") or 0,
+            "elapsed_sec": result.get("elapsed_sec"), "at": _now()}
+
+
 def save_message(tid, scope: dict, label: str, question: str, result: dict) -> dict:
     """Append one exchange to thread `tid` (a new thread when tid is None).
     Returns the stored thread."""
@@ -371,16 +388,21 @@ def save_message(tid, scope: dict, label: str, question: str, result: dict) -> d
             tid = uuid.uuid4().hex[:12]
             d = {"id": tid, "created_at": _now(),
                  "scope": dict(scope or {"kind": "all"}, label=label), "messages": []}
-        d["messages"].append({
-            "q": question, "a": result.get("answer", ""),
-            "nothing_found": bool(result.get("nothing_found")),
-            "citations": result.get("citations") or [],
-            "hits": result.get("hits") or [],
-            "left_out": result.get("left_out") or 0,
-            "elapsed_sec": result.get("elapsed_sec"), "at": _now()})
+        d["messages"].append(_message(question, result))
         d["updated_at"] = _now()
         _write(d)
     return d
+
+
+def unsaved_message(question: str, result: dict) -> dict:
+    """The exchange for a first question that found nothing, which starts
+    no thread: each '???' or 'the and of' saved one, and the saved list
+    filled with answers that cite nothing. Its hits are resolved, as
+    get_thread resolves a stored one."""
+    m = _message(question, result)
+    m["citations"] = [_resolve(c) for c in m["citations"]]
+    m["hits"] = [_resolve(h) for h in m["hits"]]
+    return m
 
 
 def history_of(tid) -> list:

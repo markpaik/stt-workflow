@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config, dates
+from .errors import UserError
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -123,19 +124,52 @@ h1{{font-size:17pt;margin:0 0 4px}}
 {''.join(rows)}</body></html>"""
 
 
+def _is_pdf(p: Path) -> bool:
+    """A whole PDF: the "%PDF-" header first and the "%%EOF" marker in the
+    last kilobyte."""
+    try:
+        with open(p, "rb") as f:
+            head = f.read(5)
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 1024))
+            tail = f.read()
+    except OSError:
+        return False
+    return head == b"%PDF-" and b"%%EOF" in tail
+
+
 def to_pdf(base: str) -> Path:
+    """Print the meeting's HTML to a PDF with headless Chrome.
+
+    The file decides, not Chrome's exit code: headless Chrome can write the
+    whole PDF and then crash on exit (crashpad, exit 2). A complete PDF is
+    the export. A missing or partial one is removed and the export fails,
+    so a retry never leaves a "name (n).pdf" behind. Chrome runs on a
+    throwaway profile, so it never contends with a Chrome already open,
+    and on a mock keychain, so the profile never opens a keychain dialog."""
     if not Path(CHROME).exists():
-        raise RuntimeError("Google Chrome not found — export Word instead, "
+        raise UserError("Google Chrome not found — export Word instead, "
                            "or install Chrome for PDF export.")
     out = _out_path(base, "pdf")
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         page = Path(td) / "t.html"
         page.write_text(to_html(base), encoding="utf-8")
-        subprocess.run(
-            [CHROME, "--headless", "--disable-gpu", "--no-pdf-header-footer",
-             f"--print-to-pdf={out}", str(page)],
-            check=True, capture_output=True, timeout=60)
-    return out
+        try:
+            rc = subprocess.run(
+                [CHROME, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+                 f"--user-data-dir={Path(td) / 'profile'}",
+                 # a new profile asks the login keychain for "Chrome Safe
+                 # Storage", and macOS shows a dialog for each export
+                 "--use-mock-keychain", "--password-store=basic",
+                 f"--print-to-pdf={out}", str(page)],
+                capture_output=True, timeout=60).returncode
+        except subprocess.TimeoutExpired:
+            rc = "timeout"
+    if _is_pdf(out):
+        return out
+    out.unlink(missing_ok=True)
+    raise UserError(f"Chrome did not write the PDF (exit {rc}). "
+                       "Try again, or export Word instead.")
 
 
 def export(base: str, fmt: str) -> Path:

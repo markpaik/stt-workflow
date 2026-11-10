@@ -42,6 +42,11 @@ const fmtT=t=>{t=Math.max(0,Math.round(+t||0));const h=Math.floor(t/3600),m=Math
  return (h?h+':'+String(m).padStart(2,'0'):m)+':'+String(s).padStart(2,'0');};
 const fmtMin=secs=>{const m=Math.max(1,Math.round((+secs||0)/60));return m>=60?`${Math.floor(m/60)}h ${m%60}m`:`${m}m`;};
 const plural=(n,one,many)=>`${n} ${n===1?one:(many||one+'s')}`;
+// a recording's length: whole seconds under a minute ('22 sec', never
+// '0 min'), else the rounded minutes. A meta from before `seconds` shows minutes
+const durText=m=>{const s=m&&m.seconds!=null?Math.round(+m.seconds||0):null;return s!=null&&s<60?`${s} sec`:`${(m&&m.minutes)||0} min`;};
+// a total length: seconds under a minute, minutes under an hour, then hours
+const totalText=secs=>{const s=Math.round(+secs||0);if(s<60)return s?`${s} sec`:'0 min';if(s<3600)return `${Math.round(s/60)} min`;return `${(s/3600).toFixed(1).replace(/\.0$/,'')} h`;};
 // one decimal: a whole-second floor can land before the hit's own line
 const meetingHref=(base,t)=>'#m/'+encodeURIComponent(base)+(t!=null?'/t/'+Math.floor(+t*10)/10:'');
 
@@ -134,7 +139,7 @@ function chipsFor(m){
 }
 function rowHTML(m,o={}){
  const named=(m.named||[]).slice(0,3);let ppl=named.join(', ');if((m.named||[]).length>3)ppl+=` +${m.named.length-3}`;
- const bits=[esc(o.day?(timeOf(m)||dayLabel(m.date)):whenText(m)),`${m.minutes||0} min`];if(ppl)bits.push(esc(ppl));
+ const bits=[esc(o.day?(timeOf(m)||dayLabel(m.date)):whenText(m)),`${durText(m)}`];if(ppl)bits.push(esc(ppl));
  const u=unnamedN(m);const sel=UI.sel.has(m.base);
  const prev=m.no_speech?'No speech found in this recording.':(m.gist||(m.summary||'').split(/(?<=[.!?])\s+/).slice(0,2).join(' '));
  return `<div class="row ${sel?'selected':''}" data-row data-base="${esc(m.base)}" tabindex="0">
@@ -178,7 +183,7 @@ function needsCard(x,i){
   const v=m.suggested||m.title||x.title;
   return `<div class="ask-card"><div class="ask-line"><input class="title-edit" type="text" id="nt-${esc(x.target)}" data-base="${esc(x.target)}" value="${esc(v)}" aria-label="Title for the recording from ${esc(whenText(m))}">
    <button class="btn ${i===0?'primary':'quiet'}" type="button" data-act="keep" data-base="${esc(x.target)}">Keep title</button><a class="btn plain" href="${meetingHref(x.target)}">Open</a></div>
-   <div class="meta">${esc(whenText(m))} · ${m.minutes||0} min · Only the model drafted this title</div>${errLine('keep:'+x.target)}</div>`;
+   <div class="meta">${esc(whenText(m))} · ${durText(m)} · Only the model drafted this title</div>${errLine('keep:'+x.target)}</div>`;
  }
  if(x.kind==='voice'){
   const act=x.uid?`<button class="btn ${i===0?'primary':'quiet'}" type="button" data-act="name-voice" data-uid="${esc(x.uid)}" data-base="${esc(x.target)}">Name</button>`:`<a class="btn ${i===0?'primary':'quiet'}" href="${meetingHref(x.target)}">Open the meeting</a>`;
@@ -198,7 +203,7 @@ function homeView(){
  const none=!ny.length?`<div class="none-line"><span class="ok-t" style="font-weight:600">Nothing needs you right now.</span> <span class="sub">New recordings appear here when they are ready.</span></div>`:'';
  const drafts=meetings().filter(m=>m.title_state==='provisional'&&m.route!=='public_download'&&arrivedDays(m)<=NEEDS_DAYS);
  const all=drafts.length>1?`<button class="btn quiet act" type="button" data-act="keep-all">${UI.confirm==='keep-all'?`Confirm: keep ${drafts.length} titles`:'Keep all'}</button>`:'';
- const draftCards=drafts.slice(0,5).map(m=>`<div class="ask-card quiet"><div class="ask-line"><input class="title-edit" type="text" id="nt-${esc(m.base)}" data-base="${esc(m.base)}" value="${esc(m.title)}" aria-label="Title for the recording from ${esc(whenText(m))}"><button class="btn quiet" type="button" data-act="keep" data-base="${esc(m.base)}">Keep title</button><a class="btn plain" href="${meetingHref(m.base)}">Open</a></div><div class="meta">${esc(whenText(m))} · ${m.minutes||0} min${m.title_source?' · From '+esc(SOURCE_NICE[m.title_source]||m.title_source):''}</div>${errLine('keep:'+m.base)}</div>`).join('');
+ const draftCards=drafts.slice(0,5).map(m=>`<div class="ask-card quiet"><div class="ask-line"><input class="title-edit" type="text" id="nt-${esc(m.base)}" data-base="${esc(m.base)}" value="${esc(m.title)}" aria-label="Title for the recording from ${esc(whenText(m))}"><button class="btn quiet" type="button" data-act="keep" data-base="${esc(m.base)}">Keep title</button><a class="btn plain" href="${meetingHref(m.base)}">Open</a></div><div class="meta">${esc(whenText(m))} · ${durText(m)}${m.title_source?' · From '+esc(SOURCE_NICE[m.title_source]||m.title_source):''}</div>${errLine('keep:'+m.base)}</div>`).join('');
  const recent=[...meetings()].sort((a,b)=>String(b.arrived_at||b.processed_at||'').localeCompare(String(a.arrived_at||a.processed_at||''))).slice(0,5).map(m=>rowHTML(m)).join('');
  return `<div class="head"><h1>Home</h1></div><div class="home"><div class="stack sections">
   ${att}${run}
@@ -318,7 +323,7 @@ async function loadHistory(){const r=await api('/api/history').catch(()=>({resul
 function dupesSec(){
  if(UI.dupes==null){loadDupes();return '<div class="none-line sub">Loading duplicate transcripts…</div>';}
  const d=UI.dupes;const pairs=d.pairs||[];
- const side=s=>`<div style="min-width:0"><a class="row-title q" style="color:inherit;text-decoration:none" href="${meetingHref(s.base)}">${esc(s.title)}</a><div class="meta">${esc(dayLabel(s.date))} · ${s.minutes||0} min${(s.speakers||[]).length?' · '+plural(s.speakers.length,'voice'):''}</div></div>`;
+ const side=s=>`<div style="min-width:0"><a class="row-title q" style="color:inherit;text-decoration:none" href="${meetingHref(s.base)}">${esc(s.title)}</a><div class="meta">${esc(dayLabel(s.date))} · ${durText(s)}${(s.speakers||[]).length?' · '+plural(s.speakers.length,'voice'):''}</div></div>`;
  return `<div class="tools"><button class="btn" type="button" data-act="dupe-scan" ${d.scanning?'disabled':''}>${d.scanning?'Comparing transcripts…':'Compare again'}</button><span class="meta">${d.scanned?plural(pairs.length,'pair')+' found':'No comparison has run yet.'}${d.truncated?' The list is cut short.':''}</span></div>
   ${errLine('dupes')}<div class="stack">${pairs.map(p=>`<div class="row static"><div style="min-width:0;display:grid;gap:var(--s2)">${side(p.a)}${side(p.b)}<div class="meta">Match ${(+p.score).toFixed(2)}</div></div><div class="rail"><button class="btn plain" type="button" data-act="dupe-ignore" data-a="${esc(p.a.base)}" data-b="${esc(p.b.base)}">Not duplicates</button></div></div>`).join('')||(d.scanned?'<div class="empty">No duplicate transcripts.</div>':'')}</div>`;
 }
@@ -363,7 +368,7 @@ function archiveView(){
  if(UI.archived==null){loadArchived();return '<h1>Archive</h1><div class="none-line sub">Loading…</div>';}
  const a=UI.archived;
  return `<div class="head"><div><h1>Archive</h1><p class="meta">Archiving hides a recording and keeps every file until you remove it. Delete is final, so a backup is the only way back.</p></div></div>
-  ${errLine('archive')}<div class="stack">${a.length?a.map(m=>{const conf=UI.confirm==='adel:'+m.base;return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(m.title)}</div><div class="meta">${esc(dayLabel(m.date))} · ${m.minutes||0} min${m.category?' · '+(m.category==='work'?'Work':'Personal'):''}</div></div>
+  ${errLine('archive')}<div class="stack">${a.length?a.map(m=>{const conf=UI.confirm==='adel:'+m.base;return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(m.title)}</div><div class="meta">${esc(dayLabel(m.date))} · ${durText(m)}${m.category?' · '+(m.category==='work'?'Work':'Personal'):''}</div></div>
    <div class="rail"><button class="btn quiet" type="button" data-act="restore" data-base="${esc(m.base)}">Restore</button><button class="btn ${conf?'danger':'plain'}" type="button" data-act="adel" data-base="${esc(m.base)}">${conf?'Confirm delete':'Delete…'}</button></div></div>`;}).join(''):'<div class="empty">Nothing is archived.</div>'}</div>`;
 }
 async function loadArchived(){const r=await api('/api/archived').catch(()=>({items:[]}));UI.archived=r.items||[];if(UI.route==='archive')render(true);}
@@ -435,29 +440,33 @@ function palText(){return UI.pq.replace(PAL_FILTER,' ').replace(/\s+/g,' ').trim
 function palResults(){
  const q=palText();const lq=q.toLowerCase();const filtered=q!==UI.pq.trim();
  if(q.length<2)return `<div class="meta pop-note">Type a word someone said, a title, or a name.</div>`+[...meetings()].slice(0,5).map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${esc(m.title)}</div><div class="meta">${esc(whenText(m))}</div></a>`).join('');
- const r=UI.pres&&UI.pres.q===UI.pq.trim().toLowerCase()?UI.pres:null;
+ const r=UI.pres&&UI.pres.q===UI.pq.trim()?UI.pres:null;
  if(r&&r.error)return `<div class="err pop-note">${esc(r.error)}</div>`;
  // with a filter, only the server knows which meetings pass it
  const local=filtered?[]:meetings().filter(m=>m.title.toLowerCase().includes(lq)||(m.named||[]).some(n=>n.toLowerCase().includes(lq)));
  const fromIdx=r?(r.meetings||[]).map(x=>byBase(x.base)).filter(Boolean):[];
  const titles=[...local,...fromIdx].filter((m,i,a)=>a.indexOf(m)===i).slice(0,6);
  const said=r?(r.hits||[]).slice(0,10):[];
- const pending=q.length>=3&&!r;
- if(!titles.length&&!said.length)return `<div class="empty">${pending?'Searching…':'No matches.'}</div>`;
+ const pending=q.length>=2&&!r;
+ // a stop word alone ('is') is not searched: say so, never 'No matches.'
+ const note=r&&r.note?`<div class="meta pop-note">${esc(r.note)}</div>`:'';
+ if(!titles.length&&!said.length)return pending?'<div class="empty">Searching…</div>':(note||'<div class="empty">No matches.</div>');
  const tby=b=>{const m=byBase(b);return m?m.title:b;};
- return (titles.length?`<div class="eyebrow">Titles <span class="n">${titles.length}</span></div>`:'')+titles.map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${hl(m.title,q)}</div><div class="meta">${esc(whenText(m))} · ${m.minutes||0} min</div></a>`).join('')
+ return (titles.length?`<div class="eyebrow">Titles <span class="n">${titles.length}</span></div>`:'')+titles.map(m=>`<a class="hit" href="${meetingHref(m.base)}"><div class="hit-t">${hl(m.title,q)}</div><div class="meta">${esc(whenText(m))} · ${durText(m)}</div></a>`).join('')
   +(said.length?`<div class="eyebrow">Said in <span class="n">${r.total>said.length?said.length+' of '+r.total:said.length}</span></div>`:'')
   +said.map(h=>`<a class="hit" href="${meetingHref(h.base,h.start)}"><div class="meta">${esc(tby(h.base))}</div><div>${hl(h.snippet||h.text||'',q)}</div><div class="meta"><span class="mono">${fmtT(h.start)}</span>${h.who?' · '+esc(h.who):''}</div></a>`).join('')
-  +(pending?'<div class="meta pop-note">Searching transcripts…</div>':'');
+  +(pending?'<div class="meta pop-note">Searching transcripts…</div>':'')+note;
 }
 let palTimer=null,palSeq=0;
+// the query goes as typed: two letters in capitals ('AI', 'IT', 'HR') search
+// as an acronym, so the server needs the case (stt/search.py _short)
 function palSearch(){
- clearTimeout(palTimer);const q=UI.pq.trim().toLowerCase();
- if(q.length<3){UI.pres=null;return;}
+ clearTimeout(palTimer);const q=UI.pq.trim();
+ if(q.length<2){UI.pres=null;return;}
  palTimer=setTimeout(async()=>{const seq=++palSeq;
   const [a,b]=await Promise.all([api('/api/search?q='+encodeURIComponent(q)).catch(()=>({hits:[]})),api('/api/search_meetings?q='+encodeURIComponent(q)).catch(()=>({meetings:[]}))]);
-  if(seq!==palSeq||UI.pq.trim().toLowerCase()!==q)return;   // a stale answer
-  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[],error:a.error||''};
+  if(seq!==palSeq||UI.pq.trim()!==q)return;   // a stale answer
+  UI.pres={q,hits:a.hits||[],total:a.total||0,meetings:b.meetings||[],error:a.error||'',note:a.note||''};
   const box=$('#pal-res');if(box)box.innerHTML=palResults();},180);
 }
 function showPop(anchor,html){const p=$('#pop');p.innerHTML=html;p.hidden=false;const r=anchor.getBoundingClientRect();p.style.left='0';p.style.top='0';

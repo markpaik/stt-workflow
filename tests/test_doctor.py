@@ -328,3 +328,35 @@ def test_a_tie_with_more_records_than_meetings_retires(twins):
     config.MANIFEST_PATH.write_text(json.dumps(m))
     ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
     assert set(ops.values()) == {"retire"}
+
+
+@pytest.mark.parametrize("tool, argv", [
+    ("backfill_keys", ["--undo", "{run}", "--apply"]),
+    ("fix_dates", ["--undo", "{run}", "--apply"]),
+    ("amnesty", ["--undo", "{run}", "--apply"]),
+    ("doctor", ["undo", "{run}", "--apply"]),
+])
+@pytest.mark.parametrize("run", ["nonexist", "../../x", "/etc/passwd", ".hidden", ""])
+def test_an_unknown_undo_run_is_one_line_and_exit_1(sandbox, tmp_path, monkeypatch,
+                                                    capsys, tool, argv, run):
+    """A mistyped run id printed a full traceback ending in FileNotFoundError,
+    and '../../x' was joined into the journal path unchecked."""
+    import importlib
+    jdir = tmp_path / "journals"
+    jdir.mkdir()
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(jdir))
+    mod = importlib.import_module(tool)
+    args = [a.format(run=run) for a in argv] + ["--journal-dir", str(jdir)]
+    assert mod.main(args) == 1
+    err = capsys.readouterr().err.strip()
+    assert err.startswith("no such run: ") and "\n" not in err
+    assert "Traceback" not in err
+
+
+def test_a_run_id_with_a_slash_never_becomes_a_path(tmp_path):
+    from stt import fieldjournal
+    for bad in ("../../x", "a/b", "/abs", ".x", "", None, "x" * 200):
+        with pytest.raises(fieldjournal.NoSuchRun):
+            fieldjournal.journal_path(bad, tmp_path)
+    assert fieldjournal.journal_path("backfill-20261109T101500", tmp_path) == \
+        tmp_path / "backfill-20261109T101500.jsonl"

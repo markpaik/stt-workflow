@@ -13,6 +13,13 @@ def test_ask_unknown_base_is_rejected(running_server):
     assert st == 400 and body["error"] == "unknown meeting"
 
 
+def test_ask_a_question_of_the_wrong_type_says_so_for_any_meeting(running_server):
+    """With an unknown base, question: [1] answered "unknown meeting"."""
+    for base in ("no such meeting", 5):
+        st, body = _post(running_server, "/api/ask", {"base": base, "question": [1]})
+        assert (st, body) == (400, {"error": "'question' must be text"})
+
+
 def test_ask_requires_llm_and_a_real_question(running_server, monkeypatch):
     _make_meeting("Mtg")
     monkeypatch.setattr(summarize, "available", lambda: False)
@@ -49,6 +56,11 @@ def test_ask_happy_path_passes_history_through(running_server, monkeypatch):
     st, body = _post(running_server, "/api/ask",
                      {"base": "Mtg", "question": "again?", "history": "bogus"})
     assert st == 200 and seen["history"] is None
+    # and so is an item of it that is not an object (it was a 500)
+    st, body = _post(running_server, "/api/ask",
+                     {"base": "Mtg", "question": "again?",
+                      "history": ["x", 3, {"q": "a", "a": "b"}]})
+    assert st == 200 and seen["history"] == [{"q": "a", "a": "b"}]
 
 
 def test_ask_not_ok_result_maps_to_400(running_server, monkeypatch):

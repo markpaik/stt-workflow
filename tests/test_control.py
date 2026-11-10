@@ -7,6 +7,9 @@ import time
 
 from stt import config, control, status
 
+# the real finder, kept before conftest's sandbox fixture stubs it per test
+_REAL_PARENT_PIDS = control._parent_pids
+
 
 def test_pause_resume_states(sandbox):
     assert not control.is_paused()
@@ -264,3 +267,164 @@ def test_a_blank_started_marker_is_not_a_running_relabel(sandbox):
     p.write_text(json.dumps({"pid": os.getpid(),
                              "started": control._proc_started(os.getpid())}))
     assert control.relabel_running() is True
+
+
+# ---------- which batch is THIS home's: the batch.lock holder ----------
+
+def _decoy(*argv):
+    """A live process whose command line holds `argv` (it sleeps 30 s)."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", *argv])
+
+
+def _lock_names(sandbox, pid, age=0.0):
+    lk = sandbox / "batch.lock"
+    lk.write_text(str(pid))
+    if age:
+        t = time.time() - age
+        os.utime(lk, (t, t))
+
+
+def test_a_command_line_that_mentions_run_batch_is_not_a_batch(sandbox, monkeypatch):
+    """pgrep -f run_batch.py matched any process on the machine: a shell
+    running a command that names the file, an editor, another home's batch.
+    The panel then read "running" with no batch of its own, and Stop
+    signalled those groups."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py", "--files", "x.m4a")
+    try:
+        time.sleep(0.2)
+        assert control._parent_pids() == []
+        assert control.batch_groups() == set()
+        assert control.snapshot(max_age=0)["pids"] == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_the_process_named_in_batch_lock_is_the_batch(sandbox, monkeypatch):
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid)
+        assert control._parent_pids() == [p.pid]
+    finally:
+        p.kill()
+        p.wait()
+    assert control._parent_pids() == []      # the holder is gone
+
+
+def test_a_lock_pid_that_is_not_run_batch_is_ignored(sandbox, monkeypatch):
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("something_else.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid)
+        assert control._parent_pids() == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_a_recycled_lock_pid_is_ignored(sandbox, monkeypatch):
+    """A batch that died leaves its pid in batch.lock. A later process that
+    gets the same pid started AFTER the lock was written: not the batch."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _decoy("run_batch.py")
+    try:
+        time.sleep(0.2)
+        _lock_names(sandbox, p.pid, age=600)
+        assert control._parent_pids() == []
+    finally:
+        p.kill()
+        p.wait()
+
+
+def test_elapsed_time_parses_every_ps_form():
+    assert control._etime_secs("05:07") == 307
+    assert control._etime_secs("02:05:07") == 2 * 3600 + 307
+    assert control._etime_secs("3-02:05:07") == 3 * 86400 + 2 * 3600 + 307
+
+
+def test_stop_leaves_the_script_that_started_the_batch(sandbox, monkeypatch):
+    """A script without job control that starts the batch in the background
+    shares its process group with the batch. stop_run sent SIGTERM to that
+    whole group, so Stop ended the script too. In a group the batch does
+    not lead, only the batch's own processes are signalled."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    pidfile = sandbox / "batch.pid"
+    # the script leads its own group; the fake batch runs in it as a
+    # background child, as `python run_batch.py &` in a script does
+    script = (f'{sys.executable} -c "import time;time.sleep(60)" run_batch.py & '
+              f'echo $! > "{pidfile}"; wait; sleep 30')
+    sh = subprocess.Popen(["/bin/bash", "-c", script], start_new_session=True)
+    try:
+        for _ in range(50):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.1)
+        batch = int(pidfile.read_text())
+        time.sleep(0.3)
+        assert os.getpgid(batch) == sh.pid != batch
+        _lock_names(sandbox, batch)
+        d = status.read()
+        d.update(running=True, pgid=sh.pid)
+        status._write(d)
+        assert control.batch_pids() == [batch]       # the script is not the batch
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == [] and not res["forced"]
+        time.sleep(0.2)
+        assert sh.poll() is None                     # the script lives on
+        assert subprocess.run(["/bin/ps", "-p", str(batch)],
+                              capture_output=True).returncode != 0
+    finally:
+        try:
+            os.killpg(sh.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        sh.wait()
+
+
+def test_stop_still_takes_a_whole_group_the_batch_leads(sandbox, monkeypatch):
+    """The panel, launchd and a terminal start the batch as its group's
+    leader (caffeinate execs its utility in its own pid). That group goes
+    whole, workers included."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = _spawn_fake_batch(sandbox)
+    pgid = os.getpgid(p.pid)
+    try:
+        assert pgid == p.pid
+        _lock_names(sandbox, p.pid)
+        assert len(control.batch_pids()) >= 2       # the leader and its worker
+        res = control.stop_run(timeout=5)
+        assert res["stopped"] and res["survivors"] == []
+        assert subprocess.run(["pgrep", "-g", str(pgid)],
+                              capture_output=True, text=True).stdout == ""
+    finally:
+        try:
+            os.killpg(pgid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def test_a_defunct_lock_holder_is_no_batch(sandbox, monkeypatch):
+    """A batch that exited but is not yet reaped (a zombie) still has its
+    pid, and batch.lock still names it. ps shows its command as
+    '<defunct>', so it never reads as a running batch and never blocks
+    the next run."""
+    monkeypatch.setattr(control, "_parent_pids", _REAL_PARENT_PIDS)
+    p = subprocess.Popen([sys.executable, "-c", "pass", "run_batch.py"],
+                         start_new_session=True)
+    try:
+        _lock_names(sandbox, p.pid)
+        for _ in range(50):          # wait for it to exit, without reaping it
+            st = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(p.pid)],
+                                capture_output=True, text=True).stdout.strip()
+            if st.startswith("Z"):
+                break
+            time.sleep(0.05)
+        assert st.startswith("Z")
+        assert control._parent_pids() == []
+        assert control.batch_groups() == set()
+    finally:
+        p.wait()

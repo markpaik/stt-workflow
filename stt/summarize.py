@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .errors import UserError
 
 MODEL = "mlx-community/Qwen3-8B-4bit"
 # mlx-lm lives in its OWN venv (.venv-llm): its transformers pin conflicts with the
@@ -78,19 +79,57 @@ _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 _ollama_seen = {"at": 0.0, "up": False, "key": None}
 
 
+def _ollama_check():
+    """(url or None, problem or None) for STT_OLLAMA_URL. A value with no
+    scheme ('localhost:11434') is read as http: urlparse took 'localhost'
+    for the scheme, so the host was None and Ollama turned off with no
+    word, and with no port either it is on 11434, as Ollama reads its own
+    OLLAMA_HOST. A port that is not a number, a scheme that is not http, or a host
+    that is not a loopback address gives no URL and a problem that says
+    why. 'off' gives neither."""
+    from urllib.parse import urlparse
+    raw = (_setting("STT_OLLAMA_URL", OLLAMA_URL) or "").strip()
+    url = raw.rstrip("/")
+    if not url or url.lower() in ("off", "0", "none", "false"):
+        return None, None
+    bare = not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
+    if bare:
+        url = "http://" + url
+    try:
+        parts = urlparse(url)
+        host = parts.hostname
+        port = parts.port               # a port that is not a number raises
+    except ValueError:
+        return None, f"{raw!r} has a port that is not a number"
+    if bare and port is None and host and not parts.path:
+        # Ollama's own rule for OLLAMA_HOST: a host with no scheme and no
+        # port is on 11434. '127.0.0.1' was read as port 80, where nothing
+        # listens, and the MLX model answered instead
+        url += ":11434"
+    if parts.scheme.lower() not in ("http", "https"):
+        return None, f"{raw!r} is not an http address"
+    if host not in _LOOPBACK:
+        return None, (f"{raw!r} is not on this Mac: only a loopback address "
+                      "is used, so transcripts never leave it")
+    return url, None
+
+
+def ollama_url_problem():
+    """Why STT_OLLAMA_URL turns Ollama off, or None when it is fine or
+    'off'. For the doctor (config.setting_problems)."""
+    url, why = _ollama_check()
+    return f"{why}; Ollama is off and the MLX model answers" if why else None
+
+
 def _ollama_url():
     """The Ollama base URL, or None when it is off or not a loopback
     address. A remote host would carry transcripts off this Mac, so it is
-    refused, never used."""
-    from urllib.parse import urlparse
-    url = (_setting("STT_OLLAMA_URL", OLLAMA_URL) or "").strip().rstrip("/")
-    if not url or url.lower() in ("off", "0", "none", "false"):
-        return None
-    try:
-        host = urlparse(url).hostname
-    except ValueError:
-        return None
-    return url if host in _LOOPBACK else None
+    refused, never used. An unusable value warns once."""
+    url, why = _ollama_check()
+    if why:
+        config._warn_once(("STT_OLLAMA_URL", why),
+                          f"STT_OLLAMA_URL={why}; Ollama is off and the MLX model answers")
+    return url
 
 
 def ollama_model() -> str:
@@ -167,15 +206,16 @@ def _backend_for(base: str) -> str:
     if backend != "local" and _strict_meeting(base):
         if LLM_PY.exists() or ollama_up():
             return "local"
-        raise RuntimeError(
+        raise UserError(
             "this is a strict recording — its transcript never leaves this "
             "Mac, and the local model isn't installed. Install .venv-llm or "
             "switch the assistant back to the local model.")
     return backend
 
 
-class LLMBusy(RuntimeError):
+class LLMBusy(UserError):
     """The local LLM is already loaded by another request or process."""
+    code = 503
 
 
 @contextlib.contextmanager
@@ -236,12 +276,14 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
 
     import subprocess
     if not LLM_PY.exists():
-        raise RuntimeError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
+        raise UserError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
                            "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
     with _llm_lock(lock_timeout):
         # the MLX fallback runs at lowered priority too: background QoS
-        # (taskpolicy -b) and nice (config.llm_nice)
-        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(config.llm_nice()),
+        # (taskpolicy -b) and nice config.llm_nice(). `nice -n` ADDS to this
+        # process's own nice, so the increment is what lands the model at
+        # the setting, never past it (a batch already at nice 4 adds 6)
+        r = subprocess.run(["taskpolicy", "-b", "nice", "-n", str(_nice_increment()),
                             str(LLM_PY), "-c", _RUNNER],
                            input=json.dumps({"model": MODEL, "prompt": prompt,
                                              "max_tokens": max_tokens, "think": think}),
@@ -273,8 +315,9 @@ def _empty_description(desc: dict) -> bool:
     return _no_description(desc.get("tmpl"), desc.get("gist"), desc.get("summary"))
 
 
-class OllamaDown(RuntimeError):
+class OllamaDown(UserError):
     """Ollama did not answer: the caller may fall back to MLX."""
+    code = 503
 
 
 # Ollama reasons apart from its answer: with think on, the reasoning
@@ -282,10 +325,23 @@ class OllamaDown(RuntimeError):
 OLLAMA_THINK_TOKENS = 4000
 
 
+def _nice_increment() -> int:
+    """How much `nice -n` must add to this process's own nice for a child
+    to start at config.llm_nice(). Never negative: a user cannot raise
+    priority, and a process already at or past the setting adds nothing."""
+    try:
+        mine = os.getpriority(os.PRIO_PROCESS, 0)
+    except OSError:
+        mine = 0
+    return max(0, config.llm_nice() - mine)
+
+
 def renice_ollama() -> int:
-    """Lower the Ollama server and runner processes to nice
-    config.llm_nice() and background QoS before a call, so local LLM work yields the CPU and
-    keeps the fan quiet. Best effort: a failure never stops the run.
+    """Set the Ollama server and runner processes to nice config.llm_nice()
+    and background QoS before a call, so local LLM work yields the CPU and
+    keeps the fan quiet. The value is absolute (`renice 10 -p`): on macOS
+    `renice -n 10` adds 10 to the current nice, so repeated calls pushed
+    the model to nice 20. Best effort: a failure never stops the run.
     Returns how many processes were reniced."""
     import subprocess
     pids = set()
@@ -300,7 +356,7 @@ def renice_ollama() -> int:
         ok = False
         # renice lowers the CPU priority; taskpolicy -b puts the process on
         # background QoS, which also lowers its GPU priority (the fan)
-        for cmd in (["renice", "-n", str(config.llm_nice()), "-p", str(pid)],
+        for cmd in (["renice", str(config.llm_nice()), "-p", str(pid)],
                     ["taskpolicy", "-b", "-p", str(pid)]):
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -314,7 +370,7 @@ def renice_ollama() -> int:
 def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
     """One chat turn to Ollama on this Mac. The caller holds llm.lock: one
     large model works at a time, whichever engine serves it. A connection
-    failure raises OllamaDown. A reply with an error raises RuntimeError.
+    failure raises OllamaDown. A reply with an error raises UserError.
     One request at a time: llm.lock serializes every caller, so nothing
     sends to Ollama in parallel."""
     import urllib.error
@@ -348,11 +404,11 @@ def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
             detail = json.loads(e.read().decode("utf-8")).get("error", "")
         except Exception:
             pass
-        raise RuntimeError(f"Ollama request failed ({e.code}): {detail[:200]}") from e
+        raise UserError(f"Ollama request failed ({e.code}): {detail[:200]}") from e
     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
         raise OllamaDown(str(e)) from e
     if d.get("error"):
-        raise RuntimeError(f"Ollama request failed: {str(d['error'])[:200]}")
+        raise UserError(f"Ollama request failed: {str(d['error'])[:200]}")
     out = (d.get("message") or {}).get("content") or ""
     out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL)
     return out.strip()
@@ -362,7 +418,7 @@ def _generate_anthropic(prompt: str, max_tokens: int) -> str:
     import anthropic
     key = _setting("STT_ANTHROPIC_KEY")
     if not key:
-        raise RuntimeError("no Anthropic API key — add one under Cloud keys in Settings")
+        raise UserError("no Anthropic API key — add one under Cloud keys in Settings")
     # Haiku: these are brief summaries and single-transcript Q&A. No sampling
     # params and no thinking config — both portable across every current model
     # if STT_ANTHROPIC_MODEL points somewhere else (Opus rejects temperature).
@@ -372,9 +428,9 @@ def _generate_anthropic(prompt: str, max_tokens: int) -> str:
             model=model, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
     except anthropic.APIError as e:
-        raise RuntimeError(f"Claude request failed: {e}") from e
+        raise UserError(f"Claude request failed: {e}") from e
     if r.stop_reason == "refusal":
-        raise RuntimeError("the model declined this request")
+        raise UserError("the model declined this request")
     return "".join(b.text for b in r.content if b.type == "text").strip()
 
 
@@ -382,7 +438,7 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
     import requests
     key = _setting("STT_OPENAI_KEY")
     if not key:
-        raise RuntimeError("no OpenAI API key — add one under Cloud keys in Settings")
+        raise UserError("no OpenAI API key — add one under Cloud keys in Settings")
     model = _setting("STT_OPENAI_LLM_MODEL", "gpt-4o-mini")
     r = requests.post(
         "https://api.openai.com/v1/chat/completions",
@@ -391,14 +447,14 @@ def _generate_openai(prompt: str, max_tokens: int) -> str:
               "messages": [{"role": "user", "content": prompt}]},
         timeout=120)
     if r.status_code != 200:
-        raise RuntimeError(f"OpenAI request failed ({r.status_code}): {r.text[:200]}")
+        raise UserError(f"OpenAI request failed ({r.status_code}): {r.text[:200]}")
     return (r.json()["choices"][0]["message"]["content"] or "").strip()
 
 
 # the .txt header line (output.txt_header): '<source file>  |  N min  |  N
 # speaker(s) ...'. It leads with the SOURCE FILE NAME, which the model copied
 # into titles, and a Voice Memos name can be a street address.
-_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*\n+")
+_TXT_HEADER = re.compile(r"^[^\n]*  \|  [\d.]+ (?:min|sec)  \|  \d+ speaker\(s\)[^\n]*\n+")
 
 
 def _model_text(base: str) -> str:
@@ -447,7 +503,9 @@ def answer_question(base: str, question: str, history: list | None = None) -> di
         return {"ok": False, "error": str(e)}
     sample, truncated = _transcript_sample(base, max_chars=QA_MAX_CHARS)
     hist = ""
-    for h in (history or [])[-QA_MAX_HISTORY:]:
+    # the panel sends this, so it is the client's: an item that is not an
+    # {"q","a"} object is dropped, never an AttributeError
+    for h in [h for h in (history or []) if isinstance(h, dict)][-QA_MAX_HISTORY:]:
         q = str(h.get("q", ""))[:2000].strip()
         a = str(h.get("a", ""))[:4000].strip()
         if q and a:
@@ -653,6 +711,10 @@ def _summary_source(base: str, backend: str, think: bool = False) -> tuple:
 # plain text (speaker_text.compose_summary). ai_stale marks a description
 # a Redo left out of date.
 GIST_MAX_WORDS = 20
+# the list limits the prompt states, enforced in build_description: a model
+# that ignores the prompt still has only this many lines stored and shown
+DECISIONS_MAX = 6
+QUESTIONS_MAX = 4
 DESCRIPTION_KEYS = ("ai_title", "ai_summary", "ai_gist",
                     "ai_decisions", "ai_open_questions", "ai_tags", "ai_series",
                     "ai_topic", "ai_person", "ai_tmpl", "ai_model",
@@ -718,9 +780,9 @@ def description_prompt(heading: str, source: str, old_title: str = "",
         "5. TAGS: 3 to 5 tags, comma-separated, ONLY from this list:\n"
         f"{series.tags_text()}\n"
         "6. DECISIONS: the decisions actually made, most important first, at "
-        "most 6, one per line, short and specific. If none, write exactly:  "
+        f"most {DECISIONS_MAX}, one per line, short and specific. If none, write exactly:  "
         "- none\n"
-        "7. OPEN QUESTIONS: the questions left unresolved, at most 4, one per "
+        f"7. OPEN QUESTIONS: the questions left unresolved, at most {QUESTIONS_MAX}, one per "
         "line. If none, write exactly:  - none\n"
         "Do not invent anything. Answer in exactly this format:\n"
         "SERIES: <id>\nPERSON: <name or none>\nTOPIC: <topic>\nGIST: <gist>\n"
@@ -948,8 +1010,8 @@ def build_description(out: str, ctx: dict) -> dict:
         # checked BEFORE clipping, or "long" could never fire
         problems = gist_problems(raw_gist, people + ([owner] if owner else []), series_name)
         gist = clip_gist(raw_gist)
-        fields = {"gist": gist, "decisions": f["decisions"],
-                  "open_questions": f["open_questions"]}
+        fields = {"gist": gist, "decisions": f["decisions"][:DECISIONS_MAX],
+                  "open_questions": f["open_questions"][:QUESTIONS_MAX]}
     tags = series.normalize_tags(f["tags"])
     tmpl = speaker_text.make(fields, snap, raw_turns)
     rendered = speaker_text.render(tmpl, snap)
@@ -1203,12 +1265,18 @@ CATEGORIES = ("work", "personal")
 
 
 def _sanitize_name(s: str) -> str:
-    """A safe folder/file name (mirrors recorder.final_name): drop path/wildcard/
+    """A safe folder/file name (names.file_title): drop path/wildcard/
     control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
     the class strip and resolve the meeting folder to the parent dir or a hidden
-    name. Collapse whitespace runs and cap the length."""
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(s)).strip().lstrip(".")
-    return re.sub(r"\s+", " ", s)[:120].strip()
+    name. Collapse whitespace runs and cap the length. A ':' or '/' becomes a
+    hyphen: deleting it made '1:1' into '11', which reads as another meeting.
+
+    The control characters are names.unsafe's: the C0 and C1 ranges, the line
+    separators, the bidirectional controls and the zero-width spaces. A
+    U+202E made '2025-05-28 <U+202E>gnp.txt' show in Finder as '...txt.png'."""
+    from . import names
+    return names.file_title(s)
+
 
 
 def _write_json(j: Path, d: dict):
@@ -1280,6 +1348,8 @@ def _move_folder(base: str, new_base: str) -> list:
 
 
 _UNSET = object()
+# the earliest year a meeting date may carry; the latest is next year
+DATE_YEAR_MIN = 2000
 # pass as recorded_at= to remove the key (an undo back to a meeting that
 # never had one)
 DROP = "$drop"
@@ -1332,7 +1402,7 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
     from the inbox without renaming) must not silently rename anything.
     Returns {ok, base, renamed, date, category, reviewed}.
     """
-    from . import dates, review, titles
+    from . import dates, names, review, titles
 
     if base not in config.meeting_bases():
         return {"ok": False, "error": f"no meeting '{base}'"}
@@ -1347,6 +1417,13 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             iso = _date.fromisoformat(str(date).strip()).isoformat()
         except ValueError:
             return {"ok": False, "error": "date should look like 2026-07-04"}
+        # a sane year: 0001-01-01 renamed the folder, and a year outside
+        # dates._valid (2000-2099) is not read back as a stamp, so the next
+        # edit stacked a second date in front of it
+        last = _date.today().year + 1
+        if not DATE_YEAR_MIN <= int(iso[:4]) <= last:
+            return {"ok": False,
+                    "error": f"date should be between {DATE_YEAR_MIN} and {last}"}
 
     cat = None
     if category is not None:
@@ -1413,9 +1490,12 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             d["title_state"] = title_state
 
         want = base
+        # the title as typed, else the one already shown: shown_title
+        # keeps it when the folder is its safe form ('1:1' on '... 1-1')
+        shown = title if title is not None else d.get("title")
         if to_base is not None:
             want = to_base
-            d["title"] = dates.title_of(want)
+            d["title"] = dates.shown_title(d.get("title"), want)
         elif title is not None or date is not None:
             # a typed date counts only as a STAMP: a leading ISO date
             # ('2026-06-15 Review') or a trailing 8-digit run ('Review
@@ -1441,8 +1521,35 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 # replacing an existing stamp in either form (peeling any
                 # ' (N)' twin suffix first) rather than adding a second date
                 want = dates.restamp(stem, on) if on else stem
+            # a twin saved under the name it already has keeps its own
+            # number while the plain name is taken. restamp() and
+            # canonical() peel the ' (N)', and _unique_base takes the LOWEST
+            # free one, so a no-op save on '(3)' moved it to '(2)': a new
+            # folder, id and every reference. A case-only fix keeps the
+            # number too. Once the plain name is free (the first one was
+            # deleted), the twin takes it: the number only ever told two
+            # meetings apart.
+            # a title of 120 characters can be 360 bytes or more (CJK), past
+            # what a folder name and its artifacts' names can hold: the
+            # name is cut by bytes, as a source file's name is
+            want = config.cap_name(want)
+            own = dates.twin_suffix(base)
+            if (own and want.lower() == base[:-len(own)].lower()
+                    and _dest_taken(want)):
+                want += own
+            plain_free = bool(own) and not _dest_taken(base[:-len(own)])
+            # the title this folder already carries, typed again on the
+            # same date, moves nothing: an old folder that still holds a
+            # colon keeps it until the title really changes. A twin whose
+            # plain name is free is the exception (above).
+            if (title is not None and not plain_free
+                    and d.get("date") == date_before
+                    and dates.is_iso_form(base)
+                    and dates.meeting_date(base) == d.get("date")
+                    and dates.title_of(names.clean_title(title)) == dates.title_of(base)):
+                want = base
             want = _unique_base(want, base)
-            d["title"] = dates.title_of(want)
+            d["title"] = dates.shown_title(shown, want)
         moved = d.get("date") != date_before
         if moved or (date is not None and date_source is not None):
             # the date changed (the picker, a repair, or a typed stamp in a
@@ -1510,6 +1617,11 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
                 continue      # the meeting moved under us: re-plan and re-lock
             _write_json(j, d)
             renamed = _move_folder(base, want)
+        # the destination was locked by its NAME (it had no id yet). The
+        # meeting locks by its id from now on, so that file is dead, and so
+        # is a base-named lock left under the old name: the doctor listed
+        # them as orphans after every rename. Locks someone holds stay.
+        config.drop_meeting_locks([want, base])
         return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
                 "category": d.get("category"), "reviewed": d.get("reviewed"),
                 "title_state": d.get("title_state")}
@@ -1668,6 +1780,11 @@ def set_local_name(base: str, speaker_id, name: str) -> dict:
     nm = str(name or "").strip()
     if len(nm) > 80:
         return {"ok": False, "error": "that name is too long"}
+    from . import names
+    if names.has_unsafe(nm):
+        # it lands in the .txt header and on every line label: a newline
+        # split the header in two
+        return {"ok": False, "error": names.UNSAFE_NAME}
     j = config.meeting_file(base, ".json")
     if not j.exists():
         return {"ok": False, "error": f"no transcript for '{base}'"}

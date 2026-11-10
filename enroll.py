@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from stt import config, identify, unknowns
+from stt import config, identify, names, unknowns
 
 
 def _meeting_embeddings(base: str) -> dict:
@@ -68,6 +68,11 @@ def main():
 
     if not args.name:
         raise SystemExit("--name is required")
+    try:
+        # '   ' was enrolled as '   .npy', and a name was never trimmed
+        args.name = names.person_name(args.name)
+    except names.BadName as e:
+        raise SystemExit(f"--name: {e}")
 
     if args.from_meeting:
         embs = _meeting_embeddings(args.from_meeting)
@@ -80,16 +85,28 @@ def main():
         dpath = config.meeting_file(args.from_meeting, ".diar.npz")
         if dpath.exists():
             from stt import diarcache
-            raw_turns = diarcache.load(dpath)[0]
+            try:
+                raw_turns = diarcache.load(dpath)[0]
+            except diarcache.Unreadable as e:
+                raise SystemExit(f"'{args.from_meeting}': {e} -- Redo the "
+                                 "meeting to rebuild it")
             veto = unknowns.floor_violation(
                 unknowns.talk_stats(raw_turns).get(args.speaker))
             if veto:
                 raise SystemExit(f"{args.speaker} in '{args.from_meeting}': {veto}")
     elif args.audio:
         from stt import audio as A, diarize
+        # a mistyped path reached ffmpeg and ended in a traceback
+        src = Path(args.audio).expanduser()
+        if not src.is_file():
+            raise SystemExit(f"audio file not found: {args.audio}")
         config.WORK_DIR.mkdir(parents=True, exist_ok=True)
         wav = config.WORK_DIR / "enroll.wav"
-        A.to_wav16k(Path(args.audio), wav)
+        try:
+            A.to_wav16k(src, wav)
+        except (A.UnreadableAudio, A.WriteFailed) as e:
+            wav.unlink(missing_ok=True)
+            raise SystemExit(str(e))
         try:
             diar = diarize.diarize(wav)
         finally:

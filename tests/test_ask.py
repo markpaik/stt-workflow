@@ -99,6 +99,23 @@ def test_scope_limits_the_meetings(sandbox):
     assert ask.scope_bases({"kind": "nonsense"})[2]
 
 
+def test_a_days_scope_is_a_whole_number_of_days_and_reads_right(sandbox):
+    """days -5 and true read 'Last 1 days', 0 read 'Last 30 days', 2.5 read
+    'Last 2 days' and 99999999 'Last 3650 days': each label named a window
+    nobody chose. A days value is a whole number from 1 to 3650, and one
+    day reads 'Last 1 day'."""
+    _world()
+    assert ask.scope_bases({"kind": "days", "days": 1})[1] == "Last 1 day"
+    assert ask.scope_bases({"kind": "days", "days": 7})[1] == "Last 7 days"
+    assert ask.scope_bases({"kind": "days"})[1] == "Last 30 days"
+    assert ask.scope_bases({"kind": "days", "days": 14.0})[1] == "Last 14 days"
+    for bad in (-5, 0, True, False, 2.5, 99999999, "7", None, [3],
+                float("inf"), float("nan")):
+        bases, label, err = ask.scope_bases({"kind": "days", "days": bad})
+        assert err == "days should be a whole number from 1 to 3650", bad
+        assert bases == set() and label == ""
+
+
 # --------------------------------------------------------------- answers ---
 
 def test_an_answer_cites_with_meeting_id(sandbox):
@@ -287,6 +304,33 @@ def test_api_ask_library_saves_a_thread(running_server, monkeypatch):
     assert st == 400
     st, r = _post(running_server, "/api/thread_delete", {"id": tid})
     assert r["ok"]
+
+
+def test_a_question_that_finds_nothing_saves_no_new_thread(running_server, monkeypatch):
+    """Every nothing-found question ('???', 'the and of') saved a thread, so
+    the saved list filled with answers that cite nothing. The reply still
+    comes back with the closest hits. Inside a saved thread, a follow-up
+    that finds nothing stays in that thread."""
+    _world()
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: "NOT FOUND")
+    st, r = _post(running_server, "/api/ask_library", {"question": "roof reserve heater?"})
+    assert st == 200 and r["ok"] and r["thread"] is None
+    m = r["message"]
+    assert m["q"] == "roof reserve heater?" and m["nothing_found"]
+    assert m["a"] == ask.NOT_FOUND_TEXT
+    assert m["hits"] and m["hits"][0]["base"] == "Roof Budget 10012026"
+    assert m["hits"][0]["gone"] is False
+    st, r = _post(running_server, "/api/ask_library", {"question": "???"})
+    assert st == 200 and r["thread"] is None
+    assert ask.list_threads() == []
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: _cite_first(p))
+    st, r = _post(running_server, "/api/ask_library", {"question": "How big is the roof reserve?"})
+    tid = r["thread"]
+    monkeypatch.setattr(summarize, "_generate", lambda p, **k: "NOT FOUND")
+    st, r = _post(running_server, "/api/ask_library", {"question": "And the heater?", "thread": tid})
+    assert st == 200 and r["thread"] == tid and r["message"]["nothing_found"]
+    assert [(t["id"], t["n"]) for t in ask.list_threads()] == [(tid, 2)]
 
 
 def test_api_ask_library_busy_and_missing_model(running_server, monkeypatch):

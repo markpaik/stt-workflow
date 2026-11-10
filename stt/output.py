@@ -23,6 +23,13 @@ def _atomic_write(path, text: str):
     os.replace(tmp, path)
 
 
+# the label every line carries when no diarization ran (--no-diarize):
+# nothing told the voices apart, so no line is anyone's in particular.
+# "Voice ?" read like a fault. No number, so it never reads as the unknown
+# registry's "Speaker N".
+NOT_SEPARATED = "Speaker"
+
+
 def speaker_display(label, name=None) -> str:
     """Human-readable speaker name (real name, else a transcript-LOCAL
     'Voice N'). 'Voice' — not 'Speaker' — on purpose: the global unknown
@@ -69,8 +76,10 @@ def header_name(base: str, data: dict = None) -> str:
     return dates.stamp(title, iso) if iso else title
 
 
-# the header line's shape (txt_header): '<name>  |  N min  |  N speaker(s)...'
-_HEADER_LINE = re.compile(r"^([^\n]*?)(  \|  [\d.]+ min  \|  \d+ speaker\(s\)[^\n]*)$")
+# the header line's shape (txt_header): '<name>  |  N min  |  N speaker(s)...',
+# with 'N sec' for a recording under a minute
+_HEADER_LINE = re.compile(r"^([^\n]*?)(  \|  [\d.]+ (?:min|sec)  \|  \d+ speaker\(s\)[^\n]*)$")
+NO_SPEECH_LINE = "(no speech detected)"
 
 
 def refresh_txt_header(path, name: str) -> bool:
@@ -90,13 +99,21 @@ def refresh_txt_header(path, name: str) -> bool:
     return True
 
 
+def length_text(duration_sec) -> str:
+    """A recording's length as the header and the batch history say it:
+    whole seconds under a minute ('0.0 min' said nothing about a 2 s clip),
+    else minutes to one decimal."""
+    secs = float(duration_sec or 0)
+    return f"{round(secs)} sec" if round(secs) < 60 else f"{round(secs / 60, 1)} min"
+
+
 def txt_header(source_file, duration_sec, speakers, strict=False,
                processed_at=None) -> str:
     """The one canonical .txt header line (pipeline, relabel, and review all
     regenerate the .txt and must agree). `source_file` is what the line
     opens with: callers pass header_name(), the meeting's date and title."""
     named = [s["name"] for s in speakers if s.get("name")]
-    h = (f"{source_file}  |  {round((duration_sec or 0) / 60, 1)} min  |  "
+    h = (f"{source_file}  |  {length_text(duration_sec)}  |  "
          f"{len(speakers)} speaker(s)")
     if named:
         h += "  |  identified: " + ", ".join(named)
@@ -136,6 +153,9 @@ def write_txt(path, segments, header=None):
             mark = " [*]"
             any_flag = True
         lines.append(f"[{_fmt_ts(seg['start'])}] {who}{mark}: {text}")
+    if len(lines) == (2 if header else 0):
+        # nothing was said: a header over an empty body gave no reason
+        lines.append(NO_SPEECH_LINE)
     if any_flag:
         lines.append("")
         lines.append("[*] = uncertain attribution (overlapping/very short speech; "

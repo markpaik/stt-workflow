@@ -85,7 +85,7 @@ const DATE_FROM={typed:'typed in the name',recorder:'the recorder',short_typed:'
 function audioNoteText(mins){return mins?`The audio is ${plural(mins,'minute')} shorter than the transcript: audio may be lost.`:'';}
 function mPeopleBits(m){
  const named=m.named||[];let s=named.slice(0,3).join(', ');if(named.length>3)s+=` +${named.length-3}`;
- const bits=[esc(whenText(m)),`${m.minutes||0} min`];if(s)bits.push(esc(s));
+ const bits=[esc(whenText(m)),durText(m)];if(s)bits.push(esc(s));
  // the unnamed count keys by display, so a split voice counts once
  const u=Object.keys(m.unnamed_clusters||{}).length;if(u)bits.push(`<span class="attn-t nb">${u} unnamed</span>`);
  return bits;

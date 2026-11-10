@@ -613,6 +613,10 @@ def promote(uid: str, name: str) -> bool:
         reg = load()
         if uid not in reg["speakers"]:
             return False
+        if reg["speakers"][uid].get("dropped"):
+            # a tombstone, as merge() says: naming it deleted the tombstone,
+            # so the voice the user removed could surface again
+            return False
         s = _samples(reg, uid)
         if s is None:
             return False

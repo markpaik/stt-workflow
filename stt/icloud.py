@@ -45,6 +45,13 @@ def materialize(path: Path, timeout: float = 900.0, poll: float = 1.0) -> bool:
 
     if _fully_present(path):
         return True
+    try:
+        if path.stat().st_size == 0:
+            # an empty file is no placeholder (a placeholder reports its full
+            # size): nothing will arrive, so never wait out the timeout on it
+            return False
+    except FileNotFoundError:
+        pass
     subprocess.run(["/usr/bin/brctl", "download", str(path)],
                    check=False, capture_output=True)
     # monotonic: a sleep/lid-close mid-download must not make wall-clock time

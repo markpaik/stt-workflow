@@ -477,3 +477,31 @@ def test_the_tail_comes_from_the_models_residuals(sandbox, monkeypatch):
     entry["stage_since"] = _t.monotonic() - 2 * est
     d = st.progress_detail(entry)
     assert abs(d["eta"] - (tail * 2 * est + st.stage_estimates(3600.0)["writing"])) < 5
+
+
+def test_the_summarizing_stage_counts_down_from_recent_summaries(sandbox):
+    """After each file the batch writes its description before the next
+    file starts. 'summarizing' was not in STAGE_ORDER, so the file had no
+    percent or ETA, and the overall ETA fell to None while it ran. The stage
+    now counts down from the median of recent summary times."""
+    import time
+    assert status.summary_estimate() == status.SUMMARY_EST_DEFAULT
+    for secs in (60.0, 90.0, 70.0):
+        status.note_summary(secs)
+    assert status.summary_estimate() == 70.0
+    status.start_run(["b.m4a"])                     # the times outlive a run
+    assert status.summary_estimate() == 70.0
+    status.set_stage("a.m4a", "summarizing", est_sec=status.summary_estimate())
+    e = status.read()["active"]["a.m4a"]
+    assert e["est_sec"] == 70.0
+    e["stage_since"] = time.monotonic() - 20
+    d = status.progress_detail(e)
+    assert d["over"] is None and abs(d["eta"] - 50) < 1 and abs(d["pct"] - 20 / 70) < 0.02
+    e["stage_since"] = time.monotonic() - 100      # past the estimate
+    d = status.progress_detail(e)
+    assert abs(d["over"] - 30) < 1 and abs(d["eta"] - 10) < 1 and d["pct"] == 0.99
+    # only the last few count
+    for _ in range(status.SUMMARY_KEEP + 2):
+        status.note_summary(10.0)
+    assert status.summary_estimate() == 10.0
+    assert len(status.read()["summary_secs"]) == status.SUMMARY_KEEP

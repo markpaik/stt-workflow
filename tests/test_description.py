@@ -4,6 +4,7 @@ flag and its idle regeneration, and what the panel receives. The model is
 faked throughout. Every name is synthetic."""
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -200,6 +201,45 @@ def test_a_non_loopback_ollama_url_is_refused(sandbox, monkeypatch):
     assert summarize.local_engine() == "mlx"
 
 
+@pytest.mark.parametrize("raw,url", [
+    ("localhost:11434", "http://localhost:11434"),
+    ("127.0.0.1:11434/", "http://127.0.0.1:11434"),
+    ("http://localhost:11434", "http://localhost:11434"),
+    # a bare host is on Ollama's own default port, as OLLAMA_HOST reads it:
+    # '127.0.0.1' went to port 80, where nothing listens
+    ("127.0.0.1", "http://127.0.0.1:11434"),
+    ("localhost/", "http://localhost:11434"),
+    # a scheme written out keeps its own default port, as Ollama's does
+    ("http://127.0.0.1", "http://127.0.0.1"),
+])
+def test_an_ollama_url_without_a_scheme_is_read_as_http(sandbox, monkeypatch, raw, url):
+    """urlparse('localhost:11434') reads 'localhost' as the scheme, so the
+    host was None and Ollama turned off with no message."""
+    _ollama_on(monkeypatch, sandbox, url=raw)
+    assert summarize._ollama_url() == url
+    assert summarize.ollama_url_problem() is None
+    assert config.setting_problems() == []
+
+
+@pytest.mark.parametrize("raw,why", [
+    ("http://localhost:abc", "has a port that is not a number"),
+    ("ftp://localhost:11434", "is not an http address"),
+    ("http://10.0.0.5:11434", "is not on this Mac"),
+])
+def test_an_unusable_ollama_url_turns_ollama_off_and_says_why(sandbox, monkeypatch, capsys,
+                                                             raw, why):
+    from stt import doctor
+    _ollama_on(monkeypatch, sandbox, url=raw)
+    assert summarize._ollama_url() is None
+    assert summarize._ollama_url() is None
+    assert summarize.local_engine() == "mlx"
+    err = capsys.readouterr().err
+    assert err.count(f"STT_OLLAMA_URL={raw!r}") == 1 and why in err
+    assert summarize.ollama_url_problem().startswith(f"{raw!r} {why}")
+    found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+    assert [f.subject for f in found] == ["STT_OLLAMA_URL"] and why in found[0].detail
+
+
 def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch):
     _ollama_on(monkeypatch, sandbox)
     monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
@@ -212,8 +252,30 @@ def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch)
         seen.append(args)
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os, "getpriority", lambda which, who: 0)
     assert summarize._generate("hi") == "mlx"
     assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", "10"]
+
+
+def test_the_mlx_fallback_lands_at_the_setting_whatever_the_batch_runs_at(sandbox, monkeypatch):
+    """nice -n adds to the caller's own nice. A batch already at nice 4
+    must start the model at 10, not 14."""
+    _ollama_on(monkeypatch, sandbox)
+    monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
+    _fake_urlopen(monkeypatch, [], fail=True)
+    monkeypatch.setattr(summarize, "renice_ollama", lambda: 0)
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    seen = []
+
+    def fake_run(args, **k):
+        seen.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": "mlx"}), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for mine, inc in ((4, "6"), (10, "0"), (15, "0")):
+        seen.clear()
+        monkeypatch.setattr(os, "getpriority", lambda which, who, v=mine: v)
+        assert summarize._generate("hi") == "mlx"
+        assert seen[0][:5] == ["taskpolicy", "-b", "nice", "-n", inc]
 
 
 def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
@@ -230,11 +292,52 @@ def test_renice_targets_every_ollama_pid_and_never_raises(sandbox, monkeypatch):
     assert summarize.renice_ollama() == 2
     renice = [c for c in calls if c[0] == "renice"]
     assert {c[-1] for c in renice} == {"101", "202", "303"}
-    assert all(c[1:3] == ["-n", "10"] for c in renice)
+    # the absolute form: "renice -n" is an increment on macOS
+    assert all(c[1:3] == ["10", "-p"] for c in renice)
     # background QoS too: it lowers the GPU priority that nice cannot
     qos = [c for c in calls if c[0] == "taskpolicy"]
     assert {c[-1] for c in qos} == {"101", "202", "303"}
     assert all(c[1:3] == ["-b", "-p"] for c in qos)
+
+
+@pytest.mark.parametrize("raw", ["10:00–12:00", "10:00—12:00", "10-12", "10:00 to 12:00",
+                                 " 10:00 - 12:00 ", "10 TO 12"])
+def test_a_quiet_window_written_by_hand_parses(sandbox, raw):
+    """'10:00–12:00' (an en dash), '10-12' and '10:00 to 12:00' raised
+    ValueError and fell back to 07:00-22:00 with no word."""
+    from datetime import datetime
+    (sandbox / "stt.env").write_text(f"STT_LLM_QUIET_HOURS={raw}\n")
+    assert config.quiet_window(raw) == (600, 720)
+    assert not config.llm_quiet_now(datetime(2026, 11, 8, 8))
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 11))
+    assert config.setting_problems() == []
+
+
+def test_a_quiet_window_with_the_same_time_at_both_ends_is_all_day(sandbox):
+    """'10:00-10:00' read as quiet at every hour, and nothing said so. It
+    is all day on purpose (quiet hours only make the model rest longer),
+    and the README now says it."""
+    from datetime import datetime
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=10:00-10:00\n")
+    assert all(config.llm_quiet_now(datetime(2026, 11, 8, h)) for h in (0, 9, 10, 23))
+    assert config.setting_problems() == []
+    readme = (config.CODE_DIR / "README.md").read_text()
+    assert "(`10:00-10:00`) means all day" in readme
+
+
+def test_an_unreadable_quiet_window_warns_once_and_the_doctor_lists_it(sandbox, capsys):
+    from datetime import datetime
+    from stt import doctor
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=mornings\n")
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 8))     # the default window
+    assert config.llm_quiet_now(datetime(2026, 11, 8, 9))
+    err = capsys.readouterr().err
+    assert err.count("STT_LLM_QUIET_HOURS='mornings'") == 1
+    assert "using 07:00-22:00" in err
+    assert [p[0] for p in config.setting_problems()] == ["STT_LLM_QUIET_HOURS"]
+    found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+    assert [(f.subject, f.fixable) for f in found] == [("STT_LLM_QUIET_HOURS", False)]
+    assert "07:00-22:00" in found[0].detail
 
 
 def test_hardware_settings_come_from_stt_env(sandbox, monkeypatch):
@@ -360,9 +463,22 @@ def test_the_shell_shows_the_gist_sections_and_tag_filter():
 
 
 def test_search_indexes_tag_labels(sandbox):
+    """Only a tag the panel shows is searchable. A slug outside the
+    vocabulary (a hand edit) is hidden in the list, so a title search must
+    not find the meeting by it either."""
     from stt import search
     txt = search._summary_text({"ai_title": "T", "ai_summary": "S", "ai_tags": ["math", "nope"]})
-    assert "Math" in txt and "nope" in txt
+    assert "Math" in txt and "nope" not in txt
+
+
+def test_an_unknown_tag_slug_does_not_match_a_title_search(sandbox):
+    from stt import search
+    j = mfile("2026-02-02 Edge Case Lab", ".json")
+    j.write_text(json.dumps({"title": "Edge Case Lab", "segments": [], "speakers": [],
+                             "ai_tags": ["special-education", "bogus-tag"]}))
+    assert search.meetings("bogus") == []
+    assert [m["base"] for m in search.meetings("special education")] == [
+        "2026-02-02 Edge Case Lab"]
 
 
 def test_a_title_that_is_a_series_name_fixes_the_series_in_code(owner, monkeypatch):
@@ -606,3 +722,48 @@ def test_an_empty_reply_keeps_the_old_description_and_counts_as_a_failure(
     with pytest.raises(summarize.EmptyDescription):
         summarize.store_description(base, cached)
     assert _load(base)["ai_gist"] == GOOD["ai_gist"]
+
+
+def test_decisions_and_open_questions_are_capped_at_the_prompt_limits(owner):
+    """The prompt asks for at most 6 decisions and 4 open questions, but a
+    model that ignored it had every line stored and shown."""
+    base = _meeting()
+    reply = (REPLY.split("DECISIONS:")[0] + "DECISIONS:\n"
+             + "".join(f"- decision {i}\n" for i in range(1, 13))
+             + "OPEN QUESTIONS:\n" + "".join(f"- question {i}?\n" for i in range(1, 10)))
+    desc = summarize.build_description(reply, summarize.context_for(base))
+    assert desc["decisions"] == [f"decision {i}" for i in range(1, 7)]
+    assert desc["open_questions"] == [f"question {i}?" for i in range(1, 5)]
+    assert (summarize.DECISIONS_MAX, summarize.QUESTIONS_MAX) == (6, 4)
+    prompt = summarize.description_prompt("heading", "source")
+    assert "at most 6" in prompt and "at most 4" in prompt
+    summarize.store_description(base, desc)
+    d = _load(base)
+    assert len(d["ai_decisions"]) == 6 and len(d["ai_open_questions"]) == 4
+    assert "decision 7" not in d["ai_summary"] and "question 5?" not in d["ai_summary"]
+
+
+def test_renice_holds_the_setting_over_repeated_calls(sandbox, monkeypatch):
+    """renice -n adds to the current nice on macOS, so STT_LLM_NICE=10 put
+    the model at 20 after two calls. A real process stays at 10."""
+    if not Path("/usr/bin/renice").exists():
+        pytest.skip("no renice")
+    if os.getpriority(os.PRIO_PROCESS, 0) > 10:
+        pytest.skip("this test runs above nice 10, and a user cannot lower it")
+    p = subprocess.Popen(["/bin/cat"], stdin=subprocess.PIPE)
+    real_run = subprocess.run
+
+    def fake_run(args, **k):
+        if args[0] == "pgrep":
+            return subprocess.CompletedProcess(args, 0, stdout=f"{p.pid}\n" if "-x" in args else "", stderr="")
+        if args[0] == "taskpolicy":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return real_run(args, **k)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    try:
+        for _ in range(3):
+            summarize.renice_ollama()
+            assert os.getpriority(os.PRIO_PROCESS, p.pid) == 10
+    finally:
+        p.kill()
+        p.wait()

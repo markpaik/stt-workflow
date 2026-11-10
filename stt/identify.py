@@ -18,12 +18,12 @@ import re
 import shutil
 import sys
 import threading
-import time
 from datetime import datetime
 
 import numpy as np
 
-from . import config
+from . import config, names
+from .errors import UserError
 
 MAX_SAMPLES = 5
 
@@ -91,19 +91,50 @@ def _registry_path():
     return config.VOICEPRINTS_DIR / "registry.json"
 
 
-def load_registry() -> dict:
-    p = _registry_path()
+REGISTRY_UNREADABLE = (
+    "The voiceprint registry (registry.json) cannot be read, so nothing was "
+    "saved. Restore registry.json.bak, or rebuild it with "
+    "tools/rebuild_voiceprints.py --apply.")
+
+
+class RegistryUnreadable(UserError):
+    """registry.json is there and cannot be read. Nothing writes over it:
+    an enrollment saved over a damaged registry left one person in it, and
+    the next save copied that one-person registry over the good .bak."""
+
+
+def _read_registry(p):
+    """The registry at `p`: {} when it is not there, None when it is there
+    and is not a readable JSON object."""
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
-    except json.JSONDecodeError as e:
+        reg = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return reg if isinstance(reg, dict) else None
+
+
+def load_registry() -> dict:
+    p = _registry_path()
+    reg = _read_registry(p)
+    if reg is None:
         # a corrupt registry must be LOUD, not a silent reset to empty — every
         # enrolled voiceprint would otherwise look freshly un-enrolled
-        print(f"WARNING: {p} is corrupt ({e}) — treating as empty. Voiceprint "
-              "files on disk are untouched; fix or restore the registry before "
-              "re-enrolling anyone.", file=sys.stderr)
+        print(f"WARNING: {p} is corrupt — treating as empty. Voiceprint "
+              "files on disk are untouched, and nothing writes the registry "
+              "until it is restored or rebuilt.", file=sys.stderr)
         return {}
+    return reg
+
+
+def load_registry_for_write() -> dict:
+    """The registry for a read-modify-write. Raises RegistryUnreadable when
+    the file is damaged, before anything is written."""
+    reg = _read_registry(_registry_path())
+    if reg is None:
+        raise RegistryUnreadable(REGISTRY_UNREADABLE)
+    return reg
 
 
 def save_registry(reg: dict):
@@ -113,21 +144,16 @@ def save_registry(reg: dict):
     # previous version as .bak — one accidental wipe of this file is the
     # difference between "restore in seconds" and rebuilding every voiceprint
     # from meeting caches (biometric data with no other copy on this machine)
-    if p.exists():
-        try:
-            has_people = bool(json.loads(p.read_text()))
-        except (OSError, json.JSONDecodeError):
-            has_people = None  # unparseable => precious; never clobber a good .bak
-        if has_people is None:
-            # corrupt content is precious too: route it to a DISTINCT timestamped
-            # sidecar so a previously-written GOOD .bak stays restorable
-            with contextlib.suppress(OSError):
-                shutil.copy2(p, p.with_suffix(f".json.corrupt-{int(time.time())}"))
-        elif has_people:
-            # copy (not rename) so registry.json is never absent from its path —
-            # an unlocked concurrent reader must never see 'nobody enrolled'
-            with contextlib.suppress(OSError):
-                shutil.copy2(p, p.with_suffix(".json.bak"))
+    on_disk = _read_registry(p)
+    if on_disk is None:
+        # damaged content is precious: it is never written over, and a GOOD
+        # .bak from an earlier save stays restorable
+        raise RegistryUnreadable(REGISTRY_UNREADABLE)
+    if on_disk:
+        # copy (not rename) so registry.json is never absent from its path —
+        # an unlocked concurrent reader must never see 'nobody enrolled'
+        with contextlib.suppress(OSError):
+            shutil.copy2(p, p.with_suffix(".json.bak"))
     _atomic_write(p, json.dumps(reg, indent=2))
 
 
@@ -340,6 +366,9 @@ def rename_person(old: str, new: str) -> bool:
         reg = load_registry()
         if old not in reg:
             return False
+        if (not str(new or "").strip() or names.has_unsafe(new)
+                or len(str(new).strip()) > names.NAME_MAX):
+            return False
         new = canonical_name(new, {k: v for k, v in reg.items() if k != old})
         if not new or new == old or reserved_name(new):
             return False
@@ -356,7 +385,7 @@ def rename_person(old: str, new: str) -> bool:
         oldf = config.VOICEPRINTS_DIR / meta["file"]
         if not oldf.exists():
             return False  # orphaned entry: file gone out-of-band, nothing to rename
-        newf = _unique_filename(new.replace("/", "_"), reg)
+        newf = _unique_filename(names.file_stem(new), reg)
         # copy -> commit registry -> delete original, so a crash always leaves
         # either the old or the new mapping fully valid. A rename-before-save
         # could orphan the moved file with the registry still pointing at the
@@ -515,6 +544,8 @@ def reassign_sample(name: str, index: int, to_name: str) -> dict:
     to_name = (to_name or "").strip()
     if not to_name:
         return {"ok": False, "error": "a destination name is required"}
+    if names.has_unsafe(to_name):
+        return {"ok": False, "error": names.UNSAFE_NAME}
     if reserved_name(to_name):
         return {"ok": False, "error": RESERVED_ERROR}
     with lock_registry():
@@ -604,12 +635,18 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
     on disk carries plain-string `sources`, several readers index straight into
     it, and a shape change would have to be migrated everywhere at once. A
     parallel list is additive — an entry without one reads exactly as it did.
+
+    An empty name, or one with a line break or an invisible control
+    character in it, raises names.BadName (a ValueError) before anything is
+    written: '   ' became '   .npy', and 'Bad\nName' became a person whose
+    name split the transcript header in two.
     """
+    name = names.person_name(name)
     if reserved_name(name):
         raise ValueError(RESERVED_ERROR)
     _private_dir()
     with lock_registry():
-        reg = load_registry()
+        reg = load_registry_for_write()   # a damaged registry: no stray .npy
         name = canonical_name(name, reg)
         # reuse this person's OWN file if already enrolled — their filename may
         # have been disambiguated at first enrollment, so recomputing it fresh
@@ -617,7 +654,7 @@ def enroll(name: str, vector, replace: bool = False, source: str = None,
         # brand-new name gets one that can't collide with any OTHER enrolled
         # person's file.
         fname = reg[name]["file"] if name in reg else _unique_filename(
-            name.replace("/", "_"), reg)
+            names.file_stem(name), reg)
         fpath = config.VOICEPRINTS_DIR / fname
         vector = _l2(vector)  # raises on zero/non-finite
         if source_id is None and source and source != "?":

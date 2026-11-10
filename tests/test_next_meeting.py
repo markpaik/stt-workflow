@@ -1274,3 +1274,17 @@ console.log(JSON.stringify([mUnknownUid('Voice 9','base1'),mUnknownUid('Voice 10
  mUnknownUid('Voice 99','base1'),mUnknownUid('Voice 9','otherbase')]));
 """)
     assert out == ["U1", "U2", None, None]
+
+
+def test_long_unbroken_text_wraps_inside_the_meeting_page():
+    """A decision holding a 200-character URL, or an open question of 300
+    letters with no space, widened the grid to 3,500 px: the page scrolled
+    sideways at 1280 px and 420 px and the gist went off screen. The reading
+    text breaks anywhere when it must, and a list item may shrink below its
+    longest word. Checked in headless Chrome against a demo_seed panel."""
+    import re
+    from pathlib import Path
+    css = (Path(__file__).resolve().parent.parent / "gui/static/next.css").read_text()
+    rule = re.search(r"^\.reading\{([^}]*)\}", css, re.M).group(1)
+    assert "overflow-wrap:anywhere" in rule and "min-width:0" in rule
+    assert re.search(r"^\.steps>li\{[^}]*min-width:0", css, re.M)

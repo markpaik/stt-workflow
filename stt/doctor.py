@@ -32,8 +32,9 @@ drops):
 
 What it only reports: a folder name that disagrees with its `title` and
 date, meetings missing the store keys (tools/backfill_keys.py adds them),
-scratch audio left in work/, and (with deep=True) a stored duration longer
-than the audio.
+scratch audio left in work/, an stt.env value that cannot be read and is
+replaced by its default (`bad_setting`), and (with deep=True) a stored
+duration longer than the audio.
 """
 import hashlib
 import json
@@ -46,7 +47,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from . import config, dates, housekeeping, provenance, registry_doctor, status
+from . import config, dates, housekeeping, names, provenance, registry_doctor, status
 from . import fieldjournal as fj
 
 REPORT_PATH_NAME = "doctor.json"
@@ -290,9 +291,16 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:
             out.append(Finding("missing_keys", b, "lacks " + ", ".join(missing), False))
-        title = d.get("title") or dates.title_of(b)
-        want = (dates.stamp(title, d["date"]) if d.get("date") else title) + dates.twin_suffix(b)
-        if want != b:
+        # the folder holds the title in its safe form: '1:1' is '1-1' on
+        # disk. A folder from before the sanitizer may still hold the title
+        # as typed, colon and all, and that is no mismatch either.
+        # A long title's folder name is cut by bytes (config.cap_name).
+        raw = d.get("title") or dates.title_of(b)
+        stamped = {(dates.stamp(t, d["date"]) if d.get("date") else t)
+                   for t in (names.file_title(raw) or raw, raw)}
+        wants = {n + dates.twin_suffix(b)
+                 for n in stamped | {config.cap_name(n) for n in stamped}}
+        if b not in wants:
             why = "folder name differs from its title and date"
             if not dates.is_iso_form(b) and dates.meeting_date(b):
                 why += " (older MMDDYYYY form: tools/iso_rename.py moves it)"
@@ -334,6 +342,8 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
     if housekeeping.cap_calibration(dry_run=True):
         out.append(Finding("calibration_oversize", "calibration.jsonl",
                            "over its cap", True))
+    for name, why in config.setting_problems():
+        out.append(Finding("bad_setting", name, why, False))
     return out
 
 

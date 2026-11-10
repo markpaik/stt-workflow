@@ -3,6 +3,8 @@
 import os
 import types
 
+import pytest
+
 import run_batch
 
 # one spoken line: the summary guard skips a transcript with 0 segments (unified
@@ -220,6 +222,15 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
            "STT_MEETINGS_DIR": str(tmp_path / "dst"),
            "PYTHONPATH": str(_P(run_batch.__file__).parent)}
     (tmp_path / "src").mkdir()
+    repo_lock = _P(run_batch.__file__).parent / "batch.lock"
+
+    def _stamp(p):
+        try:
+            st = p.stat()
+            return (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return None
+    before = _stamp(repo_lock)
     r = subprocess.run(
         [_sys.executable, run_batch.__file__, "--dry-run",
          "--paths", str(audio), "--force"],
@@ -228,10 +239,10 @@ def test_main_entrypoint_paths_flow_regression(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "already running" not in r.stdout, r.stdout
     assert "Redo Me 07012026.m4a" in r.stdout  # the path actually parsed
-    # hermeticity: the lock lived in tmp (proof STT_PROJECT_DIR was honored),
-    # never in the real repo — before the fix the subprocess ignored the env
-    # var and this file would sit under the repo instead.
-    assert (proj / "batch.lock").exists()
+    # a dry run takes no lock, in tmp or in the repo: it writes nothing, and
+    # it previews even while a real batch holds the lock
+    assert not (proj / "batch.lock").exists()
+    assert _stamp(repo_lock) == before
 
 
 def test_main_has_no_shadowed_module_imports():
@@ -459,10 +470,16 @@ def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):
     monkeypatch.setattr(summarize, "available", lambda: True)
     monkeypatch.setattr(summarize, "suggest_title", lambda b: calls.append(b) or {})
 
+    seen = []
+    real_set = status.set_stage
+    monkeypatch.setattr(status, "set_stage", lambda *a, **k: seen.append(k) or real_set(*a, **k))
     assert run_batch.summarize_one("Fresh Mtg.m4a") is True
     assert run_batch.summarize_one("Done Mtg.m4a") is False
     assert calls == ["Fresh Mtg"]
     assert status.read().get("active", {}) == {}
+    # the stage carries an estimate, and its time is kept for the next one
+    assert seen == [{"est_sec": status.SUMMARY_EST_DEFAULT}]
+    assert len(status.read()["summary_secs"]) == 1
 
 
 def test_summaries_land_per_file_not_at_end_of_run(sandbox, monkeypatch):
@@ -1261,3 +1278,431 @@ def test_a_sandboxed_batch_reads_the_sandbox_stt_env_not_the_repo_one(tmp_path, 
     monkeypatch.delenv("STT_ZZ_HOME")
     run_batch._load_env_file(repo)
     assert os.environ.get("STT_MEETINGS_DIR") == "/real/meetings"
+
+
+def test_an_empty_file_named_by_paths_fails_in_one_line(sandbox, monkeypatch, capsys):
+    """--paths on a 0-byte file printed a Python traceback that ended in
+    'RuntimeError: zero.m4a is empty (0 bytes)'. It is one line now, as a
+    file ffmpeg cannot read is."""
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    assert _run_main(monkeypatch, "--paths", str(f)) == 1
+    err = capsys.readouterr().err
+    assert "FAILED: zero.m4a: zero.m4a is empty (0 bytes)" in err
+    assert "Traceback" not in err
+
+
+def test_the_dry_run_names_an_empty_file_it_skips(sandbox, monkeypatch, capsys):
+    """A 0-byte file is skipped without a word on every run. The preview
+    says so, so the owner can see why it never runs."""
+    from stt import config
+    (config.ICLOUD_DIR / "zero.m4a").write_bytes(b"")
+    (config.ICLOUD_DIR / "~$lock.m4a").write_bytes(b"")
+    (config.ICLOUD_DIR / "real.m4a").write_bytes(b"x" * 64)
+    assert _run_main(monkeypatch, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "[would process] real.m4a" in out
+    assert "[skipped, 0 bytes] zero.m4a" in out
+    assert "lock.m4a" not in out              # an Office lock file is no recording
+
+
+def test_files_naming_an_empty_file_says_it_is_empty(sandbox, monkeypatch, capsys):
+    """--files zero.m4a printed "not found in source: zero.m4a" for a file
+    that is there and has no bytes."""
+    from stt import config
+    (config.ICLOUD_DIR / "zero.m4a").write_bytes(b"")
+    assert _run_main(monkeypatch, "--files", "zero.m4a,Nope.m4a") == 0
+    err = capsys.readouterr().err
+    assert "zero.m4a is empty (0 bytes), skipped" in err
+    assert "not found in source: Nope.m4a" in err
+    assert "not found in source: zero.m4a" not in err
+
+
+def test_iter_audio_skips_empty_files(sandbox):
+    """A 0-byte file (a failed export, a copy still being created) is not a
+    recording. The batch never picks it, and the panel never lists it."""
+    src = sandbox / "source"
+    (src / "zero.m4a").write_bytes(b"")
+    (src / "real.m4a").write_bytes(b"x" * 64)
+    assert [p.name for p in run_batch.iter_audio(src)] == ["real.m4a"]
+    from stt import config
+    assert not config.is_source_audio(src / "zero.m4a")
+    assert config.is_source_audio(src / "real.m4a")
+
+
+def test_process_one_names_an_empty_file(sandbox, monkeypatch):
+    """A 0-byte file named by --paths fails at once with a reason that
+    says so, never after a 15-minute wait on iCloud."""
+    import pytest
+    from stt import config
+    f = sandbox / "zero.m4a"
+    f.write_bytes(b"")
+    with pytest.raises(RuntimeError, match="empty"):
+        run_batch.process_one(str(f), str(config.MEETINGS_DIR),
+                              {"do_diarize": False, "strict": False,
+                               "allowed": None, "do_move": False})
+
+
+def _run_main(monkeypatch, *extra):
+    """run_batch.main() in the sandbox with the model steps stubbed off."""
+    import signal
+    import sys
+
+    from stt import config, summarize
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: None)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    monkeypatch.setattr(summarize, "available", lambda: False)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR), *extra])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        return run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+
+
+def test_a_corrupt_source_fails_with_ffmpegs_reason_and_no_traceback(sandbox, monkeypatch, capsys):
+    """The failure line and the history row carry one short reason, never
+    the ffmpeg command line with absolute paths, and no Python traceback."""
+    from stt import config, status
+    (config.ICLOUD_DIR / "Corrupt Clip.wav").write_bytes(b"garbage")
+    assert _run_main(monkeypatch) == 1
+    err = capsys.readouterr().err
+    want = ("ffmpeg could not decode Corrupt Clip.wav: "
+            "Invalid data found when processing input")
+    assert f"FAILED: Corrupt Clip.wav: {want}" in err
+    assert "Traceback" not in err and "exit status" not in err
+    assert str(config.ICLOUD_DIR) not in err
+    row = status.read()["recent"][0]
+    assert row["name"] == "Corrupt Clip.wav" and row["summary"] == want
+
+
+def _history(name):
+    import json as _json
+
+    from stt import status
+    try:
+        rows = [_json.loads(x) for x in status.HISTORY_LOG.read_text().splitlines()]
+    except OSError:
+        return []
+    return [r for r in rows if r.get("name") == name]
+
+
+def test_a_corrupt_source_is_set_aside_after_it_fails(sandbox, monkeypatch, capsys):
+    """A file ffmpeg cannot read failed, and added a history line, on every
+    automatic run. It is now set aside after its first failure. Retry (the
+    file named by --files) still runs it, and a changed file runs again."""
+    import os as _os
+
+    from stt import config
+    bad = config.ICLOUD_DIR / "Corrupt Clip.wav"
+    bad.write_bytes(b"garbage")
+    assert _run_main(monkeypatch) == 1
+    assert _run_main(monkeypatch) == 0
+    assert _run_main(monkeypatch) == 0
+    assert len(_history(bad.name)) == 1
+    assert "set aside" in capsys.readouterr().out
+    assert _run_main(monkeypatch, "--files", bad.name) == 1   # Retry runs it
+    assert len(_history(bad.name)) == 2
+    bad.write_bytes(b"garbage, re-exported")
+    _os.utime(bad, (bad.stat().st_mtime + 60,) * 2)
+    assert _run_main(monkeypatch) == 1                       # changed: runs again
+    assert len(_history(bad.name)) == 3
+
+
+def test_a_file_that_keeps_failing_is_set_aside_after_three_runs(sandbox, monkeypatch):
+    from stt import config, manifest
+    (config.ICLOUD_DIR / "flaky.m4a").write_bytes(b"\x00" * 64)
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        seen.append(src_str)
+        raise RuntimeError("the model crashed")
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    for _ in range(manifest.FAIL_PARK_AFTER + 2):
+        _run_main(monkeypatch)
+    assert len(seen) == manifest.FAIL_PARK_AFTER
+
+
+def test_a_full_disk_never_sets_a_file_aside(sandbox, monkeypatch):
+    """A failure that is this Mac's (the converted audio could not be
+    written: a full disk) parked every file a run touched, and the files
+    stayed parked after space was freed."""
+    import errno as _errno
+
+    from stt import audio, config, manifest
+    (config.ICLOUD_DIR / "Board.m4a").write_bytes(b"\x00" * 64)
+    seen = []
+
+    def fake_process_one(src_str, dest_str, opts):
+        # a new exception each time: a kept one holds the run's frames, and
+        # with them the lock file of a finished run
+        seen.append(src_str)
+        if len(seen) % 2:
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        raise audio.WriteFailed("could not write the converted audio for "
+                                "Board.m4a: No space left on device")
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    for _ in range(manifest.FAIL_PARK_AFTER + 2):
+        _run_main(monkeypatch)
+    assert len(seen) == manifest.FAIL_PARK_AFTER + 2
+    assert "Board.m4a" not in (manifest.load().get("failed") or {})
+
+
+def test_a_second_batch_never_blanks_the_lock_holders_pid(sandbox):
+    """acquire_lock opened batch.lock with "w", so every run that LOST the
+    lock race (the folder watch fires often) truncated the pid the running
+    batch wrote. The panel reads that pid to find this home's batch."""
+    from stt import config
+    first = run_batch.acquire_lock()
+    try:
+        assert first is not None
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+        assert run_batch.acquire_lock() is None
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+    finally:
+        first.close()
+    again = run_batch.acquire_lock()       # a fresh holder writes only its pid
+    try:
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == str(os.getpid())
+    finally:
+        again.close()
+
+
+def test_a_requeued_job_keeps_every_cli_flag(sandbox):
+    """A SIGTERM mid-run re-queues the claimed job from job_spec_from_args.
+    The spec dropped --no-diarize, --keep-original, --only, --speakers and
+    --ignore-battery, so the replay deleted originals a --keep-original run
+    kept, and a --only run swept the whole folder."""
+    from stt import jobs
+    args = _args(files="U1 Mid.wav,U2 Long.wav", no_diarize=True, keep_original=True,
+                 only="Mid", speakers="A Person,B Person", ignore_battery=True)
+    spec = run_batch.job_spec_from_args(args, [])
+    argv = jobs.spawn_args({**spec, "at": 1.0})
+    assert argv[3:5] == [str(run_batch.config.CODE_DIR / "run.sh"), "batch"]
+    ns = run_batch.build_parser().parse_args(argv[5:])
+    assert ns.no_diarize and ns.keep_original and ns.ignore_battery
+    assert ns.only == "Mid" and ns.speakers == "A Person,B Person"
+    assert jobs.split_list(ns.files) == ["U1 Mid.wav", "U2 Long.wav"]
+    # a value that starts with "-" stays a value
+    argv = jobs.spawn_args({**spec, "only": "-x", "at": 1.0})
+    assert run_batch.build_parser().parse_args(argv[5:]).only == "-x"
+
+
+def test_a_plain_job_adds_no_cli_flags(sandbox):
+    from stt import jobs
+    spec = run_batch.job_spec_from_args(_args(files="A.m4a"), [])
+    ns = run_batch.build_parser().parse_args(jobs.spawn_args({**spec, "at": 1.0})[5:])
+    assert not (ns.no_diarize or ns.keep_original or ns.ignore_battery)
+    assert ns.only is None and ns.speakers is None
+    assert "source" not in spec and "dest" not in spec
+    # the default folders, named outright, are not stored either
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=str(run_batch.config.ICLOUD_DIR),
+              dest=str(run_batch.config.MEETINGS_DIR)), [])
+    assert "source" not in spec and "dest" not in spec
+
+
+def test_a_requeued_job_keeps_its_folders(sandbox, tmp_path):
+    """A --job run into a sandbox went back on the queue without --source
+    and --dest, so its replay read the real watched folder and wrote into
+    the real library. The pause is no gap: every spawned job runs with
+    --ignore-pause."""
+    from stt import jobs
+    src, dst = tmp_path / "-src dir", tmp_path / "dst, with comma"
+    spec = run_batch.job_spec_from_args(
+        _args(files="A.m4a", source=str(src), dest=str(dst)), [])
+    assert spec["source"] == str(src) and spec["dest"] == str(dst)
+    argv = jobs.spawn_args({**spec, "at": 1.0})
+    ns = run_batch.build_parser().parse_args(argv[5:])
+    assert (ns.source, ns.dest) == (str(src), str(dst))
+    assert ns.ignore_pause
+
+
+def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):
+    """A 251-character stem: the meeting lands in a capped folder, the
+    audio copy fits, and the delete step (with its sidecar names past 255
+    bytes) removes the original without raising."""
+    from test_pipeline import _fake_asr
+
+    from stt import audio, config, icloud, pipeline
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    monkeypatch.setattr(icloud, "materialize", lambda p: True)
+    src = config.ICLOUD_DIR / ("L" * 251 + ".m4a")
+    src.write_bytes(b"\x01" * 256)
+    res = run_batch.process_one(str(src), str(config.MEETINGS_DIR),
+                                {"do_diarize": False, "strict": False,
+                                 "allowed": None, "do_move": True})
+    assert res["ok"] and len(res["base"].encode()) <= config.MAX_BASE_BYTES
+    assert config.meeting_file(res["base"], ".m4a").read_bytes() == b"\x01" * 256
+    assert not src.exists()
+
+
+def test_office_lock_files_are_not_recordings(sandbox):
+    """'~$name.m4a' is an Office owner/lock file, not audio. iter_audio
+    skipped only dot files, so the dry run listed it to process."""
+    from stt import config
+    src = sandbox / "source"
+    (src / "~$lock.m4a").write_bytes(b"x" * 162)
+    (src / "~$Board Prep.m4a").write_bytes(b"x" * 162)
+    (src / "Meeting ~$ notes.m4a").write_bytes(b"x" * 64)   # only a leading ~$
+    (src / "~Tilde Start.m4a").write_bytes(b"x" * 64)       # a plain name with ~
+    assert [p.name for p in run_batch.iter_audio(src)] == [
+        "Meeting ~$ notes.m4a", "~Tilde Start.m4a"]
+    assert not config.is_source_audio(src / "~$lock.m4a")
+
+
+def _summary_spy(monkeypatch):
+    from stt import summarize
+    calls = []
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(summarize, "has_speech", lambda base: True)
+    monkeypatch.setattr(summarize, "suggest_title", lambda base: calls.append(("describe", base)))
+    monkeypatch.setattr(summarize, "apply_auto_title",
+                        lambda base: calls.append(("title", base)) or {"ok": False})
+    monkeypatch.setattr(summarize, "stale_bases", lambda: [])
+    return calls
+
+
+def _fake_done(src_str, dest_str, opts):
+    from pathlib import Path
+    src = Path(src_str)
+    return {"ok": True, "key": src.name, "mtime": src.stat().st_mtime, "outputs": [],
+            "summary": "1 speaker(s)", "who": "", "base": "2026-01-05 Mtg",
+            "duration_sec": 1.0, "stage_secs": {}}
+
+
+def test_a_run_into_another_folder_never_describes_the_librarys_meeting(sandbox, monkeypatch, capsys):
+    """summarize_one resolved the just-finished meeting through the library
+    (config.meetings_dir()), not --dest. A run with --dest elsewhere read,
+    and could rewrite, the library's same-named meeting."""
+    import json
+    import signal
+    import sys
+
+    from conftest import mfile
+    from stt import config
+    mfile("2026-01-05 Mtg", ".json").write_text(json.dumps(
+        {"source_file": "other.m4a", "segments": SPOKEN, "speakers": []}))
+    (config.ICLOUD_DIR / "Mtg.m4a").write_bytes(b"\x00" * 64)
+    other = sandbox / "other_dest"
+    calls = _summary_spy(monkeypatch)
+    monkeypatch.setattr(run_batch, "process_one", _fake_done)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(other)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert calls == []
+    assert "not the meetings library" in capsys.readouterr().out
+    # nor the idle refresh of out-of-date library descriptions
+    stale = []
+    monkeypatch.setattr(run_batch, "regenerate_stale", lambda *a, **k: stale.append(1) or 0)
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert stale == []
+
+
+def test_a_run_into_the_library_still_describes_its_meeting(sandbox, monkeypatch):
+    import json
+    import signal
+    import sys
+
+    from conftest import mfile
+    from stt import config
+    mfile("2026-01-05 Mtg", ".json").write_text(json.dumps(
+        {"source_file": "Mtg.m4a", "segments": SPOKEN, "speakers": []}))
+    (config.ICLOUD_DIR / "Mtg.m4a").write_bytes(b"\x00" * 64)
+    calls = _summary_spy(monkeypatch)
+    monkeypatch.setattr(run_batch, "process_one", _fake_done)
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert ("describe", "2026-01-05 Mtg") in calls
+
+
+def test_a_files_name_that_matches_nothing_is_reported(sandbox, monkeypatch, capsys):
+    """--paths printed 'skip (not a file)' for a bad path, but --files
+    printed nothing for a name no source file has: a Redo of a file that
+    left the source folder looked like a success."""
+    import sys
+
+    from stt import config
+    _lengths(monkeypatch, {"Here.m4a": 600})
+    _drop("Here.m4a")
+    monkeypatch.setattr(sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize",
+                                      "--files", "Nope.wav,Here.m4a",
+                                      "--source", str(config.ICLOUD_DIR),
+                                      "--dest", str(config.MEETINGS_DIR)])
+    assert run_batch.main() == 0
+    cap = capsys.readouterr()
+    assert "   not found in source: Nope.wav" in cap.err
+    assert "Here.m4a" not in cap.err
+    assert "[would process] Here.m4a" in cap.out
+    assert "1 to process, 0 already done, 1 not found." in cap.out
+
+
+def test_a_dry_run_previews_while_another_batch_holds_the_lock(sandbox, monkeypatch, capsys):
+    """The lock was taken before the dry-run branch, so a preview, which
+    writes nothing, could not run during a batch."""
+    import fcntl
+    import sys
+
+    from stt import config
+    _lengths(monkeypatch, {"Here.m4a": 600})
+    _drop("Here.m4a")
+    held = open(config.PROJECT_DIR / "batch.lock", "a+")
+    held.write("4242")
+    held.flush()
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        monkeypatch.setattr(sys, "argv", ["run_batch.py", "--dry-run", "--no-diarize",
+                                          "--source", str(config.ICLOUD_DIR),
+                                          "--dest", str(config.MEETINGS_DIR)])
+        assert run_batch.main() == 0
+        out = capsys.readouterr().out
+        assert "[would process] Here.m4a" in out and "already running" not in out
+        # the running batch's pid is untouched
+        assert (config.PROJECT_DIR / "batch.lock").read_text() == "4242"
+        # a real run still waits its turn
+        monkeypatch.setattr(sys, "argv", ["run_batch.py", "--no-diarize",
+                                          "--source", str(config.ICLOUD_DIR),
+                                          "--dest", str(config.MEETINGS_DIR)])
+        assert run_batch.main() == 0
+        assert "Another batch is already running" in capsys.readouterr().out
+    finally:
+        held.close()
+
+
+def test_the_library_in_other_letter_case_is_still_the_library(sandbox, tmp_path):
+    """APFS folds letter case and Path.resolve() does not, so a --dest of
+    '~/projects/...' beside a library at '~/Projects/...' read as another
+    folder, and the run wrote no descriptions or automatic titles."""
+    from stt import config
+    lib = config.meetings_dir()
+    other = lib.parent / lib.name.swapcase()
+    if not other.exists():
+        pytest.skip("this volume is case-sensitive")
+    assert config.is_live_store(other)
+    assert config.is_live_store(lib)
+    (tmp_path / "elsewhere").mkdir()
+    assert not config.is_live_store(tmp_path / "elsewhere")
+    assert not config.is_live_store(tmp_path / "not made yet")

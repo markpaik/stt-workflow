@@ -15,7 +15,7 @@ import rumps
 from stt import config, control, recorder, status
 from gui import server as panel
 
-ICON = str(config.PROJECT_DIR / "gui" / "waveform.png")
+ICON = str(config.CODE_DIR / "gui" / "waveform.png")
 AGENT = Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"
 LABEL = "com.stt-workflow.batch"
 
@@ -82,10 +82,10 @@ def gather():
     for folder in config.source_dirs():
         try:
             for p in sorted(folder.iterdir()):
-                if (p.is_file() and p.suffix.lower() in config.AUDIO_EXTS
-                        and not p.name.startswith(".") and p.name not in active
+                if (config.is_source_audio(p) and p.name not in active
                         and p.name not in queued
-                        and not manifest.is_processed(m, p.name, p.stat().st_mtime)):
+                        and not manifest.is_processed(m, p.name, p.stat().st_mtime)
+                        and not manifest.is_parked(m, p.name, p)):
                     queued.append(p.name)
         except Exception:
             pass
@@ -391,7 +391,7 @@ class STTMenuBar(rumps.App):
         mid-batch queues itself this way instead of waiting for the next trigger)."""
         # manual runs override the pause flag and hold the Mac awake
         subprocess.Popen(["caffeinate", "-i", "-s",
-                          str(config.PROJECT_DIR / "run.sh"), "batch", "--ignore-pause"],
+                          str(config.CODE_DIR / "run.sh"), "batch", "--ignore-pause"],
                          start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

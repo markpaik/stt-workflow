@@ -347,6 +347,23 @@ console.log(JSON.stringify({said:h.includes('Said in'),deep:h.includes('href="#m
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_palette_says_a_stop_word_was_not_searched():
+    """'is' showed "No matches.", which reads as "nobody said it". The
+    server's note says the word is too common to search on its own."""
+    out = _run_node("""
+S={meetings:[{base:'b',title:'Budget',date:'2026-10-02',minutes:9,named:[],ask_clusters:{}}]};
+const note='\u201cof\u201d is too common to search on its own. Add another word.';
+UI.pq='of';UI.pres={q:'of',total:0,meetings:[],hits:[],note};
+const h=palResults();
+UI.pq='zq';UI.pres={q:'zq',total:0,meetings:[],hits:[],note:''};
+const h2=palResults();
+console.log(JSON.stringify({note:h.includes('too common'),nm:h.includes('No matches.'),
+ h2:h2.includes('No matches.')}));
+""")
+    assert out == {"note": True, "nm": False, "h2": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_tab_title_counts_items_that_joined_while_hidden():
     out = _run_node("""
 S={meetings:[],needs_you:[{kind:'needs_title'}]};UI.route='home';
@@ -439,3 +456,38 @@ console.log(JSON.stringify({a,b,c}));""")
     assert out["a"] == {"view": "meeting", "base": "Orchard 1", "seek": 61}
     assert out["b"] == {"view": "meeting", "base": "Orchard 1"}
     assert out["c"]["view"] == "timeline"
+
+
+# ------------------------------------------------ durations under a minute ---
+
+def test_the_meeting_meta_carries_whole_seconds(sandbox):
+    """round(22 / 60) is 0, so a 22 s clip read '0 min' everywhere. The meta
+    carries the seconds as well, for the page to show."""
+    _meeting("2026-10-20 Short Clip", "hello", duration_sec=22.4)
+    srv._meet_cache.clear()
+    meta = srv._meeting_meta(config.meeting_file("2026-10-20 Short Clip", ".json"),
+                             config.meetings_dir())
+    assert (meta["minutes"], meta["seconds"]) == (0, 22)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_clip_under_a_minute_shows_seconds_never_0_min():
+    out = _run_node("""
+const mk=(o)=>Object.assign({base:'b',title:'T',date:'2026-10-01',named:[],ask_clusters:{}},o);
+console.log(JSON.stringify({
+ short:durText(mk({minutes:0,seconds:22})),
+ edge:durText(mk({minutes:1,seconds:59})),
+ min:durText(mk({minutes:1,seconds:60})),
+ long:durText(mk({minutes:42,seconds:2520})),
+ old:durText(mk({minutes:7})),
+ tot:[totalText(22),totalText(300),totalText(5400),totalText(0)],
+ row:rowHTML(mk({minutes:0,seconds:22})).includes('22 sec')}));
+""")
+    assert out["short"] == "22 sec" and out["edge"] == "59 sec"
+    assert out["min"] == "1 min" and out["long"] == "42 min" and out["old"] == "7 min"
+    assert out["tot"] == ["22 sec", "5 min", "1.5 h", "0 min"]
+    assert out["row"]
+    js = _next_js()
+    # no meta line prints the rounded minutes on its own any more
+    assert "minutes||0} min" not in js
+    assert "${g.hours} h" not in js

@@ -15,7 +15,12 @@ from . import (audio, channels, config, diarcache, diarize, identify, merge,
 
 
 def _load_asr(strict=False):
-    backend = config.ASR_BACKEND
+    # read through the setting's own check, so a value set after the config
+    # loaded (code that assigns config.ASR_BACKEND) warns as a typo in
+    # stt.env does, never runs Parakeet with no word
+    backend, why = config._asr_problem(config.ASR_BACKEND)
+    if why:
+        config._warn_once(("STT_ASR_BACKEND", why), f"STT_ASR_BACKEND={why}")
     if backend.startswith("cloud:"):
         if strict:
             # sensitive recordings NEVER leave the machine, whatever the
@@ -59,7 +64,8 @@ def _meeting_date(src: Path, existing_json: Path = None) -> str:
     from . import provenance
     if existing_json is not None and existing_json.exists():
         try:
-            kept = _json.loads(existing_json.read_text()).get("date")
+            d = _json.loads(existing_json.read_text())
+            kept = d.get("date") if isinstance(d, dict) else None
             if kept:
                 return kept
         except (OSError, ValueError):
@@ -173,7 +179,7 @@ def _owns_meeting(base: str, src: Path, dest_dir) -> bool:
         d = _json.loads(config.meeting_file(base, ".json", dest_dir).read_text())
     except (OSError, ValueError):
         return False
-    if d.get("source_file") != src.name:
+    if not isinstance(d, dict) or d.get("source_file") != src.name:
         return False
     sm = d.get("source_mtime")
     if sm is None:
@@ -223,16 +229,21 @@ def resolve_base(src: Path, dest_dir=None) -> str:
     # this file's own meeting already lives under the plain name (a legacy
     # pre-stamping meeting reprocessed from the watched folder): stay there —
     # stamping now would strand the transcript in a NEW folder as a duplicate
-    if (config.meeting_file(base, ".json", dest_dir).exists()
-            and _owns_meeting(base, src, dest_dir)):
-        return base
+    try:
+        if (config.meeting_file(base, ".json", dest_dir).exists()
+                and _owns_meeting(base, src, dest_dir)):
+            return base
+    except OSError:
+        pass    # a stem too long to be a folder name: never a meeting on disk
     # the folder takes the ISO-first form, "YYYY-MM-DD <name>": a plain name
     # gets the meeting's date in front, and a name that carries a date in the
     # older form ('Weekly 07102026', the old recorder's 'Recording 07112026
     # 1814') has it moved to the front. The date is the one the meeting will
     # store, so the folder name and the stored date agree.
     on = _meeting_date(src, None)
-    target = dates.canonical(base, on)
+    # capped: the folder name is the stem of every artifact, and a long
+    # source name made a later write fail with "File name too long"
+    target = config.cap_name(dates.canonical(base, on))
     # a folder named before the ISO rule ('Sync 05012026 (2)') that THIS
     # recording owns: a reprocess lands back in it rather than minting a
     # duplicate under the new name (tools/iso_rename.py moves it later)
@@ -242,8 +253,11 @@ def resolve_base(src: Path, dest_dir=None) -> str:
         while i < 100:
             cand = legacy if i == 1 else f"{legacy} ({i})"
             i += 1
-            if not config.meeting_dir(cand, dest_dir).exists():
-                break
+            try:
+                if not config.meeting_dir(cand, dest_dir).exists():
+                    break
+            except OSError:
+                break   # too long to exist on disk
             if _owns_meeting(cand, src, dest_dir):
                 return cand
     archive = config.archive_dir(dest_dir)
@@ -272,19 +286,23 @@ def _resolve_channel(src: Path, existing_json: Path, input_opts):
     import json as _json
 
     def _pick(d):
-        return (d or {}).get("channel_layout"), (d or {}).get("mic_speaker")
+        # a json that parses to a list, a string or a number holds no layout
+        d = d if isinstance(d, dict) else {}
+        return d.get("channel_layout"), d.get("mic_speaker")
 
     cl, ms = _pick(input_opts)
     if cl:
         return cl, ms
     for path in (existing_json, src.with_suffix(".opts.json")):
-        if path and path.exists():
-            try:
+        try:
+            # exists() inside the try: a sidecar name past the 255-byte
+            # limit raises "File name too long", and it cannot exist anyway
+            if path and path.exists():
                 cl, ms = _pick(_json.loads(path.read_text()))
                 if cl:
                     return cl, ms
-            except (OSError, ValueError):
-                pass
+        except (OSError, ValueError):
+            pass
     return None, None
 
 
@@ -375,7 +393,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     do_verify = config.VERIFY if do_verify is None else do_verify
     dest_dir = Path(dest_dir) if dest_dir else config.MEETINGS_DIR
     base = resolve_base(src, dest_dir)
-    config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
+    # the meeting folder is made only once there is a transcript to write
+    # (just before the write phase below): a source that cannot be decoded
+    # or transcribed leaves no empty folder behind
     txt_path = config.meeting_file(base, ".txt", dest_dir)
     json_path = config.meeting_file(base, ".json", dest_dir)
     emb_path = config.meeting_file(base, ".emb.npz", dest_dir)
@@ -470,6 +490,9 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
         if config.PUNCTUATE:
             punctuate.restore_segments(segments)
+        if not do_diarize:
+            for seg in segments:
+                seg["display"] = output.NOT_SEPARATED
         speakers = output.build_speakers(labels, names)
 
         verify_engine, verify_regions = None, None
@@ -509,6 +532,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
     # The id is decided BEFORE the lock, so the lock is named for it from the
     # start, and a new meeting's two first runs queue on one lock (_write_lock).
     from . import review
+    config.meeting_dir(base, dest_dir).mkdir(parents=True, exist_ok=True)
     with _write_lock(base, json_path, dest_dir) as meeting_id:
         # human-owned flags survive a Redo exactly like the corrected date: the
         # Work/Personal category and the reviewed state were set in the panel, and
@@ -522,6 +546,10 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         try:
             import json as _json
             prev = _json.loads(json_path.read_text())
+            if not isinstance(prev, dict):
+                # a json that parses to a list or a number holds no meeting:
+                # the Redo treats it like one that cannot be read
+                raise ValueError("the meeting json is not an object")
             category = prev.get("category")
             reviewed = prev.get("reviewed", True)  # an existing meeting stays put
             # a Redo re-transcribes the SAME meeting: it keeps its id, or every
@@ -529,7 +557,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             # would be orphaned by a reprocess
             meeting_id = prev.get("meeting_id") or meeting_id
         except (OSError, ValueError):
-            pass
+            prev = None
         meta = {
             # immutable identity: minted once, never rewritten, and FIRST in
             # the file so config.id_of finds it in a bounded read of a
@@ -597,7 +625,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         # some other folder (a demo home, a test dest) has no business
         # rewriting the library's map.
         try:
-            if Path(dest_dir).resolve() == config.meetings_dir().resolve():
+            if config.is_live_store(dest_dir):
                 config.index_set(meta["meeting_id"], base)
                 if meta.get("ai_stale"):
                     # the batch finds out-of-date descriptions from this

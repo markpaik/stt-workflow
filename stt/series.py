@@ -253,19 +253,68 @@ _SMALL = {"a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or",
           "the", "to", "vs", "via", "with"}
 
 
+def _spellings() -> dict:
+    """{UPPER CASE: spelling} for each acronym and mixed-case name the tag
+    list and the series catalog write: 'IEP', 'OKR', 'HR', 'AI', 'LT',
+    'PSSP', 'PowerSchool'. A plural the lists write ('IEPs', 'RFPs') gives
+    its singular. Read from the lists, so a new tag or series adds its own."""
+    text = " ".join([f"{label} {hint}" for _, label, hint in TAGS]
+                    + [f"{sr.template} {sr.hint}" for sr in SERIES]
+                    + list(_MORE_ACRONYMS))
+    out = {}
+    for w in re.findall(r"(?<!\w)[A-Za-z][A-Za-z0-9]*", text):
+        if not any(c.isupper() for c in w[1:]):
+            continue
+        if len(w) > 3 and w[-1] == "s" and w[:-1].isupper():
+            w = w[:-1]
+        out.setdefault(w.upper(), w)
+    return out
+
+
+_SPELLINGS = None
+# school acronyms a meeting topic uses that no tag or series writes. Only
+# ones that are never an English word: 'it' and 'sip' stay words.
+_MORE_ACRONYMS = ("PLC", "PLCs", "MTSS", "SEL", "ELA", "ELL", "ESL", "KPI", "KPIs")
+
+
+def _known(part: str):
+    """The catalog spelling of one word written without inner capitals
+    ('iep' -> 'IEP', "iep's" -> "IEP's", 'okrs' -> 'OKRs'), else None. The
+    plural 's' counts only past three letters, so 'hrs' stays a word."""
+    global _SPELLINGS
+    if _SPELLINGS is None:
+        _SPELLINGS = _spellings()
+    m = re.fullmatch(r"(\W*)([\w']+?)(\W*)", part)
+    if not m:
+        return None
+    lead, core, tail = m.groups()
+    tries = [(core, "")]
+    if core.lower().endswith("'s"):
+        tries.append((core[:-2], core[-2:].lower()))
+    elif len(core) > 3 and core.lower().endswith("s"):
+        tries.append((core[:-1], "s"))
+    for stem, suffix in tries:
+        hit = _SPELLINGS.get(stem.upper())
+        if hit:
+            return lead + hit + suffix + tail
+    return None
+
+
+def _cap(w: str) -> str:
+    """The first letter in capitals, and the letter after an O' or D'
+    prefix ("o'brien" -> "O'Brien")."""
+    w = w[:1].upper() + w[1:]
+    return re.sub(r"^(\W*[OD]')([a-z])", lambda m: m.group(1) + m.group(2).upper(), w)
+
+
 def title_case(t: str) -> str:
     """Title Case with the small words lower-case after the first word.
     A word already holding a capital past its first letter (an acronym
-    such as 'ESE', 'OKRs', 'PlayLab') is kept as written."""
-    out = []
-    for i, w in enumerate(str(t or "").split()):
-        if any(c.isupper() for c in w[1:]) or any(c.isdigit() for c in w):
-            out.append(w)
-        elif i and w.lower() in _SMALL:
-            out.append(w.lower())
-        else:
-            out.append(w[:1].upper() + w[1:])
-    s = " ".join(out)
+    such as 'ESE', 'OKRs', 'PlayLab') is kept as written. A word the model
+    wrote without one takes the tag list's or the catalog's spelling when
+    they write it ('iep' -> 'IEP', 'powerschool' -> 'PowerSchool'), each
+    part of a hyphenated or slashed word on its own."""
+    s = " ".join(_case_word(w, i == 0) for i, w in enumerate(str(t or "").split()))
     # program names whose second word is a small word ('Early On' is the
     # Part C program, 'Transfer In' a workflow): the small-word rule above
     # must not lower-case them
@@ -275,6 +324,22 @@ def title_case(t: str) -> str:
 
 
 _PROPER = ("Early On", "Transfer In")
+
+
+def _case_word(w: str, first: bool) -> str:
+    """One word of title_case. A slash parts two words, and each is cased
+    on its own ('iep/ese' read as one word and came out 'Iep/ese')."""
+    if "/" in w.strip("/"):
+        return "/".join(_case_word(p, first) if p else p for p in w.split("/"))
+    if any(c.isupper() for c in w[1:]) or any(c.isdigit() for c in w):
+        return w
+    parts = w.split("-")
+    known = [_known(p) for p in parts]
+    if any(known):
+        return "-".join(k or _cap(p) for k, p in zip(known, parts))
+    if not first and w.lower() in _SMALL:
+        return w.lower()
+    return _cap(w)
 
 
 def _first(name: str) -> str:

@@ -74,7 +74,9 @@ def _mutate(fn):
 
 
 def add(job: dict) -> dict:
-    """job: {files|paths, force, strict, verify, parallel, label}. Returns it
+    """job: {files|paths, force, strict, verify, parallel, label}, and for a
+    re-queued run its CLI-only options (no_diarize, keep_original,
+    ignore_battery, only, speakers). Returns it
     with its queue id ("at") stamped — bumped if two adds land in the same
     millisecond, so cancelling one can never cancel its neighbor."""
     def _add(cur):
@@ -108,7 +110,7 @@ def clear() -> int:
 def spawn_args(job: dict) -> list:
     """The full command that runs this job (caffeinate keeps the Mac awake;
     run.sh resolves the venv). Mirrors what the panel builds for a direct run."""
-    args = ["caffeinate", "-i", "-s", str(config.PROJECT_DIR / "run.sh"),
+    args = ["caffeinate", "-i", "-s", str(config.CODE_DIR / "run.sh"),
             "batch", "--ignore-pause", "--job", str(job["at"])]
     if job.get("files"):
         args += ["--files", join_list(job["files"])]
@@ -124,4 +126,15 @@ def spawn_args(job: dict) -> list:
         args += ["--one-time-speakers"]
     if int(job.get("parallel", 1)) == 2:
         args += ["--parallel", "2"]
+    # CLI-only options a re-queued run carried (run_batch.job_spec_from_args)
+    for key, flag in (("no_diarize", "--no-diarize"), ("keep_original", "--keep-original"),
+                      ("ignore_battery", "--ignore-battery")):
+        if job.get(key):
+            args += [flag]
+    for key, flag in (("only", "--only"), ("speakers", "--speakers"),
+                      ("source", "--source"), ("dest", "--dest")):
+        if job.get(key):
+            # one "--flag=value" token: a value that starts with "-" is
+            # still read as the value, never as another option
+            args += [f"{flag}={job[key]}"]
     return args

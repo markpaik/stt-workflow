@@ -13,6 +13,7 @@ version and is marked "text_edited" — we never pretend edited text came from A
 import contextlib
 import fcntl
 import json
+import math
 import os
 import shutil
 import threading
@@ -390,14 +391,32 @@ def insert_segment(base: str, start: float, end: float, speaker_id: str,
     sidecar."""
     if not (text or "").strip():
         return {"ok": False, "error": "text is required"}
+    try:
+        start, end = float(start), float(end)
+    except (TypeError, ValueError):
+        start = end = math.nan
+    if not (math.isfinite(start) and math.isfinite(end)):
+        # a NaN start passed max(0, nan) as 0.0, and a NaN end passed the
+        # `end <= start` check and was stored as a bare NaN token
+        return {"ok": False, "error": "the line's time must be a number"}
     with lock_meeting(base):
         jpath, data = _load(base)
         sp = _resolve_speaker(data, speaker_id)
         if sp is None:
             return {"ok": False, "error": f"unknown speaker {speaker_id}"}
-        start, end = max(0.0, float(start)), float(end)
+        # inside the recording: a line at 9999 s in a 21 s meeting was
+        # stored, and survived every relabel through its decision
+        dur = float(data.get("duration_sec") or 0)
+        start = max(0.0, start)
+        if dur > 0 and start >= dur:
+            return {"ok": False,
+                    "error": "that time is outside the recording, which runs "
+                             f"00:00 to {output._fmt_ts(dur)}"}
         if end <= start:
             end = start + 1.0
+        if dur > 0:
+            # the panel sends end = start + 3, which can run past the end
+            end = min(end, dur)
         manual_id = uuid.uuid4().hex[:12]
         seg = {"start": round(start, 3), "end": round(end, 3), "speaker": sp["id"],
                "text": text.strip(), "attribution": "manual", "flags": [],

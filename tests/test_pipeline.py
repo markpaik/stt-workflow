@@ -349,3 +349,82 @@ def test_redo_of_an_unreadable_meeting_json_fails_private(sandbox, monkeypatch, 
     with pytest.raises(_Stop):
         pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
     assert seen["strict"] is True
+
+
+@pytest.mark.parametrize("stored", ["[1, 2]", '"text"', "7", "null"])
+def test_redo_of_a_meeting_json_that_is_not_an_object(sandbox, monkeypatch, stored):
+    """A meeting json that parses to a list, a string or a number holds no
+    meeting. A Redo treats it like an unreadable json: it runs, stays
+    local (strict), and writes a fresh transcript. It never stops on an
+    AttributeError from the channel, date, owner or carry-forward reads."""
+    import json
+    monkeypatch.setattr(config, "STRICT", False)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    seen = {}
+
+    def _asr(strict=False):
+        seen["strict"] = strict
+        return _fake_asr()
+    monkeypatch.setattr(pipeline, "_load_asr", _asr)
+    base = "2026-01-05 Mtg"
+    config.meeting_dir(base, config.MEETINGS_DIR).mkdir(parents=True, exist_ok=True)
+    src = config.meeting_file(base, ".m4a", config.MEETINGS_DIR)
+    src.write_bytes(b"x")
+    jp = config.meeting_file(base, ".json", config.MEETINGS_DIR)
+    jp.write_text(stored)
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert seen["strict"] is True
+    assert res["base"] == base
+    d = json.loads(jp.read_text())
+    assert isinstance(d, dict) and d["source_file"] == src.name and d["strict"] is True
+
+
+@pytest.mark.parametrize("bad", [[1, 2], "mic_left_system_right", 3])
+def test_resolve_channel_ignores_a_non_object(sandbox, bad, tmp_path):
+    """input_opts or a sidecar that is not an object has no layout."""
+    import json
+    src = tmp_path / "a.m4a"
+    src.write_bytes(b"x")
+    side = tmp_path / "a.opts.json"
+    side.write_text(json.dumps(bad))
+    stored = tmp_path / "a.json"
+    stored.write_text(json.dumps(bad))
+    assert pipeline._resolve_channel(src, stored, bad) == (None, None)
+
+
+@pytest.mark.parametrize("stem", ["L" * 236, "L" * 251, "Réunion équipe " * 16])
+def test_a_long_source_name_gets_a_folder_name_that_fits(sandbox, monkeypatch, stem):
+    """The folder name is the date plus the source stem, and every artifact
+    adds a suffix (.reviews.superseded.json is 24 bytes). A 236-character
+    stem gave a 247-byte folder, and a later artifact failed with Errno 63
+    (File name too long). The name from a source stem is capped."""
+    import json
+
+    from stt import dates
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
+    src = config.ICLOUD_DIR / f"{stem}.m4a"
+    src.write_bytes(b"x")
+    base = pipeline.resolve_base(src, config.MEETINGS_DIR)
+    assert len(base.encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert base.startswith(dates.meeting_date(base) or "")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
+    assert res["base"] == base
+    assert json.loads(res["json"].read_text())["source_file"] == src.name
+    # the longest artifact name still fits
+    long = config.meeting_file(base, ".reviews.superseded.unmerged-1731170000", config.MEETINGS_DIR)
+    long.write_text("[]")
+    assert pipeline.resolve_base(src, config.MEETINGS_DIR) == base   # a Redo finds it again
+
+
+def test_cap_name_never_splits_a_character():
+    name = "2026-01-05 " + "é" * 100
+    capped = config.cap_name(name)
+    assert len(capped.encode("utf-8")) <= config.MAX_BASE_BYTES
+    assert capped.encode("utf-8").decode("utf-8") == capped and name.startswith(capped)
+    assert config.cap_name("short") == "short"
+    assert config.cap_name("a" * 119 + " b") == "a" * 119     # no trailing space

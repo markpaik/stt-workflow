@@ -56,7 +56,8 @@ is accepted, video included.
 
 Every meeting is one row, and the row tells you everything: a category dot,
 the title, date, length and attendees, a two-line summary preview, and its
-current state at the right edge.
+current state at the right edge. A length under a minute shows in seconds
+("22 sec"), and a group's total shows in minutes until it reaches an hour.
 
 - **Actionable rows pin to the top**, whatever their date: a live recording
   with its ticking clock, files transcribing with a progress hairline and
@@ -73,6 +74,13 @@ current state at the right edge.
   Fix either, press Enter, and it files itself.
 - **Click a row to peek**: it expands in place with the full summary and
   committed next steps. Click the title or the date to edit them right there.
+  A date must fall between 2000 and the end of next year. A title stays on
+  one line: a line break becomes a space, and a bidirectional control or a
+  zero-width space is dropped. A colon or a slash is kept: the title shows
+  as typed (`Dana 1:1`, `Q3/Q4 Planning`), and the folder on disk, which
+  cannot hold either one, says `Dana 1-1` and `Q3-Q4 Planning`. Saving a
+  title the meeting already has never renames its folder, and a same-day
+  twin keeps its `(2)` or `(3)`.
   Hover for actions: play the audio inline with a scrubber, open the
   transcript, or the full menu (export, copy, reveal, rename, reprocess,
   archive, delete).
@@ -84,7 +92,12 @@ current state at the right edge.
   Process > Other files for a picker.
 - **Search everything**: the box filters by title and attendee as you type,
   and full-text results show every place a phrase was said; clicking one
-  opens the meeting with the audio cued to that exact moment.
+  opens the meeting with the audio cued to that exact moment. Two letters
+  are enough for an acronym: typed in capitals (`AI`, `IT`, `HR`), the word
+  is found only where it is written in capitals, so `IT` skips every "it".
+  A two-letter word in lower case matches whole words. A two-letter stop
+  word such as "is" or "of" sits in most lines, so it does not search on
+  its own, and the search box says so instead of "No matches."
 - **Keyboard throughout**: `/` focuses search, `j`/`k` walk the rows, `Enter`
   opens (or accepts a naming row), `e` peeks the summary, `Escape` backs out.
 
@@ -114,6 +127,15 @@ macOS stops delivering audio), or let recordings land in the watched folder
 process within a minute of arriving while the Mac is awake, at a nightly
 run, and at login catch-up; pausing automation gates every trigger with one
 switch. A held file waits indefinitely without blocking anything else.
+An empty (0-byte) file, a hidden (dot) file and an Office lock file
+(`~$name`) are not recordings: the batch and the panel skip them (an
+empty file until it holds data). A file that
+ffmpeg cannot read, or that fails three runs in a row without changing,
+is set aside: automatic runs skip it until the file changes, and its
+row's Retry runs it at once. The failure shows ffmpeg's own reason
+("moov atom not found", "no audio track"). A very long file name is cut
+to 120 bytes for its meeting folder, so every file in the folder stays
+under the 255-byte name limit of macOS.
 
 Four per-run options, from the Process popover:
 
@@ -197,6 +219,12 @@ moment for context), a name box that suggests enrolled names as you type
 speaker" for noise. If a voice's source recordings were later deleted, the
 panel says so plainly instead of presenting a dead player.
 
+A name is one line of plain text. The panel, `enroll.py`, a rename and a
+meeting-only label all trim the edges and refuse an empty name, and they
+refuse a name that holds a line break, a tab, a bidirectional control such
+as U+202E, or a zero-width space. Those characters split the transcript
+header, reorder how a name displays, or make two names that look the same.
+
 Speaker management lives in the drawer: play any voice sample (each
 traceable to its source meeting), remove a bad one or reassign it to the
 right person, rename everywhere, merge duplicates, hide voices you'll never
@@ -209,7 +237,9 @@ namings all land.
 If the registry is ever lost, `tools/rebuild_voiceprints.py` reconstructs
 every voiceprint from the meeting caches; the batch warns loudly if it
 starts with an empty registry while named transcripts exist, and every
-registry write keeps a rolling backup.
+registry write keeps a rolling backup. A registry.json that cannot be read
+is never written over: naming a voice says so until it is restored from
+registry.json.bak or rebuilt (`--apply` moves the damaged file aside).
 
 ## The drawer
 
@@ -242,7 +272,9 @@ meeting page. Word and PDF copies land in `~/Downloads` and open in
 Finder. They leave the data home, so treat them as shared copies. Set
 `STT_EXPORT_DIR` (in `stt.env` or the environment) to send them elsewhere.
 A relative value is under your home folder. Under `STT_HOME` they land in
-`$STT_HOME/exports`. On disk, every meeting is a self-contained folder (audio,
+`$STT_HOME/exports`. PDF uses the installed Google Chrome, headless, on a
+throwaway profile; a PDF that Chrome finished counts even if Chrome then
+exits with an error, and a failed PDF leaves no file behind. On disk, every meeting is a self-contained folder (audio,
 readable `.txt`, structured `.json` with segment- and word-level timestamps,
 speakers, flags, and real confidence scores, caches, and edit history
 together), and renaming in the panel renames the folder and every file in
@@ -282,8 +314,11 @@ uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 Without the speakrs helper the pipeline uses pyannote on CPU instead
-(`STT_DIARIZER=pyannote` forces it). The helper runs with network access
-denied.
+(`STT_DIARIZER=pyannote` forces it; any value other than `speakrs` or
+`pyannote` prints a warning and keeps speakrs). The helper runs with
+network access denied. `STT_SPEAKRS_AHC` (merge threshold, default 0.55) and
+`STT_SPEAKRS_TIMEOUT_SEC` (default 3600) tune it; a value that is not a
+valid number prints a warning that names it, and the default is used.
 
 **Hugging Face token (one-time, required for speaker identification):**
 1. Signed in on huggingface.co, open
@@ -315,7 +350,7 @@ this Mac either way. Settings in `stt.env`:
 | Setting | Default | What it does |
 |---|---|---|
 | `STT_LOCAL_LLM` | `auto` | `auto` (Ollama when it answers, else MLX), `ollama`, or `mlx` |
-| `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A non-loopback host is refused. |
+| `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A value with no scheme (`localhost:11434`) is read as `http://`, and with no port either (`127.0.0.1`) it is on port 11434, as Ollama reads its own `OLLAMA_HOST`. A non-loopback host, a port that is not a number, or a scheme other than http turns Ollama off with one warning, and `tools/doctor.py check` lists it as `bad_setting`. |
 | `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | the Ollama model |
 | `STT_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a call |
 
@@ -323,8 +358,8 @@ this Mac either way. Settings in `stt.env`:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are reniced to this and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts under `taskpolicy -b nice -n` this value. A failure here never stops a run. |
-| `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below |
+| `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run. |
+| `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below. The two times may be joined by `-`, an en dash or `to`, and a bare hour works (`10-12`). The same time at both ends (`10:00-10:00`) means all day, so the model rests after every meeting. A value that cannot be read prints one warning, uses the default, and shows in `tools/doctor.py check` as `bad_setting`. |
 | `STT_LLM_REST_RATIO` | `1.0` | inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
 | `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds inside the quiet hours |
 | `STT_LLM_REST_RATIO_NIGHT` | `0` | outside the quiet hours, the rest is this times the wall time |
@@ -381,7 +416,7 @@ quick links to the panel and folders.
 CLI equivalents:
 
 ```bash
-./run.sh batch --dry-run                          # show what would process
+./run.sh batch --dry-run                          # show what would process, and any 0-byte file it skips (works while a batch runs)
 ./run.sh batch --strict --files "Interview.m4a"   # strict: flag, never guess
 ./run.sh relabel --all                            # re-apply names everywhere
 ./run.sh enroll --from-meeting "2026-05-21 Team Sync"
@@ -394,6 +429,12 @@ For development and testing there is a fully sandboxed data home:
 `STT_HOME` points a second server instance at it, scheduling included, so
 nothing you try there can touch your real meetings. Under `STT_HOME` the
 batch and `run.sh` read `$STT_HOME/stt.env`, never the checkout's own.
+
+The panel's API answers a request it cannot use with HTTP 400 and a plain
+message that names the field: a body that is not one JSON object, a missing
+field, or a field of the wrong type. An error nobody planned for shows
+"Something went wrong in the panel" and nothing more. The route and the full
+traceback go to the panel log, `logs/gui.err.log`, and never to the page.
 
 ## How it works
 

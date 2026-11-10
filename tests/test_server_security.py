@@ -100,6 +100,38 @@ def test_kick_jobs_suppressed_right_after_a_stop(sandbox, monkeypatch):
     assert len(spawned) == 1, "once the stop window clears, the queue drains normally"
 
 
+def test_a_burst_of_runs_spawns_one_batch_while_it_starts(sandbox, monkeypatch):
+    """Each Run click clears the kick cooldown, and until the new batch holds
+    batch.lock the process table shows no batch. A burst of 120 POSTs to
+    /api/run spawned 120 batches, and all but one exited at once. While the
+    last spawn is still starting, a kick leaves the queue to it. Once that
+    process has exited, the next kick spawns again."""
+    from stt import control, jobs
+    monkeypatch.setattr(control, "snapshot", lambda *a, **k: {"pids": [], "mem_mb": 0})
+    monkeypatch.setattr(srv, "_kicked_proc", {"proc": None, "at": 0.0})
+
+    class Proc:
+        alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+    procs = []
+
+    def spawn(args):
+        procs.append(Proc())
+        return procs[-1]
+    monkeypatch.setattr(srv, "_spawn", spawn)
+    for _ in range(5):
+        jobs.add({"label": "all new recordings", "files": []})
+        srv._jobs_kicked["at"] = 0.0      # what each /api/run does
+        srv._kick_jobs()
+    assert len(procs) == 1
+    procs[0].alive = False                # it exited: a lock loser, say
+    srv._jobs_kicked["at"] = 0.0
+    srv._kick_jobs()
+    assert len(procs) == 2
+
+
 def test_remove_sample_re_identifies_the_meetings_it_can_affect(running_server,
                                                                 monkeypatch):
     """Removing a sample changes who a profile matches, so it must re-run
@@ -1496,15 +1528,18 @@ def test_a_newline_in_a_settings_value_is_refused(running_server):
     a newline injects an arbitrary extra STT_*=... line into the file that
     stores the API keys. config re-reads that file on every call, so the
     injected line takes effect on the next poll with no restart."""
+    from stt import names
     envp = config.PROJECT_DIR / "stt.env"
     st, body = _post(running_server, "/api/mic_speaker",
                      {"name": "Alex Rivera\nSTT_ANTHROPIC_KEY=stolen"})
-    assert st == 500, "a line break in a settings value must be refused"
+    # refused as a name now, before it reaches the settings writer
+    assert (st, body) == (400, {"error": names.UNSAFE_NAME}), \
+        "a line break in a settings value must be refused"
     assert not envp.exists() or "STT_ANTHROPIC_KEY" not in envp.read_text()
 
     st, body = _post(running_server, "/api/mic_speaker",
                      {"name": "Alex Rivera\rSTT_MEETINGS_DIR=/tmp/evil"})
-    assert st == 500
+    assert st == 400
     assert not envp.exists() or "STT_MEETINGS_DIR" not in envp.read_text()
 
     # the ordinary value still saves
@@ -2079,3 +2114,141 @@ def test_a_request_with_two_host_headers_is_refused(running_server, hosts):
         data += chunk
     s.close()
     assert data.split(b"\r\n", 1)[0].split()[1] == b"403"
+
+
+# ---------- name rules (phase 4) ----------
+
+UNSAFE = ["Bad\nName", "Zoe: <b>X</b>\nLine2", "Sam\u202eChen", "Jo\u200bLee",
+          "Tab\tName", "Line\u2028Two"]
+
+
+def test_every_naming_route_refuses_an_unsafe_name(running_server, monkeypatch):
+    """A newline, a bidi control or a zero-width character in a person name
+    split the .txt header and roster, reordered how a name displays, or made
+    two look-alike people. Every route that stores a person name refuses
+    them, with one plain sentence, and writes nothing."""
+    import numpy as np
+
+    from stt import identify, names
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    base = _thin_local_meeting()
+    rich = "Rich Mtg"
+    _make_meeting_with_cache(rich, {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                   for i in range(40)]},
+                             {"SPEAKER_00": np.random.default_rng(4).normal(size=256)})
+    identify.enroll("Alex Rivera", np.random.default_rng(5).normal(size=256), source="M")
+    reg_before = identify.load_registry()
+    mj_before = mfile(base, ".json").read_text()
+    for bad in UNSAFE:
+        for body in ({"meeting": base, "speaker": "SPEAKER_00", "name": bad,
+                      "local": True},
+                     {"meeting": rich, "speaker": "SPEAKER_00", "name": bad,
+                      "confirm": True},
+                     {"uid": "U001", "name": bad, "confirm": True}):
+            st, out = _post(running_server, "/api/name", body)
+            assert (st, out) == (200, {"ok": False, "error": names.UNSAFE_NAME}), \
+                (bad, body)
+        st, out = _post(running_server, "/api/rename_speaker",
+                        {"name": "Alex Rivera", "new": bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+        st, out = _post(running_server, "/api/merge_speakers",
+                        {"src": "uid:U001", "dst": "name:" + bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+        st, out = _post(running_server, "/api/reassign_sample",
+                        {"name": "Alex Rivera", "index": 0, "to": bad})
+        assert out == {"ok": False, "error": names.UNSAFE_NAME}, bad
+    assert identify.load_registry() == reg_before
+    assert mfile(base, ".json").read_text() == mj_before
+
+
+def test_an_empty_or_whitespace_name_never_enrolls(running_server):
+    import numpy as np
+
+    from stt import identify
+    rich = "Rich Mtg"
+    _make_meeting_with_cache(rich, {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                   for i in range(40)]},
+                             {"SPEAKER_00": np.random.default_rng(4).normal(size=256)})
+    for blank in ("", "   ", "\t \n"):
+        st, out = _post(running_server, "/api/name",
+                        {"meeting": rich, "speaker": "SPEAKER_00", "name": blank,
+                         "confirm": True})
+        assert out["ok"] is False and out["error"] in (
+            "Type a name first.",
+            "A name cannot hold a line break, a tab, or an invisible control "
+            "character."), blank
+    assert identify.load_registry() == {}
+
+
+def test_set_local_name_refuses_a_line_break(sandbox):
+    from stt import names, summarize
+    base = _thin_local_meeting()
+    r = summarize.set_local_name(base, "SPEAKER_00", "Zoe: <b>X</b>\nLine2")
+    assert r == {"ok": False, "error": names.UNSAFE_NAME}
+    assert "local_names" not in json.loads(mfile(base, ".json").read_text())
+
+
+@pytest.mark.parametrize("payload", [b"PK\x03\x04truncated", b"\x80\x04garbage" * 8])
+def test_a_corrupt_diar_cache_never_500s_the_naming_panel(running_server, payload):
+    """name_preview promises an empty preview on any failure. A truncated
+    cache answered 500 "File is not a zip file", and a garbage one 500 with
+    "Failed to interpret file PosixPath('/Users/...diar.npz') as a pickle"."""
+    _make_meeting("2026-04-15 Data Review")
+    mfile("2026-04-15 Data Review", ".diar.npz").write_bytes(payload)
+    st, body = _post(running_server, "/api/name_preview",
+                     {"meeting": "2026-04-15 Data Review", "speaker": "SPEAKER_00"})
+    assert st == 200 and body["looks_like"] == [] and body["here"] == \
+        "2026-04-15 Data Review"
+    st, body = _post(running_server, "/api/name",
+                     {"meeting": "2026-04-15 Data Review", "speaker": "SPEAKER_00",
+                      "name": "Jordan Lee"})
+    assert st == 200 and body["ok"] is False
+    assert "changed while you were naming it" in body["error"]
+    assert str(config.PROJECT_DIR) not in json.dumps(body)
+
+
+def test_a_case_only_speaker_rename_through_the_panel_keeps_the_samples(
+        running_server, monkeypatch):
+    """The scan saw 'Sam Chen' -> 'sam chen' answer 500 with both server
+    paths (shutil.SameFileError). identify.rename_person already renames the
+    key alone for a case-only change (b3c9f28); this pins the route."""
+    import numpy as np
+
+    from stt import identify
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    rng = np.random.default_rng(2)
+    identify.enroll("Sam Chen", rng.normal(size=256), source="M1")
+    identify.enroll("Sam Chen", rng.normal(size=256), source="M2")
+    st, body = _post(running_server, "/api/rename_speaker",
+                     {"name": "Sam Chen", "new": "sam chen"})
+    assert st == 200 and body["ok"] is True
+    assert list(identify.load_registry()) == ["sam chen"]
+    assert identify.load_voiceprints()["sam chen"].shape[0] == 2
+
+
+def test_a_dropped_voice_cannot_be_named_back_to_life(running_server, monkeypatch):
+    """After "Not a real speaker" (/api/forget), a stale tab or a direct
+    POST named the same uid: 'Ghost' was enrolled and the tombstone was
+    deleted, so the suppressed voice could surface again. merge() already
+    refused a dropped voice. promote() now does too."""
+    import numpy as np
+
+    from stt import identify, unknowns
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: None)
+    v = np.random.default_rng(8).normal(size=256)
+    np.save(config.VOICEPRINTS_DIR / "U007.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(json.dumps(
+        {"next": 8, "speakers": {"U007": {"file": "U007.npy", "meetings": ["M"]}}}))
+    st, body = _post(running_server, "/api/forget", {"uid": "U007"})
+    assert body["ok"] is True
+    st, body = _post(running_server, "/api/name",
+                     {"uid": "U007", "name": "Ghost", "confirm": True})
+    assert body == {"ok": False, "error": "That voice was removed as not a real "
+                                          "speaker, so it cannot be named. "
+                                          "Refresh the page."}
+    st, body = _post(running_server, "/api/merge_speakers",
+                     {"src": "uid:U007", "dst": "name:Ghost", "confirm": True})
+    assert body == {"ok": False}
+    assert unknowns.promote("U007", "Ghost") is False
+    assert "Ghost" not in identify.load_registry()
+    assert unknowns.load()["speakers"]["U007"].get("dropped"), "the tombstone stays"

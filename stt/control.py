@@ -9,6 +9,9 @@ so a pid-by-name kill orphans them — each holding several GB of models. All
 run_batch processes share their launcher's process group (caffeinate/launchd),
 and status.json records that pgid, so we can find and signal every member even
 after the parent dies. stop_run() verifies termination and escalates to SIGKILL.
+
+The batch parent itself is the pid that the holder of this home's batch.lock
+wrote into it (_parent_pids), never a machine-wide match on the name.
 """
 import json
 import os
@@ -183,9 +186,54 @@ def _pgrep(args):
         return []
 
 
+def batch_lock_path():
+    return config.PROJECT_DIR / "batch.lock"
+
+
+def _etime_secs(s: str) -> int:
+    """Seconds from ps's elapsed time, "[[dd-]hh:]mm:ss"."""
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        days = int(d)
+    parts = [int(x) for x in s.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts[-3:]
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
 def _parent_pids():
-    """run_batch.py parents (found by command line)."""
-    return _pgrep(["-f", "run_batch.py"])
+    """The run_batch.py parent of THIS data home, as a list (empty or one).
+
+    The batch that holds PROJECT_DIR/batch.lock writes its pid into it
+    (run_batch.acquire_lock). That pid counts only while the process is
+    alive, its command line runs run_batch.py, and it started before the
+    lock was written: a pid recycled onto a later process started after.
+    A machine-wide `pgrep -f run_batch.py` used to stand in here. It also
+    matched a shell running a command that names the file, an editor, and
+    another home's batch, so the panel read "running" with no batch of
+    its own, and Stop signalled those groups."""
+    p = batch_lock_path()
+    try:
+        pid = int(p.read_text().strip())
+        written = p.stat().st_mtime
+    except (OSError, ValueError):
+        return []
+    if pid <= 0:
+        return []
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "etime=,command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        etime, _, cmd = out.partition(" ")
+        started = time.time() - _etime_secs(etime)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if "run_batch.py" not in cmd:
+        return []
+    if started > written + 2.0:   # ps's elapsed time is whole seconds
+        return []
+    return [pid]
 
 
 def _group_is_ours(pgid) -> bool:
@@ -250,11 +298,109 @@ def snapshot(max_age: float = 1.5) -> dict:
 
 def batch_pids():
     """Every live pid belonging to a batch run — parents AND workers.
-    (Uncached — used by stop_run, which must see fresh state.)"""
-    pids = set(_parent_pids())
+    (Uncached — used by stop_run, which must see fresh state.) In a group
+    the batch does not lead, only the batch's own processes count: the
+    script that started it is no survivor of a Stop."""
+    parents = set(_parent_pids())
+    pids = set(parents)
     for g in batch_groups():
-        pids.update(_pgrep(["-g", str(g)]))
+        if _whole_group(g, parents):
+            pids.update(_pgrep(["-g", str(g)]))
+        else:
+            pids.update(_members(g))
     return sorted(pids)
+
+
+def _ps_fields(pid) -> tuple:
+    """(executable name, command line) of a live `pid`, or None."""
+    try:
+        exe = subprocess.run(["/bin/ps", "-o", "comm=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        cmd = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not exe:
+        return None
+    return os.path.basename(exe).lstrip("-"), cmd
+
+
+def _batch_like(fields) -> bool:
+    exe, cmd = fields
+    return exe.lower().startswith("python") and (
+        "run_batch.py" in cmd or "multiprocessing" in cmd)
+
+
+def _whole_group(pgid, parents) -> bool:
+    """True when Stop may signal process group `pgid` whole: the batch
+    leads it (launchd, a terminal job and the panel's caffeinate spawn all
+    start it so), or its leader is gone and only orphaned workers are left.
+    A batch that a script without job control started in the background
+    sits in the script's group. A group kill then ended the script too."""
+    if pgid in parents:
+        return True
+    leader = _ps_fields(pgid)
+    return leader is None or _batch_like(leader)
+
+
+def _members(pgid) -> list:
+    """The batch processes in a group the batch does not lead: the batch
+    parent and its multiprocessing workers, never the group's leader."""
+    return [p for p in _pgrep(["-g", str(pgid)])
+            if p != pgid and (f := _ps_fields(p)) is not None and _batch_like(f)]
+
+
+def _descendant_pids(pid) -> list:
+    try:
+        out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids = {}
+    for ln in out.splitlines():
+        try:
+            c, par = (int(x) for x in ln.split())
+        except ValueError:
+            continue
+        kids.setdefault(par, []).append(c)
+    found, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            if c not in found:
+                found.append(c)
+                todo.append(c)
+    return found
+
+
+def _signal_batch(sig) -> None:
+    """Send `sig` to every batch run: a group the batch leads as a whole,
+    and in a group someone else leads, only the batch's own processes. For
+    SIGKILL the descendants of those go too (ffmpeg, the speakrs helper):
+    a SIGKILL leaves the batch no handler to stop them itself."""
+    parents = set(_parent_pids())
+    for g in batch_groups():
+        if _whole_group(g, parents):
+            try:
+                os.killpg(g, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            continue
+        pids = set(_members(g)) | {p for p in parents if _pgid(p) == g}
+        if sig == signal.SIGKILL:
+            for p in list(pids):
+                pids.update(_descendant_pids(p))
+        for p in pids:
+            try:
+                os.kill(p, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+def _pgid(pid):
+    try:
+        return os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        return None
 
 
 def stop_run(timeout: float = 8.0) -> dict:
@@ -277,11 +423,7 @@ def stop_run(timeout: float = 8.0) -> dict:
     if not groups:
         return {"stopped": False, "forced": False, "survivors": [],
                 "cleared_jobs": cleared}
-    for g in groups:
-        try:
-            os.killpg(g, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    _signal_batch(signal.SIGTERM)
     # monotonic: a wall-clock jump (NTP correction mid-stop) must neither
     # stretch nor cut short the grace window before SIGKILL escalation
     deadline = time.monotonic() + timeout
@@ -290,11 +432,7 @@ def stop_run(timeout: float = 8.0) -> dict:
     forced = False
     if batch_pids():  # graceful didn't finish the job — force it
         forced = True
-        for g in batch_groups():
-            try:
-                os.killpg(g, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        _signal_batch(signal.SIGKILL)
         time.sleep(0.5)
     # sweep AGAIN after death: a panel-spawned --job batch re-queues its
     # claimed job from its SIGTERM handler (so a crash or shutdown never

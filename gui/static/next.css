@@ -281,9 +281,10 @@ input.m-title-input[type=text]{font-size:var(--fs-sub);font-weight:600;flex:1 1 
 .person{display:flex;justify-content:space-between;gap:var(--s2);align-items:center;font-size:var(--fs-meta);padding-block:2px}
 .person button{border:0;background:none;padding:0;cursor:pointer;color:var(--attn);font-weight:500;font-size:var(--fs-meta);text-align:left}
 .person button:hover{text-decoration:underline}
-.reading{max-width:76ch}
+.reading{max-width:76ch;min-width:0;overflow-wrap:anywhere}
 .prose{display:grid;gap:var(--s3);font-size:var(--fs-title);line-height:1.55}
 .steps{margin:0;padding-left:var(--s5);display:grid;gap:var(--s1);font-size:var(--fs-title);line-height:1.5}
+.steps>li{min-width:0}
 .gist{margin:0;font-size:var(--fs-title);line-height:1.55;font-weight:500}
 .tags{display:flex;flex-wrap:wrap;gap:var(--s1);margin-top:var(--s1)}
 .chip.tag{border:1px solid var(--hair);color:var(--sub)}

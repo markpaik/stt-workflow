@@ -397,3 +397,106 @@ def test_fix_refuses_to_repoint_while_this_thread_holds_the_registry_lock(
         with pytest.raises(RuntimeError, match="holds the registry lock"):
             registry_doctor.fix([], other)
     assert config.VOICEPRINTS_DIR == sandbox / "voiceprints"
+
+
+# ---------- a lost registry, and shapes nobody wrote ----------
+
+def _unit(seed, dim=256):
+    v = np.random.default_rng(seed).normal(size=dim)
+    return v / np.linalg.norm(v)
+
+
+def test_a_corrupt_registry_and_its_orphaned_files_are_reported(sandbox):
+    """A truncated registry.json read as empty, and after one new enrollment
+    the report said "clean" while every earlier voiceprint sat on disk with
+    nothing pointing at it."""
+    vp = config.VOICEPRINTS_DIR
+    for i, n in enumerate(("Alex Rivera", "Sam Chen")):
+        identify.enroll(n, _unit(i), source="M")
+    reg = vp / "registry.json"
+    reg.write_text(reg.read_text()[:25])        # truncated mid-write
+    fs = registry_doctor.check()
+    assert [(f.kind, f.subject) for f in _of(fs, "corrupt")] == [
+        ("corrupt", "registry.json")]
+    assert sorted(f.subject for f in _of(fs, "unreferenced_file")) == [
+        "Alex Rivera.npy", "Sam Chen.npy"]
+    assert not any(f.fixable for f in fs if f.kind in ("corrupt", "unreferenced_file"))
+    # the next enrollment is refused: it would have started a new one-person
+    # registry over the damaged one (identify.RegistryUnreadable)
+    import pytest
+    with pytest.raises(identify.RegistryUnreadable):
+        identify.enroll("Jo Lee", _unit(7), source="M")
+    fs = registry_doctor.check()
+    assert [f.subject for f in _of(fs, "corrupt")] == ["registry.json"]
+    # once it is moved aside, a new registry starts, and the orphans are
+    # still reported, never "clean"
+    reg.rename(vp / "registry.json.damaged")
+    identify.enroll("Jo Lee", _unit(7), source="M")
+    fs = registry_doctor.check()
+    assert _of(fs, "corrupt") == []
+    assert sorted(f.subject for f in _of(fs, "unreferenced_file")) == [
+        "Alex Rivera.npy", "Sam Chen.npy"]
+
+
+@pytest.mark.parametrize("text", ['[1, 2]', '"x"', '{"Alex Rivera": "x"}',
+                                  '{"Alex Rivera": {"file": 3}}',
+                                  '{"Alex Rivera": {"file": "a.npy", "sources": "M1"}}'])
+def test_a_registry_of_the_wrong_shape_is_a_finding_not_a_crash(sandbox, text):
+    """'{"Alex Rivera": "x"}' raised AttributeError at meta.get."""
+    vp = config.VOICEPRINTS_DIR
+    (vp / "registry.json").write_text(text)
+    np.save(vp / "a.npy", _unit(1).reshape(1, -1))
+    fs = registry_doctor.check()
+    assert {f.kind for f in fs} & {"corrupt", "invalid"}, fs
+
+
+@pytest.mark.parametrize("text", ['{bad', '[1, 2]', '{"speakers": []}',
+                                  '{"speakers": {"U001": "x"}}',
+                                  '{"speakers": {"U001": {"file": "U001.npy", '
+                                  '"meetings": "M1"}}}'])
+def test_unknowns_of_the_wrong_shape_are_a_finding_not_a_crash(sandbox, text):
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(text)
+    fs = registry_doctor.check()
+    assert {f.kind for f in fs} & {"corrupt", "invalid"}, fs
+
+
+def test_an_unreadable_voiceprint_file_is_invalid(sandbox):
+    identify.enroll("Alex Rivera", _unit(1), source="M")
+    (config.VOICEPRINTS_DIR / "Alex Rivera.npy").write_bytes(b"not numpy")
+    fs = registry_doctor.check()
+    assert [(f.kind, f.subject) for f in fs] == [("invalid", "Alex Rivera")]
+
+
+def test_the_cli_names_a_corrupt_registry(sandbox, tmp_path):
+    home = tmp_path / "home"
+    (home / "voiceprints").mkdir(parents=True)
+    (home / "meetings").mkdir()
+    (home / "voiceprints" / "registry.json").write_text("{trunc")
+    r = _run(home)          # its own STT_HOME: never the real registry
+    assert r.returncode == 1, r.stderr
+    assert "corrupt     registry.json: cannot be read" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
+def test_a_rebuild_sets_a_damaged_registry_aside_first(sandbox, tmp_path):
+    """Nothing writes over a damaged registry now, so the doctor's advice,
+    "rebuild it with tools/rebuild_voiceprints.py", moves the damaged file
+    aside before it enrolls anyone. A dry run moves nothing."""
+    home = tmp_path / "home"
+    (home / "voiceprints").mkdir(parents=True)
+    (home / "meetings").mkdir()
+    (home / "voiceprints" / "registry.json").write_text("{trunc")
+    env = dict(os.environ, STT_HOME=str(home))
+    for k in ("STT_PROJECT_DIR", "STT_VOICEPRINTS_DIR", "STT_MEETINGS_DIR",
+              "STT_ICLOUD_DIR", "STT_RECORDINGS_DIR"):
+        env.pop(k, None)
+    tool = [sys.executable, str(ROOT / "tools/rebuild_voiceprints.py")]
+    r = subprocess.run(tool, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert (home / "voiceprints" / "registry.json").read_text() == "{trunc"
+    r = subprocess.run(tool + ["--apply"], capture_output=True, text=True,
+                       env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert "moved aside to registry.json.corrupt-" in r.stdout
+    aside = list((home / "voiceprints").glob("registry.json.corrupt-*"))
+    assert [p.read_text() for p in aside] == ["{trunc"]

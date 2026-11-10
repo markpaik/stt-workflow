@@ -253,6 +253,19 @@ def test_answer_question_prompt_grounding_and_history(sandbox, monkeypatch):
     assert "omitted" not in p                # no truncation note when it fits whole
 
 
+def test_answer_question_drops_history_items_that_are_not_objects(sandbox, monkeypatch):
+    """history: ["x"] reached h.get and raised AttributeError, a 500."""
+    _meeting()
+    prompts = []
+    monkeypatch.setattr(summarize, "_generate",
+                        lambda p, **k: prompts.append(p) or "It shipped [00:00].")
+    r = summarize.answer_question("Mtg", "Did we ship?",
+                                  history=["x", 5, None, ["q"],
+                                           {"q": "Who spoke?", "a": "Alex."}])
+    assert r["ok"]
+    assert "Q: Who spoke?" in prompts[0]
+
+
 def test_answer_question_flags_a_sampled_long_transcript(sandbox, monkeypatch):
     mfile("Big", ".txt").write_text(
         "HEADMARK " + "x" * (summarize.QA_MAX_CHARS + 30_000) + " TAILMARK")

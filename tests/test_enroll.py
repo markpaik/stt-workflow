@@ -36,11 +36,35 @@ def test_audio_enroll_picks_dominant_cluster_not_minority(sandbox, monkeypatch):
         return sandbox / "voiceprints" / "mark.npy"
 
     monkeypatch.setattr(identify, "enroll", fake_enroll)
+    clip = sandbox / "mark.m4a"
+    clip.write_bytes(b"audio")
     monkeypatch.setattr(sys, "argv",
-                        ["enroll", "--audio", "mark.m4a", "--name", "Mark"])
+                        ["enroll", "--audio", str(clip), "--name", "Mark"])
     assert enroll.main() == 0
     # the 30s cluster (SPEAKER_00 -> vec_a) must win, not the 2s SPEAKER_01
     assert np.array_equal(captured["vec"], vec_a)
+
+
+def test_a_missing_or_unreadable_audio_file_is_one_line(sandbox, monkeypatch):
+    """A mistyped --audio path reached ffmpeg and ended in a traceback."""
+    ran = []
+    monkeypatch.setattr(diarize, "diarize", lambda wav: ran.append(wav))
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(sandbox / "nope.wav"),
+                                      "--name", "Mark"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == f"audio file not found: {sandbox / 'nope.wav'}"
+    bad = sandbox / "bad.m4a"
+    bad.write_bytes(b"not audio")
+
+    def unreadable(src, dst):
+        raise audio.UnreadableAudio("ffmpeg could not decode bad.m4a: Invalid data")
+    monkeypatch.setattr(audio, "to_wav16k", unreadable)
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(bad), "--name", "Mark"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == "ffmpeg could not decode bad.m4a: Invalid data"
+    assert ran == [] and "Mark" not in identify.load_registry()
 
 
 def _seed_cached_meeting(base, cluster_turns, cent_emb):
@@ -95,3 +119,103 @@ def test_from_meeting_suspect_sample_requires_confirm(sandbox, monkeypatch):
     monkeypatch.setattr(sys, "argv", argv + ["--confirm"])
     assert enroll.main() == 0
     assert identify.load_registry()["Priya Shah"]["n_samples"] == 2
+
+
+BAD_NAMES = ["", "   ", "\t", "Bad\nName", "Bad\rName", "A‮B", "Zed​Q",
+             "Line Two", "Nul\x00l", "C1\x85x", "﻿Lead"]
+
+
+@pytest.mark.parametrize("bad", BAD_NAMES)
+def test_enroll_refuses_an_empty_or_unsafe_name(sandbox, bad):
+    """'   ' was enrolled as '   .npy', '' as '.npy', and 'Bad\\nName' as a
+    person whose name split the transcript header in two. Nothing is written."""
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    with pytest.raises(names.BadName):
+        identify.enroll(bad, v, source="M1")
+    assert identify.load_registry() == {}
+    assert list((sandbox / "voiceprints").glob("*.npy")) == []
+
+
+def test_enroll_trims_the_edges_and_keeps_joiners(sandbox):
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll("Zed Q ", v, source="M1")
+    identify.enroll("Zed Q", v * 1.01, source="M2")
+    assert list(identify.load_registry()) == ["Zed Q"]
+    # U+200D (zero-width joiner) is part of real names and emoji: it stays
+    identify.enroll("Ana‍Lee", v * -1, source="M3")
+    assert "Ana‍Lee" in identify.load_registry()
+
+
+def test_rename_and_reassign_refuse_an_unsafe_name(sandbox):
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll("Alex Rivera", v, source="M1")
+    identify.enroll("Alex Rivera", v * 1.1 + 0.2, source="M2")
+    assert identify.rename_person("Alex Rivera", "Alex\nRivera") is False
+    assert identify.rename_person("Alex Rivera", "   ") is False
+    r = identify.reassign_sample("Alex Rivera", 0, "Sam‮Chen")
+    assert r == {"ok": False, "error": names.UNSAFE_NAME}
+    assert list(identify.load_registry()) == ["Alex Rivera"]
+
+
+@pytest.mark.parametrize("bad, msg", [
+    ("   ", "--name: Type a name first."),
+    ("Bad\nName", "--name: A name cannot hold a line break, a tab, or an "
+                  "invisible control character.")])
+def test_the_cli_refuses_an_empty_or_unsafe_name(sandbox, monkeypatch, bad, msg):
+    v = np.random.default_rng(3).normal(size=256)
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": [(0.0, 200.0)]}, {"SPEAKER_00": v})
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", bad])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == msg
+    assert identify.load_registry() == {}
+
+
+def test_the_cli_trims_the_name_it_enrolls(sandbox, monkeypatch):
+    v = np.random.default_rng(3).normal(size=256)
+    # forty clear 5 s turns: well over the quality floor
+    _seed_cached_meeting("Mtg", {"SPEAKER_00": [(i * 6.0, i * 6.0 + 5.0)
+                                                for i in range(40)]},
+                         {"SPEAKER_00": v})
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", "  Jo Lee  "])
+    enroll.main()
+    assert list(identify.load_registry()) == ["Jo Lee"]
+
+
+def test_enroll_refuses_a_name_that_is_not_text_or_too_long(sandbox):
+    """identify.enroll(5, v) wrote '5.npy', and a 300-character name raised
+    a raw OSError (File name too long). Both are a BadName now, before
+    anything is written. The panel already capped a name at 200."""
+    from stt import names
+    v = np.random.default_rng(1).normal(size=256)
+    for bad, msg in ((5, names.NOT_TEXT), (["A"], names.NOT_TEXT),
+                     ("x" * 201, names.LONG_NAME)):
+        with pytest.raises(names.BadName) as ei:
+            identify.enroll(bad, v, source="M1")
+        assert str(ei.value) == msg
+    assert identify.load_registry() == {}
+    assert list((sandbox / "voiceprints").glob("*")) == []
+
+
+def test_a_voiceprint_file_name_is_never_hidden_or_too_long(sandbox):
+    """'.' was saved as the hidden '..npy', which a '*.npy' listing never
+    sees. A 200-character name in a script of 3-byte characters is 600
+    bytes, past the 255 a file name may hold."""
+    import os
+    v = np.random.default_rng(1).normal(size=256)
+    identify.enroll(".", v, source="M1")
+    identify.enroll("a/b", v * -1, source="M1")
+    long = "名" * 200
+    identify.enroll(long, v + 3, source="M1")
+    reg = identify.load_registry()
+    assert reg["."]["file"] == "person.npy"
+    assert reg["a/b"]["file"] == "a_b.npy"
+    f = reg[long]["file"]
+    assert len(f.encode("utf-8")) <= 255 and f.startswith("名")
+    files = sorted(os.listdir(sandbox / "voiceprints"))
+    assert not [n for n in files if n.startswith(".") and n.endswith(".npy")]
+    assert identify.load_voiceprints().keys() >= {".", "a/b", long}

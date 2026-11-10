@@ -455,9 +455,10 @@ def test_split_guards(sandbox):
                                     speaker_b="SPEAKER_99")["ok"]
     assert not review.split_segment("Split", 0, start=99.0, text_a="a",
                                     text_b="b")["ok"]  # stale guard
-    r = review.insert_segment("Split", 7.0, 8.0, "name:Sami", "added line")
+    # inside the 6 s recording: an insert past its end is refused
+    r = review.insert_segment("Split", 5.9, 6.0, "name:Sami", "added line")
     assert r["ok"]
-    assert not review.split_segment("Split", r["index"], 7.0, "added", "line")["ok"]
+    assert not review.split_segment("Split", r["index"], 5.9, "added", "line")["ok"]
 
 
 def test_split_edited_text_uses_proportional_cut(sandbox):
@@ -903,3 +904,34 @@ def test_an_unreadable_live_sidecar_is_set_aside_under_a_non_json_name(sandbox):
     strays = [p.name for p in folder.glob("*.json")
               if p.name != "Mtg.json" and not p.name.endswith(config._SIDECAR_JSON)]
     assert strays == []
+
+
+def test_an_insert_must_be_finite_and_inside_the_recording(sandbox):
+    """A line at 9999 s in a 9 s meeting was stored. A NaN start became 0.0
+    through max(0, nan), and a NaN end was stored as a bare NaN token that
+    browser JSON.parse refuses. (A negative start still moves to 0, which is
+    inside: test_insert_negative_time_clamped.)"""
+    _make_meeting(sandbox)          # duration_sec 9.0
+    before = (mfile("Mtg", ".json")).read_text()
+    for start, end in ((9999, 10001), (9.0, 10.0),
+                       (float("nan"), 2.0), (1.0, float("nan")),
+                       (float("inf"), 2.0), ("abc", 2.0), (None, 2.0)):
+        r = review.insert_segment("Mtg", start, end, "name:Sami", "way past end")
+        assert r["ok"] is False, (start, end)
+    assert "outside the recording, which runs 00:00 to 00:09" in \
+        review.insert_segment("Mtg", 9999, 10001, "name:Sami", "x")["error"]
+    assert review.insert_segment("Mtg", float("nan"), 2, "name:Sami", "x")["error"] \
+        == "the line's time must be a number"
+    assert (mfile("Mtg", ".json")).read_text() == before, "a refusal writes nothing"
+
+
+def test_an_insert_near_the_end_is_cut_at_the_end(sandbox):
+    """The panel sends end = start + 3. A line in the last seconds keeps its
+    start and ends where the recording ends."""
+    _make_meeting(sandbox)          # duration_sec 9.0
+    r = review.insert_segment("Mtg", 8.0, 11.0, "name:Sami", "last words")
+    assert r["ok"]
+    d = json.loads((mfile("Mtg", ".json")).read_text())
+    seg = d["segments"][r["index"]]
+    assert (seg["start"], seg["end"]) == (8.0, 9.0)
+    assert "NaN" not in (mfile("Mtg", ".json")).read_text()

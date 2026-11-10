@@ -26,6 +26,7 @@ starts nothing new, lets the file in flight finish, and ends cleanly (no
 chained job). The pause flag, by contrast, only gates a run's START.
 """
 import argparse
+import errno
 import fcntl
 import os
 import shutil
@@ -65,7 +66,8 @@ def _load_env_file(repo=None):
 
 _load_env_file()
 
-from stt import config, control, icloud, jobs, manifest, queue_order, rates, status  # noqa: E402
+from stt import (audio, config, control, icloud, jobs, manifest, output,  # noqa: E402
+                 queue_order, rates, status)
 
 # a plain run re-reads the Voice Memos library at most this often while it
 # picks files, so a memo that finishes during a long run joins that run
@@ -73,12 +75,19 @@ VM_RESYNC_SECONDS = 60.0
 
 
 def acquire_lock():
-    fd = open(config.PROJECT_DIR / "batch.lock", "w")
+    """The single-instance lock. The holder writes its pid into batch.lock,
+    and the panel finds this home's batch by that pid (control._parent_pids).
+    The file is opened without truncating it ("a+"), and emptied only once
+    the lock is held: a run that loses the race never blanks the pid of the
+    batch that holds it."""
+    fd = open(config.PROJECT_DIR / "batch.lock", "a+")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         fd.close()
         return None
+    fd.seek(0)
+    fd.truncate()
     fd.write(str(os.getpid()))
     fd.flush()
     return fd
@@ -113,9 +122,9 @@ def clean_scratch():
 
 
 def _sweep_shells() -> int:
-    """Drop meeting folders left behind with NO transcript json — process_file
-    mkdirs the folder up front, so a run that dies before the write phase strands
-    an empty shell (or one holding just a stray .txt). They are invisible in the
+    """Drop meeting folders left behind with NO transcript json — a run that
+    dies inside the write phase (process_file makes the folder just before it)
+    strands an empty shell (or one holding just a stray .txt). They are invisible in the
     panel (meeting_bases requires the json) but they pile up, and they used to
     push every retry onto the next ' (N)' suffix.
 
@@ -152,13 +161,30 @@ def job_spec_from_args(args, todo) -> dict:
     re-queue a --job run if it's interrupted before finishing (see
     _terminate() in main()) — manifest idempotency makes replaying it, files
     already done included, a safe no-op for anything that already succeeded."""
-    return {"files": jobs.split_list(args.files) if args.files else [],
+    spec = {"files": jobs.split_list(args.files) if args.files else [],
             "paths": jobs.split_list(args.paths) if args.paths else [],
             "force": args.force, "strict": args.strict,
             "verify": args.verify, "parallel": args.parallel,
             "onetime": getattr(args, "one_time_speakers", False),
             "label": (", ".join(s.name for s in todo[:2])
                      + (f" +{len(todo) - 2} more" if len(todo) > 2 else "")) or "resumed run"}
+    # the CLI-only options too, so a replay runs exactly what was asked: a
+    # --keep-original run must never delete originals on its replay, and a
+    # --only run must never sweep the whole folder. Only set ones are kept.
+    for key in ("no_diarize", "keep_original", "ignore_battery"):
+        if getattr(args, key, False):
+            spec[key] = True
+    for key in ("only", "speakers"):
+        if getattr(args, key, None):
+            spec[key] = getattr(args, key)
+    # a run into other folders replays into the same ones: without them a
+    # sandbox or test run's replay wrote into the real library. The default
+    # folders are left out, so a panel job stays as the panel queued it.
+    for key, default in (("source", config.ICLOUD_DIR), ("dest", config.MEETINGS_DIR)):
+        v = getattr(args, key, None)
+        if v and Path(v) != Path(default):
+            spec[key] = str(v)
+    return spec
 
 
 def spawn_chained_job(job: dict):
@@ -210,8 +236,10 @@ def summarize_one(key, base=None, track=None) -> bool:
             # already set no_speech, and the panel says "No speech found".
             print(f"   no speech in {base}: no summary written", flush=True)
             return False
-        st.set_stage(key, "summarizing")
+        st.set_stage(key, "summarizing", est_sec=st.summary_estimate())
+        t0 = time.monotonic()
         summarize.suggest_title(base)
+        st.note_summary(time.monotonic() - t0)
         done = True
     except Exception as e:
         print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
@@ -273,7 +301,7 @@ def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
         t0 = time.monotonic()
         ok, why = False, ""
         try:
-            st.set_stage(base, "summarizing", base=base)
+            st.set_stage(base, "summarizing", base=base, est_sec=st.summary_estimate())
             r = summarize.suggest_title(base)
             if isinstance(r, dict) and r.get("stored"):
                 ok = True
@@ -438,11 +466,22 @@ def sync_voice_memos(dry_run=False) -> dict:
     return r
 
 
+def _empty_audio(p) -> bool:
+    """A 0-byte file of an audio type in a watched folder: iter_audio skips
+    it until it has bytes."""
+    p = Path(p)
+    try:
+        return (p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith((".", "~$"))
+                and p.is_file() and p.stat().st_size == 0)
+    except OSError:
+        return False
+
+
 def iter_audio(folder: Path):
     if not Path(folder).is_dir():
         return
     for p in sorted(Path(folder).iterdir()):
-        if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
+        if config.is_source_audio(p):
             yield p
 
 
@@ -547,6 +586,10 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
                     diarize=opts["do_diarize"], verify=opts.get("verify", False))
 
     report("downloading")
+    if src.stat().st_size == 0:
+        # no bytes is no audio: one line, like any file ffmpeg cannot read,
+        # never a traceback
+        raise audio.UnreadableAudio(f"{key} is empty (0 bytes)")
     if not ic.materialize(src):
         raise RuntimeError("iCloud file did not fully materialize")
     # resolved again now the bytes are here: a Voice Memos date tag cannot
@@ -560,11 +603,12 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     import json as _json
     input_opts = None
     side = src.with_suffix(".opts.json")
-    if side.exists():
-        try:
+    try:
+        if side.exists():
             input_opts = _json.loads(side.read_text())
-        except (OSError, ValueError):
-            input_opts = None
+    except (OSError, ValueError):
+        # unreadable, or a name past the 255-byte limit (no such sidecar)
+        input_opts = None
 
     # the source's content fingerprint, taken NOW: after this returns the file
     # may have been moved into the meeting folder (or, for a video, replaced by
@@ -611,20 +655,92 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
         ok, why = safe_to_delete(src, dest_audio, src_fp, src_size)
         if ok:
             src.unlink()
-            side.unlink(missing_ok=True)  # the layout now lives in the meeting .json
             from stt import provenance
-            provenance.sidecar_path(src).unlink(missing_ok=True)
+            # the layout now lives in the meeting .json. A sidecar name past
+            # the 255-byte limit raises, and no such sidecar can exist
+            for extra in (side, provenance.sidecar_path(src)):
+                try:
+                    extra.unlink(missing_ok=True)
+                except OSError:
+                    pass
         else:
             print(f"   kept the source {src.name}: {why}", file=sys.stderr, flush=True)
 
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
-    summary = f"{res['n_speakers']} speaker(s), {round(res['duration_sec'] / 60, 1)} min"
+    summary = f"{res['n_speakers']} speaker(s), {output.length_text(res['duration_sec'])}"
     return {"ok": success, "key": key, "base": base, "mtime": mtime,
             "fp": src_fp, "size": src_size,
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
             "diarizer": res.get("diarizer")}
+
+
+def _descendants(pid: int) -> list:
+    """Every live descendant of `pid` (children, their children, ...), from
+    one pass over the process table. Empty when ps cannot run."""
+    try:
+        out = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    kids = {}
+    for ln in out.splitlines():
+        try:
+            child, parent = (int(x) for x in ln.split())
+        except ValueError:
+            continue
+        kids.setdefault(parent, []).append(child)
+    found, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            if c not in found:
+                found.append(c)
+                todo.append(c)
+    return found
+
+
+def _stop_own_processes():
+    """SIGTERM every process this batch started (the --parallel workers,
+    ffmpeg, the speakrs helper), so none survives as a multi-GB orphan.
+
+    When the batch leads its process group (launchd starts it so), the
+    whole group goes, ourselves included. When it does NOT lead it, the
+    group belongs to whoever started it: a shell or script that ran the
+    batch as a background job, or caffeinate for a panel run. A group kill
+    then also ended that caller, so only our own descendants are signalled,
+    and the caller sees the batch exit."""
+    me = os.getpid()
+    try:
+        pgid = os.getpgid(0)
+    except OSError:
+        pgid = None
+    if pgid == me:
+        os.killpg(pgid, signal.SIGTERM)  # includes ourselves
+        return
+    for pid in _descendants(me):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _machine_at_fault(e) -> bool:
+    """True when a failure is this Mac's, not the file's: a full disk, or a
+    folder the batch may not write. It never counts toward setting the file
+    aside, so the file runs again once space is freed."""
+    if isinstance(e, audio.WriteFailed):
+        return True
+    return isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT,
+                                                  errno.EROFS)
+
+
+def _trace(e):
+    """Print the traceback of a failed file, except for an ffmpeg failure:
+    its one-line reason (audio.UnreadableAudio, audio.WriteFailed) says it
+    all."""
+    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed)):
+        traceback.print_exc()
 
 
 def _requeue_if_unintended(claimed_job) -> bool:
@@ -639,10 +755,13 @@ def _requeue_if_unintended(claimed_job) -> bool:
     return True
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source", default=str(config.ICLOUD_DIR))
-    ap.add_argument("--dest", default=str(config.MEETINGS_DIR))
+    ap.add_argument("--dest", default=str(config.MEETINGS_DIR),
+                    help="the meetings folder to write into (default: the library). "
+                         "A run into any other folder writes no descriptions or "
+                         "automatic titles")
     ap.add_argument("--no-diarize", action="store_true")
     ap.add_argument("--keep-original", action="store_true")
     ap.add_argument("--only", help="only files whose name contains this substring")
@@ -669,14 +788,20 @@ def main():
                     help="queued-job id (panel): claimed from the queue once the "
                          "lock is held, so a lost lock race never loses the job")
     ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     if control.is_paused() and not args.ignore_pause and not args.dry_run:
         print("Automatic processing is paused (resume from the menu bar); exiting.")
         return 0
 
-    lock = acquire_lock()
-    if lock is None:
+    # a dry run writes nothing, so it previews even while a batch runs: it
+    # takes no lock, and it never touches the running batch's batch.lock
+    lock = None if args.dry_run else acquire_lock()
+    if lock is None and not args.dry_run:
         print("Another batch is already running; exiting (this is normal)."
               + (" The queued job stays queued." if args.job else ""))
         return 0
@@ -691,8 +816,9 @@ def main():
     claimed_job = None
 
     # graceful stop: abandon in-flight work safely and record a clean status.
-    # CRITICAL: take the whole process group down with us — --parallel workers
-    # are separate processes that would otherwise survive as multi-GB orphans.
+    # CRITICAL: take every process we started down with us — --parallel
+    # workers are separate processes that would otherwise survive as multi-GB
+    # orphans — but never the shell that started us (_stop_own_processes).
     def _terminate(signum, frame):
         print("Stop requested — aborting current file(s); originals preserved.",
               flush=True)
@@ -701,7 +827,7 @@ def main():
         status.end_run()
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         try:
-            os.killpg(os.getpgid(0), signal.SIGTERM)  # includes ourselves
+            _stop_own_processes()
         except (ProcessLookupError, PermissionError):
             pass
         os._exit(130)
@@ -719,6 +845,14 @@ def main():
     if not preflight_source(source):
         return 3
     dest.mkdir(parents=True, exist_ok=True)
+    # descriptions and automatic titles resolve a meeting through the
+    # library (config.meetings_dir()), never --dest. A run that writes
+    # somewhere else must not read or rewrite the library's same-named
+    # meeting, so it writes none.
+    describe = config.is_live_store(dest)
+    if not describe and not args.dry_run:
+        print("note: --dest is not the meetings library, so this run writes no "
+              "descriptions or automatic titles", flush=True)
     if not args.dry_run:
         clean_scratch()
         # size caps: logs/ at 10 MB keeping 3 gzips, calibration.jsonl at
@@ -771,11 +905,13 @@ def main():
                 print(f"   skip (not a file): {p}", file=sys.stderr)
     from stt import holds
     held = holds.items()
+    found = set()          # the --files names a source file carries
     for src in iter_sources(source):
         if args.paths and wanted is None:
             break  # explicit-paths run: don't also sweep the source folder
         if wanted is not None and src.name not in wanted:
             continue
+        found.add(src.name)
         if args.only and args.only.lower() not in src.name.lower():
             continue
         # a held file is parked ON PURPOSE: every automatic sweep leaves it alone.
@@ -792,7 +928,28 @@ def main():
         if not args.force and manifest.is_processed(m, src.name, mtime):
             skipped += 1
             continue
+        # a file that keeps failing is set aside until it changes
+        # (manifest.record_failure). Naming it (Retry, --files) or --force
+        # still runs it.
+        if wanted is None and not args.force and manifest.is_parked(m, src.name, src):
+            print(f"   set aside after failing, skipping: {src.name} (it runs again "
+                  "once the file changes, or on Retry)", flush=True)
+            skipped += 1
+            continue
         todo.append(src)
+
+    # a --files name no source file carries says so, as a bad --paths path
+    # does: a Redo of a file that left the source folder printed nothing and
+    # looked like a success. It counts as skipped.
+    found |= {p.name for p in explicit_paths}
+    missing = sorted(wanted - found) if wanted is not None else []
+    empty = {p.name for folder in config.source_dirs(source) if Path(folder).is_dir()
+             for p in Path(folder).iterdir() if p.name in missing and _empty_audio(p)}
+    for name in missing:
+        # an empty file is there, so "not found" sent the owner looking for it
+        why = "is empty (0 bytes), skipped" if name in empty else None
+        print(f"   {name} {why}" if why else f"   not found in source: {name}",
+              file=sys.stderr, flush=True)
 
     # shortest first: a short recording never waits behind multi-hour board
     # meetings that happen to sort first by name (stt.queue_order)
@@ -800,8 +957,16 @@ def main():
     if args.dry_run:
         for src in todo:
             print(f"[would process] {src.name}")
-        print(f"\n{len(todo)} to process, {skipped} already done.")
+        # an empty file is skipped without a word on every run (it may be a
+        # copy still arriving); the preview is where the owner asks why
+        for folder in config.source_dirs(source):
+            for p in (sorted(Path(folder).iterdir()) if Path(folder).is_dir() else []):
+                if _empty_audio(p):
+                    print(f"[skipped, 0 bytes] {p.name}")
+        print(f"\n{len(todo)} to process, {skipped} already done"
+              + (f", {len(missing)} not found." if missing else "."))
         return 0
+    skipped += len(missing)
 
     if args.job is not None:
         # claim only now, with every abort guard (lock, battery, folders, token)
@@ -815,7 +980,9 @@ def main():
     # its own list (--files/--paths/--only/--force) runs exactly that list.
     sweep = not (args.paths or args.files or args.only or args.force)
     control.clear_finish()  # a stale "stop after this file" never cuts this run short
-    status.start_run([s.name for s in todo], sweep=sweep)
+    from stt import summarize as _summarize
+    status.start_run([s.name for s in todo], sweep=sweep,
+                     summarizes=bool(describe and _summarize.available()))
     base_opts = {"do_diarize": not args.no_diarize,
                  "strict": args.strict or config.STRICT,
                  "verify": args.verify or config.VERIFY,
@@ -830,6 +997,7 @@ def main():
         return base_opts
 
     processed = failed = 0
+    started = {}    # name -> the source path, for every file this run started
     succeeded = []  # keys of files that fully processed (for auto-summary)
     failed_names = set()  # files that failed THIS run — never retried in rescan
     _overridden_holds = set()   # parks the caller overrode by naming the file
@@ -880,13 +1048,17 @@ def main():
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             processed += 1
-            # the description lands NOW, while the next file transcribes —
-            # not hours later when the whole backlog ends (and never lost to
-            # a Stop pressed before then). The automatic title may rename the
+            # the description lands NOW, not hours later when the whole
+            # backlog ends (and never lost to a Stop pressed before then).
+            # One file at a time, it runs here BEFORE the next file starts
+            # (with --parallel, while the other workers transcribe), so the
+            # stage counts down from recent summary times
+            # (status.summary_estimate). The automatic title may rename the
             # folder, so the end-of-run sweep gets the folder's final name.
             track = {"base": res.get("base")}
             try:
-                summarize_one(res["key"], res.get("base"), track=track)
+                if describe:
+                    summarize_one(res["key"], res.get("base"), track=track)
             finally:
                 succeeded.append((res["key"], track.get("base")))
         else:
@@ -894,6 +1066,7 @@ def main():
             status.finish_file(res["key"], False, "failed")
             failed_names.add(res["key"])
             failed += 1
+            note_failure(res["key"], "failed")
 
     queue = list(todo)       # files still to start, re-sorted before every pick
     in_flight = set()        # names started and not yet finished (--parallel)
@@ -934,6 +1107,8 @@ def main():
             try:
                 if manifest.is_processed(cur, src.name, src.stat().st_mtime):
                     continue
+                if manifest.is_parked(cur, src.name, src):
+                    continue    # set aside after failing: an automatic sweep skips it
             except OSError:
                 continue
             out.append(src)
@@ -962,6 +1137,7 @@ def main():
             if hold_skips(src):
                 announce_hold(src.name)
                 continue
+            started[src.name] = src
             return src
 
     def run_one_at_a_time():
@@ -973,7 +1149,7 @@ def main():
             try:
                 _record(process_one(str(src), str(dest), opts_for(src)), 1)
             except Exception as e:
-                traceback.print_exc()
+                _trace(e)
                 nonlocal_fail(src.name, e)
 
     def run_in_parallel():
@@ -1043,7 +1219,7 @@ def main():
                         nonlocal_fail(src.name, RuntimeError(
                             "crashed its worker process twice — file skipped"))
                     except Exception as e:
-                        traceback.print_exc()
+                        _trace(e)
                         nonlocal_fail(src.name, e)
             if pool_ok:
                 return
@@ -1055,6 +1231,22 @@ def main():
         failed_names.add(name)
         print(f"   FAILED: {name}: {e}  (original preserved)", file=sys.stderr, flush=True)
         status.finish_file(name, False, str(e))
+        if not _machine_at_fault(e):
+            note_failure(name, str(e), unreadable=isinstance(e, audio.UnreadableAudio))
+
+    def note_failure(name, why, unreadable=False):
+        """Count the failure against the unchanged file, and say so when it
+        sets the file aside. Never fails the run."""
+        src = started.get(name)
+        if src is None:
+            return
+        try:
+            rec = manifest.record_failure(name, src, why, unreadable=unreadable)
+        except Exception:
+            return
+        if rec.get("parked"):
+            print(f"   set aside: automatic runs skip {name} until the file changes "
+                  "(Retry runs it now)", file=sys.stderr, flush=True)
 
     if args.parallel > 1:
         run_in_parallel()
@@ -1062,7 +1254,7 @@ def main():
         run_one_at_a_time()
     claimed_job = None  # the work is done — a stray late SIGTERM must not re-queue it
 
-    if not args.dry_run and succeeded:
+    if not args.dry_run and succeeded and describe:
         n_sum = auto_summarize(succeeded)
         if n_sum:
             print(f"  auto-summarized {n_sum} meeting(s)", flush=True)
@@ -1085,7 +1277,7 @@ def main():
 
     # idle now: the queue is done. Refresh descriptions a Redo left out of
     # date, unless a stop was asked or a panel job waits (it chains below)
-    if not args.dry_run and not finish["asked"] and not jobs.items():
+    if not args.dry_run and describe and not finish["asked"] and not jobs.items():
         n_re = regenerate_stale()
         if n_re:
             print(f"  refreshed {n_re} out-of-date description(s)", flush=True)

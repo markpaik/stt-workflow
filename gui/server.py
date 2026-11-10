@@ -6,6 +6,7 @@ the same entrypoints the CLI uses, so the panel can never bypass the pipeline's
 locks and safety rails.
 """
 import json
+import math
 import os
 import plistlib
 import re
@@ -13,14 +14,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from gui import jobqueue
 from stt import (config, control, dates, dupes, export, groups, identify, jobs,
-                 manifest, output, queue_order, rates, recorder, review, search,
-                 series, status, titles, unknowns)
+                 manifest, names, output, queue_order, rates, recorder, review,
+                 search, series, status, titles, unknowns)
+from stt.errors import UserError
 
 PORT = 8737
 # A voice with less talk than this hides behind a count instead of asking to
@@ -41,7 +44,7 @@ AGENT = Path(config._home_default(
     "LaunchAgents/com.stt-workflow.batch.plist",
     Path.home() / "Library/LaunchAgents/com.stt-workflow.batch.plist"))
 LABEL = "com.stt-workflow.batch"
-RUN_SH = config.PROJECT_DIR / "run.sh"
+RUN_SH = config.CODE_DIR / "run.sh"     # code, never the data home
 
 _SAME_ORIGIN = re.compile(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?(/|$)")
 
@@ -274,6 +277,12 @@ def _est_duration(p: Path):
 
 _meet_cache = {}
 _jobs_kicked = {"at": 0.0}
+# the batch _kick_jobs spawned last. Until it holds batch.lock the process
+# table shows no batch, so a burst of Run clicks (each one clears the
+# cooldown) spawned one batch per click: 120 of them, all but one exiting
+# at once. While the last spawn is still starting, it takes the queue.
+_kicked_proc = {"proc": None, "at": 0.0}
+_SPAWN_STARTUP_SEC = 60.0
 
 
 def _kick_jobs():
@@ -291,8 +300,12 @@ def _kick_jobs():
         return
     if _time.monotonic() - _jobs_kicked["at"] < 15:
         return
+    p = _kicked_proc["proc"]
+    if (p is not None and p.poll() is None
+            and _time.monotonic() - _kicked_proc["at"] < _SPAWN_STARTUP_SEC):
+        return      # still starting up: it claims the head job itself
     _jobs_kicked["at"] = _time.monotonic()
-    _spawn(jobs.spawn_args(nxt[0]))
+    _kicked_proc.update(proc=_spawn(jobs.spawn_args(nxt[0])), at=_time.monotonic())
 
 
 # ---------- duplicate transcripts: computed OFF the poll thread ----------
@@ -371,7 +384,8 @@ def _dupe_pair_rows(dst_dir=None):
             if not meta:
                 break
             sides.append({"base": base, "title": meta["title"], "date": meta["date"],
-                          "minutes": meta["minutes"], "speakers": meta["speakers"],
+                          "minutes": meta["minutes"], "seconds": meta["seconds"],
+                          "speakers": meta["speakers"],
                           "source_file": meta.get("source_file")})
         if len(sides) == 2:
             rows.append({"a": sides[0], "b": sides[1], "score": p["score"]})
@@ -515,6 +529,15 @@ def _display_title(base: str) -> str:
     return dates.strip_stamp(base)
 
 
+def _shown_title(d: dict, base: str) -> str:
+    """_display_title(base), or the stored title as typed when the folder
+    holds it in its safe form (dates.shown_title): '1:1' on '... 1-1'."""
+    shown = dates.shown_title(d.get("title") if isinstance(d, dict) else None, base)
+    if shown != dates.title_of(base):
+        return shown + dates.twin_suffix(base)
+    return _display_title(base)
+
+
 def _archived_title(base: str) -> str:
     """The display title of an ARCHIVED meeting, read from its own folder.
 
@@ -602,9 +625,13 @@ def _meeting_meta(j: Path, dst_dir: Path):
                 "date": iso,
                 # display name: the folder carries the date so recurring
                 # meetings stay unique on disk, but the panel shows the clean
-                # name (the date is shown separately)
-                "title": _display_title(j.stem),
+                # name (the date is shown separately). A title typed with a
+                # ':' or '/' shows as typed ('1:1' on a '... 1-1' folder)
+                "title": _shown_title(d, j.stem),
                 "minutes": round(d.get("duration_sec", 0) / 60),
+                # whole seconds: a clip under a minute rounds to 0 minutes,
+                # and the page shows '22 sec' for it, never '0 min'
+                "seconds": round(float(d.get("duration_sec") or 0)),
                 "speakers": [s["display"] for s in d.get("speakers", [])],
                 "named": sorted(named, key=lambda k: -named[k]),
                 # {display: cluster id} for the voices this meeting heard but
@@ -788,14 +815,31 @@ def _dismissed_failures() -> dict:
         return {}
 
 
-def _voice_ids(b: dict):
+def _voice_ids(b):
     """The clusters a per-meeting voice request acts on: the body's
     `speakers` list (every cluster of one split voice) when it sends one,
     else its single `speaker`, as before the list existed."""
-    sids = b.get("speakers")
-    if isinstance(sids, list) and sids:
+    sids = b.texts("speakers", None)
+    if sids:
         return sids
-    return b.get("speaker", "")
+    return b.text("speaker", "")
+
+
+def _folder_kind(b) -> str:
+    """`which` for the folder pickers. Anything but "source" used to mean
+    the transcripts folder, so a typo moved the meeting store."""
+    which = b.text("which")
+    if which not in ("source", "dest"):
+        raise BadRequest("'which' must be source or dest")
+    return which
+
+
+def _handle(b, key):
+    """One side of a merge: ("uid", "U003") or ("name", "Jordan")."""
+    kind, sep, value = b.text(key).partition(":")
+    if not sep or kind not in ("uid", "name") or not value:
+        raise BadRequest(f"'{key}' must look like uid:U003 or name:Jordan")
+    return kind, value
 
 
 _dismiss_lock = threading.Lock()
@@ -895,7 +939,8 @@ def _run_order(queue, pending, sweep):
         if not sweep and f["name"] in at:
             return (0, at[f["name"]], by_length)
         return (1, 0, by_length)
-    waiting = [f for f in queue if not f.get("processed") and not f.get("held")]
+    waiting = [f for f in queue if not f.get("processed") and not f.get("held")
+               and not f.get("parked")]
     return {f["name"]: i for i, f in enumerate(sorted(waiting, key=key))}
 
 
@@ -983,13 +1028,15 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
                         "suggested_title": meta["suggested"],
                         "suggested_date": meta["date"],
                         "has_audio": bool(meta["audio"]),
-                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "minutes": meta["minutes"], "seconds": meta["seconds"],
+                        "speakers": meta["speakers"],
                         "named": meta["named"],
                         "unnamed_clusters": meta["unnamed_clusters"],
                         "summary": _preview(meta["summary"])})
         else:
             row.update({"id": meta["base"], "state": "ready",
-                        "minutes": meta["minutes"], "speakers": meta["speakers"],
+                        "minutes": meta["minutes"], "seconds": meta["seconds"],
+                        "speakers": meta["speakers"],
                         "named": meta["named"],
                         "category": meta["category"],
                         "review_substantial": meta["flagged"],
@@ -1024,7 +1071,15 @@ def _timeline_tray(st, queue, meetings, active_out, unknown_list, rec, order=Non
         elif name in failed_map:
             row.update({"state": "failed", "error": failed_map[name],
                         "retry_note": "still in the watched folder — it re-runs on the next batch"})
+            if f.get("parked"):
+                row.update({"parked": True,
+                            "retry_note": "set aside after failing — automatic runs skip it "
+                                          "until the file changes; Retry runs it now"})
             failed_entries.append(row)
+        elif f.get("parked"):
+            # a set-aside failure the user dismissed: no automatic run picks
+            # it, so it must not read as waiting
+            continue
         else:
             row["state"] = "waiting"
             if order and name in order:
@@ -1257,7 +1312,7 @@ def _queue_and_dupes():
             pass
     try:
         for p in _qfiles:
-            if p.is_file() and p.suffix.lower() in config.AUDIO_EXTS and not p.name.startswith("."):
+            if config.is_source_audio(p):
                 done = manifest.is_processed(m, p.name, p.stat().st_mtime)
                 dur = None if done else _est_duration(p)
                 est_min, est_detail = None, None
@@ -1283,7 +1338,9 @@ def _queue_and_dupes():
                               # the length the batch orders its picks by
                               # (shortest first): the run order below
                               "dur_sec": dur,
-                              "held": p.name in _held, "est_detail": est_detail})
+                              "held": p.name in _held, "est_detail": est_detail,
+                              # set aside after failing: automatic runs skip it
+                              "parked": (not done) and manifest.is_parked(m, p.name, p)})
                 if not done:
                     _qpaths[p.name] = p    # for the duplicate check below
     except Exception:
@@ -1471,9 +1528,15 @@ def gather_state():
     if running:
         pend_secs = 0.0
         pend_names = set(st.get("pending", []))
+        # a run into the library writes a description after each file: one
+        # summary for every waiting file, and for every active file whose
+        # summary has not started (the summarizing stage counts down itself)
+        per_summary = status.summary_estimate(st) if st.get("summarizes") else 0.0
         for f in queue:
             if f["name"] in pend_names and f.get("est_min"):
-                pend_secs += f["est_min"] * 60
+                pend_secs += f["est_min"] * 60 + per_summary
+        pend_secs += per_summary * sum(1 for e in active.values()
+                                       if e.get("stage") != "summarizing")
         overall_eta = round((active_eta_sum + pend_secs) / n_active) if (active_eta_sum or pend_secs) else None
     rec_state = _recording_state()  # resolved once: reused by the live banner AND the timeline
     order = _run_order(queue, st.get("pending", []) if running else [],
@@ -1737,8 +1800,8 @@ def _spawn(args):
     with open(config.PROJECT_DIR / "logs" / "spawned.log", "a") as log:
         log.write(f"\n--- {' '.join(str(a) for a in args)}\n")
         log.flush()
-        subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
-                         stdout=log, stderr=log, start_new_session=True)
+        return subprocess.Popen(args, cwd=str(config.PROJECT_DIR),
+                                stdout=log, stderr=log, start_new_session=True)
 
 
 def _relabel_all_background(reason: str):
@@ -1917,6 +1980,164 @@ def _suggested(meta, speakers) -> list:
     return out
 
 
+# ---------- request validation ----------
+# One layer between the client and every handler. A request the client got
+# wrong -- a body that is not one JSON object, a missing field, a field of the
+# wrong type -- answers HTTP 400 with a plain message that names the field.
+# A planned failure whose message was written for a person (stt.errors.
+# UserError: "Google Chrome not found -- export Word instead") answers with
+# that message. Anything else that goes wrong answers 500 with one fixed
+# sentence, and the detail (route, exception, traceback) goes to the panel's
+# log instead: exception text carries server paths and Python internals, and
+# the panel shows the `error` text to the user as it is.
+
+class BadRequest(Exception):
+    """The client's mistake. Answered with HTTP `code` (400 unless given) and
+    `msg` as the `error` text. `msg` is written for a person: it never holds
+    exception text or a filesystem path."""
+
+    def __init__(self, msg: str, code: int = 400):
+        super().__init__(msg)
+        self.msg, self.code = msg, code
+
+
+INTERNAL_ERROR = ("Something went wrong in the panel. The details are in the "
+                  "panel log.")
+# no JSON body the panel sends comes near this; a file goes to /api/upload
+_BODY_MAX = 8 << 20
+_REQUIRED = object()
+
+
+def _no_constant(name):
+    # Python's json reads NaN, Infinity and -Infinity, which are not JSON. A
+    # NaN time compares as nothing (`end <= start` is False for it), and a
+    # stored one writes a bare NaN token that no browser JSON.parse reads.
+    raise ValueError(f"{name} is not a JSON number")
+
+
+class Fields(dict):
+    """A request's parameters with typed reads: the JSON object body of a
+    POST, or the query string of a GET (`query=True`: every value arrives as
+    text, and a number is parsed from it).
+
+    It is still a dict, so `.get()` and `in` work as before, and `f["key"]`
+    on a key the client left out raises BadRequest, not KeyError.
+
+    Each reader takes `default`. Left out, the field is required. Given, a
+    missing or null field reads as the default. A field that is present with
+    the wrong type is always a 400: a mistake is never read as the default."""
+
+    def __init__(self, data=(), query=False):
+        super().__init__(data)
+        self.query = query
+
+    def __missing__(self, key):
+        raise BadRequest(f"missing field '{key}'")
+
+    def _value(self, key, default):
+        """(absent, value): the default when the field is missing or null."""
+        v = dict.get(self, key)
+        if v is None:
+            if default is _REQUIRED:
+                raise BadRequest(f"missing field '{key}'")
+            return True, default
+        return False, v
+
+    def text(self, key, default=_REQUIRED, max_len=None):
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, str):
+            raise BadRequest(f"'{key}' must be text")
+        if max_len is not None and len(v) > max_len:
+            raise BadRequest(f"'{key}' is too long ({max_len} characters at most)")
+        return v
+
+    def _range(self, key, v, lo, hi):
+        if (lo is not None and v < lo) or (hi is not None and v > hi):
+            if lo is not None and hi is not None:
+                raise BadRequest(f"'{key}' must be from {lo} to {hi}")
+            if lo is not None:
+                raise BadRequest(f"'{key}' must be {lo} or more")
+            raise BadRequest(f"'{key}' must be {hi} or less")
+        return v
+
+    def number(self, key, default=_REQUIRED, lo=None, hi=None):
+        """A finite number. NaN and the infinities are refused."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if self.query and isinstance(v, str):
+            try:
+                v = float(v)
+            except ValueError:
+                raise BadRequest(f"'{key}' must be a number") from None
+        if (isinstance(v, bool) or not isinstance(v, (int, float))
+                or not math.isfinite(v)):
+            raise BadRequest(f"'{key}' must be a number")
+        return self._range(key, v, lo, hi)
+
+    def integer(self, key, default=_REQUIRED, lo=None, hi=None):
+        """A whole number. 3.0 reads as 3, and 3.5 is refused."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if self.query and isinstance(v, str):
+            try:
+                v = int(v.strip())
+            except ValueError:
+                raise BadRequest(f"'{key}' must be a whole number") from None
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise BadRequest(f"'{key}' must be a whole number")
+        return self._range(key, v, lo, hi)
+
+    def flag(self, key, default=False):
+        """A JSON true or false, and nothing else. The string "false" is
+        truthy in Python: a delete that read it as a yes deleted the
+        meeting."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, bool):
+            raise BadRequest(f"'{key}' must be true or false")
+        return v
+
+    def texts(self, key, default=_REQUIRED):
+        """A list of text values. A bare string is refused: iterated, it is
+        a list of its characters."""
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise BadRequest(f"'{key}' must be a list of text values")
+        return v
+
+    def obj(self, key, default=_REQUIRED):
+        absent, v = self._value(key, default)
+        if absent:
+            return v
+        if not isinstance(v, dict):
+            raise BadRequest(f"'{key}' must be an object")
+        return v
+
+
+def parse_body(raw: bytes) -> Fields:
+    """A POST body as Fields. An empty body is {}: several buttons post none.
+    Anything that is not one JSON object is the client's mistake."""
+    if not raw.strip():
+        return Fields()
+    try:
+        obj = json.loads(raw, parse_constant=_no_constant)
+    except (ValueError, RecursionError):
+        # JSONDecodeError and UnicodeDecodeError are both ValueErrors
+        raise BadRequest("the request body is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise BadRequest("the request body must be a JSON object")
+    return Fields(obj)
+
+
 # ---------- HTTP ----------
 
 class Handler(BaseHTTPRequestHandler):
@@ -1931,9 +2152,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        return json.loads(self.rfile.read(n) or b"{}")
+    def _body(self) -> Fields:
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise BadRequest("Content-Length must be a number") from None
+        if n < 0:
+            raise BadRequest("Content-Length must be a number")
+        if n > _BODY_MAX:
+            raise BadRequest("the request body is too large", 413)
+        return parse_body(self.rfile.read(n) if n else b"")
+
+    def _failed(self, route):
+        """An error nobody planned for. The route, the exception and its
+        traceback go to the panel log (stderr, which launchd writes to
+        logs/gui.err.log). The client gets INTERNAL_ERROR and no detail."""
+        print(f"panel: {self.command} {route} failed", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        try:
+            self._json({"error": INTERNAL_ERROR}, 500)
+        except OSError:
+            pass    # the client is gone
 
     def _serve_audio(self, audio_f):
         """Serve an audio file with byte-range support (a <audio> element seeks
@@ -2069,7 +2308,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
-        q = dict(urllib.parse.parse_qsl(u.query))
+        q = Fields(urllib.parse.parse_qsl(u.query), query=True)
         if not (_host_allowed(self.headers) and _origin_allowed(self.headers)):
             self._json({"error": "forbidden"}, 403)
             return
@@ -2105,18 +2344,15 @@ class Handler(BaseHTTPRequestHandler):
                             "truncated": dupes.cache_truncated(),
                             "threshold": dupes.THRESHOLD})
             elif u.path == "/api/snippet":
-                meeting = q.get("meeting", "")
+                meeting, speaker = q.get("meeting", ""), q.text("speaker")
                 if meeting and not _known_base(meeting):
                     # a stale reference (a meeting renamed/deleted before the
                     # registries tracked renames) must not kill playback — the
                     # client string is DISCARDED, never used as a path, and
                     # find_voice_clip searches the real library instead
                     meeting = ""
-                try:
-                    secs = float(q.get("secs", 30.0))  # default sample length for ▶ playback
-                except ValueError:
-                    secs = 30.0
-                f = _snippet_for(meeting, q["speaker"], secs=secs)
+                # 30 s is the default sample length for ▶ playback
+                f = _snippet_for(meeting, speaker, secs=q.number("secs", 30.0))
                 if f is None:
                     self._json({"error": "no snippet"}, 404)
                     return
@@ -2147,7 +2383,8 @@ class Handler(BaseHTTPRequestHandler):
                     items.append({"base": b, "title": _display_title(b),
                                   "date": d.get("date") or dates.meeting_date(b) or "",
                                   "category": d.get("category"),
-                                  "minutes": round(d.get("duration_sec", 0) / 60)})
+                                  "minutes": round(d.get("duration_sec", 0) / 60),
+                                  "seconds": round(float(d.get("duration_sec") or 0))})
                 items.sort(key=lambda r: r["date"] or "", reverse=True)
                 self._json({"items": items})
             elif u.path == "/api/voice_clips":
@@ -2217,7 +2454,7 @@ class Handler(BaseHTTPRequestHandler):
                     "talk_secs": round(sum(s.get("end", 0) - s.get("start", 0)
                                            for s in mine), 1)})
             elif u.path == "/api/transcript":
-                base = q["base"]
+                base = q.text("base")
                 if not self._require_base(base):
                     return
                 j = config.meeting_file(base, ".json")
@@ -2351,8 +2588,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 self._json({"error": "not found"}, 404)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
+        except BadRequest as e:
+            self._json({"error": e.msg}, e.code)
+        except UserError as e:
+            # planned, and its text is the help ("Google Chrome not found
+            # -- export Word instead"): shown as it is
+            self._json({"ok": False, "error": str(e)}, e.code)
+        except Exception:
+            self._failed(u.path)
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -2363,37 +2606,41 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/upload":
                 # raw-body upload — must branch BEFORE _body(), which would
                 # buffer the whole file and try to parse it as JSON
-                self._upload(dict(urllib.parse.parse_qsl(u.query)))
+                self._upload(Fields(urllib.parse.parse_qsl(u.query), query=True))
                 return
             b = self._body()
             if u.path == "/api/run":
                 # every run goes through the job queue: it starts immediately
                 # when the machine is idle, and WAITS (visible in the panel)
                 # when a batch is already running — a Redo is never lost.
-                files = b.get("files") or []
-                paths = b.get("paths") or []
-                names = files + [Path(p).name for p in paths]
-                label = (", ".join(names[:2]) + (f" +{len(names)-2} more" if len(names) > 2 else "")
-                         ) if names else "all new recordings"
+                files = b.texts("files", [])
+                paths = b.texts("paths", [])
+                picked = files + [Path(p).name for p in paths]
+                label = (", ".join(picked[:2])
+                         + (f" +{len(picked)-2} more" if len(picked) > 2 else "")
+                         ) if picked else "all new recordings"
                 busy = bool(control.snapshot()["pids"])
-                jobs.add({"files": files, "paths": paths, "force": bool(b.get("force")),
-                          "strict": bool(b.get("strict")), "verify": bool(b.get("verify")),
-                          "onetime": bool(b.get("onetime")),
-                          "parallel": int(b.get("parallel", 1)), "label": label})
+                jobs.add({"files": files, "paths": paths, "force": b.flag("force"),
+                          "strict": b.flag("strict"), "verify": b.flag("verify"),
+                          "onetime": b.flag("onetime"),
+                          "parallel": b.integer("parallel", 1, lo=1, hi=2),
+                          "label": label})
                 control.clear_stopping()  # an explicit new run overrides a recent Stop
                 _jobs_kicked["at"] = 0.0  # a fresh click may bypass the cooldown
                 _kick_jobs()
                 self._json({"ok": True, "queued": busy})
             elif u.path == "/api/unqueue":
-                self._json({"ok": jobs.remove(float(b["at"]))})
+                self._json({"ok": jobs.remove(float(b.number("at")))})
             elif u.path == "/api/pick_folder":
-                p = pick_folder(b.get("prompt", "Choose a folder"))
+                which = _folder_kind(b)
+                p = pick_folder(b.text("prompt", "Choose a folder", max_len=200))
                 if p is None:
                     self._json({"cancelled": True})
                 else:
-                    self._json(set_folder(b["which"], p))
+                    self._json(set_folder(which, p))
             elif u.path == "/api/set_folder":
-                self._json(set_folder(b["which"], b["path"], bool(b.get("confirm"))))
+                self._json(set_folder(_folder_kind(b), b.text("path"),
+                                      b.flag("confirm")))
             elif u.path == "/api/pick_files":
                 fs = pick_files()
                 self._json({"cancelled": True} if fs is None else {"ok": True, "paths": fs})
@@ -2407,12 +2654,11 @@ class Handler(BaseHTTPRequestHandler):
                 control.resume()
                 self._json({"ok": True})
             elif u.path == "/api/schedule":
-                hh, mm = int(b["hour"]), int(b["minute"])
-                assert 0 <= hh < 24 and 0 <= mm < 60
-                write_schedule(hh, mm)
+                write_schedule(b.integer("hour", lo=0, hi=23),
+                               b.integer("minute", lo=0, hi=59))
                 self._json({"ok": True})
             elif u.path == "/api/model":
-                choice = b["model"]
+                choice = b.text("model")
                 # only a model the settings UI actually offers. Any other string
                 # went into STT_ASR_BACKEND verbatim, so a plain typo silently
                 # corrupted the backend setting, and this was the route the
@@ -2441,7 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
                 # every failure here answers with an empty preview, never an
                 # error the user has to read.
                 vec, uids, here = None, (), None
-                if b.get("uid"):
+                if b.text("uid", ""):
                     vec = unknowns.samples_of(b["uid"])
                     if vec is None:
                         # already named, merged or forgotten: the save itself
@@ -2458,7 +2704,7 @@ class Handler(BaseHTTPRequestHandler):
                             config.meeting_file(b["meeting"], ".diar.npz"))
                     except (OSError, ValueError, KeyError):
                         cent_emb = {}
-                    vec = cent_emb.get(b.get("speaker"))
+                    vec = cent_emb.get(b.text("speaker", ""))
                     here = b["meeting"]
                 try:
                     from stt import centroids
@@ -2474,24 +2720,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"targets": tgts, "here": here,
                             "looks_like": _looks_like(vec)})
             elif u.path == "/api/name":
-                name = str(b.get("name") or "").strip()
+                name = b.text("name", "", max_len=200).strip()
+                local, uid = b.flag("local"), b.text("uid", "")
+                if names.has_unsafe(name):
+                    # a newline split the .txt header and the roster, and a
+                    # bidi control reorders how the name displays
+                    self._json({"ok": False, "error": names.UNSAFE_NAME})
+                    return
                 # An empty name is the documented UNDO for a meeting-local
                 # label (set_local_name drops the entry). It means nothing
                 # anywhere else: an enrollment and a uid promotion have no
                 # entry to clear, so an empty name there is simply a mistake.
                 # The old bare `assert name` refused the undo outright, which
                 # left a meeting-local label removable only by a full Redo.
-                if not name and not (b.get("local") and not b.get("uid")):
+                if not name and not (local and not uid):
                     self._json({"ok": False, "error": "Type a name first."})
                     return
-                if name and not b.get("local"):
+                if name and not local:
                     if identify.reserved_name(name):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
                         return
                     # the enrolled spelling, so a case variant names the
                     # existing person and relabels under the name she has
                     name = identify.canonical_name(name)
-                confirm = bool(b.get("confirm"))
+                confirm = b.flag("confirm")
 
                 def _warn_payload(w):
                     # additive: ok stays boolean, error stays the inline text
@@ -2507,7 +2759,7 @@ class Handler(BaseHTTPRequestHandler):
                 # which meetings this naming can touch. Each branch below fills
                 # in what it knows before falling through to the shared tail.
                 tgt = {"vector": None, "names": [name], "uids": (), "first": None}
-                if b.get("uid"):
+                if uid:
                     # the uid is GONE (already named, merged, or forgotten —
                     # a stale legend chip is the usual way this arrives). Say
                     # so, before anything else: with None samples the quality
@@ -2519,6 +2771,14 @@ class Handler(BaseHTTPRequestHandler):
                         self._json({"ok": False,
                                     "error": "That voice was already named or "
                                              "removed. Refresh and try again."})
+                        return
+                    if (unknowns.load()["speakers"].get(b["uid"]) or {}).get("dropped"):
+                        # "Not a real speaker" keeps a tombstone; a stale tab
+                        # or a direct POST must not name it back to life
+                        self._json({"ok": False,
+                                    "error": "That voice was removed as not a "
+                                             "real speaker, so it cannot be "
+                                             "named. Refresh the page."})
                         return
                     if not confirm:
                         # naming an unknown as an EXISTING person appends the
@@ -2565,7 +2825,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if not self._require_base(b.get("meeting")):
                         return
-                    if b.get("local"):
+                    if local:
                         # a transcript label for THIS meeting only: no floor
                         # check and no enrollment, because nothing is learned.
                         # The panel offers this after the floor refuses the
@@ -2619,7 +2879,7 @@ class Handler(BaseHTTPRequestHandler):
                                              "were naming it. Refresh and try "
                                              "again."})
                         return
-                    if b["speaker"] not in cent_emb:
+                    if b.text("speaker") not in cent_emb:
                         self._json({"ok": False,
                                     "error": "That speaker has no voice embedding "
                                              "in this meeting."})
@@ -2668,7 +2928,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "note": "relabeling the meetings this voice appears in",
                             **res})
             elif u.path == "/api/forget":
-                self._json({"ok": unknowns.drop(b["uid"])})
+                self._json({"ok": unknowns.drop(b.text("uid"))})
             elif u.path == "/api/dismiss_voice":
                 # "Not a real speaker" for a voice the registry never tracked:
                 # a PER-MEETING silence, not a tombstone. /api/forget drops an
@@ -2680,21 +2940,27 @@ class Handler(BaseHTTPRequestHandler):
                 # cluster of one split voice, dismissed or restored in ONE
                 # write, all or none
                 from stt import summarize
-                fn = (summarize.restore_voice if b.get("restore")
+                fn = (summarize.restore_voice if b.flag("restore")
                       else summarize.dismiss_voice)
                 self._json(fn(b["base"], _voice_ids(b)))
             elif u.path == "/api/rename_speaker":
                 # the spelling rename_person will store: an enrolled case
                 # variant of the new name is a merge into that person
+                b.text("name")
+                try:
+                    new = names.person_name(b.text("new"))
+                except names.BadName as e:
+                    self._json({"ok": False, "error": str(e)})
+                    return
                 b["new"] = identify.canonical_name(
-                    b.get("new"), {k: v for k, v in identify.load_registry().items()
-                                   if k != b.get("name")})
+                    new, {k: v for k, v in identify.load_registry().items()
+                          if k != b["name"]})
                 if identify.reserved_name(b["new"]):
                     self._json({"ok": False, "error": identify.RESERVED_ERROR})
                     return
                 # a rename onto an enrolled person is a merge: the same
                 # wrong-person check as /api/merge_speakers, before confirm
-                if (not b.get("confirm") and b["new"] != b.get("name")
+                if (not b.flag("confirm") and b["new"] != b["name"]
                         and b["new"] in identify.load_registry()):
                     prints = identify.load_voiceprints()
                     warn = _merge_warning(b["new"], prints.get(b.get("name")), prints,
@@ -2713,7 +2979,7 @@ class Handler(BaseHTTPRequestHandler):
                     names=[b["name"], b["new"]],
                     vector=identify.load_voiceprints().get(b["new"]))})
             elif u.path == "/api/remove_speaker":
-                ok = identify.remove_person(b["name"])
+                ok = identify.remove_person(b.text("name"))
                 if not ok:
                     self._json({"ok": ok})
                     return
@@ -2722,9 +2988,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok, **_relabel_targets(names=[b["name"]])})
             elif u.path == "/api/merge_speakers":
                 # src/dst are "uid:U003" or "name:Jordan"
-                st_, sv = b["src"].split(":", 1)
-                dt_, dv = b["dst"].split(":", 1)
+                st_, sv = _handle(b, "src")
+                dt_, dv = _handle(b, "dst")
                 if dt_ == "name":
+                    if names.has_unsafe(dv):
+                        self._json({"ok": False, "error": names.UNSAFE_NAME})
+                        return
                     if identify.reserved_name(dv):
                         self._json({"ok": False, "error": identify.RESERVED_ERROR})
                         return
@@ -2732,7 +3001,7 @@ class Handler(BaseHTTPRequestHandler):
                     # the same quality bar as /api/name: folding a voice that
                     # does not match into a person poisons the profile, so a
                     # mismatch asks for confirm first
-                    if not b.get("confirm") and st_ in ("uid", "name"):
+                    if not b.flag("confirm") and st_ in ("uid", "name"):
                         prints = identify.load_voiceprints()
                         rows = (unknowns.samples_of(sv) if st_ == "uid"
                                 else prints.get(sv))
@@ -2775,25 +3044,30 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.rename_meeting(b["base"], b["new"]))
+                self._json(summarize.rename_meeting(b["base"], b.text("new")))
             elif u.path == "/api/ask":
+                # the body's own shape first: a question of the wrong type is
+                # that, whatever meeting it names
+                q_ = b.text("question", "").strip()
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
                 if not summarize.available():
                     self._json({"error": "local LLM not installed"}, 503)
                     return
-                q_ = (b.get("question") or "").strip()
                 if not q_:
                     self._json({"error": "empty question"}, 400)
                     return
                 if len(q_) > 2000:
                     self._json({"error": "question too long (2000 chars max)"}, 400)
                     return
+                # history is optional context: a malformed one is dropped
+                # (test_server_ask), never a reason to refuse the question
                 hist = b.get("history")
+                hist = ([h for h in hist if isinstance(h, dict)]
+                        if isinstance(hist, list) else None)
                 try:
-                    r = summarize.answer_question(
-                        b["base"], q_, history=hist if isinstance(hist, list) else None)
+                    r = summarize.answer_question(b["base"], q_, history=hist)
                     self._json(r, 200 if r.get("ok") else 400)
                 except summarize.LLMBusy:
                     self._json({"error": "The local model is busy with another "
@@ -2805,14 +3079,14 @@ class Handler(BaseHTTPRequestHandler):
                 # to its thread. Busy is a 503 with busy:true, and the page
                 # keeps the typed question.
                 from stt import ask, summarize
-                q_ = (b.get("question") or "").strip()
+                q_ = b.text("question", "").strip()
                 if not q_:
                     self._json({"error": "empty question"}, 400)
                     return
                 if len(q_) > 2000:
                     self._json({"error": "question too long (2000 chars max)"}, 400)
                     return
-                tid = b.get("thread") or None
+                tid = b.text("thread", "") or None
                 if tid is not None and not ask.valid_id(tid):
                     self._json({"error": "no such thread"}, 400)
                     return
@@ -2821,7 +3095,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "no such thread"}, 404)
                     return
                 # a follow-up keeps its thread's scope
-                scope = (prev or {}).get("scope") or b.get("scope") or {"kind": "all"}
+                scope = ((prev or {}).get("scope") or b.obj("scope", None)
+                         or {"kind": "all"})
                 if not isinstance(scope, dict):
                     self._json({"error": "bad scope"}, 400)
                     return
@@ -2843,6 +3118,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if scope.get("kind") == "group":
                     groups.log_use("group_ask")
+                if r.get("nothing_found") and not tid:
+                    # a first question that found nothing starts no thread:
+                    # the page shows the reply and its closest hits unsaved
+                    self._json({"ok": True, "thread": None,
+                                "message": ask.unsaved_message(q_, r),
+                                "scope_label": r.get("scope_label", "")})
+                    return
                 t = ask.save_message(tid, {k: v for k, v in scope.items() if k != "label"},
                                      r.get("scope_label", ""), q_, r)
                 self._json({"ok": True, "thread": t["id"],
@@ -2850,10 +3132,11 @@ class Handler(BaseHTTPRequestHandler):
                             "scope_label": r.get("scope_label", "")})
             elif u.path == "/api/thread_delete":
                 from stt import ask
-                self._json({"ok": ask.delete_thread(b.get("id"))})
+                self._json({"ok": ask.delete_thread(b.text("id", ""))})
             elif u.path == "/api/hide_unknown":
-                ok = (unknowns.archive(b["uid"]) if b.get("hide", True)
-                      else unknowns.restore(b["uid"]))
+                uid = b.text("uid")
+                ok = (unknowns.archive(uid) if b.flag("hide", True)
+                      else unknowns.restore(uid))
                 self._json({"ok": ok})
             elif u.path == "/api/cloud_keys":
                 from stt import asr_cloud
@@ -2861,9 +3144,9 @@ class Handler(BaseHTTPRequestHandler):
                             for prov, meta in asr_cloud.PROVIDERS.items()}
                 key_envs["anthropic"] = "STT_ANTHROPIC_KEY"  # assistant, not ASR
                 updates, remove = {}, set()
-                cleared = {str(p) for p in (b.get("clear") or [])}
+                cleared = set(b.texts("clear", []))
                 for prov, key_env in key_envs.items():
-                    v = (b.get(prov) or "").strip()
+                    v = b.text(prov, "", max_len=4000).strip()
                     if v:  # a pasted key wins over a clear for the same provider
                         updates[key_env] = v
                     elif prov in cleared:
@@ -2874,7 +3157,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "set": _cloud_key_status()})
             elif u.path == "/api/llm_backend":
                 from stt import summarize
-                backend = str(b.get("backend") or "")
+                backend = b.text("backend", "")
                 if backend not in summarize.LLM_BACKENDS:
                     self._json({"error": "unknown assistant backend"}, 400)
                     return
@@ -2886,24 +3169,24 @@ class Handler(BaseHTTPRequestHandler):
                 _env_file_set({"STT_LLM_BACKEND": backend})
                 self._json({"ok": True, "backend": backend})
             elif u.path == "/api/automation":
-                self._json(write_automation(
-                    watch=(bool(b["watch"]) if "watch" in b else None),
-                    nightly=(bool(b["nightly"]) if "nightly" in b else None)))
+                self._json(write_automation(watch=b.flag("watch", None),
+                                            nightly=b.flag("nightly", None)))
             elif u.path == "/api/set_date":
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.set_meeting_date(b["base"], b.get("date", "")))
+                self._json(summarize.set_meeting_date(b["base"], b.text("date", "")))
             elif u.path == "/api/set_category":
                 if not self._require_base(b.get("base")):
                     return
                 from stt import summarize
-                self._json(summarize.set_meeting_category(b["base"], b.get("category", "")))
+                self._json(summarize.set_meeting_category(b["base"],
+                                                          b.text("category", "")))
             elif u.path == "/api/queue_hold":
                 # park a waiting file: automatic runs skip it until released.
                 # Same membership gate as preview/delete.
                 from stt import holds
-                f = _queue_file(b.get("name"))
+                f = _queue_file(b.text("name", ""))
                 if f is None:
                     self._json({"ok": False, "error": "no such queued file"})
                     return
@@ -2911,10 +3194,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/queue_delete":
                 # bin a waiting source file (a bad take, a test recording) before
                 # it ever becomes a meeting. Same membership gate as the preview.
-                if not b.get("confirm"):
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
-                name = b.get("name")
+                name = b.text("name", "")
                 # every copy of this name, in the queue's own resolution order:
                 # the first is the file the row showed and the only one deleted
                 found = _queue_files(name)
@@ -2937,7 +3220,11 @@ class Handler(BaseHTTPRequestHandler):
                 was_failed = f.name in _failed_sources(status.read())
                 f.unlink()
                 # the recorder's channel-layout sidecar travels with its audio
-                f.with_suffix(".opts.json").unlink(missing_ok=True)
+                # (a name past the 255-byte limit has none, and raises)
+                try:
+                    f.with_suffix(".opts.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 out = {"ok": True, "freed_mb": mb}
                 if was_failed and dismiss_failure(f.name):
                     out["dismissed_failure"] = True
@@ -2961,7 +3248,7 @@ class Handler(BaseHTTPRequestHandler):
                 # past meeting's source is flagged in the row and deletable one
                 # by one, because a recurring export honestly reuses one name for
                 # different meetings, and this action has no undo.
-                if not b.get("confirm"):
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
                 from stt import holds as _holds
@@ -3028,7 +3315,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         freed += p.stat().st_size / 1e6
                         p.unlink()
-                        p.with_suffix(".opts.json").unlink(missing_ok=True)
+                        try:
+                            p.with_suffix(".opts.json").unlink(missing_ok=True)
+                        except OSError:
+                            pass    # a name too long to have a sidecar
                         deleted.append(f["name"])
                     except OSError as e:
                         _skip(f["name"], f"it could not be deleted ({e.strerror})")
@@ -3039,7 +3329,7 @@ class Handler(BaseHTTPRequestHandler):
                 # "keep both": this pair is two different meetings. Nothing is
                 # deleted and nothing is hidden from the library — the pair just
                 # stops being offered for review.
-                a, b_ = str(b.get("a") or ""), str(b.get("b") or "")
+                a, b_ = b.text("a", ""), b.text("b", "")
                 if not _known_base(a) or not _known_base(b_):
                     self._json({"ok": False, "error": "unknown meeting"}, 400)
                     return
@@ -3058,7 +3348,7 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/dismiss_failure":
                 # the X on a failed row whose source file no longer exists:
                 # nothing to delete, just stop showing that old failure
-                self._json({"ok": dismiss_failure(b.get("name", ""))})
+                self._json({"ok": dismiss_failure(b.text("name", ""))})
             elif u.path == "/api/recorder_note":
                 # dismiss the last-recording outcome strip
                 status.clear_recorder_note()
@@ -3092,15 +3382,33 @@ class Handler(BaseHTTPRequestHandler):
                 # "Not part of this group", keyed on meeting_id, with undo
                 if not self._require_base(b.get("base")):
                     return
-                key = str(b.get("group") or "")
+                key = b.text("group", "").strip()
                 if not key:
                     self._json({"ok": False, "error": "no group"}, 400)
                     return
                 mkey = config.id_of(b["base"]) or b["base"]
-                self._json(groups.set_override(mkey, key, exclude=not b.get("undo")))
+                undo = b.flag("undo")
+                # the key must name a real group: an invented one was stored
+                # forever, matching nothing. An undo may name a group its own
+                # exclusion dissolved (one meeting is no group), so the key
+                # already stored for this meeting is enough for it.
+                g = groups.by_key(key)
+                if undo:
+                    if g is None and key not in groups.load_overrides().get(mkey, ()):
+                        self._json({"ok": False, "error": "no such group"}, 400)
+                        return
+                elif g is None:
+                    self._json({"ok": False, "error": "no such group -- refresh "
+                                                      "and try again"}, 400)
+                    return
+                elif b["base"] not in g["bases"]:
+                    self._json({"ok": False, "error": "that meeting is not in "
+                                                      "this group"}, 400)
+                    return
+                self._json(groups.set_override(mkey, key, exclude=not undo))
             elif u.path == "/api/usage":
                 # one count line per group open or group question, no title
-                ok = groups.log_use(str(b.get("event") or ""))
+                ok = groups.log_use(b.text("event", ""))
                 self._json({"ok": ok}, 200 if ok else 400)
             elif u.path == "/api/seen":
                 # the panel is in front of the owner: record the look, so the
@@ -3124,20 +3432,21 @@ class Handler(BaseHTTPRequestHandler):
                 # a Keep on ONE meeting: the title is confirmed, and a person
                 # did look at it
                 self._json(summarize.apply_meeting_edits(
-                    b["base"], title=(b.get("name") or None),
-                    date=(b.get("date") or None), category=b.get("category"),
+                    b["base"], title=(b.text("name", "") or None),
+                    date=(b.text("date", "") or None),
+                    category=b.text("category", None),
                     reviewed=True, title_state="confirmed"))
             elif u.path == "/api/bulk":
                 # multi-select actions. Every op below gates on live/archived
                 # MEMBERSHIP internally before it builds a path, so an unknown or
                 # traversal base is simply refused per-item — never applied.
-                action = str(b.get("action") or "")
-                value, confirmed = b.get("value"), bool(b.get("confirm"))
+                action = b.text("action", "")
+                value, confirmed = b.text("value", None), b.flag("confirm")
                 results = []
                 # the cap is real, so the answer says so: a selection above it
                 # silently lost its tail and the client could not tell a
                 # dropped item from one that was never selected
-                asked = [str(x) for x in (b.get("bases") or [])]
+                asked = b.texts("bases", [])
                 dropped = max(0, len(asked) - 500)
                 for bs in asked[:500]:
                     # PER ITEM: one meeting's OSError (an unwritable folder, a
@@ -3147,8 +3456,13 @@ class Handler(BaseHTTPRequestHandler):
                     # report. Every item is now tried, and every outcome told.
                     try:
                         r = self._bulk_one(action, bs, value, confirmed)
-                    except Exception as e:
-                        r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                    except Exception:
+                        # the detail to the log: exception text names paths
+                        print(f"panel: bulk {action} on one meeting failed",
+                              file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        r = {"ok": False, "error": "this one could not be "
+                                                   "changed (see the panel log)"}
                     results.append({"base": bs, **r})
                 out = {"ok": all(r.get("ok") for r in results) and not dropped,
                        "n_ok": sum(1 for r in results if r.get("ok")),
@@ -3170,51 +3484,59 @@ class Handler(BaseHTTPRequestHandler):
                 # meeting. restore_meeting gates on archived-list membership
                 # before any path is built — same defense, different universe.
                 from stt import archive
-                self._json(archive.restore_meeting(str(b.get("base") or "")))
+                self._json(archive.restore_meeting(b.text("base", "")))
             elif u.path == "/api/delete_meeting":
                 # live or archived; delete_meeting gates on membership in one
                 # of the two lists before any path is built. confirm is a
-                # seatbelt so nothing deletes on a malformed call.
-                if not b.get("confirm"):
+                # seatbelt so nothing deletes on a malformed call: only a JSON
+                # true confirms (the string "false" used to delete).
+                if not b.flag("confirm"):
                     self._json({"ok": False, "error": "missing confirmation"})
                     return
                 from stt import archive
-                self._json(archive.delete_meeting(str(b.get("base") or "")))
+                self._json(archive.delete_meeting(b.text("base", "")))
             elif u.path == "/api/review":
                 if not self._require_base(b.get("base")):
                     return
-                if b.get("action") == "accept_minor":
+                action = b.text("action")
+                if action == "accept_minor":
                     self._json(review.accept_minor(b["base"]))
                     return
-                if b.get("action") == "insert":
-                    self._json(review.insert_segment(b["base"], b["start"], b["end"],
-                                                     b["speaker"], b.get("text", "")))
+                if action == "insert":
+                    self._json(review.insert_segment(
+                        b["base"], b.number("start"), b.number("end"),
+                        b.text("speaker"), b.text("text", "")))
                     return
-                if b.get("action") == "delete":
-                    self._json(review.delete_segment(b["base"], int(b["index"]),
-                                                     start=b.get("start"),
-                                                     end=b.get("end")))
+                # the client's snapshot of the line it means: `start` and
+                # `end` cross-check `index` against the file as it is now
+                start, end = b.number("start", None), b.number("end", None)
+                if action == "delete":
+                    self._json(review.delete_segment(b["base"], b.integer("index"),
+                                                     start=start, end=end))
                     return
-                if b.get("action") == "split":
+                if action == "split":
                     self._json(review.split_segment(
-                        b["base"], int(b["index"]), start=b.get("start"),
-                        text_a=b.get("text_a", ""), text_b=b.get("text_b", ""),
-                        speaker_a=b.get("speaker_a"), speaker_b=b.get("speaker_b"),
-                        end=b.get("end")))
+                        b["base"], b.integer("index"), start=start,
+                        text_a=b.text("text_a", ""), text_b=b.text("text_b", ""),
+                        speaker_a=b.text("speaker_a", None),
+                        speaker_b=b.text("speaker_b", None), end=end))
                     return
-                self._json(review.apply(b["base"], int(b["index"]), b["action"],
-                                        start=b.get("start"), text=b.get("text"),
-                                        speaker_id=b.get("speaker"),
-                                        end=b.get("end")))
+                self._json(review.apply(b["base"], b.integer("index"), action,
+                                        start=start, text=b.text("text", None),
+                                        speaker_id=b.text("speaker", None),
+                                        end=end))
             elif u.path == "/api/export":
                 if not self._require_base(b.get("base")):
                     return
-                if b["fmt"] == "reveal":
+                fmt = b.text("fmt")
+                if fmt not in ("docx", "pdf", "reveal"):
+                    raise BadRequest("'fmt' must be docx, pdf or reveal")
+                if fmt == "reveal":
                     f = config.meeting_file(b["base"], ".txt")
                     subprocess.run(["open", "-R", str(f)], capture_output=True)
                     self._json({"ok": f.exists()})
                 else:
-                    path = export.export(b["base"], b["fmt"])
+                    path = export.export(b["base"], fmt)
                     subprocess.run(["open", "-R", str(path)], capture_output=True)
                     self._json({"ok": True, "path": str(path)})
             elif u.path == "/api/retranscribe":
@@ -3222,19 +3544,23 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
-                    [str(config.PROJECT_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
-                     b["base"], str(b["start"]), str(b["end"]),
-                     b.get("engine") or "parakeet"],
+                    [str(config.CODE_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
+                     b["base"], str(b.number("start")), str(b.number("end")),
+                     b.text("engine", "") or "parakeet"],
                     capture_output=True, text=True, timeout=180,
-                    cwd=str(config.PROJECT_DIR),
-                    env={**__import__("os").environ,
-                         "PYTHONPATH": str(config.PROJECT_DIR)})
+                    cwd=str(config.CODE_DIR),
+                    env={**os.environ, "PYTHONPATH": str(config.CODE_DIR)})
                 try:
                     self._json(json.loads(r.stdout.strip().splitlines()[-1]))
                 except Exception:
-                    self._json({"error": (r.stderr or "re-transcription failed")[-300:]}, 500)
+                    # the child's stderr is a traceback with server paths in
+                    # it: the log keeps it, and the client gets a sentence
+                    print("panel: re-transcription failed:\n"
+                          + (r.stderr or "")[-2000:], file=sys.stderr)
+                    self._json({"error": "The second listen failed. The "
+                                         "details are in the panel log."}, 500)
             elif u.path == "/api/remove_sample":
-                ok = identify.remove_sample(b["name"], int(b["index"]))
+                ok = identify.remove_sample(b.text("name"), b.integer("index"))
                 if not ok:
                     self._json({"ok": False,
                                 "error": "Can't remove the only sample — remove the person instead."})
@@ -3251,23 +3577,27 @@ class Handler(BaseHTTPRequestHandler):
                                 names=[b["name"]],
                                 vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/reassign_sample":
-                r = identify.reassign_sample(b["name"], int(b["index"]), b.get("to", ""))
+                r = identify.reassign_sample(b.text("name"), b.integer("index"),
+                                             b.text("to", ""))
                 if not r.get("ok"):
                     self._json(r)
                     return
                 # a moved voice changes BOTH profiles, so both names count
-                to = str(b.get("to") or "").strip()
+                to = b.text("to", "").strip()
                 self._json({**r, **_relabel_targets(
                     names=[n for n in (b["name"], to) if n],
                     vector=identify.load_voiceprints().get(b["name"]))})
             elif u.path == "/api/punctuate":
-                _env_file_set({"STT_PUNCTUATE": "1" if b.get("on") else "0"})
+                _env_file_set({"STT_PUNCTUATE": "1" if b.flag("on") else "0"})
                 self._json({"ok": True})
             elif u.path == "/api/mic_speaker":
                 # who "me" is on the meeting recorder's mic channel; enables the
                 # channel-aware path for new recordings (they process as mono
                 # until this is set and that person is enrolled)
-                name = (b.get("name") or "").strip()
+                name = b.text("name", "").strip()
+                if names.has_unsafe(name):
+                    # a line break here also injected a line into stt.env
+                    raise BadRequest(names.UNSAFE_NAME)
                 if name:
                     _env_file_set({"STT_MIC_SPEAKER": name})
                 else:
@@ -3280,8 +3610,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"error": "not found"}, 404)
-        except Exception as e:
-            self._json({"error": str(e)}, 500)
+        except BadRequest as e:
+            self._json({"error": e.msg}, e.code)
+        except UserError as e:
+            # planned, and its text is the help ("Google Chrome not found
+            # -- export Word instead"): shown as it is
+            self._json({"ok": False, "error": str(e)}, e.code)
+        except Exception:
+            self._failed(u.path)
 
 
 def check_updates():

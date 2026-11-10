@@ -159,6 +159,28 @@ console.log(JSON.stringify({sent:calls.filter(c=>c[0]==='/api/ask_library').map(
 
 
 @needs_node
+def test_a_nothing_found_reply_shows_unsaved_and_starts_no_thread():
+    out = _run(_ASK + """
+location.hash='ask';route();await flush();
+LIB.adraft='???';
+const prev=answer;
+answer=(p,b)=>p==='/api/ask_library'?{ok:true,thread:null,scope_label:'All recordings',
+ message:{q:'???',a:'I did not find this in your meetings.',nothing_found:true,citations:[],
+  hits:[{base:'R1',title:'Roof Budget',date:'2026-10-01',start:40,snippet:'The roof heater.',gone:false}]}}:prev(p,b);
+calls.length=0;
+await askSend();await flush();
+console.log(JSON.stringify({v:document.querySelector('#view').innerHTML,tid:LIB.tid,draft:LIB.adraft,
+ hash:location.hash,loaded:calls.map(c=>c[0])}));
+""")
+    v = out["v"]
+    assert out["tid"] is None and out["draft"] == ""
+    assert "I did not find this in your meetings." in v and 'href="#m/R1/t/40"' in v
+    assert "Not saved: nothing was found." in v
+    assert "Delete thread" not in v
+    assert not any(c.startswith("/api/thread?") for c in out["loaded"])
+
+
+@needs_node
 def test_ask_states_for_an_empty_library_and_a_missing_model():
     out = _run(_VIEW + """
 answer=()=>({threads:[],groups:[]});

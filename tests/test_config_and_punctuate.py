@@ -1,4 +1,8 @@
 """config env parsing + punctuate's word-preserving safety guarantees."""
+import os
+
+import pytest
+
 from stt import config, punctuate
 
 
@@ -306,3 +310,119 @@ def test_an_uncached_model_downloads_as_normal_and_leaves_the_environment_alone(
     assert cfg.hf_repo_id == punctuate._HF_REPO and cfg.directory is None
     assert (cfg.spe_filename, cfg.model_filename) == \
         (punctuate._SPE_FILENAME, punctuate._ONNX_FILENAME)
+
+
+# ---------- a bad number in stt.env warns and keeps the default ----------
+
+def _import_config(tmp_path, **env):
+    """Import stt.config in a fresh interpreter with `env` set. Returns
+    (returncode, stdout, stderr)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items()
+         if not k.startswith("STT_SPEAKRS") and k != "STT_DIARIZER"}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), **env})
+    r = subprocess.run([sys.executable, "-c",
+                        "from stt import config as c; "
+                        "print(c.SPEAKRS_AHC, c.SPEAKRS_TIMEOUT_SEC, c.DIARIZER)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    return r.returncode, r.stdout.strip(), r.stderr
+
+
+@pytest.mark.parametrize("name, raw", [
+    ("STT_SPEAKRS_AHC", "abc"), ("STT_SPEAKRS_AHC", "-1"), ("STT_SPEAKRS_AHC", "nan"),
+    ("STT_SPEAKRS_AHC", "inf"), ("STT_SPEAKRS_TIMEOUT_SEC", "abc"),
+    ("STT_SPEAKRS_TIMEOUT_SEC", "0"), ("STT_SPEAKRS_TIMEOUT_SEC", "-5"),
+    ("STT_SPEAKRS_TIMEOUT_SEC", "12.5")])
+def test_a_bad_speakrs_number_warns_and_keeps_the_default(tmp_path, name, raw):
+    """float('') or int('abc') at import stopped every command that imports
+    stt.config. -1 or nan passed, then every file fell back to pyannote, and
+    a timeout of 0 timed every helper run out at once."""
+    rc, out, err = _import_config(tmp_path, **{name: raw})
+    assert rc == 0, err
+    assert out == "0.55 3600 speakrs"
+    assert name in err and "using" in err
+
+
+def test_an_empty_or_good_speakrs_number_is_quiet(tmp_path):
+    rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC="", STT_SPEAKRS_TIMEOUT_SEC="")
+    assert (rc, out) == (0, "0.55 3600 speakrs") and "warning" not in err
+    rc, out, err = _import_config(tmp_path, STT_SPEAKRS_AHC=" 0.6 ", STT_SPEAKRS_TIMEOUT_SEC="900")
+    assert (rc, out) == (0, "0.6 900 speakrs") and "warning" not in err
+
+
+@pytest.mark.parametrize("raw, want, warns", [
+    ("speakr", "speakrs", True), ("pyanote", "speakrs", True), ("cuda", "speakrs", True),
+    ("pyannote", "pyannote", False), (" PyAnnote ", "pyannote", False),
+    ("speakrs", "speakrs", False), ("", "speakrs", False)])
+def test_an_unknown_diarizer_warns_and_keeps_the_default(tmp_path, raw, want, warns):
+    """diarize() tests only == "speakrs", so STT_DIARIZER=speakr (a typo)
+    switched every file to the slow CPU engine with no message."""
+    rc, out, err = _import_config(tmp_path, STT_DIARIZER=raw)
+    assert rc == 0, err
+    assert out.split()[-1] == want
+    assert ("STT_DIARIZER" in err and "speakrs" in err and "pyannote" in err) is warns
+
+
+def _import_asr(tmp_path, raw):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    e = {k: v for k, v in os.environ.items() if k != "STT_ASR_BACKEND"}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo), "STT_ASR_BACKEND": raw})
+    r = subprocess.run([sys.executable, "-c",
+                        "from stt import config as c, pipeline as p; "
+                        "print(c.ASR_BACKEND, p._load_asr(False).__name__)"],
+                       capture_output=True, text=True, env=e, cwd=str(repo), timeout=60)
+    return r.returncode, r.stdout.strip(), r.stderr
+
+
+@pytest.mark.parametrize("raw, want, mod, warns", [
+    ("mlx-whisper", "parakeet", "stt.asr_parakeet", True),
+    ("whisper", "parakeet", "stt.asr_parakeet", True),
+    ("whisperx", "parakeet", "stt.asr_parakeet", True),
+    ("cloud:typo", "parakeet", "stt.asr_parakeet", True),
+    (" MLXWhisper ", "mlxwhisper", "stt.asr_mlxwhisper", False),
+    ("parakeet", "parakeet", "stt.asr_parakeet", False),
+    ("cloud:scribe", "cloud:scribe", "stt.asr_cloud", False),
+    ("", "parakeet", "stt.asr_parakeet", False)])
+def test_an_unknown_asr_backend_warns_and_keeps_parakeet(tmp_path, raw, want, mod, warns):
+    """_load_asr tests only == "mlxwhisper", so a typo ('mlx-whisper',
+    'whisper', or the 'whisperx' stt.env.example named) ran Parakeet with
+    no message while the owner believed Whisper was running."""
+    rc, out, err = _import_asr(tmp_path, raw)
+    assert rc == 0, err
+    assert out.split() == [want, mod]
+    assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
+
+
+def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
+    from stt import config
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=whisper\n")
+    monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
+    assert [p[0] for p in config.setting_problems()] == ["STT_ASR_BACKEND"]
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=mlxwhisper\n")
+    assert config.setting_problems() == []
+    from stt import asr_cloud
+    assert set(config.CLOUD_ASR) == set(asr_cloud.PROVIDERS)
+
+
+@pytest.mark.parametrize("value, mod, warns", [
+    ("garbage", "stt.asr_parakeet", True),
+    ("cloud:bogus", "stt.asr_parakeet", True),
+    (" MLXWhisper ", "stt.asr_mlxwhisper", False),
+    ("parakeet", "stt.asr_parakeet", False)])
+def test_a_backend_set_after_load_is_checked_too(sandbox, monkeypatch, capsys,
+                                                value, mod, warns):
+    """The warning fired only when the config loaded. Code that set
+    config.ASR_BACKEND afterward ran Parakeet with no word, and
+    'cloud:bogus' reached the cloud module."""
+    from stt import pipeline
+    monkeypatch.setattr(config, "ASR_BACKEND", value)
+    assert pipeline._load_asr().__name__ == mod
+    err = capsys.readouterr().err
+    assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
