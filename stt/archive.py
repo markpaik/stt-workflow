@@ -47,6 +47,14 @@ def purge_meeting_dir(path: Path):
     except Exception as e:
         print(f"   delete: unknown-speaker references not scrubbed ({e})",
               file=sys.stderr)
+    # an enrolled person's samples stay (their embeddings still identify
+    # the person), but a sample no longer claims a meeting that is gone:
+    # the doctor listed each as a fixable registry_dangling finding
+    try:
+        from . import identify
+        identify.forget_source_refs(path.name, mid)
+    except Exception as e:
+        print(f"   delete: voice sample sources not cleared ({e})", file=sys.stderr)
     # the stores keyed on this meeting: its group override (by id, or by
     # name for a meeting without one) and its keep-both pairs. A name that a
     # live or archived twin still carries keeps its entries.
@@ -109,7 +117,11 @@ def archive_meeting(base: str) -> dict:
     with review.lock_meeting(base):  # serialize with relabel/review/rename
         if not old_dir.is_dir():
             return {"ok": False, "error": f"no meeting folder for '{base}'"}
-        new_base = _move(base, old_dir, config.archive_dir())
+        try:
+            new_base = _move(base, old_dir, config.archive_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not archive '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # the index maps LIVE meetings only: an archived one is not a relabel
     # target, and leaving it in would resolve its id to a folder the live
     # store no longer holds. restore_meeting puts it back.
@@ -146,7 +158,16 @@ def restore_meeting(base: str) -> dict:
         return {"ok": False, "error": f"no archived meeting '{base}'"}
     src_dir = config.archive_dir() / base
     with review.lock_meeting(base):
-        new_base = _move(base, src_dir, config.meetings_dir())
+        # again under the lock: two restores of one meeting (a double click)
+        # both passed the gate above, and the loser's move raised a raw
+        # OSError that carried both absolute paths to the panel
+        if base not in config.archived_bases():
+            return {"ok": False, "error": f"no archived meeting '{base}'"}
+        try:
+            new_base = _move(base, src_dir, config.meetings_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not restore '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # live again: the id resolves to this folder from here on (the meeting
     # kept its id through the archive — that is the whole point of stamping
     # the archive in the backfill)
@@ -208,8 +229,8 @@ def delete_meeting(base: str) -> dict:
     """Permanently delete a meeting — live or archived. Scrubs the unknowns
     registry's references (the audio is gone; enrolled voiceprint samples are
     KEPT, their embeddings still identify people in future meetings — only the
-    clip playback for samples sourced here dies, and the clip endpoints skip
-    non-live meetings gracefully). Returns {ok, freed_mb, note?, error?}."""
+    clip playback for samples sourced here dies, and each such sample's
+    source reads '?' from here on). Returns {ok, freed_mb, note?, error?}."""
     from . import review
     if base in config.meeting_bases():
         if _is_active(base):

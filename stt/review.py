@@ -166,8 +166,50 @@ def accept_minor(base: str) -> dict:
     return {"ok": True, "accepted": n, "remaining": remaining}
 
 
+def _manual_num(sid) -> int:
+    """n for a 'MANUAL_n' roster id, else 0."""
+    s = str(sid or "")
+    if not s.startswith("MANUAL_"):
+        return 0
+    try:
+        return int(s[len("MANUAL_"):])
+    except ValueError:
+        return 0
+
+
+def _manual_floor(data) -> int:
+    """The lowest number a new MANUAL_ person may take: past every id on
+    the roster and past the stored `manual_next`, so a number a pruned
+    entry held is never handed to someone else."""
+    top = max((_manual_num(s.get("id")) for s in data.get("speakers") or []
+               if isinstance(s, dict)), default=0)
+    try:
+        stored = int(data.get("manual_next") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    return max(top + 1, stored)
+
+
+def _prune_manual_speakers(data):
+    """Drop each MANUAL_ roster entry that no line uses any more. Deleting
+    an inserted line, or giving it to someone else, left 'Pat Q' in the
+    header ('4 speaker(s)') and in the roster with no line behind the
+    name. A diarized speaker stays: relabel owns those. `manual_next`
+    keeps the pruned numbers retired, because an older decision in the
+    sidecar can still name one."""
+    speakers = data.get("speakers") or []
+    used = {s.get("speaker") for s in data.get("segments") or []}
+    keep = [s for s in speakers
+            if not (isinstance(s, dict) and _manual_num(s.get("id"))
+                    and s.get("id") not in used)]
+    if len(keep) != len(speakers):
+        data["manual_next"] = _manual_floor(data)
+        data["speakers"] = keep
+
+
 def _rewrite(jpath, data):
     """Persist mutated data: atomic json + regenerated txt with the shared header."""
+    _prune_manual_speakers(data)
     # a line edit can add a speaker (a MANUAL_ person) but never relabels a
     # cluster, so the description re-renders from the labels it last saw
     from . import speaker_text
@@ -200,10 +242,13 @@ def _resolve_speaker(data, spec):
     for s in speakers:
         if nm in (s.get("name"), s.get("display")):
             return s
-    n = 1 + sum(1 for s in speakers if str(s["id"]).startswith("MANUAL_"))
+    # past the highest number, not past the count: a pruned MANUAL_1 with
+    # MANUAL_2 still on the roster made the count hand out MANUAL_2 again
+    n = _manual_floor(data)
     entry = {"id": f"MANUAL_{n}", "name": nm, "global_id": None,
              "display": nm, "match_score": None, "manual": True}
     speakers.append(entry)
+    data["manual_next"] = n + 1
     return entry
 
 
@@ -369,8 +414,12 @@ def _apply_locked(base, index, action, start, text, speaker_id, end=None) -> dic
                                 "text": seg["text"], "speaker_id": seg["speaker"],
                                 "manual_id": seg["manual_id"]})
     else:
+        # the text as the live edit stored it: stripped, and None when it
+        # is blank. The raw text replayed '  padded text  \n' on the next
+        # relabel, and a blank one replaced the line's words with spaces
         _record_decision(base, {"start": seg["start"], "end": seg["end"], "action": action,
-                                "text": text if action == "edit" else None,
+                                "text": ((text or "").strip() or None)
+                                        if action == "edit" else None,
                                 "speaker_id": speaker_id if action == "edit" else None})
     merged_at, n_merged = index, 1
     if action == "edit" and speaker_id:
@@ -759,8 +808,11 @@ def reapply_decisions(base: str, data: dict) -> int:
             applied += 1
             continue
         if dec["action"] == "edit":
-            if dec.get("text"):
-                seg["text"] = dec["text"]
+            # stripped again: a sidecar written before the live edit and
+            # its decision agreed can still hold the raw text
+            t = str(dec.get("text") or "").strip()
+            if t:
+                seg["text"] = t
                 seg["text_edited"] = True
             sp = _resolve_speaker(data, dec.get("speaker_id") or "")
             if sp:

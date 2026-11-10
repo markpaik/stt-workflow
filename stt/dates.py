@@ -117,6 +117,18 @@ def stamp(name: str, iso: str) -> str:
 _UNIQ_SUFFIX = re.compile(r"\s+\(\d+\)$")
 
 
+def is_only_date(name) -> bool:
+    """True when `name` holds a date and nothing else: '2026-07-10',
+    '07102026' or '20260710', with any twin suffix peeled. strip_stamp
+    keeps such a name whole, so as a title it put the date in the folder
+    name twice ('2025-09-10 2025-09-10')."""
+    stem = _UNIQ_SUFFIX.sub("", str(name or "")).strip()
+    lead = _leading_iso(stem)
+    if lead:
+        return not lead[1].strip()
+    return bool(_DIGITS8.fullmatch(stem)) and _run_date(stem) is not None
+
+
 def title_of(base: str) -> str:
     """The meeting's `title` key: its folder name with the twin suffix and
     the date stamp removed. stamp(title_of(b), date) + twin_suffix(b) gives

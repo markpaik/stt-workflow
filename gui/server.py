@@ -1587,7 +1587,8 @@ def gather_state():
             "schedule": read_schedule(), "model": current_model(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
-            "paths": {"source": str(src_dir), "dest": str(dst_dir)},
+            "paths": {"source": str(src_dir), "dest": str(dst_dir),
+                      "source_exists": _dir_present(src_dir)},
             "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
             "recorder_ready": recorder.available(),
@@ -2318,20 +2319,33 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "forbidden"}, 403)
             return
         try:
-            if u.path in ("/", "/next", "/classic"):
-                # The 4D swap: `/` serves the new shell, and `/classic` keeps
-                # the old page for 30 days (a temporary route the owner
-                # approved; a later commit deletes it with app.js). `/next`,
-                # the 4C preview address, still answers with the new shell so
-                # a bookmark to it keeps working until that same commit. The
-                # retired `ui` query param is ignored. Every page reads the
-                # same API, and no GET here writes anything.
-                body = (_page_html() if u.path == "/classic" else _next_html()).encode()
+            if u.path in ("/", "/next"):
+                # `/` serves the panel. `/next`, the Phase 4C preview address,
+                # serves the same page, so a bookmark to it keeps working. The
+                # retired `ui` query param is ignored, and no GET here writes
+                # anything.
+                body = _next_html().encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif u.path == "/favicon.ico":
+                # the page names its own icon (an inline SVG in next.html).
+                # A client that asks here anyway gets an empty answer, not
+                # the 404 that was the only console error on every load
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif u.path == "/classic":
+                # The old page is deleted. A bookmark to it lands on the panel
+                # instead of a 404. The Location is relative, and a browser
+                # keeps the #m/<base> fragment across the redirect, which the
+                # panel reads as the same deep link.
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             elif u.path == "/api/state":
                 self._json(gather_state())
             elif u.path == "/api/dupes":
@@ -2561,10 +2575,6 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(q.get("base")):
                     return
                 self._json(review.list_flagged(q["base"]))
-            elif u.path == "/api/edits":
-                if not self._require_base(q.get("base")):
-                    return
-                self._json({"n": review.count_decisions(q["base"])})
             elif u.path == "/api/suggest":
                 # Generating a title and summary WRITES the meeting .json, so
                 # it is a POST (plan Phase 4C: GET no longer writes). A stale
@@ -3354,10 +3364,6 @@ class Handler(BaseHTTPRequestHandler):
                 # the X on a failed row whose source file no longer exists:
                 # nothing to delete, just stop showing that old failure
                 self._json({"ok": dismiss_failure(b.text("name", ""))})
-            elif u.path == "/api/recorder_note":
-                # dismiss the last-recording outcome strip
-                status.clear_recorder_note()
-                self._json({"ok": True})
             elif u.path == "/api/fix_recorder_permissions":
                 # Reset THIS APP's TCC entries so macOS re-prompts on the next
                 # Start. Needed because the recorder is ad-hoc signed: a rebuild
@@ -3682,14 +3688,10 @@ def start_server():
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _FONT_DIR = _STATIC_DIR / "fonts"   # vendored Figtree (OFL), served by GET /static/fonts/
-# The classic page, served at /classic for 30 days after the 4D swap.
-_PAGE_PARTS = ("page.html", "app.css", "app.js")
-_page_cache: dict = {"mtimes": None, "html": None}
-# The new shell (plan Phases 4C and 4D), served at /: a second parts tuple,
-# composed the same way, with its own markers. Its script is several small
-# plain files joined in this fixed order, with no import lines and no build
-# step: the frame, then the meeting page, then the voice sheet, then the
-# library views (Groups and Ask).
+# The panel (plan Phases 4C and 4D), served at /: a skeleton, a stylesheet,
+# and several small plain scripts joined in this fixed order, with no import
+# lines and no build step: the frame, then the meeting page, then the voice
+# sheet, then the library views (Groups and Ask).
 _NEXT_PARTS = ("next.html", "next.css", "next.js", "next-meeting.js", "next-voice.js",
                "next-library.js")
 _next_cache: dict = {"mtimes": None, "html": None}
@@ -3702,10 +3704,6 @@ def _compose(parts, css_marker, js_marker):
     str.replace -- never .format()/f-strings."""
     page, css, *js = ((_STATIC_DIR / f).read_text(encoding="utf-8") for f in parts)
     return page.replace(css_marker, css).replace(js_marker, "\n".join(js))
-
-
-def _compose_page():
-    return _compose(_PAGE_PARTS, "/*@APP_CSS@*/", "//@APP_JS@")
 
 
 def _compose_next():
@@ -3722,8 +3720,16 @@ def _cached(parts, cache, compose):
     return cache["html"]
 
 
-def _page_html():
-    return _cached(_PAGE_PARTS, _page_cache, _compose_page)
+def _dir_present(p) -> bool:
+    """Is the folder there? The first-run card checks the watched folder
+    with it: a path that is set but missing showed a green check. A denied
+    stat (a folder macOS privacy guards) counts as there."""
+    try:
+        return Path(p).is_dir()
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 def _next_html():

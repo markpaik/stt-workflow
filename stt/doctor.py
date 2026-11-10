@@ -12,7 +12,9 @@ titles) in doctor.json for the panel.
    config.migration_dir() (mode 700), and journals the copy with the file's
    hash before and after.
 3. Undo restores a file from its copy only where the file still holds what
-   the fix wrote. A file changed since is kept and reported.
+   the fix wrote. A file changed since is kept and reported. A removed
+   stale stopping.flag is never put back, and undo names what it cannot
+   reverse (a log rotation, the calibration cap, a mode change).
 
 What `fix` repairs (section 12, minus the centroid rebuild, which the plan
 drops):
@@ -31,7 +33,9 @@ drops):
 - logs over their cap and calibration.jsonl over its cap.
 
 What it only reports: a folder name that disagrees with its `title` and
-date, meetings missing the store keys (tools/backfill_keys.py adds them),
+date, a meeting json that is not readable (`unreadable_json`), a folder
+with no meeting json (`folder_without_json`), meetings missing the store
+keys (tools/backfill_keys.py adds them),
 scratch audio left in work/, an stt.env value that cannot be read and is
 replaced by its default (`bad_setting`), and (with deep=True) a stored
 duration longer than the audio.
@@ -271,6 +275,34 @@ def _stale_dismissals() -> list:
     return sorted(n for n in d if n in latest and latest[n].get("ok") is True)
 
 
+def _folders_without_json(store) -> list:
+    """[(folder, why)] for each folder in the store that holds no
+    <name>.json: an interrupted run or a hand copy. No reader lists one,
+    and Archive, Delete and tools/purge.py all refuse it as no meeting.
+    The batch's start-up sweep (run_batch._sweep_shells) removes one that
+    holds no audio. Checked only while no batch runs: a run writing a
+    meeting makes its folder just before the json."""
+    out = []
+    try:
+        folders = sorted(p for p in Path(store).iterdir()
+                         if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        return out
+    for p in folders:
+        if (p / f"{p.name}.json").exists():
+            continue
+        try:
+            audio = any(f.suffix.lower() in config.AUDIO_SUFFIXES for f in p.iterdir())
+        except OSError:
+            audio = False
+        out.append((p.name, (
+            "no meeting json, but it holds audio: move the audio to a watched "
+            "folder to transcribe it again, or delete the folder in Finder")
+            if audio else
+            "no meeting json and no audio: the next batch start removes it"))
+    return out
+
+
 def _batch_running() -> bool:
     return bool(status.read().get("running"))
 
@@ -287,6 +319,16 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
     if registry:
         out += [_from_registry(f) for f in registry_doctor.check(voiceprints_dir, store)]
     meets = _meetings(store)
+    for b in config.meeting_bases(store):
+        if b not in meets:
+            # meeting_bases counts it, but no reader can: the panel lists
+            # it nowhere, and every other check here skipped it in silence
+            out.append(Finding("unreadable_json", b,
+                               f"{b}.json is not readable JSON. Restore it from a "
+                               "backup, or delete the folder in Finder", False))
+    if not _batch_running():
+        for name, why in _folders_without_json(store):
+            out.append(Finding("folder_without_json", name, why, False))
     for b, d in meets.items():
         missing = [k for k in provenance.KEYS if k not in d]
         if missing:
@@ -422,6 +464,11 @@ class _Run:
         self.pending[str(d)] = {"dir": str(d), "copy": str(copy) if d.is_dir() else None,
                                 "hashes_before": _dir_hashes(d)}
 
+    def note(self, text: str):
+        """Journal a change this run made that undo cannot reverse, so the
+        undo can say so instead of claiming the whole run is back."""
+        self.journal.write({"run": self.id, "not_undoable": text})
+
     def close(self):
         for k, e in self.pending.items():
             if "dir" in e:
@@ -527,14 +574,20 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
         hk = housekeeping.rotate_all()
         if hk["logs"]:
             done.append(f"rotated {len(hk['logs'])} log(s)")
+            run.note(f"rotated {len(hk['logs'])} log(s): the old lines are in "
+                     "the .gz files beside each log")
         if hk["calibration"]:
             done.append("capped calibration.jsonl")
+            run.note("capped calibration.jsonl: the old lines are in "
+                     "calibration.jsonl.1.gz")
         # a mode change is not journaled: it only takes away other accounts'
         # access, and `chmod` puts it back if ever wanted
         if kinds["loose_mode"]:
             n = config.tighten_private_paths()
             if n:
                 done.append(f"made {n} private file(s) or folder(s) owner-only")
+                run.note(f"made {n} private file(s) or folder(s) owner-only: "
+                         "chmod gives other accounts their access back")
     finally:
         run.close()
     return {"dry_run": False, "plan": plan, "run": run.id,
@@ -543,9 +596,19 @@ def fix(findings=None, store=None, dry_run=True, journal_dir=None, run_id=None,
 
 def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
     """Restore every file the run changed, where the file still holds what
-    the run wrote. A file changed since is kept and reported."""
-    restored, kept = [], []
+    the run wrote. A file changed since is kept and reported.
+
+    Two things are not put back, and the result names both. A stale
+    stopping.flag the fix removed stays removed (`skipped`): it was a stop
+    request for a batch long gone, and restoring it only made the next
+    check report it again. A log rotation, the calibration cap and a mode
+    change are not journaled as file copies (`not_undone`): the old lines
+    stay in the gzip generations, and chmod reverses a mode."""
+    restored, kept, skipped, not_undone = [], [], [], []
     for e in reversed(fj.entries(run_id, journal_dir)):
+        if "not_undoable" in e:
+            not_undone.append(e["not_undoable"])
+            continue
         if "dir" not in e and "file" not in e:
             continue                  # a note (a tie pairing), not a change
         if "dir" in e:
@@ -566,6 +629,9 @@ def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
             restored.append(e["dir"])
             continue
         p = Path(e["file"])
+        if p.name == _stop_flag().name:
+            skipped.append(e["file"])
+            continue
         if _sha(p) != e.get("sha_after"):
             kept.append(e["file"])
             continue
@@ -577,7 +643,8 @@ def undo(run_id: str, journal_dir=None, dry_run=True) -> dict:
                 shutil.copy2(e["copy"], tmp)
                 os.replace(tmp, p)
         restored.append(e["file"])
-    return {"run": run_id, "restored": restored, "kept": kept, "dry_run": dry_run}
+    return {"run": run_id, "restored": restored, "kept": kept, "skipped": skipped,
+            "not_undone": list(reversed(not_undone)), "dry_run": dry_run}
 
 
 def run_check_at_batch_end(store=None):

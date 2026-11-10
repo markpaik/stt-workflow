@@ -471,6 +471,45 @@ def rename_source_refs(old_base: str, new_base: str) -> int:
     return n
 
 
+def forget_source_refs(base: str, meeting_id=None) -> int:
+    """A deleted meeting's name off the samples it fed: each `sources`
+    entry that names it becomes '?' and its id None, as the doctor's fix
+    writes for a dead reference. The sample keeps its row: its embedding
+    still identifies the person. Without this, a normal Delete left the
+    next doctor check listing one `registry_dangling` finding per person
+    the meeting fed.
+
+    An entry another meeting still answers to (a live or archived twin of
+    the name, or an id that resolves) is left alone, the doctor's own
+    liveness rule. A damaged registry is never written over. Returns the
+    people touched."""
+    alive = set(config.meeting_bases()) | set(config.archived_bases())
+    ids = config.load_meetings_index()["ids"]
+
+    def dead(s, i):
+        if s in alive:
+            return False
+        return not (i and ids.get(i) in alive)
+
+    n = 0
+    with lock_registry():
+        reg = load_registry_for_write()
+        for meta in reg.values():
+            if not isinstance(meta, dict) or not isinstance(meta.get("sources"), list):
+                continue
+            srcs = meta["sources"]
+            sids = aligned_source_ids(meta)
+            hit = {k for k, (s, i) in enumerate(zip(srcs, sids))
+                   if (s == base or (meeting_id and i == meeting_id)) and dead(s, i)}
+            if hit:
+                meta["sources"] = ["?" if k in hit else s for k, s in enumerate(srcs)]
+                meta["source_ids"] = [None if k in hit else i for k, i in enumerate(sids)]
+                n += 1
+        if n:
+            save_registry(reg)
+    return n
+
+
 def merge_people(src: str, dst: str) -> bool:
     """Combine two enrolled entries that are really the same person: src's voice
     samples are folded into dst (keeping a spread of BOTH within MAX_SAMPLES),

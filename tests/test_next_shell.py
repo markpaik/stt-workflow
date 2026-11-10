@@ -1,5 +1,5 @@
-"""The new shell's frame (plan Phase 4C), served at / since the 4D swap,
-with the classic page kept at /classic for 30 days.
+"""The panel's frame (plan Phase 4C), served at / since the 4D swap. A
+request for /classic, the deleted old page, redirects to /.
 
 The routes, the read-only search endpoint, the token contrast, the type
 floor, the 20-surface table in gui/DESIGN.md, and the frame's pure logic run
@@ -71,17 +71,39 @@ def _meeting(base, text, **extra):
 
 # ------------------------------------------------------------------ routes ---
 
-def test_root_serves_the_new_shell_and_classic_keeps_the_old_page(running_server):
-    # the 4D swap: / is the new shell, /classic the old page for 30 days, and
-    # the 4C preview address /next still answers with the new shell
+def _location(port, path):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", path)
+    r = conn.getresponse()
+    out = (r.status, r.getheader("Location"), r.read())
+    conn.close()
+    return out
+
+
+def test_root_serves_the_shell_and_classic_redirects_to_it(running_server):
+    # / is the panel, and the 4C preview address /next still answers with it
     for path in ("/", "/next", "/?ui=stale-bookmark"):
         status, ctype, body = _get(running_server, path)
         assert status == 200 and ctype.startswith("text/html"), path
         assert body == _compose_next().encode(), path
     html = _get(running_server, "/")[2].decode()
     assert "@NEXT_CSS@" not in html and "@NEXT_JS@" not in html
-    status, _, classic = _get(running_server, "/classic")
-    assert status == 200 and b'id="processBtn"' in classic and b'id="side"' not in classic
+    # the old page is deleted: a bookmark to /classic lands on /, never a 404,
+    # and the redirect carries no page of its own
+    for path in ("/classic", "/classic?ui=stale-bookmark"):
+        status, where, body = _location(running_server, path)
+        assert (status, where, body) == (302, "/", b""), path
+
+
+def test_the_shell_never_points_at_the_deleted_classic_page():
+    # the sidebar foot held "Open the classic page", and the narrow menu
+    # sheet's foot held nothing else. Both are gone with the page itself.
+    page = _compose_next()
+    assert "/classic" not in page
+    assert "classic" not in page.lower()
+    js = _next_js()
+    assert '<div class="side-foot"><a href="#" data-act="keys">Keys</a></div>' in js
+    assert js.count('class="side-foot"') == 1
 
 
 def test_next_frame_reloads_from_disk_without_a_restart(sandbox, tmp_path, monkeypatch):
@@ -119,7 +141,7 @@ def test_get_routes_the_frame_reads_never_write_a_meeting(running_server):
     _meeting("Orchard Survey 10202026", "We counted the pear trees by the north fence.")
     j = config.meeting_file("Orchard Survey 10202026", ".json")
     before = j.read_bytes()
-    for path in ("/", "/next", "/classic", "/api/state", "/api/search?q=pear",
+    for path in ("/", "/next", "/api/state", "/api/search?q=pear",
                  "/api/search_meetings?q=pear", "/api/transcript?base=Orchard%20Survey%2010202026",
                  "/api/review?base=Orchard%20Survey%2010202026",
                  "/api/voice_lines?base=Orchard%20Survey%2010202026&speaker=Speaker%201",
@@ -150,8 +172,9 @@ def test_search_index_backs_the_palette(sandbox):
 # ------------------------------------------------------------------ design ---
 
 def test_every_next_text_pair_clears_4_5_in_all_four_blocks():
-    from tools.token_contrast import AA, BLOCKS, NEXT_CSS_PATH, audit
-    rows = audit(NEXT_CSS_PATH)
+    from tools.token_contrast import AA, BLOCKS, CSS_PATH, audit
+    assert CSS_PATH == STATIC / "next.css"     # the tool audits the panel's sheet
+    rows = audit()
     bad = [r.line() for r in rows if r.ratio < AA]
     assert not bad, "\n".join(bad)
     assert {r.block for r in rows} == {label for label, _ in BLOCKS}
@@ -172,26 +195,152 @@ def test_next_ui_has_no_em_dashes_and_no_external_assets():
     assert "url(http" not in page
 
 
-def _surface_rows():
+def test_the_audit_measures_the_pairs_the_sheet_actually_paints():
+    """A hand-written pair list drifts: it once missed two pairs the sheet
+    painted. The audit also scans the sheet for every rule that sets a token
+    colour on a token ground, so a new rule cannot add an unmeasured pair."""
+    from tools.token_contrast import CSS_PATH, audit, painted_pairs
+
+    assert painted_pairs(".x{color:var(--ink);background:var(--inset)}"
+                         ".y{color:var(--sub)}.z{background:var(--card)}") == {("ink", "inset")}
+    rows = audit()
+    measured = {(r.fg, r.bg) for r in rows}
+    painted = painted_pairs(CSS_PATH.read_text(encoding="utf-8"))
+    assert painted, "the scan found nothing -- its rule regex broke"
+    assert painted <= measured, sorted(painted - measured)
+    # every block measures the same set, and nothing is measured twice
+    per_block = {}
+    for r in rows:
+        per_block.setdefault(r.block, []).append((r.fg, r.bg))
+    for block, pairs in per_block.items():
+        assert len(pairs) == len(set(pairs)), f"{block} measured a pair twice"
+    assert len({frozenset(v) for v in per_block.values()}) == 1
+
+
+def test_the_dark_token_block_stops_at_its_own_closing_brace():
+    """The @media pattern opens TWO braces. Counting from the start of the
+    match closed the @media wrapper instead of the :root inside it, so every
+    later rule in that media query was read as a token declaration."""
+    from tools.token_contrast import read_tokens
+
+    css = "@media(prefers-color-scheme:dark){:root{--a:#000;} .x{--b:#fff;}}"
+    tokens = read_tokens(css, r"(?m)^@media\(prefers-color-scheme:dark\)\{:root\{")
+    assert tokens == {"a": "#000"}, \
+        "the slice must end at :root's brace, not the media query's"
+
+
+def test_every_stage_the_pipeline_reports_has_its_pill_word_in_design_md():
+    """The pill names the active file's stage through STAGE_NICE, and a stage
+    it does not know reads "Working". Every stage the pipeline reports needs
+    its own word, and gui/DESIGN.md's Status pill section lists each one, so a
+    new stage cannot fall back to "Working" unnoticed."""
+    root = Path(srv.__file__).resolve().parent.parent
+    src = "".join((root / p).read_text(encoding="utf-8")
+                  for p in ("stt/pipeline.py", "run_batch.py"))
+    reported = set(re.findall(r'\b(?:report|set_stage)\(\s*(?:\w+\s*,\s*)?"([a-z]+)"', src))
+    # the scan must find the pipeline's stages, or the test proves nothing
+    assert reported >= {"downloading", "converting", "transcribing",
+                        "diarizing", "verifying", "writing", "summarizing"}
+    nice = dict(re.findall(r"(\w+):'([^']+)'",
+                           re.search(r"const STAGE_NICE=\{(.*?)\};", _next_js(), re.S).group(1)))
+    assert not reported - set(nice), sorted(reported - set(nice))
+    assert "STAGE_NICE[e.stage]||'Working'" in _next_js()
     text = DESIGN.read_text(encoding="utf-8")
-    sec = text[text.index("### Where the 20 classic surfaces went"):]
-    rows = re.findall(r"^\|\s*(\d+)\s*\|([^|]*)\|([^|]*)\|\s*(\w+)\s*\|\s*`([^`]+)`\s*\|$", sec, re.M)
-    return [(int(n), name.strip(), where.strip(), st, tok) for n, name, where, st, tok in rows]
+    sec = text[text.index("## Status pill"):]
+    sec = sec[:sec.index("\n## ")]
+    missing = [w for w in sorted(set(nice.values()) | {"Working"}) if f"`{w}`" not in sec]
+    assert not missing, f"DESIGN.md's Status pill section omits {missing}"
 
 
-def test_design_md_places_every_one_of_the_20_surfaces():
-    rows = _surface_rows()
-    assert [r[0] for r in rows] == list(range(1, 21))
-    assert {r[3] for r in rows} <= {"moves", "retires", "stays"}
-    # only the two surfaces outside 4C's reach may stay: the menu-bar app
-    # (not part of the page) and the reader (Phase 4D rebuilds it)
-    assert {r[1] for r in rows if r[3] == "stays"} <= {"Menu-bar app", "Reader"}
+def test_screen_names_for_routes_with_a_slash():
+    """QA 4F #8: groups/<key> and ask/<id> shoot to a file in OUT."""
+    from tools import next_screens
+    assert next_screens._name("groups/gabc123") == "groups-gabc123"
+    assert next_screens._name("ask/0123456789ab") == "ask-0123456789ab"
+    assert next_screens._name("m/Some Base 10012026") == "meeting"
+    assert next_screens._name("m/Some Base 10012026/t/12") == "meeting-transcript"
+    assert next_screens._name("home") == "home"
+
+
+# ------------------------------------------------------------------- fonts ---
+# The vendored UI face. Figtree (OFL) is served by the panel itself from
+# gui/static/fonts/, never a CDN, behind a strict basename allowlist.
+FONTS = STATIC / "fonts"
+
+
+def test_figtree_is_vendored_with_its_license():
+    names = sorted(p.name for p in FONTS.glob("*.woff2"))
+    assert "figtree-latin.woff2" in names, "the latin variable woff2 is missing"
+    assert (FONTS / "OFL.txt").exists(), "OFL.txt must ship alongside the font"
+    for name in names:  # every vendored file is a real woff2
+        assert (FONTS / name).read_bytes()[:4] == b"wOF2", f"{name} is not woff2"
+
+
+def test_font_route_serves_woff2_and_refuses_traversal(running_server):
+    for name in sorted(p.name for p in FONTS.glob("*.woff2")):
+        status, ctype, body = _get(running_server, f"/static/fonts/{name}")
+        assert status == 200
+        assert ctype == "font/woff2"
+        assert body == (FONTS / name).read_bytes()
+    # strict allowlist: traversal names, encoded traversal, and anything not
+    # a vendored woff2 (even the license that IS in the directory) all 404
+    for bad in ("../next.css", "..%2Fnext.css", "%2e%2e/next.css",
+                "OFL.txt", "nope.woff2", ""):
+        status, _ctype, _body = _get(running_server, "/static/fonts/" + bad)
+        assert status == 404, f"font route must refuse {bad!r}"
+
+
+def test_the_frame_loads_figtree_from_the_font_route():
+    page = _compose_next()
+    assert "@font-face" in page
+    assert "font-family:'Figtree'" in page
+    assert "font-weight:300 900" in page          # the variable axis, whole
+    assert "font-display:swap" in page
+    assert "/static/fonts/figtree-latin.woff2" in page
+    # Figtree fronts the UI stack; -apple-system stays the fallback
+    assert "--sans:'Figtree',-apple-system" in page
+
+
+# The panel's surfaces, each with a token from the frame's script or markup
+# that carries it (the 2026-11-01 panel audit numbered them, and the old
+# surface map in gui/DESIGN.md placed each one before the classic page went).
+SURFACE_TOKENS = (
+    ("Menu-bar look mark", "/api/seen"),
+    ("Sidebar top", 'class="side-top"'),
+    ("Status pill", "function pillText"),
+    ("Activity run controls", "'run-all'"),
+    ("Recordings filter and chips", "function filtered"),
+    ("Said in", "function palResults"),
+    ("Running now", "function activeRowHTML"),
+    ("Needs you", "function needsCard"),
+    ("Recordings by day and month", "function recListHTML"),
+    ("Folded months", 'data-act="fold"'),
+    ("Meeting page", "function meetingView"),
+    ("One content column", 'class="page"'),
+    ("Row menu", "function rowMenu"),
+    ("Selection bar", "function renderBulk"),
+    ("Settings page", "function settingsView"),
+    ("Voice sheet", "function vsHTML"),
+    ("Key sheet", "const KEYS"),
+    ("Drop overlay", 'class="drop"'),
+    ("Setup check", "function setupCard"),
+    ("Tab title", "function tabTitle"),
+)
 
 
 def test_each_surface_token_is_present_in_the_frame():
+    assert len(SURFACE_TOKENS) == 20
     page = _compose_next()
-    missing = [(n, tok) for n, _, _, _, tok in _surface_rows() if tok not in page]
+    missing = [(name, tok) for name, tok in SURFACE_TOKENS if tok not in page]
     assert not missing, missing
+
+
+def test_design_md_names_classic_only_as_the_redirect():
+    # the old page is deleted, so DESIGN.md describes it nowhere; the one
+    # line left says what a /classic bookmark gets
+    lines = [ln for ln in DESIGN.read_text(encoding="utf-8").splitlines()
+             if "classic" in ln.lower()]
+    assert len(lines) == 1 and "`GET /classic` answers 302 to `/`" in lines[0], lines
 
 
 def test_frame_routes_cover_the_pages_and_no_nav_entry_is_dead():
@@ -432,32 +581,6 @@ console.log(JSON.stringify({hashA,sel,cleared,nm,after:VS}));
                          "vs": {"uid": "U004", "base": "m1", "single": True, "title": True}}
 
 
-# ------------------------------------------------- classic seek deep link ---
-
-def test_classic_reader_accepts_the_seek_deep_link():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "#m\\/([^/]+)\\/t\\/" in js
-    assert "pendingOpen={base:route.base,seek:route.seek}" in js
-
-
-@pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_classic_parse_hash_reads_the_seek_form():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    fn = js[js.index("function parseHash(){"):]
-    fn = fn[:fn.index("\n}\n") + 2]
-    body = ("let location={hash:''};" + fn + """
-location.hash='#m/'+encodeURIComponent('Orchard 1')+'/t/61';const a=parseHash();
-location.hash='#m/'+encodeURIComponent('Orchard 1');const b=parseHash();
-location.hash='';const c=parseHash();
-console.log(JSON.stringify({a,b,c}));""")
-    r = subprocess.run([NODE, "-e", body], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["a"] == {"view": "meeting", "base": "Orchard 1", "seek": 61}
-    assert out["b"] == {"view": "meeting", "base": "Orchard 1"}
-    assert out["c"]["view"] == "timeline"
-
-
 # ------------------------------------------------ durations under a minute ---
 
 def test_the_meeting_meta_carries_whole_seconds(sandbox):
@@ -491,3 +614,107 @@ console.log(JSON.stringify({
     # no meta line prints the rounded minutes on its own any more
     assert "minutes||0} min" not in js
     assert "${g.hours} h" not in js
+
+
+# ------------------------------------------------------ phase 7 polish ---
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_skip_link_is_the_first_tab_stop_and_focuses_the_page():
+    """A keyboard user passed 14 sidebar stops before the page's own first
+    control. The skip link is the first focusable element of the body, it
+    stays off screen until it has focus, and it focuses main#view without
+    touching the hash (a '#view' hash would be read as a route)."""
+    page = (STATIC / "next.html").read_text(encoding="utf-8")
+    body = page.split("<body>", 1)[1]
+    first = re.search(r"<(a|button|input|select|textarea)\b[^>]*>", body).group(0)
+    assert 'class="skip"' in first and 'data-act="skip"' in first
+    assert body.index('class="skip"') < body.index('id="side"')
+    assert 'id="view" tabindex="-1"' in body
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    assert re.search(r"\.skip\{[^}]*top:-\d+px", css)
+    assert re.search(r"\.skip:focus\{[^}]*top:var\(--s3\)", css)
+    out = _run_node("""
+let focused=0;const view={focus(){focused++;}};
+document.querySelector=s=>s==='#view'?view:_el();
+location.hash='#home';
+A.skip();
+console.log(JSON.stringify({focused,hash:location.hash}));
+""")
+    assert out == {"focused": 1, "hash": "#home"}
+
+
+def test_state_says_whether_the_watched_folder_exists(running_server):
+    """The first-run card checked only that paths.source was a non-empty
+    string, and config.source_dir() always gives one, so a folder that was
+    set but not created showed a green check."""
+    import shutil as _sh
+    st = json.loads(_get(running_server, "/api/state")[2])
+    assert st["paths"]["source_exists"] is True
+    _sh.rmtree(config.source_dir())
+    st = json.loads(_get(running_server, "/api/state")[2])
+    assert st["paths"]["source"] == str(config.source_dir())
+    assert st["paths"]["source_exists"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_first_run_card_warns_for_a_watched_folder_that_is_missing():
+    out = _run_node("""
+const card=p=>{S=Object.assign({},S||{},{paths:p,enrolled:[],recorder_ready:true});return setupCard();};
+const set=card({source:'/x/source',dest:'/x/m',source_exists:true});
+const gone=card({source:'/x/source',dest:'/x/m',source_exists:false});
+const old=card({source:'/x/source',dest:'/x/m'});
+console.log(JSON.stringify({set,gone,old}));
+""")
+    mark = lambda html, title: re.search(
+        r'<span class="mark (ok|todo)">[^<]*</span><div[^>]*><div[^>]*>' + title, html)
+    assert mark(out["set"], "Watched folder set").group(1) == "ok"
+    m = mark(out["gone"], "Watched folder missing")
+    assert m and m.group(1) == "todo"
+    assert "/x/source does not exist yet" in out["gone"]
+    assert "Watched folder set" not in out["gone"]
+    # a server from before the field: the old check
+    assert mark(out["old"], "Watched folder set").group(1) == "ok"
+
+
+def test_the_page_names_an_icon_and_favicon_ico_is_no_404(running_server):
+    """Every load logged a 404 for /favicon.ico, the only console error,
+    and the tab had no icon."""
+    import urllib.parse as up
+    html = _get(running_server, "/")[2].decode()
+    m = re.search(r'<link rel="icon" href="data:image/svg\+xml,([^"]+)">', html)
+    assert m
+    svg = up.unquote(m.group(1))
+    assert svg.startswith("<svg") and svg.endswith("</svg>") and "#2F4BD6" in svg
+    assert html.index('rel="icon"') < html.index("</head>")
+    status, _, body = _get(running_server, "/favicon.ico")
+    assert (status, body) == (204, b"")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_speaker_actions_share_one_right_edge():
+    """A named row ends with a More button hidden until hover, so its
+    Samples button ended 40px left of Name, Hide and Restore in the other
+    sections. Those rows now end with a slot of the More button's width,
+    shown only where the More button is hidden."""
+    out = _run_node("""
+S={unknowns:[{uid:'U1',display:'Speaker 1',meetings:['m1']},{uid:'U2',display:'Speaker 2',meetings:['m1'],archived:true}],
+ enrolled:[{name:'Ana Ortiz',samples:2,sources:['m1']}],mic_speaker:null};
+console.log(JSON.stringify({html:speakersView()}));
+""")
+    rails = re.findall(r'<div class="rail">(.*?)</div></div>', out["html"], re.S)
+    assert len(rails) == 3
+    ends = [re.findall(r"<(button|span)\b[^>]*>", r)[-1] for r in rails]
+    unknown = next(r for r in rails if 'data-act="hide-voice"' in r)
+    hidden = next(r for r in rails if 'data-act="unhide-voice"' in r)
+    named = next(r for r in rails if 'data-act="spk-menu"' in r)
+    for r in (unknown, hidden):
+        assert r.rstrip().endswith('<span class="rail-slot" aria-hidden="true"></span>')
+    assert "rail-slot" not in named and named.rstrip().endswith("</button>")
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    assert ".rail-slot{display:none}" in css
+    hover = css[css.index("@media (hover:hover) and (min-width:900px)"):]
+    hover = hover[:hover.index("\n}")]
+    assert ".row>.rail>.icon-btn{opacity:0}" in hover
+    assert ".rail-slot{display:block;width:32px;flex:none}" in hover
+    assert re.search(r"\.icon-btn\{[^}]*width:32px", css)
+    assert len(ends) == 3

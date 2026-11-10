@@ -295,6 +295,22 @@ def test_a_second_backfill_changes_nothing(store):
     assert backfill_keys.plan() == []
 
 
+def test_a_backfill_with_nothing_to_add_writes_no_journal(store, capsys):
+    """A second --apply printed a run id, a journal path and an undo line,
+    and left a zero-byte .jsonl for each run that changed nothing."""
+    first = backfill_keys.apply()
+    mig = store / "migration"
+    journals = sorted(p.name for p in mig.glob("*.jsonl"))
+    assert journals == [f"{first['run']}.jsonl"]
+    assert backfill_keys.main(["--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing to add" in out and "undo with" not in out and "journal:" not in out
+    assert sorted(p.name for p in mig.glob("*.jsonl")) == journals
+    r = backfill_keys.apply(run_id="backfill-20261108T085555")
+    assert r == {"run": None, "journal": None, "applied": [], "skipped": []}
+    assert not (mig / "backfill-20261108T085555.jsonl").exists()
+
+
 def test_the_backfill_works_on_a_store_that_already_has_the_amnesty_keys(store):
     j = config.meeting_file("Budget Review 09292026", ".json")
     d = json.loads(j.read_text())
@@ -468,26 +484,6 @@ def test_the_panel_meta_carries_the_date_source(sandbox):
     assert meta["date_source"] == "mtime" and meta["recorded_at"] is None
 
 
-def test_the_meeting_page_shows_every_date_source_and_flags_the_guesses():
-    from test_new_shell import NODE, _js_fn, _js_oneline, _run_node
-    if NODE is None:
-        pytest.skip("node not installed")
-    out = _run_node("\n".join([_js_oneline("esc"), _js_fn("dateSourceHTML")]) + """
-const r={};
-for(const s of ['typed','recorder','short_typed','mtime','manual','<b>',null])
-  r[String(s)]=dateSourceHTML({date_source:s});
-console.log(JSON.stringify(r));
-""")
-    for src in ("typed", "recorder", "manual"):
-        assert "Date from" in out[src] and "Date uncertain" not in out[src], src
-    for src in ("mtime", "short_typed"):
-        assert out[src].startswith('<span class="mchip dateunsure"'), src
-        assert "Date from" in out[src]
-    assert "Date from the file time" in out["mtime"]
-    assert "<b>" not in out["<b>"]
-    assert out["null"] == ""
-
-
 # ---------- QA fixes ----------
 
 def test_a_null_source_name_fills_once_a_manifest_record_links_the_meeting(store):
@@ -542,12 +538,6 @@ def test_an_accept_with_the_stored_date_keeps_the_date_source(sandbox):
     # a real change is still a person's choice
     r = summarize.apply_meeting_edits("2026-10-05 Guess Day", date="2026-10-04")
     assert _load(r["base"])["date_source"] == "manual"
-
-
-def test_the_finish_flow_sends_the_date_only_when_it_changed():
-    from test_new_shell import _js_fn
-    fn = _js_fn("fsAccept")
-    assert "picked!==stored" in fn and "FS.row.date" in fn
 
 
 def test_a_restore_keeps_the_date_source(sandbox):

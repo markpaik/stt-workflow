@@ -244,3 +244,74 @@ def test_wipe_only_removes_a_home_it_built(tmp_path):
     # with --wipe on our own marked home: rebuilds cleanly
     demo_seed.main(["--dir", str(target), "--wipe"])
     assert config.meeting_file  # sanity: module intact
+
+
+def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
+    """Each seeded meeting lacked the store keys the pipeline writes (title,
+    source_name, audio_fp, date_source, recorded_at) and its meeting_id,
+    and unknowns.json had no `next`, so a fresh home failed `doctor.py
+    check` with missing_keys on every meeting and a registry_stale_next.
+    The seed also used to build folder names with a colon the sanitizer
+    never writes. The check runs in a fresh interpreter under STT_HOME, as
+    the finding's repro did."""
+    from stt import provenance
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    for j in sorted((home / "meetings").glob("*/*.json")):
+        if j.name.endswith(".reviews.json"):
+            continue
+        d = json.loads(j.read_text())
+        assert next(iter(d)) == "meeting_id" and len(d["meeting_id"]) == 16, j
+        assert all(k in d for k in provenance.KEYS), j
+        assert d["title"] and d["audio_fp"], j
+        if d["recorded_at"]:
+            assert d["date_source"] == "recorder" and d["recorded_at"][:10] == d["date"]
+        assert ":" not in j.parent.name, j
+    reg = json.loads((home / "voiceprints" / "unknowns.json").read_text())
+    assert reg["next"] == unknowns.next_floor(reg)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean: nothing to report" in out.stdout
+
+
+def test_a_recorder_meeting_starts_at_the_time_its_name_says(tmp_path):
+    """recorder.final_name names a capture 'YYYY-MM-DD Recording HHMM' by
+    its start, and provenance dates such a name 'recorder' at that time.
+    The seed took the start from the processing time instead, so Home and
+    the README screenshots showed 'Recording 1430' at 3:01 PM, and it read
+    'Recording 0915' as a typed date with no time."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    today = demo_seed.date.today().isoformat()
+    for base, start in ((f"{today} Recording 1430", f"{today}T14:30"),
+                        ("2026-07-10 Recording 0915", "2026-07-10T09:15")):
+        d = json.loads((home / "meetings" / base / f"{base}.json").read_text())
+        assert d["date_source"] == "recorder", base
+        assert d["recorded_at"][:16] == start, base
+    # a memo with no time in its name still starts before it was processed
+    j = next((home / "meetings").glob("*Reading Partner Kickoff/*Kickoff.json"))
+    d = json.loads(j.read_text())
+    assert d["recorded_at"][:10] == d["date"]
+    assert d["recorded_at"][11:16] < d["processed_at"][11:16]
+
+
+def test_a_fresh_demo_home_is_registry_doctor_clean(tmp_path):
+    """The README points at tools/registry_doctor.py for the voice
+    registries alone, and the phase 8 plan asks for a demo home it passes
+    clean. Run it as a person would: a fresh interpreter under STT_HOME,
+    report only. Exit 0 means no finding of any kind, and the run writes
+    nothing in the voiceprints folder."""
+    home = tmp_path / "demo_home"
+    demo_seed.build(home)
+    vp = home / "voiceprints"
+    before = {p.name: p.stat().st_mtime_ns for p in vp.iterdir()}
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO)})
+    out = subprocess.run([sys.executable, str(REPO / "tools" / "registry_doctor.py")],
+                         env=env, cwd=str(REPO), capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "clean — nothing to report" in out.stdout
+    assert {p.name: p.stat().st_mtime_ns for p in vp.iterdir()} == before

@@ -296,8 +296,11 @@ def classify_title(title: str, all_titles=()) -> tuple:
 
 
 def _safe(s: str) -> str:
+    """A memo title as a staged file name: no character a file name cannot
+    hold, at most 100 characters, cut between words."""
+    from . import names as _names
     s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", str(s)).strip().lstrip(".")
-    return re.sub(r"\s+", " ", s)[:100].strip()
+    return _names.cut_words(re.sub(r"\s+", " ", s), 100).strip()
 
 
 # ---------- the sync ----------

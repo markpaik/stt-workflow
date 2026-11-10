@@ -124,6 +124,59 @@ def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
     assert unknowns.load()["speakers"]["U001"]["meetings"] == ["Weekly 05012026 (2)"]
 
 
+def test_two_restores_of_one_meeting_give_one_ok_and_one_clean_refusal(sandbox):
+    """The membership gate ran before the meeting lock, so the loser of
+    two parallel restores passed it, waited, then moved a folder the
+    winner had already moved. The panel got '[Errno 2] No such file or
+    directory: '<abs path>/.archive/...' -> '<abs path>/...''. The gate
+    runs again under the lock now, and a failed move is a plain message."""
+    import threading
+    from stt import review
+    _meeting("2026-01-22 Weekly Check-in")
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+    out = []
+    gate = threading.Barrier(2)
+    real = review.lock_meeting
+
+    calls = []
+
+    def slow_lock(base, *a, **k):
+        calls.append(base)
+        if len(calls) <= 2:
+            gate.wait(timeout=5)      # both callers are past the outer gate
+        return real(base, *a, **k)
+
+    review.lock_meeting = slow_lock
+    try:
+        ts = [threading.Thread(target=lambda: out.append(
+            archive.restore_meeting("2026-01-22 Weekly Check-in"))) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=10)
+    finally:
+        review.lock_meeting = real
+    assert sorted(r["ok"] for r in out) == [False, True]
+    bad = next(r for r in out if not r["ok"])
+    assert bad["error"] == "no archived meeting '2026-01-22 Weekly Check-in'"
+    assert str(config.meetings_dir()) not in bad["error"]
+    assert config.meeting_bases() == ["2026-01-22 Weekly Check-in"]
+
+    # a move the file system refuses is a plain message too
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+
+    def refuse(*a, **k):
+        raise PermissionError(13, "Permission denied", "/abs/path")
+    real_move = archive._move
+    archive._move = refuse
+    try:
+        r = archive.restore_meeting("2026-01-22 Weekly Check-in")
+    finally:
+        archive._move = real_move
+    assert r == {"ok": False, "error":
+                 "could not restore '2026-01-22 Weekly Check-in' (Permission denied)"}
+
+
 def test_a_new_name_can_never_collide_with_an_archived_one(sandbox):
     """Rename uniquifies against the archive too, so the ambiguity the test above
     has to clean up can't be created in the first place."""
@@ -186,6 +239,40 @@ def test_delete_removes_everything_and_scrubs_speaker_refs(sandbox):
     # survives — its embedding still identifies that voice in future meetings
     u = unknowns.load()["speakers"]["U001"]
     assert u["meetings"] == ["Other 05012026"]
+
+
+def test_delete_clears_the_sample_sources_it_fed_so_the_doctor_is_quiet(sandbox):
+    """A Delete keeps enrolled samples by design, but each sample still
+    named the deleted meeting, so the next doctor check listed one fixable
+    registry_dangling finding per person it fed. The source is now '?' (the
+    doctor fix's own value), the sample row stays, and a source that a
+    live twin of the name still answers to is left alone."""
+    import numpy as np
+    from stt import doctor, identify
+    _meeting("2026-05-01 Board Prep", meeting_id="aaaa000000000001")
+    _meeting("2026-05-02 Kept", meeting_id="aaaa000000000002")
+    config.backfill_meeting_ids()
+    rng = np.random.default_rng(3)
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-01 Board Prep")
+    identify.enroll("Dana Fox", rng.normal(size=32), source="2026-05-02 Kept")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-01 Board Prep")
+    before = identify.load_registry()
+    assert before["Dana Fox"]["sources"] == ["2026-05-01 Board Prep", "2026-05-02 Kept"]
+
+    assert archive.delete_meeting("2026-05-01 Board Prep")["ok"]
+    reg = identify.load_registry()
+    assert reg["Dana Fox"]["sources"] == ["?", "2026-05-02 Kept"]
+    assert reg["Dana Fox"]["n_samples"] == 2 and reg["Sam Chen"]["sources"] == ["?"]
+    assert identify.aligned_source_ids(reg["Dana Fox"])[0] is None
+    assert not [f for f in doctor.check() if f.kind == "registry_dangling"]
+
+    # an archived twin of the name still answers to it: its samples stay put
+    _meeting("2026-05-03 Twin")
+    identify.enroll("Sam Chen", rng.normal(size=32), source="2026-05-03 Twin")
+    archive.archive_meeting("2026-05-03 Twin")
+    _meeting("2026-05-03 Twin")
+    assert archive.delete_meeting("2026-05-03 Twin")["ok"]
+    assert identify.load_registry()["Sam Chen"]["sources"] == ["?", "2026-05-03 Twin"]
 
 
 def test_delete_works_on_an_archived_meeting_too(sandbox):

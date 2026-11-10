@@ -3,15 +3,10 @@
 This file is the source of truth for the panel's visual language and
 interaction rules. Builders implement it. They do not reinterpret it.
 
-Rewritten 2026-11-02 for the new shell (plan Phase 4D, the swap). The new
-shell replaced the One Timeline page, which still serves at `/classic` for 30
-days and is described briefly at the end. The design came from the approved
-mockup (`qa/rethink-2026-11-01/rethink/mockup-plaud-style-v2.html`) and the
-unified plan. What retired with the old page: two panes, the drawer, the
-timeline list with its Now and To finish sections, the finish strip, the
-jump rail, and the list of things that deliberately did not exist. What
-carries over: the tokens, the type rules, the naming rules, and the stage
-words.
+Rewritten 2026-11-02 for the new shell (plan Phase 4D, the swap). The design
+came from the approved mockup
+(`qa/rethink-2026-11-01/rethink/mockup-plaud-style-v2.html`) and the unified
+plan.
 
 ## The idea
 
@@ -24,12 +19,10 @@ the way of reading.
 
 ## Shell mechanics
 
-- `GET /` serves the new shell. `GET /classic` serves the old page for 30
-  days after the swap, a temporary route the owner approved (plan decision
-  8). A later commit deletes `/classic`, `app.js`, `app.css`, and
-  `page.html` together. `GET /next`, the Phase 4C preview address, also
-  serves the new shell until that commit, so a bookmark keeps working. The
-  retired `ui` query flag is ignored.
+- `GET /` serves the panel. `GET /next`, the Phase 4C preview address,
+  serves the same page, and `GET /classic` answers 302 to `/`, so an old
+  bookmark still lands on the panel. The retired `ui` query flag is
+  ignored.
 - The shell lives in `gui/static/next.html`, `next.css`, and three scripts:
   `next.js` (the frame and the list pages), `next-meeting.js` (the meeting
   page), `next-voice.js` (the voice sheet). `gui/server.py` joins the
@@ -70,7 +63,7 @@ line #33405A, inset #1D2437, accent #8B9DFF (ink on it #0E1330, soft and sel
 #34191B.
 
 Every text pair measures 4.5:1 or more in all four token blocks (light, dark,
-and the two `data-theme` overrides). `tools/token_contrast.py --css next`
+and the two `data-theme` overrides). `tools/token_contrast.py`
 measures them, and `tests/test_next_shell.py` gates it. A pair that misses is
 fixed hue-true. Theme: `auto` follows macOS, and the theme button cycles auto,
 light, dark under the `stt_theme` key, applied before paint.
@@ -95,8 +88,7 @@ light, dark under the `stt_theme` key, applied before paint.
 - A 232px sidebar on `--paper`: the wordmark and the theme button, the status
   pill, New, Search, then Home, Recordings, Groups, Ask, Speakers, a gap, Activity,
   Archive, Settings. Home carries the Needs you count and Activity the
-  attention count, in teal. The foot holds "Open the classic page" (until
-  `/classic` goes) and Keys.
+  attention count, in teal. The foot holds Keys.
 - Below 900px the sidebar hides. A top bar carries the menu button, a back
   arrow on a meeting, the page name, the pill, and Search. The menu opens the
   same navigation as a sheet. Rows wrap, one column replaces two, and nothing
@@ -331,7 +323,7 @@ bottom:
 8. The footer: Save and next (Save for one voice), Skip, and Not a real
    speaker. A voice named for this meeting only gets Clear name instead.
 
-Naming rules, carried from the classic page:
+Naming rules:
 
 - One naming request at a time. Every button that can save disables while
   one is in flight.
@@ -417,75 +409,3 @@ the palette shows that line.
   and synthetic data, never the live store. `tools/next_screens.py` shoots
   every page and a meeting at 700px and 1440px in both themes and fails on a
   sideways scroll.
-
-## The classic page (`/classic`, for 30 days)
-
-The One Timeline page (`page.html`, `app.css`, `app.js`) still serves at
-`/classic` so the owner can compare and fall back. Nothing new is built
-there. Its tests stay in `tests/test_new_shell.py` until the route is
-deleted, and every naming, review, and hostile-name behavior they pin has a
-ported test in `tests/test_next_meeting.py`. Its empty library still ends on
-"Record from the menu bar, or drop an audio file here." Its pill, for the
-record, while it serves:
-
-Status pill: the ONLY place pipeline state appears. Mono, in two segments
-(revised 2026-09-27). The pipeline segment shows one state, by priority:
-`● REC 12:41` (rec red, ticking; `⏸ REC 12:41`, still, while the recording
-is paused) → `speakers 1 · ≈41h 55m` (accent) →
-`⏸ paused · 3 waiting` (amber, always with the waiting count when nonzero) →
-`3 waiting`. When a file's stage runs past its estimate, the running state
-drops the countdown and says so: `speakers 1 · running long · +12m`, the
-minutes past the estimate (`+1h 05m` past an hour), growing as it runs; with
-files waiting behind it the queue total follows, `· ≈3h 10m in all`, and
-that total carries a tail for the long file that grows with its elapsed
-time (revised 2026-09-28: the old estimate pinned the stage at 97% and left
-about ten minutes on the clock, frozen, for hours on a 4-hour board meeting).
-The running state names the active files' own stage, lowercased
-from STAGE_NICE (`downloading`, `preparing`, `transcribing`, `speakers`,
-`verifying`, `writing`, `summary`), when every active file is in that stage;
-files in different stages, or a stage not reported yet, read `processing N`
-(revised 2026-09-28: it said `transcribing 1` while the one file was
-diarizing). Runs asked for while one holds the lock add `· 2 queued`. The
-naming segment sits beside it, split by a `--line` hairline:
-`naming 3 of 7`, so a naming never hides behind a transcription. Either
-segment alone renders alone; with neither, the pill disappears (idle needs
-no announcement). The pill's colour is the pipeline segment's. At
-720px and below the pill may wrap, and the two segments stack, the same
-`--line` hairline running across between them instead of down.
-Clicking the pill opens the Process ▾ popover.
-
-
-## The surface map
-
-### Where the 20 classic surfaces went
-
-The surface numbers are those of the 2026-11-01 panel audit. Each row moved
-or retired by the 4D swap. The last column names a token in the new shell's
-script or markup that carries the surface, and `tests/test_next_shell.py`
-checks each one.
-
-| # | Classic surface | In the new shell | Status | Token |
-|---:|---|---|---|---|
-| 1 | Menu-bar app | Its Open Control Panel item opens `/`, which is the new shell since the swap. A visible tab marks the look for its ready count | moves | `/api/seen` |
-| 2 | Header | Retires. The sidebar takes the wordmark, the theme button, and the pill | retires | `class="side-top"` |
-| 3 | Status pill | Moves to the sidebar top and the narrow top bar. A click opens Activity | moves | `function pillText` |
-| 4 | Process popover | Moves to the Activity page: Process all new, Import files, Pause or Resume, Stop with two steps, queued runs with Cancel, and the four run options | moves | `'run-all'` |
-| 5 | List search and chips | Moves to Recordings: a filter field, a sort menu with A to Z, and the chips All, Work, Personal, Draft title, Has voices | moves | `function filtered` |
-| 6 | Said in | Moves to the search palette's "Said in" group | moves | `function palResults` |
-| 7 | Now | Moves to Home "Running now" and to Activity, which also holds waiting, held, failed, and urgent rows | moves | `function activeRowHTML` |
-| 8 | To finish | Retires. Home "Needs you" replaces it with the computed list from `/api/state` | retires | `function needsCard` |
-| 9 | Library accordion | Moves to Recordings: Today, Yesterday, This week, then months. The newest older month stays open | moves | `function recListHTML` |
-| 10 | Jump rail | Retires. Folded months and the search palette replace it | retires | `data-act="fold"` |
-| 11 | Reader | Moves to the meeting page at `#m/<base>`: header, notice, the Summary, Transcript, and Ask tabs, the People rail, docked audio. The finish strip retires: the title went to the header chip, the voices to the notice and the sheet, the flags to Uncertain lines and Check | moves | `function meetingView` |
-| 12 | Two-pane layout | Retires. One content column, and the meeting opens full width | retires | `class="page"` |
-| 13 | Row menu | Moves to the Recordings row menu and the meeting header's menu: Open, Select, Rename, Set date, tags, Export Word and PDF, Copy transcript, Show files, Redo, Archive, Delete. Ask is the meeting page's tab | moves | `function rowMenu` |
-| 14 | Bulk bar | Moves to the Recordings selection bar: Keep titles, Work, Personal, Clear tag, Rename, Set date, Archive, Delete audio, Delete, Select all shown | moves | `function renderBulk` |
-| 15 | Drawer | Retires. Its tabs become pages: Settings, Speakers, Activity (History and Duplicates), Archive | retires | `function settingsView` |
-| 16 | Naming panel | Moves to the voice sheet, opened from Home, the meeting notice, the legend, a line's speaker, the People rail, and Speakers | moves | `function vsHTML` |
-| 17 | Key sheet | Moves to `?` with the new keys | moves | `const KEYS` |
-| 18 | Drop overlay | Moves as is: drop audio anywhere to upload | moves | `class="drop"` |
-| 19 | Setup check | Moves to the Home empty state | moves | `function setupCard` |
-| 20 | Tab title | Moves: `(N)` counts Needs you items that joined while the tab was hidden | moves | `function tabTitle` |
-
-Gate note. The 4C gate passed as "4C or 4D": surfaces 1 and 11 moved with
-the 4D swap, as the 4C QA note recorded on 2026-11-02.

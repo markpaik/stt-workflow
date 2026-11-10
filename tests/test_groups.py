@@ -337,6 +337,21 @@ def test_group_filter_on_search(sandbox):
     assert search.query("match rate in:gnothere")["total"] == 0
 
 
+def test_an_unknown_group_filter_says_so(sandbox):
+    """in:<key> for no group answered total 0 with no error, while a bad
+    route: or after: value said what was wrong. A typo or a stale key now
+    answers with an error, as the other filters do."""
+    _mk("Grant Writing 10012026", mid="g1", texts=("The match rate is set.",))
+    _mk("Grant Writing 10082026", mid="g2", texts=("The match rate moves.",))
+    for r in (search.query("match rate in:gnothere"),
+              search.query("match rate", filters={"in": "gnothere"})):
+        assert r["hits"] == [] and r["total"] == 0
+        assert "gnothere" in r["error"] and "not a group" in r["error"]
+    assert search.meetings("grant in:gnothere") == []
+    key = _group_of("Grant Writing 10012026")
+    assert "error" not in search.query(f"match rate in:{key}")
+
+
 def test_api_search_passes_filters(running_server):
     _filter_world()
     st, r = _get(running_server, "/api/search?q=bond+budget&route=native")

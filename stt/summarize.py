@@ -1272,6 +1272,14 @@ def _unique_base(candidate: str, current: str) -> str:
 CATEGORIES = ("work", "personal")
 
 
+def _noted(r: dict, note) -> dict:
+    """`r` with `note`, a line for the person who made the edit, when
+    there is one."""
+    if note:
+        r["note"] = note
+    return r
+
+
 def _sanitize_name(s: str) -> str:
     """A safe folder/file name (names.file_title): drop path/wildcard/
     control chars, then LEADING DOTS — a bare '.' or '..' would otherwise survive
@@ -1454,10 +1462,30 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             return {"ok": False, "error": "recorded_at must fall on the meeting date"}
 
     new_title = None
+    note = None
     if title is not None:
         new_title = _sanitize_name(title)
         if not new_title:
             return {"ok": False, "error": "empty name"}
+        if dates.is_only_date(new_title):
+            # the folder would carry the date twice ('2025-09-10 2025-09-10'),
+            # and a person who types only a date most likely meant the date
+            return {"ok": False,
+                    "error": "A title needs a word besides the date. "
+                             "Set date in the row menu changes the date."}
+        if names.title_was_cut(title):
+            note = (f"The title is cut to {names.TITLE_MAX} characters, "
+                    "between two words.")
+        typed_stamp = dates.stamp_date(new_title)
+        from datetime import date as _today_d
+        if (typed_stamp and date is None and to_base is None
+                and typed_stamp > _today_d.today().isoformat()):
+            # canonical() keeps a future stamp in the title (it names an
+            # event): say so, or the typed date seems to be ignored
+            note = " ".join(x for x in (
+                note, f"{typed_stamp} is in the future, so it stays in the "
+                      "title and the meeting keeps its date. Set date changes "
+                      "the date.") if x)
 
     if to_base is not None:
         to_base = _sanitize_name(to_base)
@@ -1601,10 +1629,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
             want = _apply(d)
             if want == base:
                 _write_json(j, d)          # no move: the source lock is enough
-                return {"ok": True, "base": base, "renamed": [],
-                        "date": d.get("date"), "category": d.get("category"),
-                        "reviewed": d.get("reviewed"),
-                        "title_state": d.get("title_state")}
+                return _noted({"ok": True, "base": base, "renamed": [],
+                               "date": d.get("date"), "category": d.get("category"),
+                               "reviewed": d.get("reviewed"),
+                               "title_state": d.get("title_state")}, note)
 
         # NAME order, and case-folded to one lock when the move is only a
         # capitalization fix: APFS is case-insensitive, so 'board prep' and
@@ -1630,9 +1658,10 @@ def apply_meeting_edits(base: str, *, title=None, date=None, category=None,
         # is a base-named lock left under the old name: the doctor listed
         # them as orphans after every rename. Locks someone holds stay.
         config.drop_meeting_locks([want, base])
-        return {"ok": True, "base": want, "renamed": renamed, "date": d.get("date"),
-                "category": d.get("category"), "reviewed": d.get("reviewed"),
-                "title_state": d.get("title_state")}
+        return _noted({"ok": True, "base": want, "renamed": renamed,
+                       "date": d.get("date"), "category": d.get("category"),
+                       "reviewed": d.get("reviewed"),
+                       "title_state": d.get("title_state")}, note)
 
     return {"ok": False,
             "error": "another edit keeps taking that name -- try again in a moment"}
@@ -1648,7 +1677,8 @@ def rename_meeting(base: str, new_base: str) -> dict:
     r = apply_meeting_edits(base, title=new_base)
     if not r["ok"]:
         return r
-    return {"ok": True, "renamed": r["renamed"], "base": r["base"]}
+    return _noted({"ok": True, "renamed": r["renamed"], "base": r["base"]},
+                  r.get("note"))
 
 
 def set_meeting_date(base: str, date_str: str) -> dict:

@@ -317,15 +317,3 @@ def test_a_registry_voice_heard_only_in_public_downloads_does_not_nag(sandbox):
                  "meetings": ["Board Session 10012026", "Team Sync 10012026"]}}}))
     tray = srv.gather_state()["tray"]
     assert [t["target"] for t in tray if t["kind"] == "unknown_voice"] == ["U020"]
-
-
-# ---------- the Draft title chip ----------
-
-def test_the_draft_chip_shows_only_on_a_provisional_non_public_title():
-    import re
-    from pathlib import Path
-    js = (Path(srv.__file__).resolve().parent / "static" / "app.js").read_text()
-    fn = re.search(r"function draftChipHTML\(m\)\{.*?\n\}", js, re.S).group(0)
-    assert "m.title_state==='provisional'" in fn
-    assert "m.route!=='public_download'" in fn
-    assert "${draft}" in js

@@ -4,19 +4,17 @@
    line; the category, date source, and location note; one notice line when
    voices are open; the sticky tab row (Summary, Transcript, Ask); the tab
    panel, with a People rail at 1200px and wider; the audio bar docked at the
-   bottom. The finish strip of the classic reader is gone: the title moved to
-   the header chip, the voices to the notice and the voice sheet
-   (next-voice.js), and the flags to the Transcript tab's Uncertain lines
-   filter and its Check.
+   bottom. The title is the header chip, the voices are the notice and the
+   voice sheet (next-voice.js), and the flags are the Transcript tab's
+   Uncertain lines filter and its Check.
 
    The page is built once per meeting. The 2s poll repaints the header, the
    notice, the People rail, and the Summary tab in place when their markup
    changes, and never the transcript: a card, a find, or a typed question
-   survives every poll. A finished relabel reloads the lines, as the classic
-   relabelWatch did, but never while a card, the voice sheet, a find, or a
-   title edit is open.
+   survives every poll. A finished relabel reloads the lines, but never
+   while a card, the voice sheet, a find, or a title edit is open.
 
-   Every write is an existing endpoint, with the classic reader's payloads:
+   Every write is an existing endpoint, with the server's payload contract:
    /api/review with the segment's ORIGINAL json index plus its start as the
    server's cross-check, /api/accept_meeting for a Keep or an edited title,
    /api/suggest (POST) for Generate, /api/ask for a question.
@@ -28,7 +26,7 @@ const MRATES=[1,1.25,1.5,2,0.75];
 const ENGINES=[['parakeet','Parakeet, fast'],['mlxwhisper:large-v3','Whisper v3, thorough'],['mlxwhisper:turbo','Whisper turbo']];
 const MTABS=[['summary','Summary'],['transcript','Transcript'],['ask','Ask']];
 
-// #m/<base> and #m/<base>/t/<secs>: the classic reader's deep links, kept
+// #m/<base> and #m/<base>/t/<secs>: a meeting, or a meeting at a second
 function parseMeetingHash(h){
  const x=/^m\/([^/]+)(?:\/t\/(\d+(?:\.\d+)?))?$/.exec(h||'');if(!x)return null;
  let base;try{base=decodeURIComponent(x[1]);}catch(e){return null;}
@@ -94,7 +92,8 @@ function mHeadHTML(m){
  const title=MP.editTitle
   ?`<input class="m-title-input" type="text" id="m-title-in" value="${esc(MP.titleDraft!=null?MP.titleDraft:m.title)}" aria-label="Title">
     <button class="btn primary" type="button" data-act="m-title-save">Save</button><button class="btn plain" type="button" data-act="m-title-cancel">Cancel</button>`
-  :`<button class="m-title" type="button" data-act="m-title" title="Rename">${esc(m.title)}</button>`;
+  // the page's one h1, as every other route has: the title button inside it
+  :`<h1 class="m-h1"><button class="m-title" type="button" data-act="m-title" title="Rename">${esc(m.title)}</button></h1>`;
  const draft=!MP.editTitle&&isDraft(m)
   ?`<span class="chip ${m.title_state==='needs_title'?'attn':'draft'}" title="${m.title_state==='needs_title'?'Only the model drafted this title':'An automatic title. Keep it or edit it.'}">Draft title</span><button class="btn quiet" type="button" data-act="m-keep">Keep</button>`:'';
  const cat=m.category==='work'?'Work':m.category==='personal'?'Personal':'';
@@ -547,7 +546,9 @@ function mRevCard(){
  const el=p>=0?document.getElementById('ln-'+p):null;
  if(!el){mRevExit();return;}                      // the transcript changed underneath
  R.hold=false;R.at={index:it.index,start:it.start,end:it.end};
- const alts=(it.alt||[]).map((a,k)=>`<div class="meta">The second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}”. <button class="btn quiet" type="button" data-act="rev-usealt" data-k="${k}">Use it</button></div>`).join('');
+ // the quote closes the sentence when the line already ends in one: a
+ // period after it read 'two.”.'
+ const alts=(it.alt||[]).map((a,k)=>`<div class="meta">The second engine heard “<b>${esc(a.theirs||'(nothing)')}</b>” where this says “${esc(a.ours||'(nothing)')}”${/[.!?…]["”’)]*$/.test(String(a.ours||'').trim())?'':'.'} <button class="btn quiet" type="button" data-act="rev-usealt" data-k="${k}">Use it</button></div>`).join('');
  mCardEl(`<div class="mc-flag attn-t">${esc(mFlagWhy(it))}${it.minor?' Minor.':''}</div>${alts}
   <div class="mc-row">${mSpkSelect('mc-spk',it.speaker)}</div>
   <textarea id="mc-text" class="mc-text" aria-label="Corrected text">${esc(it.text)}</textarea>
@@ -742,7 +743,7 @@ async function mAccept(name){
  delete UI.err['m-title'];MP.editTitle=false;MP.titleDraft=null;
  await refresh();
  if(r.base&&r.base!==base)mFollow(base,r.base);else render(true);
- toast(name?'Title saved.':'Title kept.');
+ toast(r.note||(name?'Title saved.':'Title kept.'));
 }
 // the folder moved (a rename re-stamps it): carry the page state across
 function mFollow(oldBase,newBase){

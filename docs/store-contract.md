@@ -6,9 +6,10 @@ This is what the meeting store promises to the programs that read it: the panel,
 
 - The store is one folder, `~/Projects/brain/meetings` by default (`config.meetings_dir()`, or `STT_MEETINGS_DIR`, or `STT_HOME/meetings`).
 - A meeting is the folder `<store>/<base>/` that holds `<base>/<base>.json`. The store is one level deep. There are no year folders.
+- A folder with no `<base>.json`, or one whose json is not readable, is no meeting: no reader lists it. `tools/doctor.py check` reports each one (`folder_without_json`, `unreadable_json`), and the batch's start-up sweep removes a folder that holds neither a json nor audio.
 - Readers skip every folder whose name starts with a dot. `.archive/` holds archived meetings, and `.locks/` holds lock files.
 - Every file of a meeting carries the folder's name: `<base>.json` (the record of truth), `<base>.txt` (the readable transcript), the audio (`.m4a`, or another type from `config.AUDIO_SUFFIXES`), and optional caches and sidecars (`.diar.npz`, `.emb.npz`, `.reviews.json`, `.verify.json`).
-- The folder name is `YYYY-MM-DD <title>`, plus ` (2)`, ` (3)`, and so on for a same-name twin on the same date: `2026-08-03 Weekly Check-in (2)`. The date is the stored `date`.
+- The folder name is `YYYY-MM-DD <title>`, plus ` (2)`, ` (3)`, and so on for a same-name twin on the same date: `2026-08-03 Weekly Check-in (2)`. The date is the stored `date`. Twin numbers are never shuffled when a sibling moves or is deleted (the registries name meetings by folder), so a ` (2)` can stand alone. Its next title or date edit drops the number once the plain name is free.
 - Folders named before that rule read `<title> MMDDYYYY`. Every reader takes both forms (`stt/dates.py`), so an old folder, a typed name, or a dropped file still parses. Only the ISO form is written: the next title or date edit moves an old folder to it, and `tools/iso_rename.py` moves the whole store.
 - A stamp typed in a title, in either form (`Review 06152026` or `2026-06-15 Review`), becomes the stored date and moves to the front. A future typed stamp names an event, so it stays in the title and is not stored. The older recorder name `Recording 07112026 1814` loses its mid-name date: `2026-07-11 Recording 1814`.
 - The `.txt` header line opens with the meeting's date and title (`output.header_name`), and every rename refreshes it.
@@ -36,6 +37,7 @@ A reader may rely on these keys in `<base>.json`.
 | `ai_next_steps` | Removed 2026-11-05. Older meetings may still hold the list. Every summary run deletes it | A summary run deletes it |
 | `ai_summary_parts` | 1 when the summary read the transcript in one prompt, else how many parts the model noted first. Absent on a summary from before Phase 4G | With `ai_summary` |
 | `location_note` | The default place name Voice Memos gave a synced memo (a street address or a listed place), kept as a note because it is not a title | Never, once written |
+| `manual_next` | The number the next person added by hand to a line takes (`MANUAL_n`). A line edit drops a hand-added person once no line names them, and that number is never handed out again | A line edit adds or drops a hand-added person |
 | `vm_uuid` | The Voice Memos id of a synced memo. A purge blocks it so the sync never copies it again, and the delete after ingest moves a memo only while a library meeting carries its id | Never, once written |
 
 Old code can ignore any key it does not know. A meeting from before a key simply lacks it, and every reader must accept that.

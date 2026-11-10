@@ -935,3 +935,75 @@ def test_an_insert_near_the_end_is_cut_at_the_end(sandbox):
     seg = d["segments"][r["index"]]
     assert (seg["start"], seg["end"]) == (8.0, 9.0)
     assert "NaN" not in (mfile("Mtg", ".json")).read_text()
+
+
+def test_an_edit_replays_the_text_the_live_edit_stored(sandbox):
+    """The live edit stored text.strip(), and the sidecar kept the raw text,
+    so the next relabel replayed '  padded text  \\n' into the transcript.
+    A blank text with a speaker change replaced the line's words with
+    spaces on replay."""
+    _make_meeting(sandbox)
+    assert review.apply("Mtg", 1, "edit", start=5.0, text="  padded text  \n")["ok"]
+    live = json.loads(mfile("Mtg", ".json").read_text())["segments"][1]["text"]
+    assert live == "padded text"
+    decs = json.loads(mfile("Mtg", ".reviews.json").read_text())
+    assert decs[-1]["text"] == "padded text"
+    data = _make_meeting(sandbox)          # simulate the relabel rebuild
+    review.reapply_decisions("Mtg", data)
+    assert data["segments"][1]["text"] == live
+
+    _make_meeting(sandbox, base="Two")
+    assert review.apply("Two", 1, "edit", start=5.0, text="   ",
+                        speaker_id="SPEAKER_01")["ok"]
+    assert json.loads(mfile("Two", ".reviews.json").read_text())[-1]["text"] is None
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "Uncertain bit here."
+
+    # a sidecar from before the fix still holds the raw text
+    mfile("Two", ".reviews.json").write_text(json.dumps([
+        {"start": 5.0, "end": 6.0, "action": "edit", "text": " old raw \n",
+         "speaker_id": None, "at": "2026-11-01T10:00:00"}]))
+    data = _make_meeting(sandbox, base="Two")
+    review.reapply_decisions("Two", data)
+    assert data["segments"][1]["text"] == "old raw"
+
+
+def test_a_manual_person_with_no_line_left_leaves_the_roster(sandbox):
+    """Deleting an inserted line, or giving it to someone else, left the
+    hand-added person in speakers[] and in the .txt header ('3 speaker(s)
+    | identified: Mark, Pat Q') with no line behind the name. A pruned
+    number is never handed to the next new person."""
+    _make_meeting(sandbox)
+    r = review.insert_segment("Mtg", 6.5, 7.5, "name:Pat Q", "An aside.")
+    assert r["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert [s["id"] for s in d["speakers"] if s.get("manual")] == ["MANUAL_1"]
+    # reassign the inserted line to a diarized speaker
+    assert review.apply("Mtg", r["index"], "edit", start=6.5,
+                        speaker_id="SPEAKER_01")["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert not [s for s in d["speakers"] if s.get("manual")]
+    assert "Pat Q" not in mfile("Mtg", ".txt").read_text()
+    assert {s["id"] for s in d["speakers"]} == {"SPEAKER_00", "SPEAKER_01"}
+
+    # a delete prunes too, and the next new person takes a fresh number
+    r = review.insert_segment("Mtg", 7.0, 7.8, "name:Lee K", "Another aside.")
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert [s["id"] for s in d["speakers"] if s.get("manual")] == ["MANUAL_2"]
+    assert review.delete_segment("Mtg", r["index"], start=7.0)["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    assert not [s for s in d["speakers"] if s.get("manual")]
+    assert "Lee K" not in mfile("Mtg", ".txt").read_text()
+
+    # MANUAL_3 pruned while MANUAL_4 stays: the count would reuse MANUAL_4
+    a = review.insert_segment("Mtg", 7.1, 7.6, "name:Noor", "One.")
+    b = review.insert_segment("Mtg", 8.0, 8.5, "name:Sami", "Two.")
+    assert a["ok"] and b["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    noor = next(i for i, s in enumerate(d["segments"]) if s["text"] == "One.")
+    assert review.delete_segment("Mtg", noor, start=7.1)["ok"]
+    assert review.insert_segment("Mtg", 8.6, 8.9, "name:Ana", "Three.")["ok"]
+    d = json.loads(mfile("Mtg", ".json").read_text())
+    manual = {s["id"]: s["display"] for s in d["speakers"] if s.get("manual")}
+    assert manual == {"MANUAL_4": "Sami", "MANUAL_5": "Ana"}

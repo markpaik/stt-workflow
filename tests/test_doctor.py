@@ -151,7 +151,36 @@ def test_fix_repairs_and_journals_then_undo_restores(lib):
     assert dry["restored"] and _manifest() == m
     u = doctor.undo(r["run"], dry_run=False)
     assert not u["kept"]
-    assert _tree(config.PROJECT_DIR) == before
+    # every file is back but the stale stop flag, which undo never restores
+    flag = str(control.STOP_FLAG.relative_to(config.PROJECT_DIR))
+    assert u["skipped"] == [str(control.STOP_FLAG)]
+    assert _tree(config.PROJECT_DIR) == {k: v for k, v in before.items() if k != flag}
+
+
+def test_undo_says_what_it_cannot_undo_and_never_restores_a_stop_flag(
+        sandbox, monkeypatch, tmp_path, capsys):
+    """undo printed 'restored 3 file(s)' after a fix that also rotated a
+    log, as if the whole run were back, and it put the stale stopping.flag
+    back, so the next check reported stale_stop_flag again."""
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    monkeypatch.setattr(config, "LOG_DIR", sandbox / "logs")
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 1000)
+    logs = config.LOG_DIR
+    logs.mkdir(exist_ok=True)
+    (logs / "big.log").write_bytes(b"x" * 12000)
+    control.STOP_FLAG.write_text("x")
+    holds.PATH.write_text(json.dumps(["Not Here.m4a"]))
+    r = doctor.fix(dry_run=False, registry=False)
+    assert any(d.startswith("rotated 1 log") for d in r["done"])
+    assert not control.STOP_FLAG.exists()
+    capsys.readouterr()
+    assert doctor_cli.main(["undo", r["run"], "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "not restored: stopping.flag" in out
+    assert "not undone: rotated 1 log(s)" in out and ".gz" in out
+    assert not control.STOP_FLAG.exists()
+    assert json.loads(holds.PATH.read_text()) == ["Not Here.m4a"]
+    assert "stale_stop_flag" not in {f.kind for f in doctor.check(registry=False)}
 
 
 def test_undo_keeps_a_file_changed_since(lib):
@@ -360,3 +389,33 @@ def test_a_run_id_with_a_slash_never_becomes_a_path(tmp_path):
             fieldjournal.journal_path(bad, tmp_path)
     assert fieldjournal.journal_path("backfill-20261109T101500", tmp_path) == \
         tmp_path / "backfill-20261109T101500.jsonl"
+
+
+def test_check_reports_a_folder_with_no_json_or_an_unreadable_one(sandbox, monkeypatch):
+    """A folder with no meeting json (an interrupted run, a hand copy) or
+    with a json that is not JSON reached no reader: the panel listed
+    nothing, Archive and Delete refused it as no meeting, and the check
+    said 'clean: nothing to report'. Each one is reported now, and how to
+    clear it. A batch that runs makes its folder before its json, so the
+    folder check waits for it."""
+    _m("2026-08-04 Fine", title="Fine")
+    md = config.meetings_dir()
+    (md / "2026-08-02 Empty Folder").mkdir()
+    (md / "2026-08-03 No Json").mkdir()
+    (md / "2026-08-03 No Json" / "2026-08-03 No Json.txt").write_text("stub")
+    (md / "2026-08-05 Audio Only").mkdir()
+    (md / "2026-08-05 Audio Only" / "2026-08-05 Audio Only.m4a").write_bytes(b"a")
+    (md / "2026-08-01 Corrupt One").mkdir()
+    (md / "2026-08-01 Corrupt One" / "2026-08-01 Corrupt One.json").write_text("{bad json")
+    (md / ".archive").mkdir(exist_ok=True)
+    found = {(f.kind, f.subject): f for f in doctor.check(registry=False)}
+    bad = found[("unreadable_json", "2026-08-01 Corrupt One")]
+    assert not bad.fixable and "not readable JSON" in bad.detail
+    for name in ("2026-08-02 Empty Folder", "2026-08-03 No Json"):
+        assert "next batch start removes it" in found[("folder_without_json", name)].detail
+    assert "holds audio" in found[("folder_without_json", "2026-08-05 Audio Only")].detail
+    assert not any(s.startswith(".") or s == "2026-08-04 Fine" for k, s in found
+                   if k in ("unreadable_json", "folder_without_json"))
+    monkeypatch.setattr(doctor, "_batch_running", lambda: True)
+    kinds = {f.kind for f in doctor.check(registry=False)}
+    assert "folder_without_json" not in kinds and "unreadable_json" in kinds

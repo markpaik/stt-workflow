@@ -4,16 +4,22 @@
 Recommended (enroll-from-transcript): after a meeting is processed, look at its
 .txt, see which Speaker N is whom, and enroll from the saved embeddings sidecar:
 
-  ./run.sh enroll --from-meeting "LT Meeting 05212026" --speaker SPEAKER_01 --name "Mark Paik"
+  ./run.sh enroll --from-meeting "2026-05-21 Team Sync" --speaker SPEAKER_01 --name "Ana Ortiz"
 
 Or from a short single-speaker clip:
 
-  ./run.sh enroll --audio ~/samples/mark.m4a --name "Mark Paik"
+  ./run.sh enroll --audio ~/samples/ana.m4a --name "Ana Ortiz"
 
 List / inspect:
 
   ./run.sh enroll --list
-  ./run.sh enroll --from-meeting "LT Meeting 05212026"   # lists that meeting's speakers
+  ./run.sh enroll --from-meeting "2026-05-21 Team Sync"   # lists that meeting's speakers
+
+It refuses, and writes nothing, for a name the panel would refuse (empty,
+over 200 characters, a line break or an invisible control, or a name like
+U7 that an unknown voice holds), a speaker with less than 30 s of speech or
+fewer than 10 clear turns in that meeting, and a registry.json it cannot
+read. A sample that looks like the wrong person needs --confirm.
 """
 import argparse
 import sys
@@ -73,6 +79,14 @@ def main():
         args.name = names.person_name(args.name)
     except names.BadName as e:
         raise SystemExit(f"--name: {e}")
+    # identify.enroll refuses both of these and writes nothing, but here
+    # they ended in a traceback, and an --audio clip was diarized first
+    if identify.reserved_name(args.name):
+        raise SystemExit(f"--name: {identify.RESERVED_ERROR}")
+    try:
+        identify.load_registry_for_write()
+    except identify.RegistryUnreadable as e:
+        raise SystemExit(str(e))
 
     if args.from_meeting:
         embs = _meeting_embeddings(args.from_meeting)
@@ -138,7 +152,10 @@ def main():
                                    "Re-run with --confirm to enroll anyway.")
 
     source = args.from_meeting or (Path(args.audio).stem if args.audio else None)
-    path = identify.enroll(args.name, vec, replace=args.replace, source=source)
+    try:
+        path = identify.enroll(args.name, vec, replace=args.replace, source=source)
+    except identify.RegistryUnreadable as e:   # damaged since the check above
+        raise SystemExit(str(e))
     print(f"Enrolled '{args.name}' -> {path}")
     return 0
 

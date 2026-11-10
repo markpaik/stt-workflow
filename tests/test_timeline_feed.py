@@ -454,8 +454,7 @@ def test_archived_meeting_is_excluded(sandbox):
 # ranked `tray` key stays the data behind two sections: its urgent kinds
 # (recorder_stall, failed, dupe_files, dupe_meetings) render as Now rows, and
 # its chronic kinds (unknown_voice, review) are counted by the To finish
-# eyebrow's "Name N voices" and "Review flags". The client half is pinned in
-# tests/test_new_shell.py; these pin the data it reads.
+# eyebrow's "Name N voices" and "Review flags". These pin the data.
 
 def test_tray_empty_when_nothing_needs_attention(sandbox):
     _meeting("Clean Meeting 05012026")   # ready, no flags, no unknowns, no failures
@@ -979,8 +978,7 @@ def test_finish_counts_a_split_voice_once(sandbox, every_voice_asks):
     "Voices 21". The diarizer split one person into two clusters that carry
     one global id, so both display "Speaker 68", and naming that id names
     both: one voice. The row's count (finish.voices) is 21 voices in 22
-    unnamed clusters, the uid is listed once, and the strip's own count over
-    the same meeting is pinned to this number in tests/test_new_shell.py."""
+    unnamed clusters, and the uid is listed once."""
     clusters, _ = split_voice_meeting()
     d = json.loads(mfile(SPLIT_VOICE_BASE, ".json").read_text())
     assert len([s for s in d["speakers"] if not s.get("name")]) == clusters == 22

@@ -7,10 +7,9 @@
    (next-voice.js). The server joins this file, next-meeting.js, and
    next-voice.js in that fixed order into one script: no modules, no build.
 
-   Since the 4D swap, / serves this page and /classic keeps the old one for
-   30 days. Both read the same GET /api/state poll and call only existing
-   endpoints. Where each of the 20 classic surfaces went is in gui/DESIGN.md.
-   tests/test_next_shell.py and tests/test_next_meeting.py pin them.
+   Since the 4D swap, / serves this page. It reads one GET /api/state poll
+   and calls only existing endpoints. tests/test_next_shell.py and
+   tests/test_next_meeting.py pin it.
    ============================================================================ */
 
 const ICON={
@@ -125,7 +124,7 @@ function renderFrame(){
   <button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>
   <button class="searchbtn" type="button" data-act="palette" title="Search titles and words (/ or Cmd K)">${ic('search')}<span>Search</span></button>
   ${navHTML()}
-  <div class="side-foot"><a href="/classic">Open the classic page</a><a href="#" data-act="keys">Keys</a></div>`;
+  <div class="side-foot"><a href="#" data-act="keys">Keys</a></div>`;
  $('#topbar').innerHTML=`<button class="icon-btn" type="button" data-act="menu" aria-label="Open the menu">${ic('menu')}</button>${UI.route==='meeting'?`<a class="icon-btn" href="#recordings" aria-label="Back to Recordings">${ic('back')}</a>`:''}<span class="t">${esc(pageTitle())}</span>${pillHTML()}<button class="icon-btn" type="button" data-act="palette" aria-label="Search">${ic('search')}</button>`;
 }
 
@@ -172,7 +171,10 @@ function setupCard(){
  const line=(ok,t,d,btn)=>`<div class="setup-line"><span class="mark ${ok?'ok':'todo'}">${ok?'✓':'!'}</span><div style="min-width:0"><div style="font-weight:600">${t}</div><div class="meta">${d}</div></div>${btn}</div>`;
  return `<div class="setup"><h2>Set up in three checks</h2>
   ${line(!!S.recorder_ready,S.recorder_ready?'Recorder ready':'Recorder not built','The menu-bar recorder saves mic and system audio.','<a class="btn quiet" href="#settings">Recorder settings</a>')}
-  ${line(!!(S.paths&&S.paths.source),'Watched folder set',esc((S.paths||{}).source||'Not set'),'<a class="btn quiet" href="#settings">Folder settings</a>')}
+  ${(()=>{const P=S.paths||{};const gone=!!P.source&&P.source_exists===false;   // set, but not on disk
+   return line(!!P.source&&!gone,gone?'Watched folder missing':P.source?'Watched folder set':'Watched folder not set',
+    gone?`${esc(P.source)} does not exist yet. Create it, or pick another folder.`:esc(P.source||'Pick the folder new recordings arrive in.'),
+    '<a class="btn quiet" href="#settings">Folder settings</a>');})()}
   ${line(!!you,you?'Your voice is set':'Your voice is not set',you?esc(you):(enrolled?'Pick your name in Settings.':'Name yourself in your first meeting to enroll the voice.'),'<a class="btn quiet" href="#settings">Pick your voice</a>')}
   <p class="sub" style="text-align:center">Record from the menu bar, let Voice Memos sync, or drop an audio file here.</p>
   <div style="display:flex;justify-content:center"><button class="btn primary" type="button" data-act="new">${ic('plus')}New</button></div></div>`;
@@ -331,6 +333,12 @@ async function loadDupes(){const r=await api('/api/dupes').catch(()=>({pairs:[]}
  if(r.scanning)setTimeout(()=>{if(UI.route==='activity'&&UI.actTab==='dupes'){UI.dupes=null;render(true);}},2500);}
 
 /* ------------------------------------------------------------ speakers ---- */
+// A named person's row ends with a More button that stays hidden until the
+// row is hovered (next.css), so its Samples button sat 40px left of the
+// other sections' Name, Hide and Restore. This empty slot holds the same
+// place at the end of those rows, so every section's text buttons share
+// one right edge. It is shown only where the hidden button is.
+const RAIL_SLOT='<span class="rail-slot" aria-hidden="true"></span>';
 function speakersView(){
  const unk=(S.unknowns||[]).filter(u=>!u.archived).sort((a,b)=>(b.meetings||[]).length-(a.meetings||[]).length);
  const hidden=(S.unknowns||[]).filter(u=>u.archived);
@@ -339,7 +347,7 @@ function speakersView(){
  const unkRow=u=>{const n=(u.meetings||[]).length;const look=(u.looks_like||[])[0];const same=(u.suggested||[]).filter(x=>x&&x.uid).slice(0,2);
   return `<div class="row static" data-row tabindex="0" id="v-${esc(u.uid)}"><div style="min-width:0"><div class="row-title">${esc(u.display)}</div><div class="meta">In ${plural(n,'meeting')}${look?` · Looks like <span class="nb">${esc(look.name)} · <span class="mono">${(+look.score).toFixed(2)}</span></span>`:''}</div>
    ${same.length?`<div class="tools">${same.map(x=>`<button class="btn plain" type="button" data-act="link-voice" data-src="${esc(u.uid)}" data-dst="${esc(x.uid)}">Same voice as ${esc(x.display)} · <span class="mono">${(+x.score).toFixed(2)}</span></button>`).join('')}</div>`:''}</div>
-   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}" data-base="${esc((u.meetings||[])[0]||'')}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button></div></div>`;};
+   <div class="rail"><button class="icon-btn" type="button" data-act="play" data-speaker="${esc(u.uid)}" aria-label="Play ${esc(u.display)}">${ic(PLAYING===u.uid?'pause':'play')}</button><button class="btn quiet" type="button" data-act="name-voice" data-uid="${esc(u.uid)}" data-base="${esc((u.meetings||[])[0]||'')}">Name</button><button class="btn plain" type="button" data-act="hide-voice" data-uid="${esc(u.uid)}">Hide</button>${RAIL_SLOT}</div></div>`;};
  const others=enr.map(e=>e.name);
  const enrRow=e=>{const conf=UI.confirm==='rm:'+e.name;const open=UI.openSamples===e.name;const mine=S.mic_speaker===e.name;
   return `<div class="row static" data-row tabindex="0"><div style="min-width:0"><div class="row-title">${esc(e.name)}${mine?'<span class="chip draft">Your voice</span>':''}</div><div class="meta">${plural(e.samples||0,'voice sample')}${(e.sources||[]).length?' · from '+plural(e.sources.length,'meeting'):''}</div>
@@ -351,7 +359,7 @@ function speakersView(){
  return `<div class="head"><div><h1>Speakers</h1><p class="meta">Your voice library stays on this Mac and carries names across meetings. Public meetings never ask.</p></div></div>
   <div class="stack sections"><section><div class="eyebrow">Unknown voices <span class="n">${unk.length}</span></div><div class="stack">${unk.map(unkRow).join('')||'<div class="none-line sub">Every voice has a name.</div>'}</div></section>
   <section><div class="eyebrow">Named people <span class="n">${enr.length}</span></div><div class="stack">${enr.map(enrRow).join('')}</div></section>
-  ${hidden.length?`<section><div class="eyebrow">Hidden voices <span class="n">${hidden.length}</span></div><div class="stack">${hidden.map(u=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(u.display)}</div><div class="meta">In ${plural((u.meetings||[]).length,'meeting')}</div></div><div class="rail"><button class="btn quiet" type="button" data-act="unhide-voice" data-uid="${esc(u.uid)}">Restore</button></div></div>`).join('')}</div></section>`:''}</div>`;
+  ${hidden.length?`<section><div class="eyebrow">Hidden voices <span class="n">${hidden.length}</span></div><div class="stack">${hidden.map(u=>`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(u.display)}</div><div class="meta">In ${plural((u.meetings||[]).length,'meeting')}</div></div><div class="rail"><button class="btn quiet" type="button" data-act="unhide-voice" data-uid="${esc(u.uid)}">Restore</button>${RAIL_SLOT}</div></div>`).join('')}</div></section>`:''}</div>`;
 }
 function renameForm(e){const N=UI.naming;
  return `<div class="name-form"><div class="ask-line"><input type="text" id="rn-in" value="${esc(N.value!=null?N.value:e.name)}" aria-label="New name for ${esc(e.name)}" autocomplete="off"><button class="btn primary" type="button" data-act="rn-save" ${N.busy?'disabled':''}>Rename</button><button class="btn plain" type="button" data-act="vcancel">Cancel</button></div>${N.err?`<div class="err">${esc(N.err)}</div>`:''}</div>`;}
@@ -431,7 +439,7 @@ function settingsView(){
 /* ------------------------------------------------------------ overlays ---- */
 function layersHTML(){
  let h='';
- if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button><div class="side-foot"><a href="/classic">Open the classic page</a></div></div>`;
+ if(UI.menu)h+=`<div class="veil" data-act="close-layer"></div><div class="menu-sheet" role="dialog" aria-label="Menu"><div class="side-top"><span class="wordmark">Meetings</span><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><button class="btn primary new" type="button" data-act="new">${ic('plus')}New</button>${navHTML()}<button class="nav-item" type="button" data-act="theme">${ic('theme')}<span>${themeLabel()}</span></button></div>`;
  if(UI.palette)h+=`<div class="veil" data-act="close-layer"></div><div class="palette" role="dialog" aria-label="Search"><input type="search" id="pal-in" placeholder="Search titles and words" aria-label="Search" value="${esc(UI.pq)}" autocomplete="off"><div class="res" id="pal-res">${palResults()}</div></div>`;
  if(UI.keys)h+=`<div class="veil" data-act="close-layer"></div><div class="palette keysheet" role="dialog" aria-label="Keyboard keys"><div class="keysheet-head"><strong>Keys</strong><button class="icon-btn" type="button" data-act="close-layer" aria-label="Close">${ic('close')}</button></div><div class="keys">${KEYS.map(([k,d])=>`<span>${k.split(' ').map(x=>/^(or|then)$/.test(x)?`<span class="sub">${x}</span>`:`<kbd>${esc(x)}</kbd>`).join(' ')}</span><span>${esc(d)}</span>`).join('')}</div></div>`;
  $('#layers').innerHTML=h;
@@ -589,6 +597,8 @@ function play(el){
  PLAYER.play().catch(stop);
 }
 const A={
+ // the skip link: focus the page column. A hash link would be read as a route.
+ skip(){const v=$('#view');if(v&&v.focus)v.focus();},
  go(el){go(el.dataset.to);},
  theme(){const r=document.documentElement;const cur=r.getAttribute('data-theme')||'auto';const nx={auto:'light',light:'dark',dark:'auto'}[cur];setTheme(nx);},
  menu(){UI.menu=true;layersHTML();},
@@ -621,8 +631,9 @@ const A={
   else if(k==='bulk-rename'||k==='bulk-date'){r=await api('/api/bulk',{action:k==='bulk-rename'?'rename':'date',bases:[...UI.sel],value:v});}
   if(!r||r.error||r.ok===false){err.hidden=false;err.textContent=(r&&r.error)||((r&&r.results)||[]).filter(x=>!x.ok).map(x=>x.error).filter(Boolean)[0]||'That did not work.';return;}
   hidePop();if(k.startsWith('bulk'))UI.sel.clear();await refresh();
-  if(r.base&&r.base!==b&&UI.route==='meeting'&&UI.mbase===b){mFollow(b,r.base);toast('Saved.');return;}
-  render(true);toast('Saved.');},
+  // a note says what the save did not do as typed (a future date kept in the title)
+  if(r.base&&r.base!==b&&UI.route==='meeting'&&UI.mbase===b){mFollow(b,r.base);toast(r.note||'Saved.');return;}
+  render(true);toast(r.note||'Saved.');},
  async keep(el){const b=el.dataset.base;const i=document.getElementById('nt-'+b);const name=i?i.value.trim():'';
   await act('/api/accept_meeting',{base:b,name:name||undefined},'keep:'+b);toast('Title kept.');},
  async 'keep-all'(){if(UI.confirm!=='keep-all'){UI.confirm='keep-all';render(true);return;}UI.confirm=null;
@@ -780,8 +791,8 @@ addEventListener('drop',async e=>{if(!hasFiles(e))return;e.preventDefault();drag
 
 /* ----------------------------------------------- poll, tab title, seen ---- */
 // The tab title counts Needs you items that joined while the tab was hidden,
-// the same "(N) Meetings" the classic page shows. A visible tab marks the
-// look for the menu bar's "new since last look" count.
+// as "(N) Meetings". A visible tab marks the look for the menu bar's "new
+// since last look" count.
 let HIDDEN_BASE=null;
 function tabTitle(){const n=HIDDEN_BASE==null?0:Math.max(0,needsYou().length-HIDDEN_BASE);return (n?`(${n}) `:'')+pageTitle()+' · Meetings';}
 document.addEventListener('visibilitychange',()=>{
