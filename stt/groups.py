@@ -14,6 +14,11 @@ How a group forms:
    by average linkage while their mean word overlap (Jaccard) is 0.6 or
    more. Average linkage, not single linkage, because the audit's fuzzy
    match chained one group to 21 spellings.
+   A catalog series title ("LT Weekly Meeting – Budget Reallocation",
+   "Robin Weekly Check-in – Hiring Plan", see stt/series.py) counts its
+   series name only, because its topic changes every week. The person of a
+   person series is one word ("robin c"), so two people who share a first
+   name stay apart. Any other title counts all its words.
 2. People and hour. A meeting whose title has no strong word (a recorder
    default, a marker name) joins the title cluster whose members share its
    exact set of named people (the owner left out) at the same hour of day,
@@ -56,7 +61,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import config, dates
+from . import config, dates, series
 
 THRESHOLD = 0.6       # mean word overlap (Jaccard) to merge two clusters
 MIN_SIZE = 2          # a group needs two or more meetings
@@ -86,18 +91,41 @@ _lock = threading.RLock()
 
 # ------------------------------------------------------------------ words ---
 
+def _fold(text: str) -> str:
+    """Lower case, accents folded: "Réunion" is "reunion", not "r" and "union"."""
+    t = str(text or "").lower()
+    return "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+
+
 def words(title: str) -> frozenset:
     """The meeting's word set: lowercase words of its title, without stop
     words or bare numbers (dates and times say nothing about the series)."""
-    t = str(title or "").lower().replace("1-on-1", "1on1").replace("1:1", "1on1")
-    # fold accents so "Réunion" is "reunion", not "r" and "union"
-    t = "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c))
+    t = _fold(str(title or "").replace("1-on-1", "1on1").replace("1:1", "1on1"))
     out = set()
     for w in _WORD.findall(t):
         if w in _STOP or (_DIGITS.match(w) and w != "1"):
             continue
         out.add(w)
     out.discard("1")             # "1" only ever meant "1-on-1", handled above
+    return frozenset(out)
+
+
+def title_words(title: str) -> frozenset:
+    """The word set grouping reads off a title. A catalog series title,
+    with or without its topic, gives its series name's words, and a person
+    series adds the person as ONE word. Every meeting of the series then has
+    the same word set, whatever the week's topic. Any other title gives
+    words(title)."""
+    t = str(title or "").strip()
+    name = series.split_title(t)[0]
+    sid, person = series.exact_series(name if name is not None else t)
+    if sid is None:
+        return words(t)
+    sr = series.BY_ID[sid]
+    out = set(words(sr.template.replace("{person}", "")))
+    who = " ".join(_WORD.findall(_fold(person)))
+    if who:
+        out.add(who)
     return frozenset(out)
 
 
@@ -387,11 +415,21 @@ def _near(h1, h2) -> bool:
     return min(d, 24 - d) <= HOUR_SLACK
 
 
+def _series_name(title: str) -> str:
+    """A catalog series title without its topic: 'LT Weekly Meeting –
+    Budget' is 'LT Weekly Meeting'. Any other title as it is."""
+    name = series.split_title(title)[0]
+    return name if name is not None and series.exact_series(name)[0] else title
+
+
 def _name_and_why(kind, members, sig):
-    titles = Counter(dates.title_of(m["base"]) or m.get("title") or "" for m in members)
+    # a series group is named for the series, not for one week's topic
+    def shown(m):
+        return _series_name(dates.title_of(m["base"]) or m.get("title") or "")
+    titles = Counter(shown(m) for m in members)
     newest = max(members, key=lambda m: (m.get("date") or "", m["base"]))
     top = max(titles.values())
-    name = (dates.title_of(newest["base"]) if titles[dates.title_of(newest["base"])] == top
+    name = (shown(newest) if titles[shown(newest)] == top
             else sorted(t for t, c in titles.items() if c == top)[0])
     if kind == "title":
         why = "Titles share the words " + ", ".join(sorted(sig))
@@ -411,7 +449,7 @@ def compute(rows: list, me=None, overrides=None) -> list:
         overrides = load_overrides()
     me = me if me is not None else config.mic_speaker()
     by_base = {r["base"]: r for r in rows}
-    ws = {r["base"]: words(r.get("title") or dates.title_of(r["base"])) for r in rows}
+    ws = {r["base"]: title_words(r.get("title") or dates.title_of(r["base"])) for r in rows}
     titled = [b for b in ws if strong(ws[b])]
     untitled = [b for b in ws if not strong(ws[b])]
 

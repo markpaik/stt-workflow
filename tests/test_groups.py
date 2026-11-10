@@ -105,6 +105,35 @@ def test_average_linkage_stops_a_chain(sandbox):
     assert a and e and a != e
 
 
+
+def test_one_series_groups_whatever_the_week_s_topic(sandbox):
+    """A series title is '<series> – <topic>', and the topic changes every
+    week. Word overlap over the whole title kept three LT Weekly meetings,
+    and two check-ins with one person, out of any group."""
+    _mk("2026-10-01 LT Weekly Meeting – Budget Reallocation", mid="m1")
+    _mk("2026-10-08 LT Weekly Meeting – Attendance Trends", mid="m2")
+    _mk("2026-10-15 LT Weekly Meeting – Hiring Plan", mid="m3")
+    _mk("2026-10-02 Robin Weekly Check-in – Budget", mid="m4")
+    _mk("2026-10-09 Robin Weekly Check-in – Hiring Plan", mid="m5")
+    # apart: another series with the same person, two people who share a
+    # first name, and a hand-typed title that only looks like the form
+    _mk("2026-10-03 Robin Thrive Check-in – Goals", mid="m6")
+    _mk("2026-10-04 Sam C. Weekly Check-in – Budget", mid="m7")
+    _mk("2026-10-11 Sam D. Weekly Check-in – Hiring Plan", mid="m8")
+    _mk("2026-10-05 Roof Repair – Bids", mid="m9")
+    _mk("2026-10-12 Roof Repair – Schedule", mid="m10")
+    by_name = {g["name"]: g for g in groups.current()}
+    assert set(by_name) == {"LT Weekly Meeting", "Robin Weekly Check-in"}, by_name
+    assert by_name["LT Weekly Meeting"]["count"] == 3
+    assert set(by_name["Robin Weekly Check-in"]["bases"]) == {
+        "2026-10-02 Robin Weekly Check-in – Budget",
+        "2026-10-09 Robin Weekly Check-in – Hiring Plan"}
+    # a series title with no topic, and the person as one word
+    assert groups.title_words("LT Weekly Meeting") == {"lt", "weekly"}
+    assert groups.title_words("Sam C. Weekly Check-in – Budget") == {
+        "sam c", "weekly", "check"}
+    assert groups.title_words("Roof Repair – Bids") == {"roof", "repair", "bids"}
+
 def test_a_single_meeting_has_no_group_and_nothing_moves(sandbox):
     _mk("Science Fair 10012026")
     _mk("Snow Day 10022026")

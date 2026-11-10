@@ -526,8 +526,9 @@ question that finds nothing starts no saved thread: the page shows the reply
 marked "Not saved: nothing was found." A follow-up that finds nothing is
 saved in its thread.
 
-Groups collects meetings that belong together (the same title words, or the
-same people at the same hour). A group shows its total length in seconds
+Groups collects meetings that belong together (the same title words, the
+same series whatever the week's topic, or the same people at the same hour).
+A group shows its total length in seconds
 under a minute, in minutes under an hour, and in hours after that. "Not part
 of this group" corrects a group, and nothing on disk moves.
 
