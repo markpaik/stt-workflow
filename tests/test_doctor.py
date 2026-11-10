@@ -258,6 +258,74 @@ def test_a_damaged_manifest_is_reported_and_never_planned_over(lib, raw):
     assert "manifest_unreadable" not in {f.kind for f in doctor.check(registry=False)}
 
 
+@pytest.mark.parametrize("raw", ['{"processed": []}', '{"processed": null}', "[1]",
+                                 '"x"', "null"])
+def test_a_manifest_of_the_wrong_shape_is_reported_not_raised(lib, raw):
+    """fj.read_json passes any valid JSON through, so a processed list or
+    null, or a manifest that is no object, raised AttributeError and
+    aborted the whole check."""
+    config.MANIFEST_PATH.write_text(raw)
+    fs = doctor.check(registry=False)
+    assert "manifest_unreadable" in {f.kind for f in fs}
+    assert doctor.fix(dry_run=False, registry=False)["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_text() == raw
+
+
+@pytest.mark.parametrize("rec", ["x", None, [1]])
+def test_a_manifest_record_of_the_wrong_shape_is_reported_not_raised(lib, rec):
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"]["Fresh Arrival.m4a"] = rec
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    fs = doctor.check(registry=False)
+    assert [f.subject for f in fs if f.kind == "manifest_bad_record"] == ["Fresh Arrival.m4a"]
+    ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
+    assert ops["budget.m4a"] == "relink_mtime"        # the good records still plan
+    assert "Fresh Arrival.m4a" not in ops             # never linked over
+    doctor.fix(dry_run=False, registry=False)
+    assert json.loads(config.MANIFEST_PATH.read_text())["processed"]["Fresh Arrival.m4a"] == rec
+
+
+@pytest.mark.parametrize("mtime", [float("nan"), float("inf"), 1e20, "abc", [1]])
+def test_a_record_time_that_is_no_timestamp_never_aborts_the_check(lib, mtime):
+    """mtime NaN raised ValueError and 1e999 OverflowError in
+    date.fromtimestamp; the record now just has no time."""
+    m = json.loads(config.MANIFEST_PATH.read_text())
+    m["processed"]["gone.m4a"]["mtime"] = mtime
+    config.MANIFEST_PATH.write_text(json.dumps(m))
+    ops = {a["key"]: a["op"] for a in doctor.manifest_plan()}
+    assert ops["gone.m4a"] == "retire"
+    assert "manifest_stale" in {f.kind for f in doctor.check(registry=False)}
+
+
+@pytest.mark.parametrize("field, value, links", [
+    ("duration_sec", "abc", True), ("duration_sec", [1], True),
+    ("source_mtime", "abc", False), ("source_mtime", [1], False),
+    ("source_mtime", float("nan"), False), ("source_name", ["a"], False)])
+def test_a_meeting_field_of_the_wrong_shape_never_aborts_the_check(
+        lib, monkeypatch, field, value, links):
+    """duration_sec 'abc' raised ValueError in check --deep, and a text
+    source_mtime raised in the relink by time and in the link."""
+    from stt import provenance
+    monkeypatch.setattr(provenance, "probe_tags", lambda a: {"duration": 600.0})
+    base = "Fresh Arrival 09302026"
+    mfile(base, ".m4a").write_bytes(b"audio")
+    j = config.meeting_file(base, ".json")
+    d = json.loads(j.read_text())
+    d[field] = value
+    j.write_text(json.dumps(d))
+    kinds = {f.kind for f in doctor.check(registry=False, deep=True)}
+    assert "manifest_stale" in kinds
+    # a link needs a real source name and a real time
+    assert ("Fresh Arrival.m4a" in {a["key"] for a in doctor.manifest_plan()}) is links
+
+
+def test_a_meeting_json_that_is_no_object_is_reported_not_raised(lib):
+    j = config.meeting_file("Odd Folder", ".json")
+    j.write_text("[1]")
+    fs = doctor.check(registry=False, deep=True)
+    assert [f.subject for f in fs if f.kind == "unreadable_json"] == ["Odd Folder"]
+
+
 def test_a_missing_store_retires_no_record_and_says_so(lib):
     """With the meetings folder unmounted or moved, every record looked
     stale, and fix moved them all to manifest_retired.json, so the next

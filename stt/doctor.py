@@ -36,7 +36,9 @@ drops):
 
 What it only reports: a folder name that disagrees with its `title` and
 date, a meeting json that is not readable (`unreadable_json`), a
-manifest.json that is not readable (`manifest_unreadable`), a meetings
+manifest.json that is not readable or not a manifest
+(`manifest_unreadable`), a manifest record that is not an object
+(`manifest_bad_record`), a meetings
 folder that is missing or holds no meeting while the manifest has
 records (`store_missing`), a source folder that is missing while files
 are held (`source_missing`), a folder with no meeting json
@@ -50,6 +52,7 @@ duration longer than the audio.
 """
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -85,9 +88,38 @@ def _store(store):
 
 
 def _manifest() -> dict:
-    m = fj.read_json(config.MANIFEST_PATH) or {}
-    m.setdefault("processed", {})
+    """The manifest as the checks read it: only its records that are
+    objects. A file of the wrong shape reads as empty (_manifest_problem
+    names it), and a record of the wrong shape is skipped
+    (_bad_records names it). Every one raised in check before."""
+    m = fj.read_json(config.MANIFEST_PATH)
+    m = m if isinstance(m, dict) else {}
+    proc = m.get("processed")
+    m["processed"] = ({k: r for k, r in proc.items() if isinstance(r, dict)}
+                      if isinstance(proc, dict) else {})
     return m
+
+
+def _bad_records() -> list:
+    """Manifest keys whose record is not an object ("x", null, a list)."""
+    m = fj.read_json(config.MANIFEST_PATH)
+    proc = m.get("processed") if isinstance(m, dict) else None
+    if not isinstance(proc, dict):
+        return []
+    return sorted(k for k, r in proc.items() if not isinstance(r, dict))
+
+
+def _num(v):
+    """A finite number from a stored value, or None. A hand edit can leave
+    text, NaN or an infinity there: float() raised on text, and a
+    timestamp raised on NaN or an infinity."""
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _manifest_problem():
@@ -103,14 +135,19 @@ def _manifest_problem():
     except OSError as e:
         return f"cannot be read ({e.strerror or e})"
     try:
-        json.loads(raw)
+        m = json.loads(raw)
     except ValueError:              # bad JSON, or bytes that are not UTF-8
-        return "is not readable JSON"
+        return "is not readable JSON, so the next batch run treats every source as new"
+    if not isinstance(m, dict) or not isinstance(m.get("processed", {}), dict):
+        return "does not hold a processed-files object"
     return None
 
 
 def _core(rec) -> list:
-    return [o for o in (rec.get("outputs") or []) if str(o).endswith((".txt", ".json"))]
+    outs = rec.get("outputs")
+    if not isinstance(outs, list):
+        return []
+    return [o for o in outs if isinstance(o, str) and o.endswith((".txt", ".json"))]
 
 
 def _stale(rec) -> bool:
@@ -122,7 +159,7 @@ def _meetings(store) -> dict:
     out = {}
     for b in config.meeting_bases(store):
         d = fj.read_json(config.meeting_file(b, ".json", store))
-        if d is not None:
+        if isinstance(d, dict):     # a list or a string is no meeting either
             out[b] = d
     return out
 
@@ -194,13 +231,10 @@ def manifest_plan(store=None) -> list:
                 free.discard(old_base)
                 continue
         # R1 by time: the meeting whose stored source time is this record's
-        try:
-            rm = float(rec.get("mtime"))
-        except (TypeError, ValueError):
-            rm = None
+        rm = _num(rec.get("mtime"))
         hits = [b for b in free if rm is not None
-                and meets[b].get("source_mtime") is not None
-                and abs(float(meets[b]["source_mtime"]) - rm) < 1.0]
+                and _num(meets[b].get("source_mtime")) is not None
+                and abs(_num(meets[b]["source_mtime"]) - rm) < 1.0]
         if len(hits) == 1:
             b = hits[0]
             acts.append({"op": "relink_mtime", "key": key, "meeting": b,
@@ -210,7 +244,10 @@ def manifest_plan(store=None) -> list:
         # R1 by title words and date
         day = dates.meeting_date(os.path.splitext(key)[0])
         if day is None and rm is not None:
-            day = date.fromtimestamp(rm).isoformat()
+            try:
+                day = date.fromtimestamp(rm).isoformat()
+            except (OverflowError, OSError, ValueError):
+                day = None          # a time past what the platform holds
         kt = _tokens(key) | _tokens(old_base)
         hits = [b for b in free if meets[b].get("date") == day
                 and _jaccard(kt, _tokens(b)) >= TITLE_MATCH_MIN]
@@ -225,13 +262,16 @@ def manifest_plan(store=None) -> list:
             continue
         acts.append({"op": "retire", "key": key})
     acts += _pair_ties(ties, free, meets, store)
-    # R3: a live meeting with no record, rebuilt from its own keys
+    # R3: a live meeting with no record, rebuilt from its own keys (a key
+    # whose record is of the wrong shape is reported, never linked over)
+    bad = set(_bad_records())
     for b in sorted(free):
         d = meets[b]
-        key, mt = d.get("source_name"), d.get("source_mtime")
-        if not key or mt is None or key in m["processed"]:
+        key, mt = d.get("source_name"), _num(d.get("source_mtime"))
+        if (not isinstance(key, str) or not key or mt is None
+                or key in m["processed"] or key in bad):
             continue
-        acts.append({"op": "link", "key": key, "meeting": b, "mtime": float(mt),
+        acts.append({"op": "link", "key": key, "meeting": b, "mtime": mt,
                      "outputs": [jpath[b], str(config.meeting_file(b, ".txt", store))]})
     return acts
 
@@ -241,7 +281,7 @@ def _rec_time(rec) -> str:
     if rec.get("processed_at"):
         return str(rec["processed_at"])
     try:
-        return datetime.fromtimestamp(float(rec.get("mtime"))).isoformat(timespec="seconds")
+        return datetime.fromtimestamp(_num(rec.get("mtime"))).isoformat(timespec="seconds")
     except (TypeError, ValueError, OSError, OverflowError):
         return ""
 
@@ -380,8 +420,9 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
             # meeting_bases counts it, but no reader can: the panel lists
             # it nowhere, and every other check here skipped it in silence
             out.append(Finding("unreadable_json", b,
-                               f"{b}.json is not readable JSON. Restore it from a "
-                               "backup, or delete the folder in Finder", False))
+                               f"{b}.json is not readable JSON, or holds no meeting "
+                               "object. Restore it from a backup, or delete the "
+                               "folder in Finder", False))
     if not _batch_running():
         for name, why in _folders_without_json(store):
             out.append(Finding("folder_without_json", name, why, False))
@@ -405,18 +446,22 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
             out.append(Finding("name_mismatch", b, why, False))
         if deep:
             a = config.meeting_audio(b, store)
-            if a is not None and d.get("duration_sec"):
+            dur = _num(d.get("duration_sec"))
+            if a is not None and dur:
                 real = provenance.probe_tags(a).get("duration")
-                if real and float(d["duration_sec"]) > real + 60:
+                if real and dur > real + 60:
                     out.append(Finding("duration_mismatch", b,
                                        "stored length is longer than the audio", False))
     mp = _manifest_problem()
     if mp:
         out.append(Finding("manifest_unreadable", config.MANIFEST_PATH.name,
-                           f"manifest.json {mp}, so the next batch run treats "
-                           "every source as new. Restore it from a backup, or "
+                           f"manifest.json {mp}. Restore it from a backup, or "
                            "move it aside and run fix, which links each meeting "
                            "back from its own keys", False))
+    for k in _bad_records():
+        out.append(Finding("manifest_bad_record", k,
+                           "manifest record is not an object, so the batch cannot "
+                           "read it. Restore manifest.json from a backup", False))
     away = _store_away(store)
     if away:
         out.append(Finding("store_missing", store.name,
