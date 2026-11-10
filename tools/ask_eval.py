@@ -167,18 +167,26 @@ def _guard():
         sys.exit("refused: set STT_HOME to a scratch home")
     h = Path(home).expanduser().resolve()
     # the real library: the checkout's own stt.env names it, else the
-    # default transcripts folder. Read straight from the file: under
-    # STT_HOME, config resolves every folder inside the scratch home.
+    # default transcripts folder, and the checkout's voiceprints. Read
+    # straight from the file: under STT_HOME, config resolves every folder
+    # inside the scratch home.
     from stt import config, envfile
     repo = Path(__file__).resolve().parent.parent
     lib = envfile.parse(repo / "stt.env").get("STT_MEETINGS_DIR")
-    real = [config.DEFAULT_MEETINGS_DIR, repo] + ([Path(lib).expanduser()] if lib else [])
+    real = [config.DEFAULT_MEETINGS_DIR, repo / "voiceprints"] + (
+        [Path(lib).expanduser()] if lib else [])
     # demo_seed's compare folds letter case as APFS does: a home typed as
     # ~/projects/... passed this check while ~/Projects/... was refused
     tools = str(Path(__file__).resolve().parent)
     if tools not in sys.path:
         sys.path.append(tools)
-    from demo_seed import _overlaps
+    from demo_seed import _fold, _overlaps
+    # The checkout is refused only as the home itself or a folder that
+    # holds it. Its scratch folders (qa/, work/) are where demo_seed and
+    # the QA runs put a sandbox home, and the overlap test refused them.
+    r = repo.resolve()
+    if _fold(h) == _fold(r) or _fold(r).is_relative_to(_fold(h)):
+        sys.exit(f"refused: STT_HOME is or holds the checkout ({r})")
     for r in real:
         r = r.resolve()
         if _overlaps(h, r):

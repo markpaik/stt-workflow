@@ -441,10 +441,34 @@ def test_the_evaluation_guard_folds_letter_case(monkeypatch, fold):
     _guard only resolves the paths: it writes nothing."""
     from pathlib import Path
     repo = Path(ask_eval.__file__).resolve().parent.parent
-    for real in (config.DEFAULT_MEETINGS_DIR / "inside", repo / "qa" / "ask_home"):
+    for real in (config.DEFAULT_MEETINGS_DIR / "inside", repo / "voiceprints" / "x"):
         monkeypatch.setenv("STT_HOME", fold(str(real)))
         with pytest.raises(SystemExit, match="overlaps a real folder"):
             ask_eval._guard()
+    for held in (repo, repo.parent):
+        monkeypatch.setenv("STT_HOME", fold(str(held)))
+        with pytest.raises(SystemExit, match="is or holds the checkout"):
+            ask_eval._guard()
+
+
+@pytest.mark.parametrize("sub", ["qa/ask_home", "work/qa-scan2/ae"])
+def test_the_evaluation_guard_accepts_a_scratch_home_inside_the_checkout(
+        monkeypatch, sub):
+    """The guard refused every home inside the checkout, so qa/demo_home
+    (demo_seed's documented scratch place) and work/qa-scan2 printed
+    "refused: STT_HOME overlaps a real folder" for the checkout itself.
+    _guard only resolves the paths: it writes nothing."""
+    from pathlib import Path
+    repo = Path(ask_eval.__file__).resolve().parent.parent
+    home = repo / sub
+    monkeypatch.setenv("STT_HOME", str(home))
+    monkeypatch.delenv("STT_MEETINGS_DIR", raising=False)
+    # config as it reads under this STT_HOME: every folder inside the home
+    monkeypatch.setattr(config, "PROJECT_DIR", home)
+    monkeypatch.setattr(config, "MEETINGS_DIR", home / "meetings")
+    monkeypatch.setattr(config, "SEARCH_DB", home / "search.db")
+    assert ask_eval._guard() == home.resolve()
+    assert not home.exists()
 
 
 def test_purge_finds_a_thread_citing_an_accented_name_without_an_id(sandbox, monkeypatch, tmp_path):
