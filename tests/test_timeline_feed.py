@@ -584,7 +584,10 @@ def test_additive_keys(sandbox):
     # and `voicememos` (sync on or off and its go-live day, for /next Settings)
     assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running",
                                        "jobs", "needs_you", "voicememos"}
-    assert set(st["voicememos"]) == {"enabled", "since"}
+    # plus the delete after ingest: on or off, recent removals, manual
+    # deletes waiting, and a stop
+    assert set(st["voicememos"]) == {"enabled", "since", "delete", "removed",
+                                     "manual", "halted"}
     assert isinstance(st["relabel_running"], bool)
     assert st["jobs"] == {"running": None, "queued": [], "last": None}, \
         "no queue in this process: the empty shape, never a missing key"

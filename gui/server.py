@@ -1615,11 +1615,16 @@ def gather_state():
 
 
 def _voicememos_state() -> dict:
+    """The sync (on or off, its go-live day) and the delete after ingest
+    (on or off, the memos it moved lately, the manual deletes waiting, and
+    a stop), for Settings and Activity."""
     try:
         from stt import voicememos
-        return {"enabled": voicememos.enabled(), "since": voicememos.go_live()}
+        return {"enabled": voicememos.enabled(), "since": voicememos.go_live(),
+                **voicememos.delete_panel_state()}
     except Exception:
-        return {"enabled": None, "since": None}
+        return {"enabled": None, "since": None, "delete": None, "removed": [],
+                "manual": 0, "halted": False}
 
 
 def _osascript(script: str, timeout=120, args=None):

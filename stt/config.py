@@ -680,6 +680,10 @@ def setting_problems() -> list:
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:
         out.append(("STT_ASR_BACKEND", why))
+    from . import voicememos
+    why = voicememos.delete_setting_problem()
+    if why:
+        out.append((voicememos.DELETE_SETTING, why))
     return out
 
 

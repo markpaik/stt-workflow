@@ -17,6 +17,17 @@ def _no_live_ollama(monkeypatch):
     monkeypatch.setattr(summarize, "_ollama_seen", {"at": 0.0, "up": False, "key": None})
 
 
+@pytest.fixture(autouse=True)
+def _no_real_shortcuts(monkeypatch, tmp_path):
+    """No test may run the real `shortcuts` binary: it acts on the real
+    Voice Memos library. The delete-after-ingest step sees no binary unless
+    a test installs its own fake, and the setting starts off."""
+    from stt import voicememos
+    monkeypatch.setattr(voicememos, "SHORTCUTS_BIN", tmp_path / "no-shortcuts-here")
+    monkeypatch.delenv("STT_VM_DELETE_AFTER_INGEST", raising=False)
+    monkeypatch.delenv("STT_VM_DELETE_SHORTCUT", raising=False)
+
+
 def mfile(base, suffix):
     """A meeting artifact's path in the per-meeting-folder layout, creating
     the folder — what test fixtures use to build meetings on disk."""

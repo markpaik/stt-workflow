@@ -305,7 +305,7 @@ function activityView(){
  else if(UI.actTab==='running')body=runSec+jobSec;
  else if(UI.actTab==='waiting')body=waitSec;
  else if(UI.actTab==='failed')body=failSec||'<div class="empty">Nothing has failed.</div>';
- else body=attention+runSec+jobSec+waitSec+failSec+doneSec;
+ else body=attention+runSec+jobSec+waitSec+failSec+doneSec+vmRemovedSec();
  return `<div class="head"><h1>Activity</h1>${tools}</div>${opts}
   <div class="chips">${tab('all','All')}${tab('running','Running',act.length)}${tab('waiting','Waiting',wait.length)}${tab('failed','Failed',fail.length)}${tab('history','History')}${tab('dupes','Duplicates')}</div>
   ${errLine('activity')}<div class="stack sections">${body}</div>`;
@@ -377,7 +377,15 @@ async function loadArchived(){const r=await api('/api/archived').catch(()=>({ite
 function kv(k,d,v){return `<div class="kv"><div class="k"><span>${k}</span>${d?`<span class="meta">${d}</span>`:''}</div><div class="v">${v}</div></div>`;}
 function tog(id,on,dis,label){return `<label class="toggle"><input type="checkbox" id="${id}" ${on?'checked':''} ${dis?'disabled':''} aria-label="${esc(label)}">${on?'On':'Off'}</label>`;}
 function vmNote(){const v=S.voicememos||{};if(v.enabled===false)return 'Off in stt.env (STT_VOICEMEMOS_SYNC=0). Share memos to the watched folder instead.';
- return `Finished memos of 3 minutes or more${v.since?', recorded on or after '+esc(new Date(v.since.slice(0,10)+'T12:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})):''}, arrive by themselves. The library is read only.`;}
+ return `Finished memos of 3 minutes or more${v.since?', recorded on or after '+esc(new Date(v.since.slice(0,10)+'T12:00:00').toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})):''}, arrive by themselves. ${v.delete?'Once a memo is stored and checked, it moves to Recently Deleted in Voice Memos (STT_VM_DELETE_AFTER_INGEST=1).':'The library is read only.'}`;}
+/* the delete after ingest: what it moved lately, and what waits for the owner */
+function vmRemovedSec(){
+ const v=S.voicememos||{};const rm=v.removed||[];const rows=[];
+ if(v.halted)rows.push(`<div class="row static"><div style="min-width:0"><div class="row-title q">Deletes from Voice Memos are stopped</div><div class="meta attn-t">A delete did not check out. Look in Voice Memos, then run tools/vm_delete.py --clear-halt.</div></div></div>`);
+ if(v.manual)rows.push(`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(plural(v.manual,'memo'))} to delete by hand in Voice Memos</div><div class="meta">tools/vm_delete.py --dry-run says why.</div></div></div>`);
+ rm.forEach(r=>rows.push(`<div class="row static"><div style="min-width:0"><div class="row-title q">${esc(r.title||'')}</div><div class="meta">Moved to Recently Deleted in Voice Memos · ${esc(fmtAt(r.at))}</div></div><span class="chip ok">Removed</span></div>`));
+ return rows.length?`<section><div class="eyebrow">Removed from Voice Memos</div><div class="stack">${rows.join('')}</div></section>`:'';
+}
 function settingsView(){
  const sc=S.schedule||{};const master=!S.paused;const inst=!!sc.installed;
  const hh=sc.hour!=null?String(sc.hour).padStart(2,'0')+':'+String(sc.minute||0).padStart(2,'0'):'23:00';

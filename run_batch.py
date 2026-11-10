@@ -466,6 +466,44 @@ def sync_voice_memos(dry_run=False) -> dict:
     return r
 
 
+def note_voice_memo_ingest(res: dict, dest) -> bool:
+    """Tell the Voice Memos sync that the batch stored this staged memo
+    (stt/voicememos.py note_ingested). Called right after the manifest
+    records a success, for a run into the library only: the delete step
+    needs this proof. Never fails the run."""
+    uuid = res.get("vm_uuid")
+    if not uuid:
+        return False
+    try:
+        from stt import voicememos
+        mid = config.id_of(res.get("base"), dest) if res.get("base") else None
+        return voicememos.note_ingested(uuid, res.get("key"), res.get("base"), mid)
+    except Exception as e:
+        print(f"  (Voice Memos ingest note skipped: {e.__class__.__name__})",
+              file=sys.stderr, flush=True)
+        return False
+
+
+def delete_voice_memos(live_store: bool) -> dict:
+    """Once per run, after the descriptions: move each memo the batch has
+    stored to Voice Memos' Recently Deleted (STT_VM_DELETE_AFTER_INGEST=1,
+    off by default; stt/voicememos.py delete_pass states every rule). A
+    run into a folder other than the library never deletes. One line per
+    memo removed goes to the log. Never blocks or fails the run: the pass
+    is bounded, and anything it raises is caught here."""
+    if not live_store:
+        return {"status": "not_library"}
+    try:
+        from stt import voicememos
+        return voicememos.delete_pass(
+            log=lambda s: print(s, flush=True),
+            warn=lambda s: print(s, file=sys.stderr, flush=True))
+    except Exception as e:
+        print(f"  (Voice Memos delete skipped: {e.__class__.__name__}: {e})",
+              file=sys.stderr, flush=True)
+        return {"status": "error"}
+
+
 def _empty_audio(p) -> bool:
     """A 0-byte file of an audio type in a watched folder: iter_audio skips
     it until it has bytes."""
@@ -618,6 +656,11 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     from stt import dupes
     src_fp = dupes.fingerprint(src)
     src_size = src.stat().st_size
+    # a Voice Memos sync copy names its memo in the sidecar. Read it now:
+    # the sidecar is deleted with the staged copy after a verified store,
+    # and the delete-after-ingest step needs to know which memo this was
+    from stt import provenance as _prov
+    vm_uuid = _prov.read_sidecar(src).get("vm_uuid")
 
     res = pipeline.process_file(
         src, dest_dir=dest, do_diarize=opts["do_diarize"], strict=opts["strict"],
@@ -669,7 +712,7 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
     who = ("  identified: " + ", ".join(res["identified"])) if res["identified"] else ""
     summary = f"{res['n_speakers']} speaker(s), {output.length_text(res['duration_sec'])}"
     return {"ok": success, "key": key, "base": base, "mtime": mtime,
-            "fp": src_fp, "size": src_size,
+            "fp": src_fp, "size": src_size, "vm_uuid": vm_uuid,
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
@@ -1037,6 +1080,8 @@ def main():
             m["processed"][res["key"]] = manifest.record(
                 res["key"], res["mtime"], res["outputs"],
                 fp=res.get("fp"), size=res.get("size"))
+            if describe:
+                note_voice_memo_ingest(res, dest)
             if res["key"] in _overridden_holds:
                 # the park was OVERRIDDEN by name, and the file it parked is
                 # now processed, so clearing it cannot pin a stale name. A hold
@@ -1281,6 +1326,11 @@ def main():
         n_re = regenerate_stale()
         if n_re:
             print(f"  refreshed {n_re} out-of-date description(s)", flush=True)
+
+    # the descriptions are written: move the memos this library now holds
+    # to Voice Memos' Recently Deleted (off unless STT_VM_DELETE_AFTER_INGEST=1)
+    if not args.dry_run:
+        delete_voice_memos(describe)
 
     status.end_run()
     if not args.dry_run:
