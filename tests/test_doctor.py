@@ -357,6 +357,21 @@ def test_one_log_that_fails_never_stops_the_others(sandbox, monkeypatch, capsys)
     assert housekeeping.rotate_all()["logs"] == ["c.log"]
 
 
+def test_a_leftover_temp_gzip_is_not_a_log(sandbox, monkeypatch):
+    """A process killed between the gzip and the replace left
+    c.log.1.gz.tmp. It was listed as a log and rotated into
+    c.log.1.gz.tmp.1.gz. The next rotation of c.log replaces it."""
+    monkeypatch.setattr(housekeeping, "LOG_MAX_BYTES", 10)
+    logs = sandbox / "logs"
+    logs.mkdir()
+    (logs / "c.log.1.gz.tmp").write_bytes(b"Z" * 50)
+    (logs / "c.log").write_bytes(b"C" * 50)
+    assert [f.name for f in housekeeping.log_files(logs)] == ["c.log"]
+    assert housekeeping.rotate_logs(logs) == ["c.log"]
+    assert sorted(p.name for p in logs.iterdir()) == ["c.log", "c.log.1.gz"]
+    assert gzip.decompress((logs / "c.log.1.gz").read_bytes()) == b"C" * 50
+
+
 def test_calibration_is_capped_with_one_gzip(sandbox, monkeypatch):
     monkeypatch.setattr(housekeeping, "CALIBRATION_MAX_BYTES", 50)
     cal = config.CALIBRATION_LOG

@@ -73,10 +73,14 @@ def rotate(path, max_bytes: int, keep: int, dry_run=False) -> bool:
 
 
 def log_files(log_dir=None) -> list:
+    """The logs in `log_dir`: not a gzip generation, not a dotfile, and not
+    the temporary gzip rotate() writes. A process killed mid-copy left
+    name.1.gz.tmp, which was listed as a log and grew generations of its
+    own (c.log.1.gz.tmp.1.gz). The next rotation of that log replaces it."""
     d = Path(log_dir or config.LOG_DIR)
     try:
         return sorted(f for f in d.iterdir()
-                      if f.is_file() and not f.name.endswith(".gz")
+                      if f.is_file() and not f.name.endswith((".gz", ".gz.tmp"))
                       and not f.name.startswith("."))
     except OSError:
         return []
