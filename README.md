@@ -350,7 +350,7 @@ this Mac either way. Settings in `stt.env`:
 | Setting | Default | What it does |
 |---|---|---|
 | `STT_LOCAL_LLM` | `auto` | `auto` (Ollama when it answers, else MLX), `ollama`, or `mlx` |
-| `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A value with no scheme (`localhost:11434`) is read as `http://`. A non-loopback host, a port that is not a number, or a scheme other than http turns Ollama off with one warning, and `tools/doctor.py check` lists it as `bad_setting`. |
+| `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A value with no scheme (`localhost:11434`) is read as `http://`, and with no port either (`127.0.0.1`) it is on port 11434, as Ollama reads its own `OLLAMA_HOST`. A non-loopback host, a port that is not a number, or a scheme other than http turns Ollama off with one warning, and `tools/doctor.py check` lists it as `bad_setting`. |
 | `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | the Ollama model |
 | `STT_OLLAMA_KEEP_ALIVE` | `30m` | how long Ollama keeps the model loaded after a call |
 

@@ -205,6 +205,12 @@ def test_a_non_loopback_ollama_url_is_refused(sandbox, monkeypatch):
     ("localhost:11434", "http://localhost:11434"),
     ("127.0.0.1:11434/", "http://127.0.0.1:11434"),
     ("http://localhost:11434", "http://localhost:11434"),
+    # a bare host is on Ollama's own default port, as OLLAMA_HOST reads it:
+    # '127.0.0.1' went to port 80, where nothing listens
+    ("127.0.0.1", "http://127.0.0.1:11434"),
+    ("localhost/", "http://localhost:11434"),
+    # a scheme written out keeps its own default port, as Ollama's does
+    ("http://127.0.0.1", "http://127.0.0.1"),
 ])
 def test_an_ollama_url_without_a_scheme_is_read_as_http(sandbox, monkeypatch, raw, url):
     """urlparse('localhost:11434') reads 'localhost' as the scheme, so the

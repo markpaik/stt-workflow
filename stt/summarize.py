@@ -83,7 +83,8 @@ def _ollama_check():
     """(url or None, problem or None) for STT_OLLAMA_URL. A value with no
     scheme ('localhost:11434') is read as http: urlparse took 'localhost'
     for the scheme, so the host was None and Ollama turned off with no
-    word. A port that is not a number, a scheme that is not http, or a host
+    word, and with no port either it is on 11434, as Ollama reads its own
+    OLLAMA_HOST. A port that is not a number, a scheme that is not http, or a host
     that is not a loopback address gives no URL and a problem that says
     why. 'off' gives neither."""
     from urllib.parse import urlparse
@@ -91,14 +92,20 @@ def _ollama_check():
     url = raw.rstrip("/")
     if not url or url.lower() in ("off", "0", "none", "false"):
         return None, None
-    if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url):
+    bare = not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", url)
+    if bare:
         url = "http://" + url
     try:
         parts = urlparse(url)
         host = parts.hostname
-        parts.port                      # a port that is not a number raises
+        port = parts.port               # a port that is not a number raises
     except ValueError:
         return None, f"{raw!r} has a port that is not a number"
+    if bare and port is None and host and not parts.path:
+        # Ollama's own rule for OLLAMA_HOST: a host with no scheme and no
+        # port is on 11434. '127.0.0.1' was read as port 80, where nothing
+        # listens, and the MLX model answered instead
+        url += ":11434"
     if parts.scheme.lower() not in ("http", "https"):
         return None, f"{raw!r} is not an http address"
     if host not in _LOOPBACK:
