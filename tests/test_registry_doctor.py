@@ -586,3 +586,47 @@ def test_a_rebuild_never_enrolls_a_meeting_only_label_or_a_voice_below_the_floor
     assert r.returncode == 0, r.stderr
     reg = json.loads((home / "voiceprints" / "registry.json").read_text())
     assert set(reg) == {"Alex Rivera"}
+
+
+def test_a_rebuild_skips_a_damaged_meeting_and_carries_on(tmp_path):
+    """rebuild_voiceprints parsed each meeting json with no guard, and took
+    scored[0] with no check. A truncated json raised JSONDecodeError and an
+    .emb.npz with no clusters raised IndexError, so --apply stopped midway
+    and left a half-rebuilt registry. Each damaged meeting is now skipped
+    with a reason, and the meetings after it still enroll."""
+    from stt import diarcache
+    home = tmp_path / "home"
+    (home / "voiceprints").mkdir(parents=True)
+    e = _basis(seed=33)
+
+    def meeting(base, raw_json=None, cents=None, name="Alex Rivera"):
+        folder = home / "meetings" / base
+        folder.mkdir(parents=True)
+        cents = {} if cents is None else cents
+        turns = [{"start": i * 5.0, "end": i * 5.0 + 4.0, "cluster": k}
+                 for k in cents for i in range(12)]
+        diarcache.save(folder / f"{base}.diar.npz", turns, [None] * len(turns), cents)
+        np.savez(folder / f"{base}.emb.npz", **cents)
+        words = [{"start": i * 5.0 + 1, "end": i * 5.0 + 1.5, "word": "w",
+                  "speaker": "SPEAKER_00"} for i in range(12)]
+        (folder / f"{base}.json").write_text(raw_json if raw_json is not None else
+                                             json.dumps({"speakers": [
+                                                 {"id": "SPEAKER_00", "name": name}],
+                                                 "segments": [], "words": words}))
+        (folder / f"{base}.txt").write_text("stub")
+
+    meeting("2026-08-01 Synthetic Torn", raw_json="{trunc", cents={"SPEAKER_00": e[1]})
+    meeting("2026-08-02 Synthetic Empty", name="Amy Pond")
+    meeting("2026-08-03 Synthetic Sync", cents={"SPEAKER_00": e[0]})
+    env = dict(os.environ, STT_HOME=str(home))
+    for k in ("STT_PROJECT_DIR", "STT_VOICEPRINTS_DIR", "STT_MEETINGS_DIR",
+              "STT_ICLOUD_DIR", "STT_RECORDINGS_DIR"):
+        env.pop(k, None)
+    tool = [sys.executable, str(ROOT / "tools/rebuild_voiceprints.py"), "--apply"]
+    r = subprocess.run(tool, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    assert r.returncode == 0, r.stderr
+    assert "2026-08-01 Synthetic Torn: transcript json unreadable" in r.stdout
+    assert "2026-08-02 Synthetic Empty: embedding cache holds no clusters" in r.stdout
+    reg = json.loads((home / "voiceprints" / "registry.json").read_text())
+    assert set(reg) == {"Alex Rivera"}
+    assert reg["Alex Rivera"]["sources"] == ["2026-08-03 Synthetic Sync"]

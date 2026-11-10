@@ -48,8 +48,18 @@ if APPLY:
         print(f"registry.json could not be read: moved aside to {moved.name}")
 
 for base in config.meeting_bases():
-    j = json.loads(config.meeting_file(base, ".json").read_text())
-    roster = j.get("speakers", [])
+    # one damaged meeting is skipped, never the end of the run: a rebuild
+    # only runs after a registry loss, and a crash midway under --apply
+    # left a half-rebuilt registry
+    try:
+        j = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError) as e:
+        print(f"{base}: transcript json unreadable ({e}) — skipped")
+        continue
+    if not isinstance(j, dict) or not isinstance(j.get("speakers", []), list):
+        print(f"{base}: transcript json is not a meeting — skipped")
+        continue
+    roster = [s for s in j.get("speakers", []) if isinstance(s, dict)]
     named = {s["id"]: s["name"] for s in roster if s.get("name") and not s.get("local")}
     local = [s["name"] for s in roster if s.get("name") and s.get("local")]
     if not named:
@@ -63,7 +73,15 @@ for base in config.meeting_bases():
     if not emb_path.exists() or not diar_path.exists():
         print(f"{base}: MISSING caches — skipped")
         continue
-    embs = dict(np.load(emb_path).items())
+    try:
+        with np.load(emb_path, allow_pickle=False) as z:
+            embs = {k: z[k] for k in z.files}
+    except Exception as e:
+        print(f"{base}: embedding cache unreadable ({e}) — skipped")
+        continue
+    if not embs:
+        print(f"{base}: embedding cache holds no clusters — skipped")
+        continue
     try:
         raw_turns, _, cent_emb, _ = diarcache.load(diar_path)
     except (OSError, ValueError) as e:
@@ -109,7 +127,10 @@ for base in config.meeting_bases():
         print(f"  {name}: cluster={cluster} overlap={frac:.2f} "
               f"(runner-up {runner:.2f}) {verdict}")
         if ok and APPLY:
-            identify.enroll(name, embs[cluster], source=base)
+            try:
+                identify.enroll(name, embs[cluster], source=base)
+            except ValueError as e:      # a bad name or a zero-norm centroid
+                print(f"  {name}: not enrolled ({e})")
 
 if APPLY:
     reg = identify.load_registry()
