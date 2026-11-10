@@ -359,7 +359,7 @@ this Mac either way. Settings in `stt.env`:
 | Setting | Default | What it does |
 |---|---|---|
 | `STT_LLM_NICE` | `10` | before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers GPU priority); the MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run. |
-| `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below. The two times may be joined by `-`, an en dash or `to`, and a bare hour works (`10-12`). A value that cannot be read prints one warning, uses the default, and shows in `tools/doctor.py check` as `bad_setting`. |
+| `STT_LLM_QUIET_HOURS` | `07:00-22:00` | the daytime window for the rest rule below. The two times may be joined by `-`, an en dash or `to`, and a bare hour works (`10-12`). The same time at both ends (`10:00-10:00`) means all day, so the model rests after every meeting. A value that cannot be read prints one warning, uses the default, and shows in `tools/doctor.py check` as `bad_setting`. |
 | `STT_LLM_REST_RATIO` | `1.0` | inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's summary sweeps) rests after each meeting for this times the wall time it took |
 | `STT_LLM_REST_MIN_SEC` | `20` | and rests at least this many seconds inside the quiet hours |
 | `STT_LLM_REST_RATIO_NIGHT` | `0` | outside the quiet hours, the rest is this times the wall time |

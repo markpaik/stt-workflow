@@ -630,7 +630,9 @@ def quiet_window(raw: str):
     """(start, end) in minutes since midnight for an STT_LLM_QUIET_HOURS
     value. The two times are joined by '-', an en or em dash, or 'to', with
     or without spaces ('10:00–12:00', '10-12', '10:00 to 12:00'). A time is
-    'HH:MM' or a bare hour. Raises ValueError for anything else."""
+    'HH:MM' or a bare hour. Raises ValueError for anything else. The same
+    time at both ends is all day (llm_quiet_now): quiet hours only make the
+    model rest longer, so the reading that rests more is the safe one."""
     parts = re.split(r"\s*(?:-|\u2013|\u2014|\bto\b)\s*", str(raw or "").strip(),
                      flags=re.I)
     if len(parts) != 2:

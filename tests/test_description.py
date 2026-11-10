@@ -307,6 +307,18 @@ def test_a_quiet_window_written_by_hand_parses(sandbox, raw):
     assert config.setting_problems() == []
 
 
+def test_a_quiet_window_with_the_same_time_at_both_ends_is_all_day(sandbox):
+    """'10:00-10:00' read as quiet at every hour, and nothing said so. It
+    is all day on purpose (quiet hours only make the model rest longer),
+    and the README now says it."""
+    from datetime import datetime
+    (sandbox / "stt.env").write_text("STT_LLM_QUIET_HOURS=10:00-10:00\n")
+    assert all(config.llm_quiet_now(datetime(2026, 11, 8, h)) for h in (0, 9, 10, 23))
+    assert config.setting_problems() == []
+    readme = (config.CODE_DIR / "README.md").read_text()
+    assert "(`10:00-10:00`) means all day" in readme
+
+
 def test_an_unreadable_quiet_window_warns_once_and_the_doctor_lists_it(sandbox, capsys):
     from datetime import datetime
     from stt import doctor
