@@ -63,6 +63,10 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MIC_SPEAKER", None)  # don't inherit the real user's setting
     # a bad setting warns once per process: each test starts with none said
     monkeypatch.setattr(config, "_setting_warned", set())
+    # the undo journals and rename plans live outside the repo, by default in
+    # the REAL Application Support folder: a purge in a test reads and
+    # rewrites that folder, so it must be the sandbox's own
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(d / "migration"))
     # the Voice Memos sync runs at every batch start: a sandbox run must read
     # a synthetic library, never the real one, even with STT_HOME unset
     monkeypatch.setenv("STT_VOICEMEMOS_DIR", str(d / "vm_container"))

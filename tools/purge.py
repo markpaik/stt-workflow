@@ -18,7 +18,11 @@ What it removes:
   references to it from voices also heard elsewhere;
 - its centroid-index rows (the index is refreshed without it);
 - its rows in the duplicate review stores, the queue holds, the failure
-  dismissals, and the run history;
+  dismissals, the run history, and the recent results in status.json;
+- its lines in the undo journals and its rows in the rename plans in
+  config.migration_dir() (backfill, amnesty, fix_dates, iso_rename,
+  retitle_all): an undo cannot act on a purged meeting, and a journal line
+  keeps its old names and titles;
 - saved Ask threads that cite it and group overrides keyed on it, when
   those stores exist;
 - the source file if it still sits in a watched folder (so the next run
@@ -28,7 +32,9 @@ What it removes:
 
 What it only reports: pages and notes outside this project that name the
 meeting (STT_PURGE_SCAN_DIRS, colon-separated, default the folder above the
-meeting store), and that encrypted backups still hold it until they age out.
+meeting store), any other file in config.migration_dir() that still names
+it (a doctor fix run keeps whole copies of the files it changed), and that
+encrypted backups still hold it until they age out.
 
   ./run.sh py tools/purge.py "<meeting folder name>"           # dry run
   ./run.sh py tools/purge.py "<meeting folder name>" --apply
@@ -208,8 +214,171 @@ def _outside_mentions(base: str, mid) -> list:
     return hits
 
 
+# ---------- the migration folder ----------
+
+# the keys a journal entry or a plan row names its meeting by
+_NAME_KEYS = ("base", "old_base", "new_base", "planned_base", "renamed")
+_PLAN_FILES = ("iso-rename-plan.json",)
+
+
+def _needles(mid, names: set) -> set:
+    """The meeting's names and id as bytes, raw and as JSON escapes them."""
+    out = set()
+    for n in set(names) | ({mid} if mid else set()):
+        out |= {n.encode(), json.dumps(n).strip('"').encode()}
+    return out
+
+
+def _names_meeting(e, mid, names: set, line: str = "") -> bool:
+    """An entry with a meeting id names the meeting only by that id: a name
+    an older meeting gave up can belong to another meeting now. A line that
+    is not JSON (a torn last line) names it when it holds one of its names."""
+    if e is None and line:
+        b = line.encode()
+        return any(x in b for x in _needles(mid, names))
+    if not isinstance(e, dict):
+        return False
+    if e.get("meeting_id"):
+        return bool(mid) and e["meeting_id"] == mid
+    return any(isinstance(e.get(k), str) and e[k] in names for k in _NAME_KEYS)
+
+
+def _migration_docs() -> dict:
+    """{path: [(line, entry or None)]} for each journal (.jsonl) at the top
+    of config.migration_dir(), and {path: plan} for each rename plan."""
+    d = config.migration_dir()
+    out = {}
+    if not d.is_dir():
+        return out
+    for p in sorted(d.iterdir()):
+        if not p.is_file():
+            continue
+        if p.suffix == ".jsonl":
+            try:
+                lines = p.read_text(encoding="utf-8").splitlines()
+            except (OSError, ValueError):
+                continue
+            rows = []
+            for ln in lines:
+                try:
+                    rows.append((ln, json.loads(ln)))
+                except ValueError:
+                    rows.append((ln, None))
+            out[p] = rows
+        elif p.name in _PLAN_FILES:
+            doc = _read_json(p)
+            if isinstance(doc, dict) and isinstance(doc.get("rows"), list):
+                out[p] = doc
+    return out
+
+
+def _all_names(docs: dict, mid, names: set) -> set:
+    """`names` plus every older or later name the journals give the meeting:
+    an entry that names it carries the name it had then. Repeated until no
+    new name turns up, so a chain of renames is followed to its start."""
+    names = set(names)
+    entries = []
+    for v in docs.values():
+        entries += v["rows"] if isinstance(v, dict) else [e for _, e in v]
+    grew = True
+    while grew:
+        grew = False
+        for e in entries:
+            if _names_meeting(e, mid, names):
+                for k in _NAME_KEYS:
+                    if isinstance(e.get(k), str) and e[k] and e[k] not in names:
+                        names.add(e[k])
+                        grew = True
+    return names
+
+
+def _migration_plan(mid, names: set) -> dict:
+    docs = _migration_docs()
+    every = _all_names(docs, mid, names)
+    files, n = {}, 0
+    for p, v in docs.items():
+        rows = v["rows"] if isinstance(v, dict) else v
+        hit = sum(1 for r in rows if (_names_meeting(r, mid, every) if isinstance(v, dict)
+                                      else _names_meeting(r[1], mid, every, r[0])))
+        if hit:
+            files[str(p)] = hit
+            n += hit
+    return {"names": sorted(every), "files": files, "lines": n}
+
+
+def _write_private(p: Path, text: str) -> None:
+    tmp = p.with_name(p.name + ".purge.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+def _purge_migration(mid, names: set) -> int:
+    """Drop the meeting's journal lines and plan rows. A journal left with
+    no line is removed. The tsv beside a plan loses the same rows. Returns
+    the number of lines and rows dropped."""
+    docs = _migration_docs()
+    every = _all_names(docs, mid, names)
+    n = 0
+    for p, v in docs.items():
+        if isinstance(v, dict):
+            keep = [r for r in v["rows"] if not _names_meeting(r, mid, every)]
+            if len(keep) == len(v["rows"]):
+                continue
+            n += len(v["rows"]) - len(keep)
+            _write_private(p, json.dumps({**v, "rows": keep}, ensure_ascii=False, indent=1))
+            tsv = p.with_suffix(".tsv")
+            try:
+                lines = tsv.read_text(encoding="utf-8").splitlines()
+            except (OSError, ValueError):
+                continue
+            # old_base and new_base are its first two columns
+            lines = [ln for i, ln in enumerate(lines)
+                     if i == 0 or not set(ln.split("\t")[:2]) & every]
+            _write_private(tsv, "\n".join(lines) + "\n")
+            continue
+        keep = [ln for ln, e in v if not _names_meeting(e, mid, every, ln)]
+        if len(keep) == len(v):
+            continue
+        n += len(v) - len(keep)
+        if any(ln.strip() for ln in keep):
+            _write_private(p, "\n".join(keep) + "\n")
+        else:
+            p.unlink(missing_ok=True)
+    return n
+
+
+def _migration_leftovers(mid, names: set) -> list:
+    """Files in config.migration_dir() that the purge does not rewrite (a
+    doctor run's whole-file copies, anything unknown) whose bytes still hold
+    one of the meeting's names or its id. The journals and plans it rewrote
+    are not listed: a line left in one belongs to another meeting."""
+    d = config.migration_dir()
+    if not d.is_dir():
+        return []
+    done = set()
+    for p in _migration_docs():
+        done |= {p, p.with_suffix(".tsv")} if p.name in _PLAN_FILES else {p}
+    needles = _needles(mid, names)
+    out = []
+    for p in sorted(d.rglob("*")):
+        try:
+            if (p.is_file() and p not in done
+                    and any(x in p.read_bytes() for x in needles)):
+                out.append(str(p))
+        except OSError:
+            continue
+    return out
+
+
+def _names(base: str, meta: dict, keys) -> set:
+    return ({base} | {n for n in (meta.get("source_name"), meta.get("source_file")) if n}
+            | set(keys))
+
+
 def plan(base: str) -> dict:
     """What a purge of `base` would remove. Reads only."""
+    from stt import status
     folder, archived = locate(base)
     if folder is None:
         return {"ok": False, "error": f"no meeting '{base}'"}
@@ -218,6 +387,7 @@ def plan(base: str) -> dict:
     from stt import centroids
     cmeta = _read_json(centroids.meta_path()) or {}
     keys = _manifest_keys(folder, base, meta)
+    names = _names(base, meta, keys)
     return {
         "ok": True, "base": base, "meeting_id": mid, "archived": archived,
         "folder": str(folder),
@@ -230,6 +400,8 @@ def plan(base: str) -> dict:
         "vm_uuid": meta.get("vm_uuid"),
         "threads": [str(p) for p in _threads(base, mid)],
         "overrides": _overrides(base, mid),
+        "recent_rows": status.recent_naming(names),
+        "migration": _migration_plan(mid, names),
         "outside": _outside_mentions(base, mid),
         "note": BACKUP_NOTE,
     }
@@ -399,8 +571,7 @@ def apply(base: str) -> dict:
     folder = Path(p["folder"])
     meta = _read_json(folder / f"{base}.json") or {}
     mid = p["meeting_id"]
-    names = {base} | {n for n in (meta.get("source_name"), meta.get("source_file")) if n}
-    names |= set(p["manifest_keys"])
+    names = _names(base, meta, p["manifest_keys"])
 
     with review.lock_meeting(base):
         archive.purge_meeting_dir(folder)
@@ -429,9 +600,13 @@ def apply(base: str) -> dict:
         tmp.write_text(json.dumps(d, indent=2))
         os.chmod(tmp, 0o600)
         os.replace(tmp, op)
+    scrub["recent"] = status.forget_recent(names)
+    every = set(p["migration"]["names"]) | names
+    scrub["migration"] = _purge_migration(mid, every)
     p.update({"done": True, "enrolled_removed": enrolled,
               "unknowns_removed": n_unknowns, "scrubbed": scrub,
-              "vm_blocked": blocked})
+              "vm_blocked": blocked,
+              "migration_left": _migration_leftovers(mid, every)})
     return p
 
 
@@ -454,6 +629,14 @@ def _print(p: dict, applied: bool):
         print(f"{'blocked' if applied else 'would block'}: the Voice Memos id, so "
               "the sync never copies it again (the memo itself is not touched)")
     print(f"{verb}: {len(p['threads'])} saved thread(s), {len(p['overrides'])} override(s)")
+    print(f"{verb}: {p['recent_rows']} recent result(s) in status.json")
+    print(f"{verb}: {p['migration']['lines']} line(s) in "
+          f"{len(p['migration']['files'])} undo journal(s) and rename plan(s)")
+    if p.get("migration_left"):
+        print(f"in the migration folder, {len(p['migration_left'])} other file(s) "
+              "still name it; remove them by hand once their undo is not needed:")
+        for o in p["migration_left"]:
+            print("  " + o)
     if p["outside"]:
         print(f"outside this project, {len(p['outside'])} file(s) name it; remove "
               "them by hand:")

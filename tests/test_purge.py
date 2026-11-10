@@ -130,6 +130,72 @@ def test_a_leaked_memo_leaves_every_store(sandbox, monkeypatch, tmp_path):
     assert json.loads(config.meeting_file(KEEP, ".json").read_text())["meeting_id"] == "mid-keep"
 
 
+def test_a_purge_leaves_the_migration_journals_and_status(sandbox, monkeypatch, tmp_path):
+    """The purge left the meeting's folder name, id, title and source name
+    in the undo journals and rename plans of config.migration_dir(), and
+    its row in status.json recent[]. It now drops each line and row that
+    names the meeting, by its id or by any name the journals give it, and
+    it lists any other file there that still names it."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    old = "Errand 11032026"          # a name the meeting had before a rename
+    mig = config.migration_dir()
+    mig.mkdir(mode=0o700)
+
+    def jl(name, *rows, tail=""):
+        (mig / name).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                                        for r in rows) + tail)
+        (mig / name).chmod(0o600)
+    jl("amnesty-1.jsonl",
+       {"run": "amnesty-1", "meeting_id": "mid-leak", "base": LEAK, "field": "route"},
+       {"run": "amnesty-1", "meeting_id": "mid-keep", "base": KEEP, "field": "route"},
+       tail='{"run": "amnesty-1", "mee')            # a torn last line is kept
+    jl("iso-rename-journal.jsonl",
+       {"event": "apply", "meeting_id": "mid-leak", "old_base": old, "new_base": LEAK},
+       {"event": "apply", "meeting_id": "mid-keep", "old_base": KEEP, "new_base": KEEP},
+       tail='{"event": "begin", "meeting_id": "mid-leak", "old_b')   # torn, names it
+    # a line from before the meeting had an id, under its older name
+    jl("backfill-1.jsonl", {"run": "backfill-1", "meeting_id": None, "base": old,
+                            "field": "source_name", "new": "Personal Errand.m4a"})
+    # another meeting that took the old name later: its id says it is not this one
+    jl("fixdates-1.jsonl", {"run": "fixdates-1", "meeting_id": "mid-keep", "base": old})
+    rows = [{"meeting_id": "mid-leak", "old_base": LEAK, "new_base": LEAK},
+            {"meeting_id": "mid-keep", "old_base": KEEP, "new_base": KEEP}]
+    (mig / "iso-rename-plan.json").write_text(json.dumps({"version": 1, "rows": rows}))
+    (mig / "iso-rename-plan.tsv").write_text(
+        f"old_base\tnew_base\trename\n{LEAK}\t{LEAK}\tFalse\n{KEEP}\t{KEEP}\tFalse\n")
+    run = mig / "doctor-1"
+    run.mkdir()
+    (run / "001-manifest.json").write_text(json.dumps({"processed": {"x": [LEAK]}}))
+    status.STATUS_PATH.write_text(json.dumps({"running": False, "recent": [
+        {"name": "Personal Errand.m4a", "ok": True, "summary": "1 speaker(s)"},
+        {"name": "Budget Review.m4a", "ok": True, "summary": "1 speaker(s)"}]}))
+
+    p = purge.plan(LEAK)
+    assert p["recent_rows"] == 1 and p["migration"]["lines"] == 5
+    assert old in p["migration"]["names"]
+    assert "Personal Errand" in status.STATUS_PATH.read_text()      # a dry run
+
+    r = purge.apply(LEAK)
+    assert r["done"] and r["scrubbed"]["recent"] == 1 and r["scrubbed"]["migration"] == 5
+    assert [x["name"] for x in status.read()["recent"]] == ["Budget Review.m4a"]
+    assert not (mig / "backfill-1.jsonl").exists()          # its only line was this meeting
+    amn = (mig / "amnesty-1.jsonl").read_text()
+    assert "mid-leak" not in amn and KEEP in amn and amn.endswith('"mee\n')
+    assert "mid-keep" in (mig / "fixdates-1.jsonl").read_text()
+    assert [x["meeting_id"] for x in
+            json.loads((mig / "iso-rename-plan.json").read_text())["rows"]] == ["mid-keep"]
+    assert LEAK not in (mig / "iso-rename-plan.tsv").read_text()
+    for f in ("amnesty-1.jsonl", "iso-rename-plan.json", "iso-rename-plan.tsv"):
+        assert (mig / f).stat().st_mode & 0o777 == 0o600
+    # the doctor's copy is not rewritten: it is listed for the owner
+    assert r["migration_left"] == [str(run / "001-manifest.json")]
+    named = [f for f in mig.rglob("*") if f.is_file() and f.parent == mig
+             and ("Personal Errand" in f.read_text() or "mid-leak" in f.read_text()
+                  or LEAK in f.read_text())]
+    assert named == []
+
+
 def test_a_purge_never_writes_over_a_damaged_unknowns_registry(sandbox, monkeypatch,
                                                                 tmp_path):
     """A damaged unknowns.json read as empty, and the purge saved that

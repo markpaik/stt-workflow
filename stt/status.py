@@ -541,6 +541,29 @@ def _append_history(entry):
         pass
 
 
+def recent_naming(names) -> int:
+    """How many rows of the `recent` ring name one of `names`. Reads only."""
+    names = set(names)
+    return sum(1 for r in read().get("recent") or []
+               if isinstance(r, dict) and r.get("name") in names)
+
+
+def forget_recent(names) -> int:
+    """Drop the `recent` rows that name one of `names` (a purge). start_run
+    carries the ring forward, so a row stays until 20 newer results push it
+    out. Returns how many rows were dropped."""
+    names = set(names)
+    with _lock():
+        d = read()
+        rows = d.get("recent") or []
+        keep = [r for r in rows if not (isinstance(r, dict) and r.get("name") in names)]
+        if len(keep) == len(rows):
+            return 0
+        d["recent"] = keep
+        _write(d)
+        return len(rows) - len(keep)
+
+
 def finish_file(name, ok, summary=""):
     with _lock():
         d = read()
