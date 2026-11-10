@@ -48,12 +48,21 @@ env_get() {
   printf '%s' "$out"
 }
 env_set() {  # env_set KEY VALUE — update-or-append, preserving other lines
+  # The value is written as given, byte for byte. A sed substitution read
+  # '&' as the matched text, a '|' as the end of its pattern and '\n' as a
+  # newline, so a folder named "R & D" corrupted the line.
+  local line tmp="$ENVF.tmp.$$" found=0
   touch "$ENVF"; chmod 600 "$ENVF"
-  if grep -qE "^$1=" "$ENVF"; then
-    /usr/bin/sed -i '' "s|^$1=.*|$1=$2|" "$ENVF"
-  else
-    echo "$1=$2" >> "$ENVF"
-  fi
+  : > "$tmp"; chmod 600 "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$(_env_key "$line")" = "$1" ]; then
+      printf '%s=%s\n' "$1" "$2" >> "$tmp"; found=1
+    else
+      printf '%s\n' "$line" >> "$tmp"
+    fi
+  done < "$ENVF"
+  [ "$found" = 1 ] || printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv -f "$tmp" "$ENVF"
 }
 
 # sourced (the tests load the helpers above): stop before the setup steps

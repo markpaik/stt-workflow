@@ -163,3 +163,43 @@ def test_a_plain_path_still_makes_the_same_plists(tmp_path):
     assert b["WorkingDirectory"] == str(base)
     assert b["WatchPaths"][0].endswith("com~apple~CloudDocs/Voice Recordings")
     assert plistlib.loads(gui.read_bytes())["Label"] == "com.stt-workflow.menubar"
+
+
+# ---------- init.sh writes stt.env ----------
+
+def _env_set(tmp_path, *pairs, start=""):
+    shutil.copy(REPO / "init.sh", tmp_path / "init.sh")
+    envf = tmp_path / "stt.env"
+    envf.write_text(start)
+    calls = "; ".join(f"env_set {_q(k)} {_q(v)}" for k, v in pairs)
+    sh = f'source "{tmp_path}/init.sh"; ENVF={_q(str(envf))}; {calls}'
+    r = subprocess.run(["/bin/bash", "-c", sh], capture_output=True, text=True,
+                       env=_clean_env(HOME=str(tmp_path / "home")))
+    assert r.returncode == 0, r.stderr
+    return envf
+
+
+def _q(s):
+    import shlex
+    return shlex.quote(s)
+
+
+@pytest.mark.parametrize("value", ["/Users/x/R & D", "/a/b|c", "a\\nb",
+                                   "/Users/x/%s 100%", "/a/$HOME/`x`"])
+def test_init_writes_a_value_exactly_as_given(tmp_path, value):
+    """env_set rebuilt the line with sed. On a second run (the key already
+    there), '&' expanded to the matched text, '|' aborted sed with 'bad
+    flag in substitute command', and a backslash-n became a newline."""
+    envf = _env_set(tmp_path, ("STT_ICLOUD_DIR", "/a/old"), ("STT_ICLOUD_DIR", value),
+                    start="# keep me\nHF_TOKEN=hf_synthetic\n")
+    assert envf.read_text() == f"# keep me\nHF_TOKEN=hf_synthetic\nSTT_ICLOUD_DIR={value}\n"
+    assert envfile.parse(envf)["STT_ICLOUD_DIR"] == value
+    assert oct(envf.stat().st_mode & 0o777) == "0o600"
+    assert sorted(p.name for p in tmp_path.glob("stt.env*")) == ["stt.env"]
+
+
+def test_init_updates_a_key_in_place_and_appends_a_new_one(tmp_path):
+    envf = _env_set(tmp_path, ("STT_MEETINGS_DIR", "/new/meetings"), ("NEW_KEY", "v"),
+                    start="A=1\nSTT_MEETINGS_DIR=/old\nSTT_MEETINGS_DIR_X=keep\nB=2")
+    assert envf.read_text() == ("A=1\nSTT_MEETINGS_DIR=/new/meetings\n"
+                                "STT_MEETINGS_DIR_X=keep\nB=2\nNEW_KEY=v\n")
