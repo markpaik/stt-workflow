@@ -228,6 +228,8 @@ def _outside_mentions(base: str, mid) -> list:
 
 # the keys a journal entry or a plan row names its meeting by
 _NAME_KEYS = ("base", "old_base", "new_base", "planned_base", "renamed")
+# the keys that name the meeting after a rename entry ran
+_NEW_KEYS = ("new_base", "planned_base", "renamed")
 _PLAN_FILES = ("iso-rename-plan.json",)
 
 
@@ -250,7 +252,21 @@ def _names_meeting(e, mid, names: set, line: str = "") -> bool:
         return False
     if e.get("meeting_id"):
         return bool(mid) and e["meeting_id"] == mid
-    return any(isinstance(e.get(k), str) and e[k] in names for k in _NAME_KEYS)
+    return any(n in names for n in _later_names(e))
+
+
+def _later_names(e: dict) -> list:
+    """The names an entry with no meeting id gives the meeting once the
+    entry ran: its new name for a rename, else the name it ran on. The
+    old_base of a rename is left out. Two meetings can share an old name
+    (a default "New Recording 3"), and a match on it took the other
+    meeting's lines and, through the new name, its rename chain."""
+    later = [e[k] for k in _NEW_KEYS if isinstance(e.get(k), str) and e[k]]
+    if not later:
+        later = [e[k] for k in ("base", "old_base") if isinstance(e.get(k), str) and e[k]]
+    elif isinstance(e.get("base"), str) and e["base"]:
+        later.append(e["base"])
+    return later
 
 
 def _migration_docs() -> dict:
@@ -283,9 +299,12 @@ def _migration_docs() -> dict:
 
 
 def _all_names(docs: dict, mid, names: set) -> set:
-    """`names` plus every older or later name the journals give the meeting:
-    an entry that names it carries the name it had then. Repeated until no
-    new name turns up, so a chain of renames is followed to its start."""
+    """`names` plus every older name the journals give the meeting: an
+    entry that names it carries the name it had then. Repeated until no
+    new name turns up, so a chain of renames is followed to its start.
+    An entry with no meeting id matches only by a later name
+    (_later_names), so the chain runs backward and never forward from a
+    shared old name into another meeting."""
     names = set(names)
     entries = []
     for v in docs.values():
@@ -332,9 +351,12 @@ def _purge_migration(mid, names: set) -> int:
     n = 0
     for p, v in docs.items():
         if isinstance(v, dict):
-            keep = [r for r in v["rows"] if not _names_meeting(r, mid, every)]
-            if len(keep) == len(v["rows"]):
+            hit = [_names_meeting(r, mid, every) for r in v["rows"]]
+            if not any(hit):
                 continue
+            keep = [r for r, h in zip(v["rows"], hit) if not h]
+            gone = {(r.get("old_base"), r.get("new_base"))
+                    for r, h in zip(v["rows"], hit) if h}
             n += len(v["rows"]) - len(keep)
             _write_private(p, json.dumps({**v, "rows": keep}, ensure_ascii=False, indent=1))
             tsv = p.with_suffix(".tsv")
@@ -342,9 +364,13 @@ def _purge_migration(mid, names: set) -> int:
                 lines = tsv.read_text(encoding="utf-8").splitlines()
             except (OSError, ValueError):
                 continue
-            # old_base and new_base are its first two columns
-            lines = [ln for i, ln in enumerate(lines)
-                     if i == 0 or not set(ln.split("\t")[:2]) & every]
+            # old_base and new_base are its first two columns. A row goes
+            # with its plan row, or when its new name is the meeting's: an
+            # old name alone can be another meeting's too.
+            def ours(ln):
+                cols = ln.split("\t")
+                return tuple(cols[:2]) in gone or (len(cols) > 1 and cols[1] in every)
+            lines = [ln for i, ln in enumerate(lines) if i == 0 or not ours(ln)]
             _write_private(tsv, "\n".join(lines) + "\n")
             continue
         keep = [ln for ln, e in v if not _names_meeting(e, mid, every, ln)]

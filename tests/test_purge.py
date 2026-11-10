@@ -274,3 +274,37 @@ def test_a_manifest_record_that_is_not_an_object_never_stops_the_purge(
     assert sorted(left) == ["Bad Record.m4a", "Budget Review.m4a",
                             "Odd Outputs.m4a", "Personal Errand 2.m4a"]
     assert left["Bad Record.m4a"] == "x"   # kept for a person to repair
+
+
+def test_a_shared_old_name_never_takes_another_meetings_journal_lines(
+        sandbox, monkeypatch, tmp_path):
+    """Lines with no meeting id were matched by any name, and the name
+    chain followed a shared OLD name forward: a default "New Recording 3"
+    that two meetings once had led to the other meeting's new name, and
+    --apply dropped that meeting's rename lines. purge.py has no undo."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    other = "2026-11-07 Reading Partner Kickoff"
+    shared = "New Recording 3"
+    mig = config.migration_dir()
+    mig.mkdir(mode=0o700)
+    rows = [{"event": "apply", "old_base": shared, "new_base": LEAK},
+            {"event": "apply", "old_base": shared, "new_base": other},
+            {"run": "backfill-0", "base": other, "field": "date"}]
+    (mig / "legacy-rename-journal.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    plan_rows = [{"old_base": shared, "new_base": LEAK},
+                 {"old_base": shared, "new_base": other}]
+    (mig / "iso-rename-plan.json").write_text(json.dumps({"version": 1, "rows": plan_rows}))
+    (mig / "iso-rename-plan.tsv").write_text(
+        f"old_base\tnew_base\trename\n{shared}\t{LEAK}\tTrue\n{shared}\t{other}\tTrue\n")
+    p = purge.plan(LEAK)
+    assert shared in p["migration"]["names"] and other not in p["migration"]["names"]
+    assert p["migration"]["lines"] == 2
+    assert purge.apply(LEAK)["scrubbed"]["migration"] == 2
+    left = [json.loads(ln) for ln in
+            (mig / "legacy-rename-journal.jsonl").read_text().splitlines()]
+    assert left == rows[1:]
+    assert json.loads((mig / "iso-rename-plan.json").read_text())["rows"] == plan_rows[1:]
+    assert (mig / "iso-rename-plan.tsv").read_text() == (
+        f"old_base\tnew_base\trename\n{shared}\t{other}\tTrue\n")
