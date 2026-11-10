@@ -25,6 +25,9 @@ What it removes:
   keeps its old names and titles;
 - saved Ask threads that cite it and group overrides keyed on it, when
   those stores exist;
+- the retitle dry run's scratch in work/retitle (tools/retitle_all.py): the
+  cached model reply for it (title, gist, decisions) and its row in
+  proposals.json and proposals.tsv;
 - the source file if it still sits in a watched folder (so the next run
   cannot bring it back), and, for a Voice Memos sync copy, a block on the
   memo's id so the sync never copies it again. The memo on the phone and
@@ -335,6 +338,73 @@ def _migration_plan(mid, names: set) -> dict:
     return {"names": sorted(every), "files": files, "lines": n}
 
 
+# ---------- the retitle scratch (tools/retitle_all.py) ----------
+
+def _retitle_dir() -> Path:
+    return config.WORK_DIR / "retitle"
+
+
+def _retitle_cache_files(mid, names: set) -> list:
+    """The cached model replies for the meeting: retitle_all keys one by its
+    meeting id (unsafe characters as '_'), else 'b_' and a hash of its name."""
+    import hashlib
+    import re
+    keys = {"b_" + hashlib.sha256(n.encode()).hexdigest()[:16] for n in names}
+    if mid:
+        keys.add(re.sub(r"[^\w.-]", "_", str(mid)))
+    d = _retitle_dir() / "cache"
+    return sorted(str(d / f"{k}.json") for k in keys if (d / f"{k}.json").is_file())
+
+
+def _retitle_rows(mid, names: set):
+    """(doc, hit): proposals.json and a flag per proposal, True for the
+    meeting's own row (by its id, else by the name it had then)."""
+    doc = _read_json(_retitle_dir() / "proposals.json")
+    if not isinstance(doc, dict) or not isinstance(doc.get("proposals"), list):
+        return None, []
+    hit = []
+    for r in doc["proposals"]:
+        if not isinstance(r, dict):
+            hit.append(False)
+        elif r.get("meeting_id"):
+            hit.append(bool(mid) and r["meeting_id"] == mid)
+        else:
+            hit.append(r.get("old_base") in names)
+    return doc, hit
+
+
+def _retitle_plan(mid, names: set) -> dict:
+    _, hit = _retitle_rows(mid, names)
+    return {"cache": _retitle_cache_files(mid, names), "proposals": sum(hit)}
+
+
+def _purge_retitle(mid, names: set) -> dict:
+    """Remove the meeting's cached model reply and its proposal rows. The
+    tsv beside proposals.json loses the same rows (old_base, its second
+    column, is one folder name per row)."""
+    gone = _retitle_cache_files(mid, names)
+    for f in gone:
+        Path(f).unlink(missing_ok=True)
+    doc, hit = _retitle_rows(mid, names)
+    n = sum(hit)
+    if n:
+        rows = doc["proposals"]
+        dropped = {r.get("old_base") for r, h in zip(rows, hit) if h}
+        doc["proposals"] = [r for r, h in zip(rows, hit) if not h]
+        pj = _retitle_dir() / "proposals.json"
+        _write_private(pj, json.dumps(doc, ensure_ascii=False, indent=1))
+        tsv = pj.with_suffix(".tsv")
+        try:
+            lines = tsv.read_text(encoding="utf-8").splitlines()
+        except (OSError, ValueError):
+            lines = None
+        if lines is not None:
+            keep = [ln for i, ln in enumerate(lines)
+                    if i == 0 or (ln.split("\t")[1:2] or [None])[0] not in dropped]
+            _write_private(tsv, "\n".join(keep) + "\n")
+    return {"cache": len(gone), "proposals": n}
+
+
 def _write_private(p: Path, text: str) -> None:
     tmp = p.with_name(p.name + ".purge.tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -438,6 +508,7 @@ def plan(base: str) -> dict:
         "overrides": _overrides(base, mid),
         "recent_rows": status.recent_naming(names),
         "migration": _migration_plan(mid, names),
+        "retitle": _retitle_plan(mid, names),
         "outside": _outside_mentions(base, mid),
         "note": BACKUP_NOTE,
     }
@@ -639,6 +710,7 @@ def apply(base: str) -> dict:
     scrub["recent"] = status.forget_recent(names)
     every = set(p["migration"]["names"]) | names
     scrub["migration"] = _purge_migration(mid, every)
+    scrub["retitle"] = _purge_retitle(mid, every)
     p.update({"done": True, "enrolled_removed": enrolled,
               "unknowns_removed": n_unknowns, "scrubbed": scrub,
               "vm_blocked": blocked,
@@ -668,6 +740,9 @@ def _print(p: dict, applied: bool):
     print(f"{verb}: {p['recent_rows']} recent result(s) in status.json")
     print(f"{verb}: {p['migration']['lines']} line(s) in "
           f"{len(p['migration']['files'])} undo journal(s) and rename plan(s)")
+    rt = p.get("retitle") or {}
+    print(f"{verb}: {len(rt.get('cache') or [])} cached retitle reply(ies), "
+          f"{rt.get('proposals', 0)} retitle proposal row(s)")
     if p.get("migration_left"):
         print(f"in the migration folder, {len(p['migration_left'])} other file(s) "
               "still name it; remove them by hand once their undo is not needed:")

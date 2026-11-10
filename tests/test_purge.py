@@ -308,3 +308,35 @@ def test_a_shared_old_name_never_takes_another_meetings_journal_lines(
     assert json.loads((mig / "iso-rename-plan.json").read_text())["rows"] == plan_rows[1:]
     assert (mig / "iso-rename-plan.tsv").read_text() == (
         f"old_base\tnew_base\trename\n{shared}\t{other}\tTrue\n")
+
+
+def test_a_purge_removes_the_retitle_scratch_for_the_meeting(sandbox, monkeypatch, tmp_path):
+    """tools/retitle_all.py keeps each model reply (title, gist, decisions)
+    in work/retitle/cache and a row per meeting in proposals.json and
+    proposals.tsv. The purge left all three, so the meeting's summary
+    stayed in the project after a purge that promised every store."""
+    import hashlib
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    _world()
+    rt = config.WORK_DIR / "retitle"
+    (rt / "cache").mkdir(parents=True)
+    by_id = rt / "cache" / "mid-leak.json"
+    by_name = rt / "cache" / ("b_" + hashlib.sha256(LEAK.encode()).hexdigest()[:16] + ".json")
+    other = rt / "cache" / "mid-keep.json"
+    for f in (by_id, by_name, other):
+        f.write_text(json.dumps({"desc": {"gist": "zebracakes" if f != other else "budget"}}))
+    rows = [{"meeting_id": "mid-leak", "old_base": LEAK, "gist": "zebracakes"},
+            {"meeting_id": "mid-keep", "old_base": KEEP, "gist": "budget"}]
+    (rt / "proposals.json").write_text(json.dumps({"version": 1, "proposals": rows}))
+    (rt / "proposals.tsv").write_text(
+        f"trust\told_base\tnew_base\n90\t{LEAK}\tx\n80\t{KEEP}\ty\n")
+    p = purge.plan(LEAK)
+    assert p["retitle"] == {"cache": sorted([str(by_id), str(by_name)]), "proposals": 1}
+    assert by_id.exists()                                   # a dry run
+    r = purge.apply(LEAK)
+    assert r["scrubbed"]["retitle"] == {"cache": 2, "proposals": 1}
+    assert not by_id.exists() and not by_name.exists() and other.exists()
+    assert json.loads((rt / "proposals.json").read_text())["proposals"] == rows[1:]
+    assert (rt / "proposals.tsv").read_text() == f"trust\told_base\tnew_base\n80\t{KEEP}\ty\n"
+    left = b"".join(f.read_bytes() for f in rt.rglob("*") if f.is_file())
+    assert b"zebracakes" not in left and LEAK.encode() not in left
