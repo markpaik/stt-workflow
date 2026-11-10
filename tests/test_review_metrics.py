@@ -109,6 +109,59 @@ def test_a_last_line_that_is_not_a_row_does_not_stop_the_log(sandbox, last):
     assert lines[0] == last and json.loads(lines[-1])["date"] == NOW.date().isoformat()
 
 
+def test_a_torn_last_line_does_not_swallow_the_next_row(sandbox):
+    """A torn last line (no newline) made _last_date return None, and the
+    new row was glued onto it: one corrupt line, and a second run the same
+    day appended again. The new row starts its own line now, and the day
+    check reads it."""
+    _store()
+    p = config.PROJECT_DIR / "review_metrics.jsonl"
+    assert review_metrics.record_today() is True
+    p.write_bytes(p.read_bytes()[:150])
+    assert review_metrics.record_today() is True
+    assert review_metrics.record_today() is False
+    lines = p.read_text().splitlines()
+    assert len(lines) == 2 and len(lines[0]) == 150
+    assert json.loads(lines[1])["date"] == NOW.date().isoformat()
+
+
+def test_a_torn_line_after_yesterdays_row_still_records_today(sandbox):
+    _store()
+    p = config.PROJECT_DIR / "review_metrics.jsonl"
+    yesterday = NOW - timedelta(days=1)
+    assert review_metrics.record_today(now=yesterday) is True
+    p.write_bytes(p.read_bytes() + b'{"date": "' + NOW.date().isoformat().encode())
+    assert review_metrics.record_today() is True
+    rows = [json.loads(x) for i, x in enumerate(p.read_text().splitlines()) if i != 1]
+    assert [r["date"] for r in rows] == [yesterday.date().isoformat(),
+                                         NOW.date().isoformat()]
+
+
+def test_parallel_records_write_one_row(sandbox, monkeypatch):
+    """The check and the append held no lock: four --record runs at once
+    each printed "recorded" and the log held 4 rows for one date."""
+    import threading
+    import time
+    real = review_metrics.compute
+
+    def slow(now=None):
+        time.sleep(0.2)   # widen the gap between the check and the append
+        return real(now)
+
+    monkeypatch.setattr(review_metrics, "compute", slow)
+    _store()
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(review_metrics.record_today()))
+          for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    p = config.PROJECT_DIR / "review_metrics.jsonl"
+    assert sorted(out) == [False, False, False, True]
+    assert len(p.read_text().splitlines()) == 1
+
+
 def test_the_batch_end_records_the_day(sandbox):
     _store()
     assert run_batch.record_review_metrics() is True

@@ -20,6 +20,7 @@ run_batch.py calls record_today() at the end of each run, so the log grows
 by at most one row a day without a scheduler of its own.
 """
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -133,31 +134,51 @@ def compute(now=None) -> dict:
 
 
 def _last_date(p: Path):
+    """The date of the last whole row in the log. A torn last line (a crash
+    or a cap cut the append short) or a line that is not a row is passed
+    over: it hid the row before it, so the once-a-day check failed."""
     try:
         with open(p, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
             fh.seek(max(0, size - 8192))
             tail = fh.read().decode("utf-8", "replace").strip().splitlines()
-        last = json.loads(tail[-1]) if tail else None
-        # a last line of [1] or "x" parses but is no row: .get() raised
-        # AttributeError, and run_batch skipped the day's row every run
-        return last.get("date") if isinstance(last, dict) else None
-    except (OSError, ValueError, IndexError):
+    except OSError:
         return None
+    for line in reversed(tail):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        # a line of [1] or "x" parses but is no row: .get() raised
+        # AttributeError, and run_batch skipped the day's row every run
+        if isinstance(row, dict) and isinstance(row.get("date"), str):
+            return row["date"]
+    return None
 
 
 def record_today(now=None) -> bool:
-    """Append today's row unless today already has one. True when written."""
+    """Append today's row unless today already has one. True when written.
+
+    The check and the append hold one lock on the log: four --record runs
+    at once each saw no row for today, and the log held four. A log that
+    ends without a newline (a torn last line) gets one first, so the new
+    row starts its own line: it was glued onto the torn one, and both were
+    lost."""
     now = now or datetime.now()
     p = metrics_path()
-    if _last_date(p) == now.date().isoformat():
-        return False
-    row = compute(now)
     p.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(fd, "a") as fh:
-        fh.write(json.dumps(row) + "\n")
+    fd = os.open(p, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if _last_date(p) == now.date().isoformat():
+            return False
+        row = compute(now)
+        size = os.fstat(fd).st_size
+        lead = b"\n" if size and os.pread(fd, 1, size - 1) != b"\n" else b""
+        os.write(fd, lead + (json.dumps(row) + "\n").encode())
+    finally:
+        os.close(fd)   # releases the lock
     return True
 
 
