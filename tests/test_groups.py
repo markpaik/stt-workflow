@@ -228,6 +228,24 @@ def test_meetings_without_amnesty_keys_still_group(sandbox):
     assert g["count"] == 2
 
 
+def test_one_damaged_meeting_json_never_stops_the_groups(sandbox):
+    """float() on duration_sec ran outside any guard: one json with a
+    string or NaN there, or a number for its date, raised for the whole
+    library."""
+    _mk("Zed Budget Sync 09012026", mid="m1")
+    _mk("Zed Budget Sync 09022026", mid="m2", dur="abc")
+    _mk("Zed Budget Sync 09032026", mid="m3", dur=float("nan"), date=20260101)
+    _mk("Zed Budget Sync 09042026", meeting_id=["m4"], dur=-5,
+        speakers=[{"name": ["Robin"]}, "x"], title=7)
+    (g,) = groups.current()
+    assert g["count"] == 4 and g["seconds"] == 1800
+    r = groups.row_from_json("Zed Budget Sync 09042026",
+                             {"meeting_id": ["m4"], "date": 5, "duration_sec": True,
+                              "speakers": "Robin", "recorded_at": 1})
+    assert r["meeting_id"] is None and r["named"] == [] and r["recorded_at"] is None
+    assert r["date"] == "2026-09-04" and r["duration_sec"] == 0.0
+
+
 # --------------------------------------------------------- overrides ---
 
 def test_not_part_of_this_group_with_undo(sandbox):

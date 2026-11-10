@@ -54,6 +54,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -186,24 +187,39 @@ def row_hour(row: dict):
     return h
 
 
+def _text(v):
+    """A non-empty string value, else None."""
+    return v if isinstance(v, str) and v else None
+
+
+def _seconds(v) -> float:
+    """A duration in seconds: a finite number of zero or more, else 0.0."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0.0
+    v = float(v)
+    return v if math.isfinite(v) and v >= 0 else 0.0
+
+
 def row_from_json(base: str, d: dict) -> dict:
-    """The few keys grouping reads, from one meeting json."""
+    """The few keys grouping reads, from one meeting json. A value of the
+    wrong type (a hand-edited or damaged json) reads as absent: one such
+    meeting must never stop the groups of the whole library."""
     d = d if isinstance(d, dict) else {}
     named = []
-    for s in d.get("speakers") or []:
-        if isinstance(s, dict) and s.get("name"):
-            nm = s.get("display") or s.get("name")
+    speakers = d.get("speakers")
+    for s in speakers if isinstance(speakers, list) else []:
+        if isinstance(s, dict) and _text(s.get("name")):
+            nm = _text(s.get("display")) or s["name"]
             if nm not in named:
                 named.append(nm)
-    ra = d.get("recorded_at") if isinstance(d.get("recorded_at"), str) else None
     return {"base": base,
-            "meeting_id": d.get("meeting_id") or None,
-            "title": d.get("title") or dates.title_of(base),
+            "meeting_id": _text(d.get("meeting_id")),
+            "title": _text(d.get("title")) or dates.title_of(base),
             "named": named,
-            "recorded_at": ra,
-            "source_name": d.get("source_name") if isinstance(d.get("source_name"), str) else None,
-            "date": d.get("date") or dates.meeting_date(base),
-            "duration_sec": float(d.get("duration_sec") or 0.0)}
+            "recorded_at": _text(d.get("recorded_at")),
+            "source_name": _text(d.get("source_name")),
+            "date": _text(d.get("date")) or dates.meeting_date(base),
+            "duration_sec": _seconds(d.get("duration_sec"))}
 
 
 def load_rows() -> list:
