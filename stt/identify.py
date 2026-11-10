@@ -20,6 +20,7 @@ import sys
 import threading
 import unicodedata
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -75,9 +76,21 @@ def _private_dir():
 
 
 def _save_npy(path, arr):
-    np.save(path, arr)
-    with contextlib.suppress(OSError):
-        os.chmod(path, 0o600)
+    """A sample stack, written whole or not at all: through a temporary
+    file and os.replace, so a crash or a full disk mid-write leaves the old
+    stack, never a truncated file that every later read raises on."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            np.save(fh, arr)
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _atomic_write(path, text: str):

@@ -48,7 +48,7 @@ import numpy as np
 
 from . import config
 from .errors import UserError
-from .identify import (_atomic_write, _l2, cosine, load_voiceprints,
+from .identify import (_atomic_write, _l2, _save_npy, cosine, load_voiceprints,
                        lock_registry, score_against)
 
 MATCH_MIN = config.env_float("STT_UNKNOWN_MATCH_MIN", 0.6)
@@ -328,11 +328,27 @@ def forget_meeting_refs(base: str) -> int:
     return n
 
 
+_unreadable_warned = set()
+
+
 def _samples(reg, uid):
+    """This unknown's sample stack (n, dim), or None when its file is not
+    there or cannot be read. A damaged file reads as no samples: one
+    truncated U###.npy raised inside assign() for every meeting after it,
+    because each cluster is scored against every unknown."""
     f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
     if not f.exists():
         return None
-    arr = np.load(f)
+    try:
+        arr = np.load(f, allow_pickle=False)
+    except (OSError, ValueError, EOFError):
+        arr = None
+    if arr is None or arr.ndim not in (1, 2):
+        if str(f) not in _unreadable_warned:
+            _unreadable_warned.add(str(f))
+            print(f"WARNING: {f.name} cannot be read — {display(uid)} is "
+                  "skipped until it is restored or removed.", file=sys.stderr)
+        return None
     return arr.reshape(1, -1) if arr.ndim == 1 else arr
 
 
@@ -542,8 +558,8 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 # same meeting must not stack duplicate centroids)
                 mts = reg["speakers"][uid].setdefault("meetings", [])
                 if meeting not in mts:
-                    np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"],
-                            stack_after)
+                    _save_npy(config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"],
+                              stack_after)
                     ids = aligned_meeting_ids(reg["speakers"][uid])
                     mts.append(meeting)
                     reg["speakers"][uid]["meeting_ids"] = ids + [meeting_id]
@@ -602,7 +618,7 @@ def assign(cent_emb: dict, cluster_names: dict, meeting: str, stats: dict = None
                 near = near_misses(reg, scored)
                 uid = mint_uid(reg)
                 fname = f"{uid}.npy"
-                np.save(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
+                _save_npy(config.VOICEPRINTS_DIR / fname, _l2(v).reshape(1, -1))
                 reg["speakers"][uid] = {"file": fname, "meetings": [meeting],
                                         "meeting_ids": [meeting_id],
                                         "created": datetime.now().isoformat(timespec="seconds")}
@@ -652,7 +668,7 @@ def _restore_profile(name: str, entry, rows):
         else:
             reg[name] = entry
             if rows is not None:
-                np.save(config.VOICEPRINTS_DIR / entry["file"], rows)
+                _save_npy(config.VOICEPRINTS_DIR / entry["file"], rows)
         identify.save_registry(reg)
 
 
@@ -736,7 +752,7 @@ def merge(uid_src: str, uid_dst: str) -> bool:
             return False
         if s is not None:
             arr = np.vstack([d, s])[-MAX_SAMPLES:]
-            np.save(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)
+            _save_npy(config.VOICEPRINTS_DIR / reg["speakers"][uid_dst]["file"], arr)
         mts = reg["speakers"][uid_dst].setdefault("meetings", [])
         ids = aligned_meeting_ids(reg["speakers"][uid_dst])
         src_ids = aligned_meeting_ids(reg["speakers"][uid_src])

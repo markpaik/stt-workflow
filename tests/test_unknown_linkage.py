@@ -12,6 +12,8 @@ The third rule is about numbers, not voices. A freed number is never reused,
 so "Speaker 3" in a year-old transcript can never come back meaning somebody
 else.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -286,3 +288,53 @@ def test_a_damaged_registry_is_never_written_over(sandbox, capsys, damage):
     assert reg_path.read_text() == damage
     assert npy.read_bytes() == old
     assert sorted(p.name for p in config.VOICEPRINTS_DIR.glob("*.npy")) == ["U001.npy"]
+
+
+def test_a_damaged_sample_file_never_stops_assign(sandbox, capsys):
+    """_samples called np.load with no guard. Every assign() scores each
+    cluster against every unknown, so one truncated U###.npy raised
+    ValueError for every meeting after it, and samples_of() raised into the
+    panel. A damaged file now reads as no samples, with one warning."""
+    e = _basis(seed=43)
+    assert unknowns.assign({"S0": e[0]}, {"S0": None}, "M1",
+                           stats={"S0": GOOD_STATS}) == {"S0": "U001"}
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    for junk in (b"junk", npy.read_bytes()[:60], b""):
+        npy.write_bytes(junk)
+        assert unknowns.samples_of("U001") is None
+    out = unknowns.assign({"S0": e[1], "S1": e[2]}, {"S0": None, "S1": None}, "M2",
+                          stats={"S0": GOOD_STATS, "S1": GOOD_STATS})
+    assert sorted(out.values()) == ["U002", "U003"]
+    assert not unknowns.promote("U001", "Zed Quill")
+    assert npy.read_bytes() == b"", "the damaged file is left for the user"
+    assert capsys.readouterr().err.count("U001.npy cannot be read") == 1
+
+
+def test_a_sample_write_that_dies_midway_keeps_the_old_stack(sandbox, monkeypatch):
+    """np.save wrote the stack in place, so a crash or a full disk left a
+    truncated U###.npy behind. The write now goes through a temporary file:
+    the old stack stays whole and no temporary file is left."""
+    e = _basis(seed=44)
+    unknowns.assign({"S0": e[0]}, {"S0": None}, "M1", stats={"S0": GOOD_STATS})
+    npy = config.VOICEPRINTS_DIR / "U001.npy"
+    old = npy.read_bytes()
+
+    def dying_save(target, arr, *a, **kw):
+        if hasattr(target, "write"):
+            target.write(old[:40])
+        else:
+            Path(target).write_bytes(old[:40])
+        raise OSError("No space left on device")
+
+    # its own context: undo() on the fixture's monkeypatch would also undo
+    # the sandbox paths
+    with monkeypatch.context() as m:
+        m.setattr(np, "save", dying_save)
+        with pytest.raises(OSError):
+            # a returning voice: the link appends to U001's stack
+            unknowns.assign({"S0": _mix(e, 1.0, 0.1)}, {"S0": None}, "M2",
+                            stats={"S0": GOOD_STATS})
+    assert config.VOICEPRINTS_DIR == npy.parent
+    assert npy.read_bytes() == old
+    assert not list(config.VOICEPRINTS_DIR.glob("*.tmp"))
+    assert unknowns.load()["speakers"]["U001"]["meetings"] == ["M1"]
