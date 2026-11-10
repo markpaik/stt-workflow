@@ -270,6 +270,56 @@ def test_refuses_dir_overlapping_real_data(tmp_path, monkeypatch):
         demo_seed.main(["--dir", str(real / "inside")])  # nested under real data
 
 
+def _checkout_copy(tmp_path, env_text):
+    """A copy of the code (stt/ and tools/demo_seed.py) whose own stt.env
+    names a synthetic live library, so every live folder is a tmp path."""
+    import shutil
+    co = tmp_path / "checkout"
+    shutil.copytree(REPO / "stt", co / "stt",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (co / "tools").mkdir()
+    shutil.copy(REPO / "tools" / "demo_seed.py", co / "tools" / "demo_seed.py")
+    (co / "stt.env").write_text(env_text)
+    return co
+
+
+def _resolve_in(co, env_extra, *targets):
+    """resolve_target(t) for each target, in a fresh interpreter run from
+    the copy `co`: 'ACCEPTED <path>' or 'REFUSED <why>' per target. It
+    writes nothing."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    env.update(env_extra, PYTHONPATH=str(co))
+    code = ("import sys; sys.path.insert(0, 'tools'); import demo_seed\n"
+            "for t in sys.argv[1:]:\n"
+            "    try: print('ACCEPTED', demo_seed.resolve_target(t))\n"
+            "    except SystemExit as e: print('REFUSED', e)\n")
+    r = subprocess.run([sys.executable, "-c", code, *map(str, targets)], env=env,
+                       cwd=str(co), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_the_guard_sees_the_live_library_with_stt_home_exported(tmp_path):
+    """_real_data_dirs said it read the folders without STT_HOME, but
+    nothing cleared it. With STT_HOME exported every folder it listed was
+    inside the scratch home, and a --dir inside the real library passed."""
+    live = (tmp_path / "Live Library").resolve()
+    rec = (tmp_path / "live rec").resolve()
+    co = _checkout_copy(tmp_path, f"STT_MEETINGS_DIR={live}\nSTT_RECORDINGS_DIR={rec}\n")
+    home = tmp_path / "scratch"
+    out = _resolve_in(co, {"STT_HOME": str(home),
+                           "STT_MEETINGS_DIR": str(home / "meetings")},
+                      live / "demo_x", rec, co / "voiceprints" / "x",
+                      tmp_path / "elsewhere")
+    assert out[0] == (f"REFUSED refusing: --dir {live / 'demo_x'} overlaps a real "
+                      f"configured data folder ({live}). Pick a throwaway path "
+                      "such as qa/demo_home.")
+    assert out[1].startswith("REFUSED") and out[2].startswith("REFUSED")
+    assert out[3] == f"ACCEPTED {(tmp_path / 'elsewhere').resolve()}"
+    # the run without STT_HOME refuses the same way, as before
+    assert _resolve_in(co, {}, live / "demo_x")[0].startswith("REFUSED")
+
+
 def test_wipe_only_removes_a_home_it_built(tmp_path):
     target = tmp_path / "home"
     demo_seed.main(["--dir", str(target)])

@@ -694,9 +694,47 @@ def build(home: Path) -> dict:
 
 # ------------------------------------------------------------- CLI / safety -
 
+# The folders the batch and the panel use, as config resolves them in a
+# fresh interpreter with no STT_HOME, no STT_PROJECT_DIR and no STT_<X>_DIR
+# override: launchd sets none of them, so this is the live configuration
+# (the checkout's stt.env, else the defaults). This process's config cannot
+# say it: under STT_HOME every path it holds is inside the scratch home.
+# The Voice Memos library is left out on purpose: resolve() would stat a
+# path inside another app's container, and the seeder never reads it.
+_LIVE_DIRS_CODE = """
+import json
+from stt import config, voicememos
+print(json.dumps([str(p) for p in (
+    config.meetings_dir(), config.source_dir(), config.recordings_dir(),
+    config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
+    config.VOICEPRINTS_DIR, voicememos.staging_dir())]))
+"""
+
+
+def _live_data_dirs():
+    import subprocess
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("STT_HOME", "STT_PROJECT_DIR", "STT_VOICEMEMOS_STAGING")
+           and not (k.startswith("STT_") and k.endswith("_DIR"))}
+    repo = Path(__file__).resolve().parent.parent
+    env["PYTHONPATH"] = str(repo)
+    try:
+        r = subprocess.run([sys.executable, "-c", _LIVE_DIRS_CODE], env=env,
+                           cwd=str(repo), capture_output=True, text=True, timeout=60)
+        return [Path(p) for p in json.loads(r.stdout.strip().splitlines()[-1])]
+    except Exception as e:
+        # no list means no guard: refuse rather than write blind
+        sys.exit(f"refusing: could not read the live data folders ({e!r}).")
+
+
 def _real_data_dirs():
-    """The real, currently-configured folders the seeder must never write into
-    or under. Read WITHOUT STT_HOME, so these are the operator's live paths."""
+    """The real folders the seeder must never write into or under: the live
+    ones (_live_data_dirs) and the ones this process's config names.
+
+    The live list used to be this process's config alone, and the comment
+    said it was read without STT_HOME. Nothing cleared STT_HOME, so with it
+    exported every folder was inside the scratch home, and --dir inside the
+    real library passed."""
     dirs = []
     for fn in (config.meetings_dir, config.source_dir, config.recordings_dir):
         try:
@@ -704,11 +742,13 @@ def _real_data_dirs():
         except Exception:
             pass
     for p in (config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
-              config.VOICEPRINTS_DIR):
+              config.VOICEPRINTS_DIR, *_live_data_dirs()):
         try:
-            dirs.append(Path(p).expanduser().resolve())
+            p = Path(p).expanduser().resolve()
         except Exception:
-            pass
+            continue
+        if p not in dirs:
+            dirs.append(p)
     return dirs
 
 
