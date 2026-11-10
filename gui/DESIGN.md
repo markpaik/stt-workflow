@@ -70,7 +70,7 @@ line #33405A, inset #1D2437, accent #8B9DFF (ink on it #0E1330, soft and sel
 #34191B.
 
 Every text pair measures 4.5:1 or more in all four token blocks (light, dark,
-and the two `data-theme` overrides). `tools/token_contrast.py --css next`
+and the two `data-theme` overrides). `tools/token_contrast.py`
 measures them, and `tests/test_next_shell.py` gates it. A pair that misses is
 fixed hue-true. Theme: `auto` follows macOS, and the theme button cycles auto,
 light, dark under the `stt_theme` key, applied before paint.

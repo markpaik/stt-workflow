@@ -161,8 +161,9 @@ def test_search_index_backs_the_palette(sandbox):
 # ------------------------------------------------------------------ design ---
 
 def test_every_next_text_pair_clears_4_5_in_all_four_blocks():
-    from tools.token_contrast import AA, BLOCKS, NEXT_CSS_PATH, audit
-    rows = audit(NEXT_CSS_PATH)
+    from tools.token_contrast import AA, BLOCKS, CSS_PATH, audit
+    assert CSS_PATH == STATIC / "next.css"     # the tool audits the panel's sheet
+    rows = audit()
     bad = [r.line() for r in rows if r.ratio < AA]
     assert not bad, "\n".join(bad)
     assert {r.block for r in rows} == {label for label, _ in BLOCKS}
@@ -181,6 +182,112 @@ def test_next_ui_has_no_em_dashes_and_no_external_assets():
     # fonts are the vendored Figtree; no CDN, no remote script
     assert not re.search(r"""(src|href)=["']https?://""", page)
     assert "url(http" not in page
+
+
+def test_the_audit_measures_the_pairs_the_sheet_actually_paints():
+    """A hand-written pair list drifts: it once missed two pairs the sheet
+    painted. The audit also scans the sheet for every rule that sets a token
+    colour on a token ground, so a new rule cannot add an unmeasured pair."""
+    from tools.token_contrast import CSS_PATH, audit, painted_pairs
+
+    assert painted_pairs(".x{color:var(--ink);background:var(--inset)}"
+                         ".y{color:var(--sub)}.z{background:var(--card)}") == {("ink", "inset")}
+    rows = audit()
+    measured = {(r.fg, r.bg) for r in rows}
+    painted = painted_pairs(CSS_PATH.read_text(encoding="utf-8"))
+    assert painted, "the scan found nothing -- its rule regex broke"
+    assert painted <= measured, sorted(painted - measured)
+    # every block measures the same set, and nothing is measured twice
+    per_block = {}
+    for r in rows:
+        per_block.setdefault(r.block, []).append((r.fg, r.bg))
+    for block, pairs in per_block.items():
+        assert len(pairs) == len(set(pairs)), f"{block} measured a pair twice"
+    assert len({frozenset(v) for v in per_block.values()}) == 1
+
+
+def test_the_dark_token_block_stops_at_its_own_closing_brace():
+    """The @media pattern opens TWO braces. Counting from the start of the
+    match closed the @media wrapper instead of the :root inside it, so every
+    later rule in that media query was read as a token declaration."""
+    from tools.token_contrast import read_tokens
+
+    css = "@media(prefers-color-scheme:dark){:root{--a:#000;} .x{--b:#fff;}}"
+    tokens = read_tokens(css, r"(?m)^@media\(prefers-color-scheme:dark\)\{:root\{")
+    assert tokens == {"a": "#000"}, \
+        "the slice must end at :root's brace, not the media query's"
+
+
+def test_every_stage_the_pipeline_reports_has_its_pill_word_in_design_md():
+    """The pill names the active file's stage through STAGE_NICE, and a stage
+    it does not know reads "Working". Every stage the pipeline reports needs
+    its own word, and gui/DESIGN.md's Status pill section lists each one, so a
+    new stage cannot fall back to "Working" unnoticed."""
+    root = Path(srv.__file__).resolve().parent.parent
+    src = "".join((root / p).read_text(encoding="utf-8")
+                  for p in ("stt/pipeline.py", "run_batch.py"))
+    reported = set(re.findall(r'\b(?:report|set_stage)\(\s*(?:\w+\s*,\s*)?"([a-z]+)"', src))
+    # the scan must find the pipeline's stages, or the test proves nothing
+    assert reported >= {"downloading", "converting", "transcribing",
+                        "diarizing", "verifying", "writing", "summarizing"}
+    nice = dict(re.findall(r"(\w+):'([^']+)'",
+                           re.search(r"const STAGE_NICE=\{(.*?)\};", _next_js(), re.S).group(1)))
+    assert not reported - set(nice), sorted(reported - set(nice))
+    assert "STAGE_NICE[e.stage]||'Working'" in _next_js()
+    text = DESIGN.read_text(encoding="utf-8")
+    sec = text[text.index("## Status pill"):]
+    sec = sec[:sec.index("\n## ")]
+    missing = [w for w in sorted(set(nice.values()) | {"Working"}) if f"`{w}`" not in sec]
+    assert not missing, f"DESIGN.md's Status pill section omits {missing}"
+
+
+def test_screen_names_for_routes_with_a_slash():
+    """QA 4F #8: groups/<key> and ask/<id> shoot to a file in OUT."""
+    from tools import next_screens
+    assert next_screens._name("groups/gabc123") == "groups-gabc123"
+    assert next_screens._name("ask/0123456789ab") == "ask-0123456789ab"
+    assert next_screens._name("m/Some Base 10012026") == "meeting"
+    assert next_screens._name("m/Some Base 10012026/t/12") == "meeting-transcript"
+    assert next_screens._name("home") == "home"
+
+
+# ------------------------------------------------------------------- fonts ---
+# The vendored UI face. Figtree (OFL) is served by the panel itself from
+# gui/static/fonts/, never a CDN, behind a strict basename allowlist.
+FONTS = STATIC / "fonts"
+
+
+def test_figtree_is_vendored_with_its_license():
+    names = sorted(p.name for p in FONTS.glob("*.woff2"))
+    assert "figtree-latin.woff2" in names, "the latin variable woff2 is missing"
+    assert (FONTS / "OFL.txt").exists(), "OFL.txt must ship alongside the font"
+    for name in names:  # every vendored file is a real woff2
+        assert (FONTS / name).read_bytes()[:4] == b"wOF2", f"{name} is not woff2"
+
+
+def test_font_route_serves_woff2_and_refuses_traversal(running_server):
+    for name in sorted(p.name for p in FONTS.glob("*.woff2")):
+        status, ctype, body = _get(running_server, f"/static/fonts/{name}")
+        assert status == 200
+        assert ctype == "font/woff2"
+        assert body == (FONTS / name).read_bytes()
+    # strict allowlist: traversal names, encoded traversal, and anything not
+    # a vendored woff2 (even the license that IS in the directory) all 404
+    for bad in ("../next.css", "..%2Fnext.css", "%2e%2e/next.css",
+                "OFL.txt", "nope.woff2", ""):
+        status, _ctype, _body = _get(running_server, "/static/fonts/" + bad)
+        assert status == 404, f"font route must refuse {bad!r}"
+
+
+def test_the_frame_loads_figtree_from_the_font_route():
+    page = _compose_next()
+    assert "@font-face" in page
+    assert "font-family:'Figtree'" in page
+    assert "font-weight:300 900" in page          # the variable axis, whole
+    assert "font-display:swap" in page
+    assert "/static/fonts/figtree-latin.woff2" in page
+    # Figtree fronts the UI stack; -apple-system stays the fallback
+    assert "--sans:'Figtree',-apple-system" in page
 
 
 def _surface_rows():
@@ -441,32 +548,6 @@ console.log(JSON.stringify({hashA,sel,cleared,nm,after:VS}));
     assert out["cleared"] == 0 and out["after"] is None
     assert out["nm"] == {"hash": "#home", "route": "home",
                          "vs": {"uid": "U004", "base": "m1", "single": True, "title": True}}
-
-
-# ------------------------------------------------- classic seek deep link ---
-
-def test_classic_reader_accepts_the_seek_deep_link():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "#m\\/([^/]+)\\/t\\/" in js
-    assert "pendingOpen={base:route.base,seek:route.seek}" in js
-
-
-@pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_classic_parse_hash_reads_the_seek_form():
-    js = (STATIC / "app.js").read_text(encoding="utf-8")
-    fn = js[js.index("function parseHash(){"):]
-    fn = fn[:fn.index("\n}\n") + 2]
-    body = ("let location={hash:''};" + fn + """
-location.hash='#m/'+encodeURIComponent('Orchard 1')+'/t/61';const a=parseHash();
-location.hash='#m/'+encodeURIComponent('Orchard 1');const b=parseHash();
-location.hash='';const c=parseHash();
-console.log(JSON.stringify({a,b,c}));""")
-    r = subprocess.run([NODE, "-e", body], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["a"] == {"view": "meeting", "base": "Orchard 1", "seek": 61}
-    assert out["b"] == {"view": "meeting", "base": "Orchard 1"}
-    assert out["c"]["view"] == "timeline"
 
 
 # ------------------------------------------------ durations under a minute ---

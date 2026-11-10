@@ -769,10 +769,8 @@ def test_a_rename_to_a_new_name_or_onto_the_same_voice_needs_no_confirm(
     assert body["ok"] is True, body
 
 
-def test_both_shells_route_a_rename_warning_to_the_merge_confirm():
+def test_the_shell_routes_a_rename_warning_to_the_merge_confirm():
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent / "gui" / "static"
     nxt = (root / "next.js").read_text()
     assert "if(r&&r.need_confirm){UI.naming=null;UI.confirm='mg:'+N.rename;UI.mergeTo=r.dst" in nxt
-    app = (root / "app.js").read_text()
-    assert "DRAWER.mergeWarn={dst:r.dst" in app

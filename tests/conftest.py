@@ -97,8 +97,7 @@ def sandbox(tmp_path, monkeypatch):
 # unknown id (the diarizer split one person) and so both display "Speaker 68".
 # Naming U068 names both clusters, so it is ONE voice: 21 voices in 22
 # clusters. Four clusters are transcript-local "Voice N" labels with no uid.
-# Shared by the gather_state test (tests/test_timeline_feed.py) and the strip
-# test (tests/test_new_shell.py), so both count the same meeting.
+# The gather_state test (tests/test_timeline_feed.py) counts it.
 SPLIT_VOICE_BASE = "Board Meeting 09232026"
 SPLIT_VOICE_UID = "U068"
 

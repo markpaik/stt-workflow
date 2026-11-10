@@ -95,6 +95,10 @@ def test_no_banner_is_posted_and_the_written_rule_stands():
     root = Path(srv.__file__).resolve().parent
     assert "rumps.notification" not in (root / "menubar.py").read_text()
     assert "No notification banners." in (root / "menubar.py").read_text()
-    js = (root / "static" / "app.js").read_text()
-    fn = re.search(r"function markSeen\(now\)\{.*?\n\}", js, re.S).group(0)
-    assert "document.hidden" in fn and "/api/seen" in fn
+    # the page marks the look only while it is visible: on load when the tab
+    # is not hidden, and when a hidden tab comes back
+    js = (root / "static" / "next.js").read_text()
+    vis = re.search(r"addEventListener\('visibilitychange',\(\)=>\{.*?\n\}\);", js, re.S).group(0)
+    shown = vis[vis.index("else{"):]
+    assert "api('/api/seen',{})" in shown and "api('/api/seen'" not in vis[:vis.index("else{")]
+    assert "if(!document.hidden)api('/api/seen',{})" in js

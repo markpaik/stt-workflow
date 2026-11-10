@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contrast audit for the panel's colour tokens (gui/static/app.css).
+"""Contrast audit for the panel's colour tokens (gui/static/next.css).
 
 The Indigo Blueprint round, like Signal and Boardroom Wide before it, promises
 that every text pair reaches WCAG AA 4.5:1 in BOTH themes and that a token
@@ -8,11 +8,10 @@ module is the arithmetic behind that promise: it reads the four token blocks
 straight out of the stylesheet, resolves the var() aliases, and measures each
 pair the design actually paints.
 
-Run it:      python3 tools/token_contrast.py            (gui/static/app.css)
-             python3 tools/token_contrast.py --css next (gui/static/next.css)
+Run it:      python3 tools/token_contrast.py
 Import it:   from tools.token_contrast import audit  ->  list of Result rows
 
-tests/test_new_shell.py runs it over the shipped sheet, so a future token edit
+tests/test_next_shell.py runs it over the shipped sheet, so a future token edit
 cannot quietly drop a pair below 4.5:1.
 """
 from __future__ import annotations
@@ -22,9 +21,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-CSS_PATH = Path(__file__).resolve().parent.parent / "gui" / "static" / "app.css"
-# the /next frame's sheet (plan Phase 4C), audited with its own base pairs
-NEXT_CSS_PATH = CSS_PATH.with_name("next.css")
+CSS_PATH = Path(__file__).resolve().parent.parent / "gui" / "static" / "next.css"
 
 AA = 4.5   # WCAG AA for normal-size text; the house floor for every pair
 
@@ -43,32 +40,12 @@ BLOCKS = (
 # block whether or not a rule still paints them. Foreground first, background
 # second; both are token names without the leading dashes. Everything else the
 # sheet paints is found by painted_pairs() below, so a new rule cannot add an
-# unmeasured pair (the hand list had already drifted: accent-text on
-# accent-soft and ink on rec-soft were painted and never measured).
+# unmeasured pair. Beside the page grounds, the frame paints text on the
+# sidebar's --hair (current nav item, its Needs you count), the toast (paper
+# on ink), accent text on accent-soft (a chip that is on, a search match), and
+# --sel, a selected row's ground set by class, not by the rule that sets the
+# text colour, so the scan below cannot find those.
 PAIRS = (
-    ("ink", "paper"), ("ink", "card"), ("ink", "inset"),
-    ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
-    ("accent-text", "paper"), ("accent-text", "card"), ("accent-text", "inset"),
-    ("acc-ink", "accent"),
-    ("ok", "ok-soft"), ("ok", "card"),
-    ("busy", "busy-soft"),
-    ("attn", "attn-soft"), ("attn", "card"), ("attn", "paper"), ("attn", "inset"),
-    ("amber", "amber-soft"),          # the alias pair, measured in its own right
-    ("rec-text", "rec-soft"), ("rec-text", "card"), ("rec-text", "paper"),
-    ("work", "work-soft"),
-    ("personal", "personal-soft"), ("personal", "card"),
-    # the selected list row (docs/ui-refresh phase 3): its title, meta, and
-    # teal review count sit on --sel, a ground set by class, not by the rule
-    # that sets the text colour, so the scan below cannot find these
-    ("ink", "sel"), ("sub", "sel"), ("attn", "sel"),
-)
-
-
-# The /next frame's promised pairs. It retires --busy, --amber, --work, and
-# --personal, and it adds the grounds the frame paints text on: the sidebar's
-# --hair (current nav item, its Needs you count), the toast (paper on ink),
-# and accent text on accent-soft (a chip that is on, a search match).
-NEXT_PAIRS = (
     ("ink", "paper"), ("ink", "card"), ("ink", "inset"), ("ink", "hair"),
     ("sub", "paper"), ("sub", "card"), ("sub", "inset"),
     ("accent-text", "paper"), ("accent-text", "card"), ("accent-text", "inset"),
@@ -203,7 +180,7 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
     arithmetic has no opinion about."""
     css = Path(css_path).read_text(encoding="utf-8")
     if pairs is None:
-        pairs = NEXT_PAIRS if Path(css_path).name == "next.css" else PAIRS
+        pairs = PAIRS
     scanned = sorted(painted_pairs(css))          # stable order, base pairs first
     rows: list[Result] = []
     for label, pattern in BLOCKS:
@@ -232,9 +209,7 @@ def audit(css_path: Path = CSS_PATH, pairs=None) -> list[Result]:
 
 
 def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    # --css next audits the /next frame's sheet; the default stays app.css
-    path = NEXT_CSS_PATH if argv[:2] == ["--css", "next"] else CSS_PATH
+    path = CSS_PATH
     print(f"{path.name}")
     rows = audit(path)
     for r in rows:

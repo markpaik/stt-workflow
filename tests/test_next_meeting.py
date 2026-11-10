@@ -1,11 +1,11 @@
 """The new shell's meeting page and voice sheet (plan Phase 4D).
 
 The plan forbids dropping the naming, review, and hostile-name tests of the
-classic page when its reader is replaced: they encode bugs already found
-once. Each test here ports one or more of them to the new files
-(gui/static/next-meeting.js and next-voice.js) and names the classic test it
-ports. The classic tests stay in tests/test_new_shell.py while /classic
-serves the old page.
+old page when its reader was replaced: they encode bugs already found once.
+Each test here ports one or more of them to the new files
+(gui/static/next-meeting.js and next-voice.js) and names the old test it
+ports. The old page and its tests (tests/test_new_shell.py) are deleted, so
+those names are a record of what each port covers.
 
 The behavior runs in Node against the joined script (next.js, then
 next-meeting.js, then next-voice.js, the server's order) with a stub DOM, a
@@ -93,8 +93,9 @@ def _run(body, timeout=30, pre=""):
 # ================================================================ routing ===
 
 @needs_node
-def test_meeting_hash_reads_the_classic_deep_links():
-    # ports test_classic_parse_hash_reads_the_seek_form: the same two forms
+def test_meeting_hash_reads_both_deep_link_forms():
+    # ports test_classic_parse_hash_reads_the_seek_form: #m/<base> and
+    # #m/<base>/t/<secs>, which /classic bookmarks carry across the redirect
     out = _run("""
 console.log(JSON.stringify({a:parseMeetingHash('m/'+encodeURIComponent('Orchard 1')+'/t/61'),
  b:parseMeetingHash('m/'+encodeURIComponent('Orchard 1')),c:parseMeetingHash('home'),
@@ -1152,6 +1153,63 @@ def test_meeting_rows_carry_the_location_note(running_server):
     status, body = _get(running_server, "/api/state")
     rows = {m["base"]: m for m in json.loads(body)["meetings"]}
     assert rows["Library Walk 11022026"]["location_note"] == "Harbor Street Library"
+
+
+def _below_floor_meeting(base):
+    """A meeting shaped like the real one that showed "SPEAKER_08": every
+    segment's speaker is on the roster, but the voices below the minting
+    floor (no uid) carry no `display` on their segments, because the
+    pipeline stamps a segment's display only from a name or a uid. The
+    roster reads "Voice 9" (build_speakers' fallback). Beside it: a named
+    person, a registry voice, a dismissed below-floor voice, and a
+    meeting-local name."""
+    from conftest import mfile
+    roster = [
+        {"id": "SPEAKER_00", "name": "Grace Lindqvist", "global_id": None,
+         "display": "Grace Lindqvist"},
+        {"id": "SPEAKER_01", "name": None, "global_id": "U070", "display": "Speaker 70"},
+        {"id": "SPEAKER_03", "name": None, "global_id": None, "display": "Voice 4"},
+        {"id": "SPEAKER_05", "name": "Elena Ruiz", "global_id": None,
+         "display": "Elena Ruiz", "local": True},
+        {"id": "SPEAKER_08", "name": None, "global_id": None, "display": "Voice 9"},
+    ]
+    stamped = {"SPEAKER_00", "SPEAKER_01", "SPEAKER_05"}
+    segs = []
+    for i, s in enumerate(roster):
+        seg = {"start": i * 10.0, "end": i * 10.0 + 4.0, "speaker": s["id"],
+               "name": s["name"], "text": f"budget line number {i} spoken"}
+        if s["id"] in stamped:
+            seg["display"] = s["display"]
+        segs.append(seg)
+    segs.append({"start": 60.0, "end": 62.0, "speaker": "SPEAKER_08", "name": None,
+                 "text": "one more from nine"})
+    d = {"source_file": f"{base}.m4a", "duration_sec": 70.0, "date": "2026-09-23",
+         "speakers": roster, "segments": segs, "words": [],
+         "dismissed_voices": ["SPEAKER_03"], "local_names": {"SPEAKER_05": "Elena Ruiz"}}
+    mfile(base, ".json").write_text(json.dumps(d))
+    mfile(base, ".txt").write_text("stub")
+
+
+def test_transcript_and_search_label_a_below_floor_voice_by_its_roster_display(running_server):
+    """The server half of the raw-id fix (the page half is
+    test_no_line_renders_a_raw_diarizer_id). On a real meeting one line read
+    "SPEAKER_08" while the legend showed "Voice 9": /api/transcript labelled a
+    line by the segment's own display, else its name, else the RAW id, and a
+    voice below the minting floor never gets a display on its segments. A
+    line now carries its roster display in `who`, and a search hit too."""
+    from urllib.parse import quote
+    base = "Below Floor Mtg 09232026"
+    _below_floor_meeting(base)
+    status, body = _get(running_server, "/api/transcript?base=" + quote(base))
+    assert status == 200
+    tr = json.loads(body)
+    assert [g["who"] for g in tr["segments"]] == [
+        "Grace Lindqvist", "Speaker 70", "Voice 4", "Elena Ruiz", "Voice 9", "Voice 9"]
+    assert not any(re.fullmatch(r"SPEAKER_\d+", g["who"]) for g in tr["segments"])
+    assert "Voice 9" in tr["speakers"]
+    status, body = _get(running_server, "/api/search?q=" + quote("from nine"))
+    assert status == 200
+    assert [h["who"] for h in json.loads(body)["hits"]] == ["Voice 9"]
 
 
 def test_every_page_route_is_origin_gated(running_server):

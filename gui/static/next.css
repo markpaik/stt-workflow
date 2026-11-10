@@ -7,8 +7,8 @@
    is #0A6C7E, and --personal is retired. Four hues: indigo acts, teal asks,
    green is done, red records or destroys.
 
-   tools/token_contrast.py audits this sheet with --css next (NEXT_PAIRS), and
-   tests/test_next_shell.py pins every text pair at or above 4.5:1.
+   tools/token_contrast.py audits this sheet (its PAIRS plus every pair a rule
+   paints), and tests/test_next_shell.py pins every text pair at or above 4.5:1.
    ============================================================================ */
 
 :root{

@@ -934,32 +934,6 @@ def test_audio_range_suffix_and_unsatisfiable(running_server):
 
 # ---------- HTML/JS defects (findings #19, #12) ----------
 
-def _shell_js():
-    return (Path(srv.__file__).resolve().parent / "static" / "app.js"
-            ).read_text(encoding="utf-8")
-
-
-def test_flag_title_attribute_escapes_flag_text():
-    """The transcript's uncertainty marker interpolates flag text into an HTML
-    title attribute; a flag containing a quote (a speaker name flows into
-    `possible:<name>`) would break out of the attribute without esc()."""
-    js = _shell_js()
-    assert 'title="Uncertain: ${esc((g.flags||[]).join(\', \'))}"' in js
-    # the raw, un-escaped form must never appear
-    assert 'title="Uncertain: ${(g.flags||[]).join(\', \')}"' not in js
-
-
-def test_speaker_select_restores_prior_selection_on_cancel():
-    """Cancelling the New-person prompt must restore the segment's prior
-    speaker, not silently jump to option 0 (misattributing the line)."""
-    js = _shell_js()
-    # remembers the prior real selection and restores it on cancel
-    assert "sel._prev" in js
-    assert "if(sel._prev!=null)sel.value=sel._prev;else sel.selectedIndex=0" in js
-    # the unconditional reset must never return
-    assert "if(!nm){sel.selectedIndex=0;return}" not in js
-
-
 def _new_shell_js():
     static = Path(srv.__file__).resolve().parent / "static"
     return "\n".join((static / f).read_text(encoding="utf-8")
@@ -968,18 +942,18 @@ def _new_shell_js():
 
 
 def test_new_shell_flag_reason_is_escaped():
-    """The new shell's port of the flag-title test above: a flag code (a
-    speaker name flows into `possible:<name>`) reaches the line and the card
-    only through esc()."""
+    """A flag code (a speaker name flows into `possible:<name>`) reaches the
+    line and the card only through esc(), so a quote in a name never breaks
+    out of the markup."""
     js = _new_shell_js()
     assert "${esc(mFlagWhy(g))}" in js and "${esc(mFlagWhy(it))}" in js
     assert "${mFlagWhy(" not in js
 
 
 def test_new_shell_new_person_never_falls_back_to_the_first_speaker():
-    """The new shell's port of the select-restore test above: "New person"
-    with an empty name box refuses the save (mSpkValue answers __new__ and
-    every caller refuses it), so a line is never silently given to option 0."""
+    """"New person" with an empty name box refuses the save (mSpkValue
+    answers __new__ and every caller refuses it), so a line is never silently
+    given to option 0."""
     js = _new_shell_js()
     assert "return v?'name:'+v:'__new__';" in js
     for fn in ("mEditSave", "mRevApply", "mRevSave", "mSplitSave", "mInsertSave"):
@@ -2086,12 +2060,10 @@ def test_a_transcripts_folder_with_other_files_needs_a_confirm(
     assert r.get("ok") is True          # nothing in it: no question to ask
 
 
-def test_both_shells_offer_the_folder_confirm():
+def test_the_shell_offers_the_folder_confirm():
     root = Path(__file__).resolve().parent.parent / "gui" / "static"
     nxt = (root / "next.js").read_text()
     assert "'folder-confirm'" in nxt and "confirm:true" in nxt
-    app = (root / "app.js").read_text()
-    assert "dFolderGo" in app and "DRAWER.folderAsk" in app
 
 
 @pytest.mark.parametrize("hosts", [("127.0.0.1", "evil.com"), ("evil.com", "127.0.0.1"),

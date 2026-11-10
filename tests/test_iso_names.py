@@ -590,12 +590,6 @@ def test_a_date_outside_2000_to_next_year_is_refused(sandbox):
     assert r["ok"] and r["base"] == f"{last}-12-31 Board Prep Session"
 
 
-def test_the_classic_date_inputs_carry_the_same_range():
-    js = (Path(__file__).resolve().parent.parent / "gui/static/app.js").read_text()
-    # summarize.apply_meeting_edits takes 2000 to next year
-    assert js.count('min="2000-01-01" max="${new Date().getFullYear()+1}-12-31"') == 3
-
-
 def test_a_title_loses_bidi_controls_and_zero_width_spaces(sandbox):
     """Rename accepted U+202E: the folder '2025-05-28 <U+202E>gnp.txt' showed
     in Finder as '2025-05-28 txt.png'. A title strips the same characters a
