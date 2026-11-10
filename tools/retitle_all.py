@@ -33,6 +33,9 @@ to config.migration_dir() first, line by line, so it resumes after a stop
 and skips a meeting that is already done. It refuses to start while
 status.json shows the batch running, and stops cleanly if a run starts
 mid-way. A meeting renamed by a person since the dry run is skipped.
+
+--undo reverses each rename the run made. It skips a meeting renamed by a
+person since the retitle, and it keeps a field a person changed since.
 """
 import argparse
 import hashlib
@@ -413,12 +416,13 @@ def progress() -> dict:
         if ev == "undo":
             st.pop(mid, None)
         elif ev == "begin":
-            st[mid] = {"begin": e, "renamed": None, "applied": False}
+            st[mid] = {"begin": e, "renamed": None, "applied": False, "after": None}
         elif ev == "renamed" and mid in st:
             st[mid]["renamed"] = e.get("new_base")
         elif ev == "apply" and mid in st:
             st[mid]["applied"] = True
             st[mid]["renamed"] = e.get("new_base") or st[mid]["renamed"]
+            st[mid]["after"] = e.get("after")
     return st
 
 
@@ -536,8 +540,15 @@ def apply(log=print, stop_on_batch=True) -> dict:
                 "a rerun finishes it)")
             counts["failed"] += 1
             continue
+        # the fields as the run left them: undo restores a field only where
+        # it still holds this value, so an edit made after the run survives
+        try:
+            after = _before_fields(json.loads(
+                config.meeting_file(landed, ".json").read_text()))
+        except (OSError, ValueError):
+            after = None
         _journal_append({"event": "apply", "meeting_id": mid, "old_base": old,
-                         "new_base": landed})
+                         "new_base": landed, "after": after})
         counts["applied"] += 1
         log(f"  {old}  ->  {landed}")
     return {"ok": True, "counts": dict(counts)}
@@ -556,9 +567,34 @@ def _changed_since(p: dict, d: dict, base: str):
     return None
 
 
+# the fields that go with the title: the base check in undo() covers them,
+# and the undo's own rename rewrites them
+_TITLE_KEYS = ("title", "title_state", "title_source", "renamed_from")
+
+
+def _changed_fields(base: str, after) -> set:
+    """The journaled fields that `base` no longer holds as the run left
+    them, read before the undo writes anything. Empty when the journal
+    carries no `after` (an older run) or the json cannot be read."""
+    if not isinstance(after, dict):
+        return set()
+    try:
+        d = json.loads(config.meeting_file(base, ".json").read_text())
+    except (OSError, ValueError):
+        return set()
+    return {k for k, v in after.items()
+            if k not in _TITLE_KEYS and (d[k] if k in d else _MISSING) != v}
+
+
 def undo(dry: bool = True, log=print) -> dict:
     """Reverse every rename in the journal that landed, described or not:
-    the old name and the fields as they were. A dry run prints the plan."""
+    the old name and the fields as they were. A dry run prints the plan.
+
+    A meeting renamed since the retitle (a title or date set by hand) is
+    skipped, as apply skips one renamed since the dry run. A field changed
+    since the run (a description edited by hand) is kept: the journal's
+    `after` holds each field as the run left it. A journal from before
+    `after` was recorded restores every field."""
     if not dry:
         why = busy_reason()
         if why:
@@ -573,6 +609,11 @@ def undo(dry: bool = True, log=print) -> dict:
         if cur is None:
             counts["gone"] += 1
             continue
+        if cur != st["renamed"]:
+            log(f"  skip {cur}: renamed by someone else after the retitle "
+                f"(the retitle named it {st['renamed']})")
+            counts["renamed since the retitle"] += 1
+            continue
         log(f"  {cur}  ->  {old}")
         if dry:
             counts["would undo"] += 1
@@ -580,6 +621,7 @@ def undo(dry: bool = True, log=print) -> dict:
         if batch_running():
             log("the batch started: stopping here.")
             break
+        changed = _changed_fields(cur, st.get("after"))
         r = summarize.apply_meeting_edits(cur, title=old, retitle=True)
         if not r.get("ok"):
             log(f"  FAILED {cur}: {r.get('error')}")
@@ -591,13 +633,17 @@ def undo(dry: bool = True, log=print) -> dict:
         with review.lock_meeting(r["base"]):
             d = json.loads(j.read_text())
             for k, v in before.items():
-                if k == "title":
-                    continue          # the folder name decides it
+                if k == "title" or k in changed:
+                    continue          # the folder name decides the title
                 if isinstance(v, dict) and v.get("$missing"):
                     d.pop(k, None)
                 else:
                     d[k] = v
             summarize._write_json(j, d)
+        if changed:
+            log(f"  kept {len(changed)} field(s) of {r['base']} changed since the "
+                f"retitle: {', '.join(sorted(changed))}")
+            counts["fields kept, changed since"] += len(changed)
         if d.get("ai_stale"):
             # back out of date, as it was: the batch's index lists it again
             summarize.stale_mark(mid, r["base"])

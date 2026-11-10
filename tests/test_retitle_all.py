@@ -254,6 +254,67 @@ def test_undo_reverses_the_names_and_fields(lib):
     assert config.base_of("mid-b") == "2026-10-02 LT Weekly Meeting"
 
 
+def test_undo_skips_a_meeting_retitled_by_hand_after_the_run(lib):
+    """Undo never checked that the meeting still held the name the run
+    gave it. It renamed a meeting retitled by hand back to its old name,
+    and the hand-chosen title was gone with no warning."""
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    e = summarize.apply_meeting_edits(config.base_of("mid-a"), title="Hand Chosen Title")
+    assert e["ok"] and e["base"] == "2026-10-01 Hand Chosen Title"
+    lines = []
+    plan = rt.undo(dry=True, log=lines.append)
+    assert plan["counts"] == {"would undo": 3, "renamed since the retitle": 1}
+    assert any("skip 2026-10-01 Hand Chosen Title" in ln for ln in lines)
+    r = rt.undo(dry=False, log=lambda *_: None)
+    assert r["counts"] == {"undone": 3, "renamed since the retitle": 1}
+    assert config.base_of("mid-a") == "2026-10-01 Hand Chosen Title"
+    d = json.loads(config.meeting_file("2026-10-01 Hand Chosen Title", ".json").read_text())
+    assert d["title"] == "Hand Chosen Title"
+    assert config.base_of("mid-b") == "2026-10-02 LT Weekly Meeting"
+
+
+def test_undo_keeps_a_description_field_edited_after_the_run(lib):
+    """Undo restored every journaled field, so a gist written by hand after
+    the run was replaced by the one from before it. The apply line now
+    journals each field as the run left it, and undo keeps a field that
+    no longer holds that value."""
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    base = config.base_of("mid-a")
+    j = config.meeting_file(base, ".json")
+    d = json.loads(j.read_text())
+    d["ai_gist"] = "Written by hand after the retitle."
+    j.write_text(json.dumps(d, indent=2))
+    r = rt.undo(dry=False, log=lambda *_: None)
+    assert r["counts"]["undone"] == 4 and r["counts"]["fields kept, changed since"] == 1
+    d = json.loads(config.meeting_file(config.base_of("mid-a"), ".json").read_text())
+    assert d["ai_gist"] == "Written by hand after the retitle."
+    # the fields nobody touched go back to what they were
+    assert "ai_series" not in d and d["title_source"] == "label"
+    assert "ai_gist" not in json.loads(
+        config.meeting_file(config.base_of("mid-b"), ".json").read_text())
+
+
+def test_undo_of_a_journal_without_after_restores_every_field(lib):
+    """A journal from before the apply line carried `after` keeps the old
+    rule: every journaled field comes back."""
+    rt.dry_run(log=lambda *_: None)
+    rt.apply(log=lambda *_: None)
+    p = rt.journal_path()
+    rows = [json.loads(ln) for ln in p.read_text().splitlines()]
+    for e in rows:
+        e.pop("after", None)
+    p.write_text("".join(json.dumps(e) + "\n" for e in rows))
+    j = config.meeting_file(config.base_of("mid-a"), ".json")
+    d = json.loads(j.read_text())
+    d["ai_gist"] = "Written by hand after the retitle."
+    j.write_text(json.dumps(d, indent=2))
+    assert rt.undo(dry=False, log=lambda *_: None)["counts"] == {"undone": 4}
+    d = json.loads(config.meeting_file(config.base_of("mid-a"), ".json").read_text())
+    assert "ai_gist" not in d
+
+
 def test_the_dry_run_rests_between_model_calls(lib, monkeypatch):
     rests = []
     monkeypatch.setattr(config, "llm_rest", lambda sec, log=None, sleep=None: rests.append(sec))
