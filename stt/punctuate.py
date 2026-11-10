@@ -104,9 +104,56 @@ def _get_model():
     return _model
 
 
+# one model "word": a run with no whitespace and none of the punctuation the
+# model is allowed to change. _normalize_for_model splits text into exactly these.
+_PIECE_RE = re.compile(r"[^\s.,!?;:]+")
+
+
 def _normalize_for_model(text: str) -> str:
     text = re.sub(r"[.,!?;:]", " ", text.lower())
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _restore_inner_punct(out: str, text: str) -> str:
+    """Put back the punctuation INSIDE an original token: '3.5', '9:30',
+    '$1,200', 'v1.2', 'jo.doe@example.org'.
+
+    The model input splits such a token into separate words ('3 5'), and the
+    model punctuates the pieces as words. The identity check ignores
+    punctuation, so '3 5' would pass it and ship. This rebuilds each such token
+    from the ORIGINAL text: its inner punctuation verbatim, the model's casing
+    on its first piece only (a sentence-initial 'v1.2' may become 'V1.2'),
+    and the model's punctuation after it (or the original's when the model put
+    none). Anything the model wrote between the pieces is dropped.
+
+    Call it only on output that passed the identity check. Returns the
+    original text if the pieces do not line up (they always should)."""
+    spans, n = [], 0
+    for tok in text.split():
+        pieces = list(_PIECE_RE.finditer(tok))
+        if len(pieces) >= 2:
+            a, b = pieces[0].start(), pieces[-1].end()
+            trail = re.match(r"[.,!?;:]*", tok[b:]).group()
+            spans.append((n, len(pieces), tok[a:b], pieces[0].group(), trail))
+        n += len(pieces)
+    if not spans:
+        return out
+    got = list(_PIECE_RE.finditer(out))
+    if len(got) != n:
+        return text
+    res, pos = [], 0
+    for first, count, core, head, trail in spans:
+        start, end = got[first].start(), got[first + count - 1].end()
+        model_head = got[first].group()
+        if model_head.lower() == head.lower() and len(model_head) == len(head):
+            core = model_head + core[len(head):]
+        tail = re.match(r"[.,!?;:]*", out[end:]).group()
+        res += [out[pos:start], core]
+        if not tail:
+            res.append(trail)
+        pos = end
+    res.append(out[pos:])
+    return "".join(res)
 
 
 def _repair_unk(out: str, norm: str) -> str:
@@ -140,7 +187,10 @@ def _accept(text: str, norm: str, sentences) -> str:
     # ignoring case/punctuation (exactly what the model is allowed to change).
     if _normalize_for_model(out).split() != norm.split():
         return text
-    return out or text
+    # the check above ignores punctuation, so a token whose punctuation is
+    # part of the word ('3.5' fed to the model as '3 5') must be rebuilt from
+    # the original, or '3 5' ships as the transcript text
+    return _restore_inner_punct(out, text) if out else text
 
 
 def restore(text: str) -> str:

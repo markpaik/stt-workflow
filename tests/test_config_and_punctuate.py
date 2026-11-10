@@ -95,6 +95,60 @@ def test_punctuator_unk_repaired_from_original():
     assert punctuate._repair_unk("clean text", norm) == "clean text"
 
 
+
+class _SplitsLikeTheModel:
+    """Answers the way the real model did on 2026-11-10: it punctuates the
+    pieces of a split token ('3 5') as separate words, and may put a comma or
+    a full stop between them."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def infer(self, xs):
+        return [[self.answers[x]] for x in xs]
+
+
+def test_punctuate_keeps_punctuation_inside_a_token(sandbox, monkeypatch):
+    """'3.5' reaches the model as '3 5'. The identity check ignores
+    punctuation, so '3 5' passed it and shipped: a rate, a time and a sum of
+    money were rewritten in the transcript. The token must come back whole."""
+    monkeypatch.setattr(punctuate, "_model", _SplitsLikeTheModel({
+        "the rate is 3 5 percent": "The rate is 3 5 percent.",
+        "meet at 9 30 in room 4 2": "Meet at 9, 30 in Room 4. 2.",
+        "it costs $1 200 for the self-management course":
+            "It costs $1 200 for the <unk>management course.",
+        "v1 2 shipped and jo doe@example org knows":
+            "V1 2 shipped, and jo doe@example. Org knows.",
+        "we met at 9 a m": "We met at 9 a m",
+    }))
+    segs = [{"text": t} for t in [
+        "The rate is 3.5 percent.",
+        "Meet at 9:30 in room 4.2",
+        "It costs $1,200 for the self-management course",
+        "v1.2 shipped and jo.doe@example.org knows",
+        "we met at 9 a.m.",
+    ]]
+    punctuate.restore_segments(segs)
+    assert [s["text"] for s in segs] == [
+        "The rate is 3.5 percent.",
+        "Meet at 9:30 in Room 4.2.",
+        "It costs $1,200 for the self-management course.",
+        # the model's casing on the first piece only, its comma after it
+        "V1.2 shipped, and jo.doe@example.org knows.",
+        # the model put nothing after 'a m', so the original's '.' stays
+        "We met at 9 a.m.",
+    ]
+    assert punctuate.restore("The rate is 3.5 percent.") == \
+        "The rate is 3.5 percent."
+
+
+def test_inner_punct_rebuild_refuses_pieces_that_do_not_line_up():
+    """A defensive path: output whose pieces do not match the original's count
+    keeps the original text, never a half-rebuilt line."""
+    assert punctuate._restore_inner_punct("Three 5 extra.", "3.5") == "3.5"
+    assert punctuate._restore_inner_punct("Plain words.", "plain words") == \
+        "Plain words."
+
 # ---------------------------------------------------------------------------
 # Batched restoration. Measured 2026-09-13: 4.0s of a 7.1s relabel was the
 # punctuator reloading its SentencePiece tokenizer once per infer() call, 273
