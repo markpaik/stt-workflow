@@ -714,6 +714,55 @@ def test_bases_from_still_queues_a_follow_up_when_another_pass_holds_the_lock(
         holder.close()
 
 
+def test_a_typed_meeting_that_is_missing_or_archived_exits_1(sandbox, monkeypatch, capsys):
+    """A basename typed on the command line that names no live meeting (a
+    typo, '../../x', one in .archive) printed a skip and exited 0, so a
+    script that chains the command could not tell nothing was relabelled.
+    The panel's --bases-from list keeps exit 0 for the same skip."""
+    import sys as _sys
+
+    import relabel
+
+    _seed_meeting("A Mtg")
+    arch = config.meetings_dir() / config.ARCHIVE_DIRNAME / "Old Mtg"
+    arch.mkdir(parents=True)
+    (arch / "Old Mtg.json").write_text("{}")
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    touched = []
+    monkeypatch.setattr(relabel, "relabel_one",
+                        lambda base, **kw: touched.append(base) or True)
+
+    for typo in ("nosuch", "../../x", "Old Mtg"):
+        monkeypatch.setattr(_sys, "argv", ["relabel.py", typo])
+        assert relabel.main() == 1, typo
+        assert typo in capsys.readouterr().err
+
+    # one good meeting and one typo: the good one still runs, and the exit
+    # code still says the typo was not relabelled
+    touched.clear()
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "A Mtg", "nosuch"])
+    assert relabel.main() == 1
+    assert touched == ["A Mtg", "nosuch"]
+
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "A Mtg"])
+    assert relabel.main() == 0
+
+    # a typed meeting that FAILS is not relabelled either
+    def boom(base, **kw):
+        raise RuntimeError("unreadable")
+    monkeypatch.setattr(relabel, "relabel_one", boom)
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "A Mtg"])
+    assert relabel.main() == 1
+
+    # the panel path: a meeting removed since the list was written is an
+    # expected skip
+    f = config.PROJECT_DIR / "targets.txt"
+    f.write_text("nosuch\n")
+    monkeypatch.setattr(relabel, "relabel_one", lambda base, **kw: True)
+    monkeypatch.setattr(_sys, "argv", ["relabel.py", "--bases-from", str(f)])
+    assert relabel.main() == 0
+
+
 def test_relabel_keeps_a_strict_meeting_strict(sandbox, monkeypatch):
     """A meeting processed in strict mode stays strict after a relabel. The
     panel calls relabel_one(base) with no strict argument when a voice is
