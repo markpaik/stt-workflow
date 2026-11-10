@@ -340,3 +340,22 @@ def test_a_purge_removes_the_retitle_scratch_for_the_meeting(sandbox, monkeypatc
     assert (rt / "proposals.tsv").read_text() == f"trust\told_base\tnew_base\n80\t{KEEP}\ty\n"
     left = b"".join(f.read_bytes() for f in rt.rglob("*") if f.is_file())
     assert b"zebracakes" not in left and LEAK.encode() not in left
+
+
+def test_a_run_history_with_bytes_that_are_not_utf8_never_stops_the_purge(
+        sandbox, monkeypatch, tmp_path):
+    """_scrub_names read results.jsonl with read_text(). A line of bytes
+    that are not UTF-8 raised UnicodeDecodeError after the meeting folder
+    was gone, so the stores after it (sources, threads, journals) kept the
+    meeting. The odd line now stays byte for byte."""
+    monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))
+    src = _world()
+    hp = Path(status.HISTORY_LOG)
+    odd = b'{"name": "Caf\xe9 Notes.m4a", "ok": true}'
+    hp.write_bytes(hp.read_bytes() + odd + b"\n\xff\xfe torn\n")
+    r = purge.apply(LEAK)
+    assert r["done"] and r["scrubbed"]["history"] == 1
+    assert not src.exists()                      # a store after the history
+    raw = hp.read_bytes()
+    assert b"Personal Errand" not in raw
+    assert odd in raw and b"\xff\xfe torn" in raw and b"Budget Review.m4a" in raw

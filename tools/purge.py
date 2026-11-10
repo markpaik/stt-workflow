@@ -641,7 +641,11 @@ def _scrub_names(names: set) -> dict:
     hp = Path(status.HISTORY_LOG)
     if hp.exists():
         kept, drop = [], 0
-        for line in hp.read_text().splitlines():
+        # bytes that are not UTF-8 (a torn write, a hand edit) stay as they
+        # are: read_text() raised UnicodeDecodeError here, after the meeting
+        # folder was gone, and every store after this one kept the meeting
+        text = hp.read_bytes().decode("utf-8", "surrogateescape")
+        for line in text.splitlines():
             try:
                 r = json.loads(line)
             except ValueError:
@@ -653,7 +657,8 @@ def _scrub_names(names: set) -> dict:
             kept.append(line)
         if drop:
             tmp = hp.with_suffix(".jsonl.tmp")
-            tmp.write_text("\n".join(kept) + ("\n" if kept else ""))
+            tmp.write_bytes(("\n".join(kept) + ("\n" if kept else ""))
+                            .encode("utf-8", "surrogateescape"))
             os.replace(tmp, hp)
             out["history"] = drop
     ip = dupes.ignored_path()
