@@ -1205,6 +1205,7 @@ def backfill_meeting_ids(dest_dir=None) -> int:
     from . import review
     d = Path(dest_dir) if dest_dir else meetings_dir()
     n = 0
+    stamped = []
     for base in meeting_bases(d):
         j = meeting_file(base, ".json", d)
         if id_of(base, d):
@@ -1221,9 +1222,17 @@ def backfill_meeting_ids(dest_dir=None) -> int:
             tmp.write_text(_json.dumps(data, indent=2, ensure_ascii=False))
             os.replace(tmp, j)
             n += 1
+            stamped.append(base)
     if dest_dir is None or Path(dest_dir).resolve() == meetings_dir().resolve():
         rebuild_meetings_index(dest_dir)
         prune_lock_files(dest_dir)
+    elif stamped:
+        # the stamp above held each meeting's lock under its BASE (it had no
+        # id yet), and from now on it locks under the id. The live pass
+        # sweeps those, but an archive pass left one base-named lock per
+        # archived meeting, which the registry doctor reported as an
+        # orphan_lock on every fresh demo home. Drop just those.
+        drop_meeting_locks(stamped)
     return n
 
 
