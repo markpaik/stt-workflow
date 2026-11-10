@@ -36,6 +36,17 @@ fi
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
+  batch|enroll|relabel|gui|test|py) ;;
+  *) echo "usage: run.sh {batch|enroll|relabel|gui|test|py} [args...]"; exit 2 ;;
+esac
+# a fresh clone has no .venv until init.sh builds it: say so, instead of
+# the shell's bare ".venv/bin/python: No such file or directory"
+if [ ! -x "$PY" ]; then
+  echo "run.sh: no Python environment at $PY" >&2
+  echo "run.sh: run ./init.sh first; it builds .venv and installs the pipeline." >&2
+  exit 1
+fi
+case "$cmd" in
   batch)  exec "$PY" "$BASE/run_batch.py" "$@" ;;
   enroll) exec "$PY" "$BASE/enroll.py" "$@" ;;
   relabel) exec "$PY" "$BASE/relabel.py" "$@" ;;

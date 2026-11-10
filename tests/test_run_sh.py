@@ -49,3 +49,28 @@ def test_under_stt_home_the_sandbox_stt_env_is_loaded_not_the_repo_one(run_sh, t
         capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "-|yes"
+
+
+def _bare_copy(tmp_path):
+    """run.sh in a folder with no .venv: a fresh clone before init.sh."""
+    script = tmp_path / "run.sh"
+    script.write_text((REPO / "run.sh").read_text())
+    script.chmod(0o755)
+    return script
+
+
+def test_a_fresh_clone_says_to_run_init_first(tmp_path):
+    """Before init.sh there is no .venv, and run.sh failed with the shell's
+    bare '.venv/bin/python: No such file or directory'."""
+    env = {k: v for k, v in os.environ.items() if k not in ("STT_HOME", "STT_PROJECT_DIR")}
+    r = subprocess.run([str(_bare_copy(tmp_path)), "batch", "--dry-run"],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 1
+    assert "run ./init.sh first" in r.stderr
+    assert "No such file or directory" not in r.stderr
+
+
+def test_an_unknown_command_still_prints_the_usage(tmp_path):
+    r = subprocess.run([str(_bare_copy(tmp_path)), "nonsense"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and r.stdout.startswith("usage: run.sh")
