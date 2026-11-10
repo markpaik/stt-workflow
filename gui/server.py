@@ -769,15 +769,9 @@ def _results_rows():
         return []
     if _results_cache["key"] == key:
         return _results_cache["rows"]
-    rows = []
-    try:
-        for ln in p.read_text().splitlines():
-            try:
-                rows.append(json.loads(ln))
-            except json.JSONDecodeError:
-                pass
-    except OSError:
-        rows = []
+    # status' own reader: a line of the wrong shape, or a byte that is not
+    # UTF-8, is skipped (the failure list raised on either)
+    rows = status.history_rows()
     _results_cache["key"], _results_cache["rows"] = key, rows
     return rows
 
@@ -791,8 +785,9 @@ def _failed_sources(st):
     removed."""
     rows = list(_results_rows())  # oldest-first on disk
     seen = {(r.get("name"), r.get("at")) for r in rows}
-    rows += [r for r in st.get("recent", [])
-             if (r.get("name"), r.get("at")) not in seen]
+    recent = st.get("recent")
+    rows += [r for r in (recent if isinstance(recent, list) else [])
+             if status.is_result_row(r) and (r.get("name"), r.get("at")) not in seen]
     latest = {}
     for r in rows:
         nm = r.get("name")

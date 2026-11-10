@@ -543,9 +543,12 @@ def _append_history(entry):
         with open(HISTORY_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
         if HISTORY_LOG.stat().st_size > HISTORY_MAX_BYTES:
-            lines = HISTORY_LOG.read_text().splitlines()[-HISTORY_KEEP_LINES:]
+            # surrogateescape: a byte that is not UTF-8 raised here, inside
+            # finish_file, and is kept as it was now
+            lines = HISTORY_LOG.read_text(
+                errors="surrogateescape").splitlines()[-HISTORY_KEEP_LINES:]
             tmp = HISTORY_LOG.with_suffix(".jsonl.tmp")
-            tmp.write_text("\n".join(lines) + "\n")
+            tmp.write_text("\n".join(lines) + "\n", errors="surrogateescape")
             os.replace(tmp, HISTORY_LOG)
     except OSError:
         pass
@@ -586,23 +589,46 @@ def finish_file(name, ok, summary=""):
         _append_history(entry)  # the permanent, size-capped history log
 
 
+def is_result_row(r) -> bool:
+    """A result as finish_file writes it: an object whose name and time
+    are text (or absent). Anything else came from a hand edit or a disk
+    fault, and every reader skips it."""
+    return isinstance(r, dict) and all(
+        isinstance(r.get(k), (str, type(None))) for k in ("name", "at"))
+
+
+def history_rows() -> list:
+    """The permanent results log, oldest first: only its result rows. A
+    line that is valid JSON but not a result ('[1,2]', 'null') raised
+    AttributeError in every reader, and a byte that is not UTF-8 raised
+    UnicodeDecodeError, so one bad line crashed the doctor's check and the
+    panel's failure list. Such a line is skipped now, like a torn one."""
+    try:
+        text = HISTORY_LOG.read_text(errors="replace")
+    except OSError:
+        return []
+    rows = []
+    for ln in text.splitlines():
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if is_result_row(r):
+            rows.append(r)
+    return rows
+
+
 def history():
     """Every result ever recorded, newest first: the permanent results.jsonl
     merged with the status ring (which covers results from before the log
     existed), deduplicated by (name, at)."""
-    rows = []
-    try:
-        if HISTORY_LOG.exists():
-            for ln in HISTORY_LOG.read_text().splitlines():
-                with contextlib.suppress(json.JSONDecodeError):
-                    rows.append(json.loads(ln))
-    except OSError:
-        pass
+    rows = history_rows()
     rows.reverse()  # newest-last on disk; the sort below is stable, so ties
     # (results finishing within the same second) must already be newest-first
     seen = {(r.get("name"), r.get("at")) for r in rows}
-    rows.extend(r for r in read().get("recent", [])
-                if (r.get("name"), r.get("at")) not in seen)
+    recent = read().get("recent")
+    rows.extend(r for r in (recent if isinstance(recent, list) else [])
+                if is_result_row(r) and (r.get("name"), r.get("at")) not in seen)
     rows.sort(key=lambda r: r.get("at") or "", reverse=True)
     return rows
 

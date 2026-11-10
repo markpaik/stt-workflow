@@ -1,5 +1,7 @@
 """status: run lifecycle across states — start, stages, finish, end, recover."""
-from stt import status
+import pytest
+
+from stt import config, status
 
 
 def test_full_lifecycle(sandbox):
@@ -360,6 +362,46 @@ def test_history_survives_a_corrupt_log_line(sandbox):
         f.write("{not json\n")
     status.start_run(["b.m4a"])
     status.finish_file("b.m4a", True, "ok")
+    assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
+
+
+@pytest.mark.parametrize("bad", [b"[1, 2]\n", b'"str"\n', b"5\n", b"null\n",
+                                 b'{"name": ["x"], "at": "2026-01-01T00:00:00"}\n',
+                                 b'{"name": "c.m4a", "at": 5}\n',
+                                 b"\xff\xfe\x00bad\n"])
+def test_history_skips_a_line_of_the_wrong_shape_or_not_utf8(sandbox, bad):
+    """history() kept any JSON value, so a '[1,2]' line raised
+    AttributeError in every reader, and a 0xff byte raised
+    UnicodeDecodeError, which is no OSError. The doctor's check and the
+    panel's failure list crashed on either."""
+    import json
+
+    from stt import doctor
+    from gui import server as srv
+    status.start_run(["a.m4a"])
+    status.finish_file("a.m4a", False, "ffmpeg exploded")
+    with open(status.HISTORY_LOG, "ab") as f:
+        f.write(bad)
+    status.finish_file("b.m4a", True, "ok")
+    assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
+    (config.PROJECT_DIR / "dismissed_failures.json").write_text(
+        json.dumps({"b.m4a": "2026-01-01T00:00:00"}))
+    assert {f.kind for f in doctor.check(registry=False)} >= {"stale_dismissal"}
+    assert "error" not in doctor.run_check_at_batch_end()
+    srv._results_cache["key"] = None
+    assert srv._failed_sources(status.read()) == {"a.m4a": "ffmpeg exploded"}
+
+
+def test_the_history_trim_keeps_a_byte_that_is_not_utf8(sandbox, monkeypatch):
+    """The trim read the log as UTF-8 inside finish_file: a 0xff byte
+    raised there, and the batch's result write failed with it."""
+    monkeypatch.setattr(status, "HISTORY_MAX_BYTES", 50)
+    monkeypatch.setattr(status, "HISTORY_KEEP_LINES", 3)
+    status.HISTORY_LOG.write_bytes(b"\xff\xfe\x00bad\n")
+    status.finish_file("a.m4a", True, "x" * 40)
+    status.finish_file("b.m4a", True, "x" * 40)
+    raw = status.HISTORY_LOG.read_bytes()
+    assert raw.startswith(b"\xff\xfe\x00bad\n")
     assert [r["name"] for r in status.history()] == ["b.m4a", "a.m4a"]
 
 
