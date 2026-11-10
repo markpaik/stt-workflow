@@ -73,6 +73,14 @@ def main():
         args.name = names.person_name(args.name)
     except names.BadName as e:
         raise SystemExit(f"--name: {e}")
+    # identify.enroll refuses both of these and writes nothing, but here
+    # they ended in a traceback, and an --audio clip was diarized first
+    if identify.reserved_name(args.name):
+        raise SystemExit(f"--name: {identify.RESERVED_ERROR}")
+    try:
+        identify.load_registry_for_write()
+    except identify.RegistryUnreadable as e:
+        raise SystemExit(str(e))
 
     if args.from_meeting:
         embs = _meeting_embeddings(args.from_meeting)
@@ -138,7 +146,10 @@ def main():
                                    "Re-run with --confirm to enroll anyway.")
 
     source = args.from_meeting or (Path(args.audio).stem if args.audio else None)
-    path = identify.enroll(args.name, vec, replace=args.replace, source=source)
+    try:
+        path = identify.enroll(args.name, vec, replace=args.replace, source=source)
+    except identify.RegistryUnreadable as e:   # damaged since the check above
+        raise SystemExit(str(e))
     print(f"Enrolled '{args.name}' -> {path}")
     return 0
 

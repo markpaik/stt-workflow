@@ -219,3 +219,27 @@ def test_a_voiceprint_file_name_is_never_hidden_or_too_long(sandbox):
     files = sorted(os.listdir(sandbox / "voiceprints"))
     assert not [n for n in files if n.startswith(".") and n.endswith(".npy")]
     assert identify.load_voiceprints().keys() >= {".", "a/b", long}
+
+
+def test_a_reserved_name_or_a_damaged_registry_is_one_line(sandbox, monkeypatch):
+    """identify.enroll refuses 'U7' (an unknown voice's id, whose samples
+    live in U7.npy) and a registry.json it cannot read, and writes nothing.
+    The CLI let both end in a traceback, and an --audio clip was diarized
+    before the refusal."""
+    ran = []
+    monkeypatch.setattr(diarize, "diarize", lambda wav: ran.append(wav))
+    clip = sandbox / "clip.m4a"
+    clip.write_bytes(b"audio")
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip), "--name", "U7"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == f"--name: {identify.RESERVED_ERROR}"
+
+    reg = sandbox / "voiceprints" / "registry.json"
+    reg.write_text('{"broken')
+    monkeypatch.setattr(sys, "argv", ["enroll", "--audio", str(clip), "--name", "Ana Ortiz"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == identify.REGISTRY_UNREADABLE
+    assert ran == [] and reg.read_text() == '{"broken'
+    assert sorted(p.name for p in (sandbox / "voiceprints").iterdir()) == ["registry.json"]
