@@ -308,7 +308,10 @@ def _folders_without_json(store) -> list:
 
 
 def _batch_running() -> bool:
-    return bool(status.read().get("running"))
+    """A dead batch's stale running flag does not count: a hard kill left
+    it true, so check skipped the stop flag and the scratch audio, and fix
+    refused, until the next batch ran (status.batch_running)."""
+    return status.batch_running()
 
 
 def _stop_flag():

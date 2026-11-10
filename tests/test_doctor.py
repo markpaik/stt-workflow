@@ -201,6 +201,23 @@ def test_fix_refuses_while_a_batch_runs(lib):
     assert _manifest() == json.loads(before["manifest.json"])["processed"]
 
 
+def test_a_dead_batchs_running_flag_neither_hides_findings_nor_blocks_fix(lib):
+    """A hard kill skips end_run, so status.json keeps running true with a
+    dead pid. check skipped the stale stop flag and the scratch audio, and
+    fix refused 'a batch is running', until the next batch ran."""
+    import subprocess
+    dead = subprocess.Popen(["/usr/bin/true"])
+    dead.wait()                                  # reaped: its pid is free
+    status.STATUS_PATH.write_text(json.dumps({"running": True, "pid": dead.pid}))
+    config.WORK_DIR.mkdir(exist_ok=True)
+    (config.WORK_DIR / "x.wav").write_bytes(b"scratch")
+    kinds = {f.kind for f in doctor.check(registry=False)}
+    assert {"stale_stop_flag", "work_scratch"} <= kinds
+    r = doctor.fix(dry_run=False, registry=False)
+    assert not r.get("error") and r["run"]
+    assert not control.STOP_FLAG.exists()
+
+
 def test_registry_repairs_copy_the_voiceprints_first_and_undo(lib, monkeypatch):
     vp = config.VOICEPRINTS_DIR
     (vp / "unknowns.json").write_text(json.dumps({"next": 1, "speakers": {}}))
