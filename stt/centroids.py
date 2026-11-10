@@ -65,7 +65,11 @@ def _load_cache():
     try:
         with np.load(index_path(), allow_pickle=False) as z:
             arrays = {k: z[k] for k in z.files}
-    except (OSError, ValueError):
+    except Exception:
+        # any damage at all: a truncated zip raises BadZipFile, a bad member
+        # raises zlib.error or EOFError. Each one escaped the old (OSError,
+        # ValueError) catch, so the refresh never wrote a good index, and
+        # every naming fell back to relabel --all until the file was deleted.
         return {}, {}
     return meta, arrays
 

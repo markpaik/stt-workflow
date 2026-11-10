@@ -162,6 +162,26 @@ def test_a_corrupt_index_costs_a_re_read_not_an_answer(sandbox):
     assert centroids.targets(vector=target) == ["Alpha Mtg"]
 
 
+def test_a_truncated_index_is_rebuilt_on_the_next_pass(sandbox):
+    """A truncated npz is still a zip header and raises BadZipFile, not
+    ValueError. It escaped _load_cache, so the refresh never wrote a good
+    index, and every naming fell back to relabel --all. Now it costs one
+    re-read and the index on disk is whole again."""
+    target = _library()
+    centroids.index()
+    good = centroids.index_path().read_bytes()
+    centroids.index_path().write_bytes(good[:50])
+    assert centroids.targets(vector=target) == ["Alpha Mtg"]
+    with np.load(centroids.index_path(), allow_pickle=False) as z:
+        assert len(z.files) > 1
+    # a whole zip whose member is damaged inside fails the same way
+    bad = bytearray(good)
+    mid = len(bad) // 2
+    bad[mid:mid + 40] = b"\x00" * 40
+    centroids.index_path().write_bytes(bytes(bad))
+    assert set(centroids.index()) == {"Alpha Mtg", "Bravo Mtg", "Charlie Mtg"}
+
+
 def test_the_cache_lives_under_the_project_dir(sandbox):
     """It is derived state, so it belongs where the sandbox can redirect it —
     never inside the user's meetings library."""
