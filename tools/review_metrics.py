@@ -139,7 +139,10 @@ def _last_date(p: Path):
             size = fh.tell()
             fh.seek(max(0, size - 8192))
             tail = fh.read().decode("utf-8", "replace").strip().splitlines()
-        return json.loads(tail[-1]).get("date") if tail else None
+        last = json.loads(tail[-1]) if tail else None
+        # a last line of [1] or "x" parses but is no row: .get() raised
+        # AttributeError, and run_batch skipped the day's row every run
+        return last.get("date") if isinstance(last, dict) else None
     except (OSError, ValueError, IndexError):
         return None
 

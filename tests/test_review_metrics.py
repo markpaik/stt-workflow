@@ -6,6 +6,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 import run_batch
 from stt import config
 from conftest import mfile
@@ -92,6 +94,19 @@ def test_one_row_a_day(sandbox):
     tomorrow = NOW + timedelta(days=1)
     assert review_metrics.record_today(now=tomorrow) is True
     assert len(p.read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize("last", ["[1]", '"x"', "7", "null"])
+def test_a_last_line_that_is_not_a_row_does_not_stop_the_log(sandbox, last):
+    """_last_date called .get() on any JSON value, so a last line of [1]
+    raised "AttributeError: 'list' object has no attribute 'get'", and the
+    batch skipped the day's row on every run."""
+    _store()
+    p = config.PROJECT_DIR / "review_metrics.jsonl"
+    p.write_text(last + "\n")
+    assert review_metrics.record_today() is True
+    lines = p.read_text().splitlines()
+    assert lines[0] == last and json.loads(lines[-1])["date"] == NOW.date().isoformat()
 
 
 def test_the_batch_end_records_the_day(sandbox):
