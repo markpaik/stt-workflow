@@ -380,6 +380,29 @@ def test_a_missing_source_folder_releases_no_hold_and_says_so(lib):
     assert json.loads(holds.PATH.read_text()) == ["Private Memo.wav"]
 
 
+def test_a_denied_source_folder_counts_as_there_and_releases_no_hold(lib):
+    """A source folder under a parent with no search right (or one macOS
+    privacy guards) gives PermissionError on a stat. check and fix raised
+    it from _source_away and from _stale_holds' exists()."""
+    locked = config.PROJECT_DIR / "locked"
+    src = locked / "src"
+    src.mkdir(parents=True)
+    (config.PROJECT_DIR / "stt.env").write_text(f"STT_ICLOUD_DIR={src}\n")
+    holds.PATH.write_text(json.dumps(["Private Memo.wav"]))
+    (src / "Private Memo.wav").write_bytes(b"x")
+    os.chmod(locked, 0)
+    try:
+        if os.access(src, os.F_OK):
+            pytest.skip("this user can stat a mode-000 folder's children")
+        fs = doctor.check(registry=False)
+        assert not {"stale_hold", "source_missing"} & {f.kind for f in fs}
+        r = doctor.fix(dry_run=False, registry=False)
+        assert not any("stale hold" in d for d in r["done"])
+    finally:
+        os.chmod(locked, 0o700)
+    assert json.loads(holds.PATH.read_text()) == ["Private Memo.wav"]
+
+
 def test_the_batch_end_report_holds_counts_and_no_names(lib):
     doctor.run_check_at_batch_end()
     rep = (config.PROJECT_DIR / doctor.REPORT_PATH_NAME).read_text()

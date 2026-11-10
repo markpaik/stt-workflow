@@ -325,11 +325,23 @@ def _store_away(store) -> int:
     return sum(1 for rec in _manifest()["processed"].values() if _stale(rec))
 
 
+def _there(p: Path, test=Path.exists) -> bool:
+    """`test(p)`, where a denied stat (a folder macOS privacy guards, a
+    parent with no search right) counts as there: check and fix raised
+    PermissionError on it. A hold is released only on a file known gone."""
+    try:
+        return test(p)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def _source_away() -> bool:
     """The source folder is not there (unmounted or moved): every held
     name looked gone then, and fix released the hold on a private file,
     so the next batch ran it."""
-    return not config.source_dir().is_dir()
+    return not _there(config.source_dir(), Path.is_dir)
 
 
 def _stale_holds() -> list:
@@ -345,7 +357,7 @@ def _stale_holds() -> list:
         return names
     dirs = config.source_dirs()
     for n in cur:
-        if not any((d / n).exists() for d in dirs):
+        if not any(_there(d / n) for d in dirs):
             names.append(n)
     return sorted(names)
 
