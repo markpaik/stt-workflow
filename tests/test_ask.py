@@ -434,6 +434,25 @@ def test_the_evaluation_guard_follows_folder_redirects(sandbox, monkeypatch, tmp
     assert not decoy.exists()
 
 
+def test_the_evaluation_guard_refuses_the_main_checkouts_library(monkeypatch, tmp_path):
+    """_guard read only its own checkout's stt.env. A worktree has none,
+    so a home inside the library that the main checkout's stt.env names
+    passed. _guard only resolves the paths: it writes nothing."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(ask_eval.__file__).resolve().parent))
+    import demo_seed
+    main = tmp_path / "main"
+    live = tmp_path / "Live Library"
+    main.mkdir()
+    (main / "stt.env").write_text(f"STT_MEETINGS_DIR={live}\n")
+    monkeypatch.setattr(demo_seed, "_other_checkouts", lambda repo: [main])
+    for real in (live / "inside", main / "voiceprints"):
+        monkeypatch.setenv("STT_HOME", str(real))
+        with pytest.raises(SystemExit, match="overlaps a real folder"):
+            ask_eval._guard()
+
+
 @pytest.mark.parametrize("fold", [str.lower, str.upper])
 def test_the_evaluation_guard_folds_letter_case(monkeypatch, fold):
     """APFS folds letter case and resolve() does not, so a home typed as

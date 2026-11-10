@@ -728,9 +728,67 @@ def _live_data_dirs():
         sys.exit(f"refusing: could not read the live data folders ({e!r}).")
 
 
+# the batch agent setup.sh installs: its WorkingDirectory is the checkout
+# the live batch runs from
+BATCH_PLIST_NAME = "Library/LaunchAgents/com.stt-workflow.batch.plist"
+# the stt.env settings that name a data folder, and the folder each one
+# defaults to inside its checkout (None: the default is outside it)
+_CHECKOUT_FOLDERS = (("STT_MEETINGS_DIR", None), ("STT_ICLOUD_DIR", None),
+                     ("STT_RECORDINGS_DIR", None),
+                     ("STT_VOICEPRINTS_DIR", "voiceprints"),
+                     ("STT_VOICEMEMOS_STAGING", "voicememos"))
+
+
+def _other_checkouts(repo: Path) -> list:
+    """The checkouts other than `repo` that can hold the live settings: the
+    main checkout of this git repository, and the folder the batch agent
+    runs from. A worktree has no stt.env of its own, so a guard that read
+    only its own checkout saw the defaults and not the real library."""
+    import subprocess
+    found = []
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=30)
+        common = r.stdout.strip()
+        if r.returncode == 0 and common:
+            common = (repo / common).resolve()
+            found.append(common.parent if common.name == ".git" else common)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        with open(Path.home() / BATCH_PLIST_NAME, "rb") as f:
+            wd = plistlib.load(f).get("WorkingDirectory")
+        if isinstance(wd, str) and wd.strip():
+            found.append(Path(wd).expanduser().resolve())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        pass
+    out, seen = [], {_fold(repo.resolve())}
+    for co in found:   # one folder on APFS, whatever its letter case
+        if _fold(co) not in seen:
+            seen.add(_fold(co))
+            out.append(co)
+    return out
+
+
+def _other_checkout_dirs(repo: Path) -> list:
+    """The data folders that the stt.env of each other checkout names
+    (_other_checkouts), and the folders inside it that hold real state."""
+    from stt import envfile
+    dirs = []
+    for co in _other_checkouts(repo):
+        env = envfile.parse(co / "stt.env")
+        for key, inside in _CHECKOUT_FOLDERS:
+            for v in (env.get(key), inside and str(co / inside)):
+                if v:
+                    p = Path(v).expanduser()
+                    dirs.append(p if p.is_absolute() else co / p)
+    return dirs
+
+
 def _real_data_dirs():
     """The real folders the seeder must never write into or under: the live
-    ones (_live_data_dirs) and the ones this process's config names.
+    ones (_live_data_dirs), the ones this process's config names, and the
+    ones the other checkouts name (_other_checkout_dirs).
 
     The live list used to be this process's config alone, and the comment
     said it was read without STT_HOME. Nothing cleared STT_HOME, so with it
@@ -742,8 +800,10 @@ def _real_data_dirs():
             dirs.append(Path(fn()).expanduser().resolve())
         except Exception:
             pass
+    repo = Path(__file__).resolve().parent.parent
     for p in (config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
-              config.VOICEPRINTS_DIR, *_live_data_dirs()):
+              config.VOICEPRINTS_DIR, *_live_data_dirs(),
+              *_other_checkout_dirs(repo)):
         try:
             p = Path(p).expanduser().resolve()
         except Exception:

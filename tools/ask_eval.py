@@ -167,7 +167,8 @@ def _guard():
         sys.exit("refused: set STT_HOME to a scratch home")
     h = Path(home).expanduser().resolve()
     # the real library: the checkout's own stt.env names it, else the
-    # default transcripts folder, and the checkout's voiceprints. Read
+    # default transcripts folder, and the checkout's voiceprints (and the
+    # same folders of the other checkouts, below). Read
     # straight from the file: under STT_HOME, config resolves every folder
     # inside the scratch home.
     from stt import config, envfile
@@ -180,7 +181,10 @@ def _guard():
     tools = str(Path(__file__).resolve().parent)
     if tools not in sys.path:
         sys.path.append(tools)
-    from demo_seed import _fold, _overlaps
+    from demo_seed import _fold, _other_checkout_dirs, _overlaps
+    # a worktree has no stt.env: the main checkout's and the batch agent's
+    # checkout name the real library
+    real += _other_checkout_dirs(repo)
     # The checkout is refused only as the home itself or a folder that
     # holds it. Its scratch folders (qa/, work/) are where demo_seed and
     # the QA runs put a sandbox home, and the overlap test refused them.

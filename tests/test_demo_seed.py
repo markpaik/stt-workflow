@@ -339,6 +339,65 @@ def test_the_guard_sees_the_live_library_with_stt_home_exported(tmp_path):
     assert _resolve_in(co, {}, live / "demo_x")[0].startswith("REFUSED")
 
 
+def _git(*args, cwd):
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+def test_the_guard_run_from_a_worktree_sees_the_main_checkouts_library(tmp_path):
+    """The guard read only its own checkout's stt.env. A worktree has
+    none, so it listed the defaults and a --dir inside the real library
+    (named in the main checkout's stt.env) passed."""
+    import shutil
+    main = tmp_path / "main"
+    main.mkdir()
+    _git("init", "-q", cwd=main)
+    (main / "README").write_text("x\n")
+    _git("add", "README", cwd=main)
+    _git("commit", "-q", "-m", "init", cwd=main)
+    wt = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(wt), cwd=main)
+    shutil.copytree(REPO / "stt", wt / "stt",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    (wt / "tools").mkdir()
+    shutil.copy(REPO / "tools" / "demo_seed.py", wt / "tools" / "demo_seed.py")
+    assert not (wt / "stt.env").exists()
+    live = (tmp_path / "Live Library").resolve()
+    src = (tmp_path / "Live Source").resolve()
+    (main / "stt.env").write_text(f"STT_MEETINGS_DIR={live}\nSTT_ICLOUD_DIR={src}\n")
+    fake_home = tmp_path / "user"   # no batch agent plist
+    out = _resolve_in(wt, {"HOME": str(fake_home)}, live / "demo_x", src,
+                      main / "voiceprints" / "x", tmp_path / "elsewhere")
+    assert out[0].startswith(f"REFUSED refusing: --dir {live / 'demo_x'} overlaps")
+    assert out[1].startswith("REFUSED") and out[2].startswith("REFUSED")
+    assert out[3] == f"ACCEPTED {(tmp_path / 'elsewhere').resolve()}"
+
+
+def test_the_guard_sees_the_library_of_the_batch_agents_checkout(tmp_path):
+    """The batch agent runs from its plist's WorkingDirectory. That
+    checkout's stt.env names the live library, wherever the seeder runs."""
+    import plistlib
+    live = (tmp_path / "Agent Library").resolve()
+    agent_co = tmp_path / "agent checkout"
+    agent_co.mkdir()
+    (agent_co / "stt.env").write_text(f'STT_MEETINGS_DIR="{live}"\n')
+    fake_home = tmp_path / "user"
+    plist = fake_home / demo_seed.BATCH_PLIST_NAME
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(plistlib.dumps({"Label": "com.stt-workflow.batch",
+                                      "WorkingDirectory": str(agent_co)}))
+    co = _checkout_copy(tmp_path, "")
+    out = _resolve_in(co, {"HOME": str(fake_home)}, live / "demo_x",
+                      agent_co / "voicememos", tmp_path / "elsewhere")
+    assert out[0].startswith(f"REFUSED refusing: --dir {live / 'demo_x'} overlaps")
+    assert out[1].startswith("REFUSED")
+    assert out[2].startswith("ACCEPTED")
+    # a damaged plist is no guard, never a crash
+    plist.write_bytes(b"not a plist")
+    assert _resolve_in(co, {"HOME": str(fake_home)}, tmp_path / "elsewhere")[0] \
+        .startswith("ACCEPTED")
+
+
 def test_wipe_only_removes_a_home_it_built(tmp_path):
     target = tmp_path / "home"
     demo_seed.main(["--dir", str(target)])
