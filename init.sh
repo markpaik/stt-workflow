@@ -22,8 +22,13 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()    { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '  \033[33m!\033[0m %s\n' "$*"; }
 fail()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
-ask()   { local a; read -r -p "  → $1 " a </dev/tty; echo "$a"; }
-yes_no() { local a; a="$(ask "$1 [Y/n]")"; [[ ! "$a" =~ ^[Nn] ]]; }
+# Every answer is read from /dev/tty. With no terminal (ssh without -t, a
+# cron or CI run) the read failed, the empty answer read as the default
+# Yes, and every install ran unasked. A failed read is a No now, and the
+# script stops before step 1 when it has no terminal (has_tty below).
+ask()   { local a; read -r -p "  → $1 " a </dev/tty || return 1; echo "$a"; }
+yes_no() { local a; a="$(ask "$1 [Y/n]")" || return 1; [[ ! "$a" =~ ^[Nn] ]]; }
+has_tty() { { : </dev/tty; } 2>/dev/null; }
 
 # stt.env is read by stt/envfile.py's rules: keys and values trimmed, one
 # pair of matching quotes around a value removed, a later line wins.
@@ -107,6 +112,12 @@ setup_local_llm() {
 
 # sourced (the tests load the helpers above): stop before the setup steps
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
+if ! has_tty; then
+  echo "init.sh asks before each install, so it needs a terminal." >&2
+  echo "Run it in Terminal, or over ssh with -t (ssh -t host ./init.sh)." >&2
+  exit 1
+fi
 
 bold "STT Workflow — first-run setup"
 echo "  Everything runs on this Mac; nothing is uploaded unless you later add a"
