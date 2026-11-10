@@ -152,3 +152,23 @@ def test_a_person_with_a_path_character_or_dash_never_reaches_the_title():
                    for c in ':"?/')
     # a person that is nothing but such characters drops the slot
     assert series.build_title("weekly_checkin", "Budget", "/") == f"Weekly Check-in {DASH} Budget"
+
+
+def test_a_real_topic_keeps_a_first_word_the_series_name_also_uses():
+    lt = lambda topic: series.build_title("lt_weekly", topic)
+    assert lt("Meeting Norms") == f"LT Weekly Meeting {DASH} Meeting Norms"
+    assert lt("Monthly Budget") == f"LT Weekly Meeting {DASH} Monthly Budget"
+    assert lt("Call Center Staffing") == f"LT Weekly Meeting {DASH} Call Center Staffing"
+    assert lt("Session Planning") == f"LT Weekly Meeting {DASH} Session Planning"
+    assert lt("Weekly Budget Review") == f"LT Weekly Meeting {DASH} Weekly Budget Review"
+    # a run that names the series, or that is two of its words, still goes
+    assert lt("LT Weekly Budget") == f"LT Weekly Meeting {DASH} Budget"
+    assert lt("Weekly Meeting Norms") == f"LT Weekly Meeting {DASH} Norms"
+    assert (series.build_title("weekly_checkin", "Check-in Goals", "Robin")
+            == f"Robin Weekly Check-in {DASH} Goals")
+    assert (series.build_title("weekly_checkin", "Weekly Robin Goals", "Robin")
+            == f"Robin Weekly Check-in {DASH} Goals")
+    assert (series.build_title("thrive_icd", "Initial Career Dialogue Goals", "Robin")
+            == f"Robin Thrive Initial Career Dialogue {DASH} Goals")
+    assert (series.build_title("board_study", "Study Session Budget")
+            == f"Board Study Session {DASH} Budget")
