@@ -500,3 +500,38 @@ def test_a_rebuild_sets_a_damaged_registry_aside_first(sandbox, tmp_path):
     assert "moved aside to registry.json.corrupt-" in r.stdout
     aside = list((home / "voiceprints").glob("registry.json.corrupt-*"))
     assert [p.read_text() for p in aside] == ["{trunc"]
+
+
+def test_a_stack_with_a_corrupt_row_is_reported_once_and_never_merged(sandbox):
+    """A stack holding an all-NaN row was reported as invalid, as a split
+    (cosine gives -1.0 for NaN) and as a duplicate of a healthy voice.
+    --fix merged the NaN row into that healthy voice, then reported it
+    invalid there, and a second run split it off again. Now the bad stack
+    is reported only as invalid, the healthy voice stays clean, and one
+    --fix converges."""
+    for b in ("Live 05012026", "Live 05022026", "Live 05032026"):
+        _meeting(b)
+    e = _basis(seed=21)
+    v = e[0]
+    nan = np.full_like(v, np.nan)
+    _seed_unknown("U007", [v], ["Live 05012026"])
+    _seed_unknown("U020", [v], ["Live 05022026"])          # a true duplicate
+    _seed_unknown("U022", [v, nan], ["Live 05012026", "Live 05032026"])
+
+    found = registry_doctor.check()
+    assert [(f.kind, f.subject) for f in found if f.subject.startswith("U022")
+            or "U022" in f.subject] == [("invalid", "U022[1]")]
+    assert [f.subject for f in _of(found, "duplicate")] == ["U007/U020"]
+
+    done = registry_doctor.fix(found)
+    assert done[0] == "merged U020 into U007"
+    assert not any("U022" in line for line in done)
+    u007 = unknowns._samples(unknowns.load(), "U007")
+    assert np.isfinite(u007).all()
+    assert sorted(unknowns.load()["speakers"]["U007"]["meetings"]) == \
+        ["Live 05012026", "Live 05022026"]
+
+    again = registry_doctor.check()
+    assert [(f.kind, f.subject) for f in again] == [("invalid", "U022[1]")]
+    assert registry_doctor.fix(again) == []
+    assert [(f.kind, f.subject) for f in registry_doctor.check()] == [("invalid", "U022[1]")]
