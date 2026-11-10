@@ -120,10 +120,11 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         wc = len(text.split())
         minor = bool(flags) and wc <= 3
         dur = 0.6 if minor else max(1.3, round(wc * 0.34, 2))
-        # turns run at a talking pace (meetings show a minute or more), and a
-        # long-talk turn lets a voice cross the panel's one-minute ask floor
+        # turns run at a talking pace (every live meeting runs over a
+        # minute), and a long-talk turn lets a voice cross the panel's
+        # one-minute ask floor
         if not minor:   # a sub-second crumb stays sub-second (review.is_minor)
-            dur = round(dur * float(spec.get("stretch", 5.0)), 2)
+            dur = round(dur * float(spec.get("stretch", 8.0)), 2)
         start, end = round(cursor, 2), round(cursor + dur, 2)
         sp = disp_of[sid]
         seg = {"start": start, "end": end, "speaker": sid,
@@ -629,10 +630,9 @@ def build(home: Path) -> dict:
         })
     history.insert(0, {
         "name": "Vendor Webinar Recording.mp4", "ok": False,
-        "summary": "RuntimeError: ffmpeg could not decode "
-                   "'Vendor Webinar Recording.mp4' — moov atom not found (exit 1); "
-                   "the MP4 container is truncated. Re-export the recording and "
-                   "queue it again.",
+        # the text the batch records for an unreadable file (audio._run_ffmpeg)
+        "summary": "ffmpeg could not decode Vendor Webinar Recording.mp4: "
+                   "moov atom not found",
         "at": "2026-07-09T02:41:55",
     })
     write_state(home, built, [waiting, held], [held], history)
