@@ -588,6 +588,8 @@ function play(el){
  PLAYER.play().catch(stop);
 }
 const A={
+ // the skip link: focus the page column. A hash link would be read as a route.
+ skip(){const v=$('#view');if(v&&v.focus)v.focus();},
  go(el){go(el.dataset.to);},
  theme(){const r=document.documentElement;const cur=r.getAttribute('data-theme')||'auto';const nx={auto:'light',light:'dark',dark:'auto'}[cur];setTheme(nx);},
  menu(){UI.menu=true;layersHTML();},

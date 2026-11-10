@@ -90,6 +90,10 @@ a{color:var(--accent-text)}
 .rec-t{color:var(--rec-text)}
 .nb{white-space:nowrap}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* the first Tab stop: the sidebar holds 14 before the page's own controls.
+   Off screen until it has focus. */
+.skip{position:fixed;left:var(--s3);top:-60px;z-index:90;background:var(--ink);color:var(--paper);padding:var(--s2) var(--s3);border-radius:var(--r);font-weight:600;text-decoration:none}
+.skip:focus{top:var(--s3)}
 ::placeholder{color:var(--sub);opacity:1}
 
 /* Controls: filled once per region, outlined rarely, text the rest of the time */

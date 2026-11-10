@@ -614,3 +614,30 @@ console.log(JSON.stringify({
     # no meta line prints the rounded minutes on its own any more
     assert "minutes||0} min" not in js
     assert "${g.hours} h" not in js
+
+
+# ------------------------------------------------------ phase 7 polish ---
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_skip_link_is_the_first_tab_stop_and_focuses_the_page():
+    """A keyboard user passed 14 sidebar stops before the page's own first
+    control. The skip link is the first focusable element of the body, it
+    stays off screen until it has focus, and it focuses main#view without
+    touching the hash (a '#view' hash would be read as a route)."""
+    page = (STATIC / "next.html").read_text(encoding="utf-8")
+    body = page.split("<body>", 1)[1]
+    first = re.search(r"<(a|button|input|select|textarea)\b[^>]*>", body).group(0)
+    assert 'class="skip"' in first and 'data-act="skip"' in first
+    assert body.index('class="skip"') < body.index('id="side"')
+    assert 'id="view" tabindex="-1"' in body
+    css = (STATIC / "next.css").read_text(encoding="utf-8")
+    assert re.search(r"\.skip\{[^}]*top:-\d+px", css)
+    assert re.search(r"\.skip:focus\{[^}]*top:var\(--s3\)", css)
+    out = _run_node("""
+let focused=0;const view={focus(){focused++;}};
+document.querySelector=s=>s==='#view'?view:_el();
+location.hash='#home';
+A.skip();
+console.log(JSON.stringify({focused,hash:location.hash}));
+""")
+    assert out == {"focused": 1, "hash": "#home"}
