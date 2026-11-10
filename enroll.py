@@ -146,6 +146,30 @@ def main():
     else:
         raise SystemExit("Provide --from-meeting (+--speaker) or --audio")
 
+    # identify.enroll raises a plain ValueError for a zero or NaN embedding,
+    # and np.vstack for a sample whose size differs from the person's stored
+    # samples. Both ended in a traceback here, and a size mismatch first
+    # asked for --confirm, which then crashed.
+    vec = np.asarray(vec, dtype=float).reshape(-1)
+    who = (f"{args.speaker} in '{args.from_meeting}'" if args.from_meeting
+           else args.audio)
+    if not np.isfinite(vec).all() or not np.linalg.norm(vec):
+        hint = " Redo the meeting to rebuild it." if args.from_meeting else ""
+        raise SystemExit(f"{who}: the voice embedding is empty or damaged (zero "
+                         f"or not a number), so it cannot identify anyone.{hint}")
+    have = (reg.get(args.name) or {}).get("dim")
+    if have and int(have) != vec.size and not args.replace:
+        raise SystemExit(
+            f"{who}: this sample has {vec.size} dimensions and {args.name}'s "
+            f"voiceprint has {have}, so they come from different voice models. "
+            "Re-run with --replace to start the voiceprint over from this sample.")
+    others = {int(m["dim"]) for n, m in reg.items()
+              if n != args.name and isinstance(m, dict) and m.get("dim")}
+    if others and vec.size not in others:
+        print(f"Note: this sample has {vec.size} dimensions and the other "
+              f"voiceprints have {', '.join(map(str, sorted(others)))}. It matches "
+              "only meetings embedded by the same voice model.", file=sys.stderr)
+
     # a suspect sample joining an EXISTING stack needs an explicit --confirm:
     # a low cosine to the person's own samples (or a better match to somebody
     # else entirely) is how a wrong-cluster enrollment poisons a profile
@@ -164,6 +188,8 @@ def main():
         path = identify.enroll(args.name, vec, replace=args.replace, source=source)
     except identify.RegistryUnreadable as e:   # damaged since the check above
         raise SystemExit(str(e))
+    except ValueError as e:   # any other refusal: one line, nothing written
+        raise SystemExit(f"Cannot enroll '{args.name}': {e}")
     print(f"Enrolled '{args.name}' -> {path}")
     return 0
 

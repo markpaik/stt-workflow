@@ -149,6 +149,51 @@ def test_from_meeting_suspect_sample_requires_confirm(sandbox, monkeypatch):
 
 
 
+@pytest.mark.parametrize("bad", [np.zeros(192), np.full(192, np.nan),
+                                 np.r_[np.ones(191), np.inf]])
+def test_a_zero_or_nan_embedding_is_one_line(sandbox, monkeypatch, bad):
+    """identify.enroll raises "embedding has zero/non-finite norm", and the
+    CLI let it end in a traceback."""
+    np.savez(mfile("Mtg", ".emb.npz"), SPEAKER_00=bad)
+    monkeypatch.setattr(sys, "argv", ["enroll", "--from-meeting", "Mtg",
+                                      "--speaker", "SPEAKER_00", "--name", "Zed Zero"])
+    with pytest.raises(SystemExit) as ei:
+        enroll.main()
+    assert str(ei.value) == (
+        "SPEAKER_00 in 'Mtg': the voice embedding is empty or damaged (zero or "
+        "not a number), so it cannot identify anyone. Redo the meeting to rebuild it.")
+    assert "Zed Zero" not in identify.load_registry()
+
+
+def test_a_sample_of_another_size_is_one_line_and_replace_notes_it(
+        sandbox, monkeypatch, capsys):
+    """--confirm with a 256-dim sample on a 192-dim stack ended in "all the
+    input array dimensions except for the concatenation axis must match",
+    and without --confirm the CLI asked for --confirm first. --replace
+    succeeded silently and left a mixed-size registry."""
+    rng = np.random.default_rng(9)
+    identify.enroll("Priya Shah", rng.normal(size=192), source="Old")
+    identify.enroll("Sam Chen", rng.normal(size=192), source="Old")
+    np.savez(mfile("Long256", ".emb.npz"), SPEAKER_00=rng.normal(size=256))
+    argv = ["enroll", "--from-meeting", "Long256", "--speaker", "SPEAKER_00",
+            "--name", "Priya Shah"]
+    for extra in ([], ["--confirm"]):
+        monkeypatch.setattr(sys, "argv", argv + extra)
+        with pytest.raises(SystemExit) as ei:
+            enroll.main()
+        assert str(ei.value) == (
+            "SPEAKER_00 in 'Long256': this sample has 256 dimensions and Priya "
+            "Shah's voiceprint has 192, so they come from different voice "
+            "models. Re-run with --replace to start the voiceprint over from "
+            "this sample.")
+        assert identify.load_registry()["Priya Shah"]["dim"] == 192
+    monkeypatch.setattr(sys, "argv", argv + ["--replace"])
+    assert enroll.main() == 0
+    assert identify.load_registry()["Priya Shah"]["dim"] == 256
+    assert ("Note: this sample has 256 dimensions and the other voiceprints "
+            "have 192.") in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("typed", ["priya shah", "PRIYA SHAH", "  Priya   Shah "])
 def test_a_name_in_another_case_still_needs_confirm(sandbox, monkeypatch, typed):
     """sample_check looked the typed name up case for case. 'priya shah'
