@@ -295,6 +295,22 @@ def test_a_second_backfill_changes_nothing(store):
     assert backfill_keys.plan() == []
 
 
+def test_a_backfill_with_nothing_to_add_writes_no_journal(store, capsys):
+    """A second --apply printed a run id, a journal path and an undo line,
+    and left a zero-byte .jsonl for each run that changed nothing."""
+    first = backfill_keys.apply()
+    mig = store / "migration"
+    journals = sorted(p.name for p in mig.glob("*.jsonl"))
+    assert journals == [f"{first['run']}.jsonl"]
+    assert backfill_keys.main(["--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing to add" in out and "undo with" not in out and "journal:" not in out
+    assert sorted(p.name for p in mig.glob("*.jsonl")) == journals
+    r = backfill_keys.apply(run_id="backfill-20261108T085555")
+    assert r == {"run": None, "journal": None, "applied": [], "skipped": []}
+    assert not (mig / "backfill-20261108T085555.jsonl").exists()
+
+
 def test_the_backfill_works_on_a_store_that_already_has_the_amnesty_keys(store):
     j = config.meeting_file("Budget Review 09292026", ".json")
     d = json.loads(j.read_text())
