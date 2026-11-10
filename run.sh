@@ -51,7 +51,15 @@ case "$cmd" in
   enroll) exec "$PY" "$BASE/enroll.py" "$@" ;;
   relabel) exec "$PY" "$BASE/relabel.py" "$@" ;;
   gui)    exec "$PY" "$BASE/gui/menubar.py" "$@" ;;
-  test)   exec "$PY" -m pytest "$BASE/tests" -q "$@" ;;
+  test)
+    # pytest is a development package (requirements-dev.txt), not a
+    # pipeline one, so a plain install does not have it
+    if ! "$PY" -c "import pytest" 2>/dev/null; then
+      echo "run.sh: pytest is not installed. Install the test packages with:" >&2
+      echo "  uv pip install --python .venv/bin/python -r requirements-dev.txt" >&2
+      exit 1
+    fi
+    exec "$PY" -m pytest "$BASE/tests" -q "$@" ;;
   py)     exec "$PY" "$@" ;;
   *) echo "usage: run.sh {batch|enroll|relabel|gui|test|py} [args...]"; exit 2 ;;
 esac

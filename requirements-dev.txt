@@ -1,0 +1,10 @@
+# Development: the test suite, plus the optional accuracy tools. The
+# pipeline itself needs only requirements.txt (what init.sh installs).
+#   uv pip install --python .venv/bin/python -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=9
+
+# Optional: accuracy evaluation against reference transcripts (tuning/)
+# jiwer>=4.0
+# meeteval>=0.4

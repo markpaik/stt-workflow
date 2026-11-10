@@ -13,12 +13,9 @@ punctuators>=0.0.7
 python-docx>=1.2
 rumps>=0.4
 
-# Tests
-pytest>=9
-
-# Optional: accuracy evaluation against reference transcripts (tuning/)
-# jiwer>=4.0
-# meeteval>=0.4
-
-# Optional cloud assistant (summaries & Ask) — local Qwen remains the default
+# The client for the cloud assistant. Installed so that picking Claude in
+# Settings works with no second step. It sends nothing unless you pick it:
+# the local model stays the default, and strict meetings never use it.
 anthropic>=0.116
+
+# The test suite and the accuracy tools are in requirements-dev.txt.
