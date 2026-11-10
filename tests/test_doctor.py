@@ -184,6 +184,21 @@ def test_undo_says_what_it_cannot_undo_and_never_restores_a_stop_flag(
     assert "stale_stop_flag" not in {f.kind for f in doctor.check(registry=False)}
 
 
+def test_a_torn_last_journal_line_never_stops_the_doctor_undo(lib, capsys):
+    """A kill inside one journal write, or a hand edit, leaves a line that
+    is not JSON. `doctor undo` raised a JSONDecodeError traceback on it and
+    restored nothing, though every whole entry before it was intact."""
+    before = _tree(config.PROJECT_DIR)
+    r = doctor.fix(dry_run=False, registry=False)
+    with open(lib / "migration" / f"{r['run']}.jsonl", "a") as fh:
+        fh.write('garbage\n{"file": "' + str(holds.PATH) + '", "sha_af')
+    capsys.readouterr()
+    assert doctor_cli.main(["undo", r["run"], "--apply"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+    flag = str(control.STOP_FLAG.relative_to(config.PROJECT_DIR))
+    assert _tree(config.PROJECT_DIR) == {k: v for k, v in before.items() if k != flag}
+
+
 def test_undo_keeps_a_file_changed_since(lib):
     r = doctor.fix(dry_run=False, registry=False)
     holds.hold("New Hold.m4a")
