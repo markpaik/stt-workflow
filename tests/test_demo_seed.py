@@ -138,18 +138,18 @@ def test_inbox_meeting_flagged_unreviewed(seeded):
 
 
 def test_review_flags_load_with_alt_and_minor(seeded):
-    out = review.list_flagged("2026-04-08 Leadership Team Weekly")
+    out = review.list_flagged("2026-04-08 LT Weekly Meeting – Reserve Target")
     assert out["items"], "review meeting should have flagged segments"
     assert out["n_minor"] >= 1
     assert any(not it["minor"] for it in out["items"])          # substantial ones too
     alts = [it["alt"] for it in out["items"] if it.get("alt")]
     assert alts and alts[0][0]["theirs"], "second-engine alternative text present"
-    assert review.count_decisions("2026-04-08 Leadership Team Weekly") >= 1
+    assert review.count_decisions("2026-04-08 LT Weekly Meeting – Reserve Target") >= 1
 
 
 def test_speaker_store_loads(seeded):
     reg = identify.load_registry()
-    assert set(reg) >= {"Mark Paik", "Alex Rivera", "Jordan Lee", "Priya Shah",
+    assert set(reg) >= {"Morgan Ellis", "Alex Rivera", "Jordan Lee", "Priya Shah",
                         "Sam Chen", "Dana Fox"}
     vps = identify.load_voiceprints()
     for name, arr in vps.items():
