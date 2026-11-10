@@ -173,9 +173,15 @@ def _guard():
     repo = Path(__file__).resolve().parent.parent
     lib = envfile.parse(repo / "stt.env").get("STT_MEETINGS_DIR")
     real = [config.DEFAULT_MEETINGS_DIR, repo] + ([Path(lib).expanduser()] if lib else [])
+    # demo_seed's compare folds letter case as APFS does: a home typed as
+    # ~/projects/... passed this check while ~/Projects/... was refused
+    tools = str(Path(__file__).resolve().parent)
+    if tools not in sys.path:
+        sys.path.append(tools)
+    from demo_seed import _overlaps
     for r in real:
         r = r.resolve()
-        if h == r or r in h.parents or h in r.parents:
+        if _overlaps(h, r):
             sys.exit(f"refused: STT_HOME overlaps a real folder ({r})")
     return h
 

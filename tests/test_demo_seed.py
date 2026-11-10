@@ -270,6 +270,25 @@ def test_refuses_dir_overlapping_real_data(tmp_path, monkeypatch):
         demo_seed.main(["--dir", str(real / "inside")])  # nested under real data
 
 
+def test_the_guard_folds_letter_case_as_apfs_does(tmp_path, monkeypatch):
+    """resolve() keeps the case it is given and APFS folds it, so
+    ~/projects/brain/meetings/demo_x passed while ~/Projects/... was
+    refused. synth_corpus uses the same compare."""
+    real = tmp_path / "Real Meetings"
+    real.mkdir()
+    monkeypatch.setattr(config, "MEETINGS_DIR", real)
+    monkeypatch.setattr(config, "ICLOUD_DIR", tmp_path / "src")
+    monkeypatch.setattr(config, "RECORDINGS_DIR", tmp_path / "rec")
+    for t in (tmp_path / "real meetings" / "demo_x", tmp_path / "REAL MEETINGS",
+              Path(str(tmp_path).upper()) / "Real Meetings"):
+        with pytest.raises(SystemExit, match="overlaps a real configured"):
+            demo_seed.resolve_target(str(t))
+    # composed and decomposed accents are one name on APFS too
+    assert demo_seed._overlaps(Path("/a/Caf\u00e9/x"), Path("/a/cafe\u0301"))
+    assert not demo_seed._overlaps(Path("/a/Real Meetings2"), Path("/a/real meetings"))
+    assert demo_seed.resolve_target(str(tmp_path / "demo")) == (tmp_path / "demo").resolve()
+
+
 def _checkout_copy(tmp_path, env_text):
     """A copy of the code (stt/ and tools/demo_seed.py) whose own stt.env
     names a synthetic live library, so every live folder is a tmp path."""

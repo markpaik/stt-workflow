@@ -35,6 +35,7 @@ import os
 import plistlib
 import shutil
 import sys
+import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from wave import open as wave_open
@@ -752,7 +753,17 @@ def _real_data_dirs():
     return dirs
 
 
+def _fold(p: Path) -> Path:
+    """`p` as APFS compares names: letter case and Unicode composition do
+    not matter. resolve() keeps the case it is given, so ~/projects/... and
+    ~/Projects/... were two folders to the guard and one folder on disk."""
+    return Path(unicodedata.normalize("NFC", str(p)).casefold())
+
+
 def _overlaps(a: Path, b: Path) -> bool:
+    """True when `a` is `b`, or one holds the other. On a case-sensitive
+    volume the fold refuses a little more, never less."""
+    a, b = _fold(a), _fold(b)
     return a == b or a.is_relative_to(b) or b.is_relative_to(a)
 
 

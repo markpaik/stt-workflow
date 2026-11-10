@@ -411,6 +411,19 @@ def test_the_evaluation_refuses_a_real_home(monkeypatch):
         ask_eval._guard()
 
 
+@pytest.mark.parametrize("fold", [str.lower, str.upper])
+def test_the_evaluation_guard_folds_letter_case(monkeypatch, fold):
+    """APFS folds letter case and resolve() does not, so a home typed as
+    ~/projects/... was not the real ~/Projects/... folder to the guard.
+    _guard only resolves the paths: it writes nothing."""
+    from pathlib import Path
+    repo = Path(ask_eval.__file__).resolve().parent.parent
+    for real in (config.DEFAULT_MEETINGS_DIR / "inside", repo / "qa" / "ask_home"):
+        monkeypatch.setenv("STT_HOME", fold(str(real)))
+        with pytest.raises(SystemExit, match="overlaps a real folder"):
+            ask_eval._guard()
+
+
 def test_purge_finds_a_thread_citing_an_accented_name_without_an_id(sandbox, monkeypatch, tmp_path):
     from tools import purge
     monkeypatch.setenv("STT_PURGE_SCAN_DIRS", str(tmp_path / "none"))

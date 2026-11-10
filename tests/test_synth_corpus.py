@@ -198,6 +198,10 @@ def test_generate_is_deterministic_across_runs(sandbox, tmp_path, monkeypatch):
 def test_build_home_refuses_real_data_dirs(sandbox):
     with pytest.raises(SystemExit):
         synth_corpus.build_home(config.MEETINGS_DIR / "evil_home")
+    # the same folder in other letter case (APFS folds it; resolve() does not)
+    with pytest.raises(SystemExit):
+        synth_corpus.build_home(Path(str(config.MEETINGS_DIR).upper()) / "evil_home")
+    assert not (config.MEETINGS_DIR / "evil_home").exists()
 
 
 def test_stages_refuse_outside_a_sandbox(sandbox, tmp_path, monkeypatch):
