@@ -185,10 +185,10 @@ ffmpeg's own reason ("moov atom not found", "no audio track"). A full disk
 never counts against the file.
 
 When a file finishes, Home shows it under Needs you if it needs a decision.
-Each meeting is a folder named `YYYY-MM-DD <title>` with the audio, a
-readable `.txt`, the `.json` record (segments, words, speakers, flags,
-confidence), the caches, and your edits. A folder name is cut to 120 bytes,
-so every file name in the folder stays under the 255-byte limit of macOS.
+Each meeting is a folder named `YYYY-MM-DD <title>`
+([Folder names](#folder-names)) with the audio, a readable `.txt`, the
+`.json` record (segments, words, speakers, flags, confidence), the caches,
+and your edits.
 
 <img src="docs/img/home-light.png" width="1200" alt="Home: a failed file under Needs attention, two waiting files, a title to keep, a voice to name, and two draft titles">
 
@@ -320,6 +320,41 @@ voices do not match. A person keeps up to five samples. Samples from
 different meetings and rooms identify someone better than several clips
 from one recording.
 
+### Enrolling from the command line
+
+`enroll.py` adds a voice sample from a processed meeting or from a short
+clip of one person:
+
+```bash
+./run.sh enroll --from-meeting "2026-05-21 Team Sync"     # list that meeting's speakers
+./run.sh enroll --from-meeting "2026-05-21 Team Sync" --speaker SPEAKER_01 --name "Ana Ortiz"
+./run.sh enroll --audio ~/samples/ana.m4a --name "Ana Ortiz"
+./run.sh enroll --list
+```
+
+It refuses a sample in these cases. Each refusal is one line, exits 1,
+and writes nothing:
+
+- The name breaks the name rules above, or it reads like `U7` or `U007`,
+  the number an unknown voice holds.
+- The speaker has less than 30 seconds of speech in that meeting, or fewer
+  than 10 turns of 1.5 seconds or more. That is too little to identify
+  anyone.
+- The sample scores below 0.45 against the person's saved samples, or it
+  matches another enrolled person better. It may be the wrong person, and
+  the message gives both scores. Add `--confirm` to enroll it anyway.
+- `registry.json` cannot be read. It is never written over: restore
+  `registry.json.bak` or run `tools/rebuild_voiceprints.py --apply`.
+- The meeting has no voice caches (process it with speaker separation
+  first), its cache is damaged (Redo the meeting), or it has no speaker by
+  that label (the message lists the labels it has). An `--audio` file is
+  missing or cannot be read.
+
+A name that differs from an enrolled name only in case or spacing joins
+that person. The same sample twice is stored once. From a clip, the voice
+that talks most is enrolled. `--replace` drops the person's saved samples,
+keeps only the new one, and skips the wrong-person check.
+
 ### Reviewing a meeting
 
 A meeting page has three tabs (Summary, Transcript, Ask) and the audio bar
@@ -364,31 +399,97 @@ that arrives with only a default name ("Recording 1430") gets the model's
 draft and a Needs you card with Keep title. Draft titles that came from a
 typed label or from the catalog appear in an optional Draft titles list for
 14 days, with Keep title and Keep all. To change a title, click it on the
-meeting page or use Rename in the row menu. Set date in the same menu
-changes the date, which must fall between 2000 and the end of next year.
-The folder follows the title and the date:
-`2026-04-08 LT Weekly Meeting – Reserve Target`. A past date typed at the
-front of a title becomes the meeting's date. A future one names an event,
-so it stays in the title, and the save says so. A title that is only a
-date is refused: use Set date.
+meeting page or use Rename in the row menu. The folder follows the title
+([Folder names](#folder-names)). A past date typed in a title
+(`2026-04-08 Review` or `Review 04082026`) becomes the meeting's date. A
+future one names an event, so it stays in the title, and the save says so.
+A title that is only a date is refused: use Set date
+([Dates](#dates)).
 
 A title stays on one line: a line break becomes a space, and a
 bidirectional control or a zero-width space is dropped. A colon or a slash
 is kept. The title shows as typed (`Dana 1:1`, `Q3/Q4 Planning`), and the
 folder, which cannot hold either one, says `Dana 1-1` and `Q3-Q4 Planning`.
 A title over 120 characters is cut between two words, and the save says so.
-Saving a title the meeting already has never renames its folder, and a
-same-day twin keeps its `(2)` or `(3)`.
+Saving the title a meeting already has leaves its folder alone, with two
+exceptions: a folder in the old `<title> MMDDYYYY` form moves to the
+date-first form, and a twin whose plain sibling is gone drops its number.
+
+### Dates
+
+Each meeting stores one date, and the meeting page says where it came
+from: the recorder (the start time Voice Memos or the menu-bar recorder
+gives), a full date typed in the name, a short date typed in the name
+(`9.14`), the file time, or set by hand. A date from the file time or a
+short typed date may be the day the file was copied, so the page marks it
+"Date uncertain".
+
+To change a date, use Set date in the row menu on Recordings or in the
+meeting page's menu. Type the date as `YYYY-MM-DD`. It must fall between
+2000 and the end of next year. To give several recordings one date, select
+them on Recordings and use Set date in the bar. A save moves the folder to
+the new date, and the voice registries and the processed-file record
+follow it. The page then says the date was set by hand, and a recorded
+start time on another day is cleared. A meeting that is being processed
+refuses the change until it finishes.
+
+`tools/fix_dates.py` corrects dates across the library. It changes a date
+only when a better source contradicts it: the start time in a Voice Memos
+file's tags, the recorder's file name (`2026-04-08 Recording 1430`), or a
+short date typed in the name. A full date typed in the name and a date set
+by hand are never changed. Each correction goes through the same path as
+Set date, and the journal gets it first.
+
+```bash
+./run.sh py tools/fix_dates.py                       # dry run: counts only, writes nothing
+./run.sh py tools/fix_dates.py --apply               # correct, and print the run id
+./run.sh py tools/fix_dates.py --undo RUN            # dry run of the undo
+./run.sh py tools/fix_dates.py --undo RUN --apply    # put the old dates back
+```
+
+The undo restores a date only where the meeting still holds the corrected
+one. A date changed since then is kept. `--no-probe` skips reading the
+audio tags.
+
+### Folder names
+
+Each meeting is a folder named `YYYY-MM-DD <title>`, date first, for
+example `2026-04-08 LT Weekly Meeting – Reserve Target`. The date in the
+name keeps the meetings of one series apart on disk. A title edit or a
+date edit moves the folder to match, and every file in it is renamed with
+it. A folder name is cut to 120 bytes, so every file name in the folder
+stays under the 255-byte limit of macOS.
 
 Two meetings with the same title on the same day are twins: the second
 folder ends in ` (2)`, the third in ` (3)`, and the list shows the number
 so you can tell them apart. Numbers are not shuffled when one twin moves
-to another date or is deleted, because the speaker registries name
-meetings by folder. A twin left with a number and no plain sibling drops
-the number on its next title or date edit. Folders named before the
-date-first rule read `<title> MMDDYYYY`. Every reader takes both forms,
-the next title or date edit moves an old folder to the new form, and
-`tools/iso_rename.py` moves the whole library at once.
+to another date or is deleted, because the voice registries name
+meetings by folder. A twin keeps its number when you save its title or
+date again while its plain sibling is there. A twin left with a number and
+no plain sibling drops the number on its next title or date edit.
+
+Folders named before the date-first rule read `<title> MMDDYYYY`. Every
+reader takes both forms, and the next title or date edit moves an old
+folder to the new form. `tools/iso_rename.py` moves the whole library at
+once:
+
+```bash
+./run.sh py tools/iso_rename.py                 # dry run: write the plan, change nothing
+./run.sh py tools/iso_rename.py --apply         # rename from the plan
+./run.sh py tools/iso_rename.py --undo          # dry run of the reversal
+./run.sh py tools/iso_rename.py --undo --apply  # put every folder back
+```
+
+The dry run writes the plan to the migration folder ([Tools](#tools)) as
+`iso-rename-plan.json`, with `iso-rename-plan.tsv` beside it to read. Both
+are owner-only, because they hold meeting names. The stored date wins over
+the date in an old folder name, and the plan flags each meeting where the
+two differ. `--apply` renames each meeting through the same path as Set
+date, points the header line of every `.txt` at the meeting's date and
+title, and journals each step first, so it resumes after a stop. It
+refuses to start while the batch or a relabel runs, stops when a batch
+starts, and skips a meeting renamed since the dry run. `--undo --apply`
+puts back each old name and the fields the move changed.
 [docs/store-contract.md](docs/store-contract.md) holds the full naming
 rules.
 
@@ -601,20 +702,26 @@ and `num_gpu` stay at the server's defaults.
 ## Tools
 
 Run each one with `./run.sh py tools/<name>.py`. A tool that changes the
-library does a dry run first, needs `--apply` to write, and keeps an undo
-journal outside the repo (`~/Library/Application Support/com.stt-workflow/migration`).
+library does a dry run by default and writes only with `--apply`.
+`registry_doctor.py` is the one exception: it reports by default and
+repairs with `--fix`. `retitle_all.py`, `iso_rename.py`, `fix_dates.py`,
+`backfill_keys.py`, and `doctor.py fix` also keep an undo journal in the
+migration folder, outside the repo:
+`~/Library/Application Support/com.stt-workflow/migration`, or
+`$STT_HOME/migration` under `STT_HOME`. `STT_MIGRATION_DIR` moves it.
+`purge.py` has no undo.
 
 | Tool | What it does |
 |---|---|
 | `retitle_all.py` | Retitles the library by the series catalog and writes new descriptions. `--only "Check-in" --limit 5` tries a few first. `--undo` prints the reversal, and `--undo --apply` runs it |
-| `iso_rename.py` | Moves every folder from the old `<title> MMDDYYYY` form to `YYYY-MM-DD <title>`. `--undo` prints the reversal, and `--undo --apply` runs it |
+| `iso_rename.py` | Moves every folder from the old `<title> MMDDYYYY` form to `YYYY-MM-DD <title>` ([Folder names](#folder-names)). `--undo` prints the reversal, and `--undo --apply` runs it |
 | `fetch_speakrs_models.py` | Downloads the speakrs Core ML models once, pinned and checksum-verified |
 | `doctor.py` | Checks the meeting store and voice registries (`check`, `check --deep`), repairs what is safe (`fix --apply`), and undoes a repair (`undo RUN --apply`) |
-| `registry_doctor.py` | Checks and repairs the voice registries alone |
+| `registry_doctor.py` | Checks the voice registries alone, and `--fix` repairs what is safe ([Repairing the voice registries](#repairing-the-voice-registries)) |
 | `rebuild_voiceprints.py` | Rebuilds the voiceprint registry from meeting caches after a loss |
 | `purge.py` | Removes one meeting from every store: folder, manifest, search index, voice samples, and unknown voices heard only there |
 | `vm_delete.py` | Lists every memo the Voice Memos sync copied and what the delete after ingest would do with it, and never runs the Shortcut. `--apply` runs one pass now, and `--clear-halt` resumes deletes after a stop |
-| `fix_dates.py` | Corrects dates that a better source contradicts (a Voice Memos start time, a short typed date) |
+| `fix_dates.py` | Corrects dates that a better source contradicts: a recorder start time or a short typed date ([Dates](#dates)). `--undo RUN --apply` puts them back |
 | `backfill_keys.py` | Adds missing store keys (`title`, `source_name`, `audio_fp`, `date_source`, `recorded_at`) |
 | `restamp_folders.py` | Adds the date to folders that predate the date-in-name rule |
 | `demo_seed.py` | Builds a synthetic library for development and screenshots |
@@ -631,7 +738,43 @@ STT_HOME=$PWD/qa/demo_home STT_PANEL_PORT=8747 .venv/bin/python -m gui.server
 `STT_HOME` moves every data path (meetings, folders, voiceprints, state,
 the launchd plist) under that folder, so nothing there can touch your real
 meetings. Under `STT_HOME`, the batch and `run.sh` read `$STT_HOME/stt.env`,
-never the checkout's own, and exports land in `$STT_HOME/exports`.
+never the checkout's own, and exports land in `$STT_HOME/exports`. A fresh
+demo home passes `doctor.py check` and `registry_doctor.py` with nothing
+to report.
+
+### Repairing the voice registries
+
+`tools/registry_doctor.py` checks the two voice registries
+(`registry.json` for enrolled people, `unknowns.json` for unknown voices)
+and the sample files beside them. `doctor.py check` lists the same
+findings with a `registry_` prefix, next to its store checks.
+
+```bash
+./run.sh py tools/registry_doctor.py          # report, write nothing
+./run.sh py tools/registry_doctor.py --fix    # make the safe repairs, then check again
+```
+
+Each finding is marked `fixable` or `manual`:
+
+| Finding | What it means | `--fix` |
+|---|---|---|
+| `duplicate` | One voice under two unknown numbers | Merges the newer number into the older one |
+| `duplicate` | Two enrolled people share a voice, or one person holds the same sample twice | Leaves it. Two people with one voice means a wrong sample or one person under two spellings, and only you can say which |
+| `split` | One unknown number whose samples no longer agree, so it spans two people | Keeps the largest group of samples and moves each other group to a new number |
+| `dangling` | A sample or meeting reference that names no meeting on disk | Drops the reference |
+| `orphan_lock` | A meeting lock file that nothing can take again | Removes it |
+| `stale_next` | The next unknown number would reuse one already given out | Moves the counter past the highest number |
+| `invalid` | A missing or unreadable sample file, a sample count that disagrees with the file, a sample that is not a unit vector, or an entry of the wrong shape | Leaves it |
+| `corrupt` | `registry.json` or `unknowns.json` cannot be read | Leaves it |
+| `unreferenced_file` | A `.npy` that no entry points at | Leaves it: it may be someone's only voiceprint |
+
+It exits 1 while any finding remains, so a script can gate on it.
+`--voiceprints DIR` checks and repairs that folder only, and the
+configured one is never written. `--fix` writes in place and keeps no
+journal. For repairs you can undo, run `./run.sh py tools/doctor.py fix
+--apply`: it refuses while a batch runs, copies the whole voiceprints
+folder first, makes the same repairs, and prints the `undo RUN --apply`
+line that reverses them.
 
 ## Troubleshooting
 

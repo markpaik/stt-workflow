@@ -700,3 +700,24 @@ def test_undo_without_apply_prints_the_undo_plan_and_writes_nothing(lib, capsys)
     assert _tree() == tree
     assert ir.plan_path().read_bytes() == plan_before
     assert ir.plan_path().stat().st_mtime_ns == plan_mtime
+
+
+def test_saving_the_title_a_meeting_has_moves_only_an_old_form_or_a_lone_twin(sandbox):
+    """The README says saving the title a meeting already has leaves its
+    folder alone, with two exceptions: an old '<title> MMDDYYYY' folder
+    moves to the date-first form, and a twin whose plain sibling is gone
+    drops its number. A twin whose sibling is there keeps its number."""
+    _m("2025-05-21 Team Sync", date="2025-05-21", title="Team Sync")
+    _m("2025-05-21 Team Sync (2)", date="2025-05-21", title="Team Sync")
+    _m("Board Prep 09102025", date="2025-09-10", title="Board Prep")
+    r = summarize.rename_meeting("2025-05-21 Team Sync", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync" and r["renamed"] == []
+    r = summarize.rename_meeting("2025-05-21 Team Sync (2)", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync (2)"
+    r = summarize.set_meeting_date("2025-05-21 Team Sync (2)", "2025-05-21")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync (2)"
+    r = summarize.rename_meeting("Board Prep 09102025", "Board Prep")
+    assert r["ok"] and r["base"] == "2025-09-10 Board Prep"
+    summarize.set_meeting_date("2025-05-21 Team Sync", "2025-05-22")
+    r = summarize.rename_meeting("2025-05-21 Team Sync (2)", "Team Sync")
+    assert r["ok"] and r["base"] == "2025-05-21 Team Sync"
