@@ -769,3 +769,27 @@ def test_a_name_that_only_starts_like_a_label_is_allowed(sandbox, ok):
     assert identify.reserved_name(ok) is False
     identify.enroll(ok, _near(0, 0))
     assert ok in identify.load_registry()
+
+
+def test_a_damaged_enrolled_sample_file_leaves_that_person_out(sandbox, capsys):
+    """np.load raised on a damaged person .npy, and unknowns.assign() fell
+    for every meeting: "ValueError This file contains pickled (object)
+    data". The batch's naming and the panel's voice pages read the same
+    file. The person is now left out, with one warning."""
+    from stt import config, unknowns
+    rng = np.random.default_rng(1)
+    np.save(config.VOICEPRINTS_DIR / "Pat Quill.npy", rng.normal(size=(2, 8)))
+    np.save(config.VOICEPRINTS_DIR / "Rae Lind.npy", rng.normal(size=(1, 8)))
+    identify.save_registry({
+        "Pat Quill": {"file": "Pat Quill.npy", "n_samples": 2, "sources": ["A", "B"]},
+        "Rae Lind": {"file": "Rae Lind.npy", "n_samples": 1, "sources": ["A"]}})
+    assert set(identify.load_voiceprints()) == {"Pat Quill", "Rae Lind"}
+    for junk in (b"junk", np.array(["a", "b"])):
+        f = config.VOICEPRINTS_DIR / "Pat Quill.npy"
+        if isinstance(junk, bytes):
+            f.write_bytes(junk)
+        else:
+            np.save(f, junk)
+        assert set(identify.load_voiceprints()) == {"Rae Lind"}
+    assert capsys.readouterr().err.count("Pat Quill.npy cannot be read") == 1
+    unknowns.assign({"c": rng.normal(size=8)}, {}, "2026-01-01 M")   # no raise

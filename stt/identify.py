@@ -257,16 +257,36 @@ def _l2(v):
     return v / n
 
 
+_unreadable_warned = set()
+
+
 def load_voiceprints() -> dict:
-    """Return {name: np.ndarray of shape (n_samples, dim)} for all enrolled people."""
+    """Return {name: np.ndarray of shape (n_samples, dim)} for all enrolled people.
+
+    A sample file that cannot be read (truncated, overwritten, a pickle)
+    leaves that person out, with one warning per file. np.load raised on
+    it, and every caller fell with it: the batch's naming for each meeting,
+    unknowns.assign() and the panel's voice pages. The registry doctor names
+    the file ("cannot be read")."""
     out = {}
     for name, meta in load_registry().items():
         f = config.VOICEPRINTS_DIR / meta["file"]
-        if f.exists():
-            arr = np.load(f)
-            if arr.ndim == 1:  # legacy single-centroid format
-                arr = arr.reshape(1, -1)
-            out[name] = arr
+        if not f.exists():
+            continue
+        try:
+            arr = np.load(f, allow_pickle=False)
+        except (OSError, ValueError, EOFError):
+            arr = None
+        if arr is None or arr.ndim not in (1, 2) or not np.issubdtype(arr.dtype, np.number):
+            if str(f) not in _unreadable_warned:
+                _unreadable_warned.add(str(f))
+                print(f"WARNING: {f.name} cannot be read — {name} is not matched "
+                      "until it is restored or re-enrolled (tools/registry_doctor.py "
+                      "names it).", file=sys.stderr)
+            continue
+        if arr.ndim == 1:  # legacy single-centroid format
+            arr = arr.reshape(1, -1)
+        out[name] = arr
     return out
 
 
