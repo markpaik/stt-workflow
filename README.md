@@ -95,6 +95,7 @@ the local 8B model (about 4.5 GB), and offers to install the automation.
 brew install ffmpeg uv rust
 uv venv --python 3.12 .venv          # 3.13 and 3.14 lack wheels for some ML packages
 uv pip install --python .venv/bin/python -r requirements.txt
+uv pip install --python .venv/bin/python -r requirements-dev.txt   # only to run the tests
 
 # speakrs: speaker separation on Core ML
 (cd native/speakrs && cargo build --release --locked)
@@ -106,7 +107,10 @@ uv pip install --python .venv/bin/python -r requirements.txt
 while signed in and accept the terms (and those of any repository it lists).
 Create a read token at [hf.co/settings/tokens](https://hf.co/settings/tokens).
 Copy `stt.env.example` to `stt.env` and set `HF_TOKEN=hf_...`. `stt.env` is
-git-ignored.
+git-ignored. Both speaker engines need the token. speakrs separates the
+speakers, but naming and the per-turn voice checks use the gated pyannote
+embedder, so without a token the batch stops at its start. The doctor
+reports a missing token as `diarizer_no_token`.
 
 **Local models for descriptions, titles, and Ask.** The 8B fallback has its
 own environment, because its `transformers` version conflicts with the audio
@@ -305,7 +309,9 @@ A name is one line of plain text, at most 200 characters. The panel,
 refuse an empty name. They also refuse a name that holds a line break, a
 tab, a bidirectional control such as U+202E, or a zero-width space. Those
 characters split the transcript header, reorder how a name displays, or
-make two names that look the same.
+make two names that look the same. Names like `U7`, `Speaker 7`, and
+`Voice 3` are reserved, because unknown voices show those labels. Naming a
+voice, `enroll.py`, a rename, and a merge refuse them.
 
 When a voice is named, renamed, merged, or relabeled, the description is
 re-rendered with the new names. No model runs for that: the description is
@@ -335,8 +341,8 @@ clip of one person:
 It refuses a sample in these cases. Each refusal is one line, exits 1,
 and writes nothing:
 
-- The name breaks the name rules above, or it reads like `U7` or `U007`,
-  the number an unknown voice holds.
+- The name breaks the name rules above, or it reads like `U7`, `U007`,
+  `Speaker 7`, or `Voice 3`, the labels unknown voices show.
 - The speaker has less than 30 seconds of speech in that meeting, or fewer
   than 10 turns of 1.5 seconds or more. That is too little to identify
   anyone.
@@ -609,8 +615,9 @@ folder, and the logs.
 ./run.sh relabel --all                            # apply names to every meeting
 ./run.sh enroll --from-meeting "2026-05-21 Team Sync"   # list that meeting's speakers
 ./run.sh enroll --from-meeting "2026-05-21 Team Sync" --speaker SPEAKER_01 --name "Ana Ortiz"
+./run.sh enroll --from-meeting "2026-05-21 Team Sync" --speaker SPEAKER_01 --name "Ana Ortiz" --confirm   # enroll even when the sample looks like the wrong person
 ./run.sh enroll --list
-./run.sh test                                     # the test suite (about 2,000 tests)
+./run.sh test                                     # the test suite (about 2,000 tests; needs requirements-dev.txt)
 ```
 
 A `--files` name that matches no file in the watched folder prints `not
@@ -629,15 +636,19 @@ An unreadable `STT_ASR_BACKEND`, `STT_DIARIZER`, `STT_SPEAKRS_AHC`,
 `STT_SPEAKRS_TIMEOUT_SEC`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`, or
 `STT_VM_DELETE_AFTER_INGEST` prints one warning that names it, and the code
 falls back as the tables below say. `./run.sh py tools/doctor.py check`
-lists a bad `STT_ASR_BACKEND`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`, or
-`STT_VM_DELETE_AFTER_INGEST` as `bad_setting`.
+lists each of them as `bad_setting`.
+
+`stt.env` holds one `KEY=VALUE` per line and is read as plain text, never
+run as shell. A path with spaces needs no quotes. One pair of quotes around
+a value is removed, so `FOO="a b"` reads as `a b`. `&`, `|`, and `\` are
+plain characters. A later line for the same key wins.
 
 ### Folders and sources
 
 | Setting | Default | What it does |
 |---|---|---|
 | `STT_ICLOUD_DIR` | iCloud Drive `Voice Recordings` | The watched folder |
-| `STT_MEETINGS_DIR` | `~/Projects/brain/meetings` | Where meetings are stored |
+| `STT_MEETINGS_DIR` | `~/Documents/Meeting Transcripts` | Where meetings are stored |
 | `STT_RECORDINGS_DIR` | `~/Library/Application Support/com.stt-workflow/recordings` | Where the recorder saves captures |
 | `STT_EXPORT_DIR` | `~/Downloads` | Where Word and PDF exports go. A relative path is under your home folder. Under `STT_HOME` the default is `$STT_HOME/exports` |
 | `STT_VOICEMEMOS_SYNC` | `1` | `0` turns the Voice Memos sync off |
@@ -717,8 +728,8 @@ migration folder, outside the repo:
 | `iso_rename.py` | Moves every folder from the old `<title> MMDDYYYY` form to `YYYY-MM-DD <title>` ([Folder names](#folder-names)). `--undo` prints the reversal, and `--undo --apply` runs it |
 | `fetch_speakrs_models.py` | Downloads the speakrs Core ML models once, pinned and checksum-verified |
 | `doctor.py` | Checks the meeting store and voice registries (`check`, `check --deep`), repairs what is safe (`fix --apply`), and undoes a repair (`undo RUN --apply`) |
-| `registry_doctor.py` | Checks the voice registries alone, and `--fix` repairs what is safe ([Repairing the voice registries](#repairing-the-voice-registries)) |
-| `rebuild_voiceprints.py` | Rebuilds the voiceprint registry from meeting caches after a loss |
+| `registry_doctor.py` | Checks and repairs the voice registries alone ([Repairing the voice registries](#repairing-the-voice-registries)). It exits 1 while any finding is left. An unknown voice with a damaged sample is reported only as `invalid` and left for you: `--fix` never merges or splits it |
+| `rebuild_voiceprints.py` | Rebuilds the voiceprint registry from meeting caches after a loss. Like naming, it skips a meeting-only label and a voice with too little speech |
 | `purge.py` | Removes one meeting from every store: folder, manifest, search index, voice samples, and unknown voices heard only there |
 | `vm_delete.py` | Lists every memo the Voice Memos sync copied and what the delete after ingest would do with it, and never runs the Shortcut. `--apply` runs one pass now, and `--clear-halt` resumes deletes after a stop |
 | `fix_dates.py` | Corrects dates that a better source contradicts: a recorder start time or a short typed date ([Dates](#dates)). `--undo RUN --apply` puts them back |
@@ -739,8 +750,10 @@ STT_HOME=$PWD/qa/demo_home STT_PANEL_PORT=8747 .venv/bin/python -m gui.server
 the launchd plist) under that folder, so nothing there can touch your real
 meetings. Under `STT_HOME`, the batch and `run.sh` read `$STT_HOME/stt.env`,
 never the checkout's own, and exports land in `$STT_HOME/exports`. A fresh
-demo home passes `doctor.py check` and `registry_doctor.py` with nothing
-to report.
+demo home passes `registry_doctor.py` with nothing to report. `doctor.py
+check` finds nothing wrong in the home itself. It can still name what the
+Mac lacks: `diarizer_no_token` when the demo home's `stt.env` has no token,
+and `diarizer_fallback` when the speakrs helper is not built.
 
 ### Repairing the voice registries
 
@@ -764,7 +777,7 @@ Each finding is marked `fixable` or `manual`:
 | `dangling` | A sample or meeting reference that names no meeting on disk | Drops the reference |
 | `orphan_lock` | A meeting lock file that nothing can take again | Removes it |
 | `stale_next` | The next unknown number would reuse one already given out | Moves the counter past the highest number |
-| `invalid` | A missing or unreadable sample file, a sample count that disagrees with the file, a sample that is not a unit vector, or an entry of the wrong shape | Leaves it |
+| `invalid` | A missing or unreadable sample file, a sample count that disagrees with the file, a sample that is not a unit vector, or an entry of the wrong shape | Leaves it. An unknown voice with such a sample gets this finding only, so no merge or split touches it |
 | `corrupt` | `registry.json` or `unknowns.json` cannot be read | Leaves it |
 | `unreferenced_file` | A `.npy` that no entry points at | Leaves it: it may be someone's only voiceprint |
 
@@ -782,7 +795,13 @@ line that reverses them.
   check`. A `voicememos_denied` finding means the Python the batch runs lacks
   Full Disk Access. A memo shorter than 3 minutes, one still recording, one
   in Recently Deleted, or one from before `STT_VOICEMEMOS_SINCE` is skipped
-  on purpose.
+  on purpose. The doctor's `voicememos_skipped` line counts held-back memos
+  by reason: `short`, `no_duration` (Voice Memos has no length for it),
+  `in_progress`, `not_local` (an iCloud copy not downloaded yet), `empty` (a
+  zero-byte file), and `copy_failed` (macOS refused that one file; the next
+  run tries again). Rarer reasons are `no_file` and `no_start` (the library
+  gives no file or no start time) and `outside_library` (a path that leaves
+  the Voice Memos folder).
 - **A stored memo stays in Voice Memos.** Run `./run.sh py
   tools/vm_delete.py` to see why. A `voicememos_shortcut_missing` finding
   from the doctor means the Shortcut is not installed under its name. A
@@ -793,7 +812,8 @@ line that reverses them.
 - **Speaker separation is slow.** The speakrs helper or its models are
   missing, so the pipeline fell back to pyannote. Install Rust, then re-run
   `./init.sh`, or build `native/speakrs` and run
-  `tools/fetch_speakrs_models.py`.
+  `tools/fetch_speakrs_models.py`. The doctor reports this as
+  `diarizer_fallback` and names what is missing.
 - **No descriptions or titles.** Neither local model is available. Check
   that Ollama answers at `STT_OLLAMA_URL` with the model pulled, or that
   `.venv-llm` exists. A `bad_setting` finding from the doctor names a value
@@ -813,13 +833,18 @@ line that reverses them.
   (a body that is not one JSON object, a missing field, or a field of the
   wrong type) gets HTTP 400 and a message that names the field.
 - **The registry looks empty but named meetings exist.** The batch warns
-  about this at the start of a run. Every registry write keeps a rolling
-  backup, and `tools/rebuild_voiceprints.py --apply` rebuilds it from the
-  meeting caches.
+  about this at the start of a run. Every write to `registry.json` keeps the
+  previous copy as `registry.json.bak`, unless that copy held nobody.
+  `unknowns.json` has no backup. `tools/rebuild_voiceprints.py --apply`
+  rebuilds `registry.json` from the meeting caches.
 - **Naming a voice says the registry cannot be read.** A damaged
   `registry.json` is never written over. Restore `registry.json.bak`, or run
   `tools/rebuild_voiceprints.py --apply`, which moves the damaged file aside
   first.
+- **The panel does not open.** Another panel, or another program, holds port
+  8737. The menu bar keeps running and shows "Panel not started: port 8737
+  is in use". Quit the other one, or set `STT_PANEL_PORT` for a headless
+  panel.
 - **Overnight runs do not happen.** They need AC power. For a true night
   wake: `sudo pmset repeat wakeorpoweron MTWRFSU 01:57:00`.
 
