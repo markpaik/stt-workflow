@@ -605,3 +605,26 @@ def test_a_title_loses_bidi_controls_and_zero_width_spaces(sandbox):
         assert not any(c in f.name for c in "‮​⁦⁩\n")
     # a joiner is part of real text and stays
     assert summarize._sanitize_name("Caf‍e") == "Caf‍e"
+
+
+def test_undo_without_apply_prints_the_undo_plan_and_writes_nothing(lib, capsys):
+    """--undo alone fell through to the forward plan: it printed 'name
+    already ISO' counts and the forward DRY RUN line, rewrote the plan
+    files, and never showed the undo. A meeting that only got a new
+    header read 'X  ->  X'."""
+    ir.plan(log=lambda *_: None)
+    ir.apply(log=lambda *_: None)
+    capsys.readouterr()
+    plan_before = ir.plan_path().read_bytes()
+    plan_mtime = ir.plan_path().stat().st_mtime_ns
+    tree = _tree()
+    assert ir.main(["--undo"]) == 0
+    out = capsys.readouterr().out
+    assert "would undo" in out and "--undo --apply runs this undo" in out
+    assert "name already ISO" not in out and "--apply renames from this plan" not in out
+    assert "  2026-08-03 Kim Weekly Check-in – Plans  ->  Kim Weekly Check-in – Plans 08032026" in out
+    assert "  2026-08-08 Header Only  (header only)" in out
+    assert "2026-08-08 Header Only  ->  2026-08-08 Header Only" not in out
+    assert _tree() == tree
+    assert ir.plan_path().read_bytes() == plan_before
+    assert ir.plan_path().stat().st_mtime_ns == plan_mtime
