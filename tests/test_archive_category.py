@@ -124,6 +124,59 @@ def test_restore_onto_a_taken_name_uniquifies_and_follows_the_registry(sandbox):
     assert unknowns.load()["speakers"]["U001"]["meetings"] == ["Weekly 05012026 (2)"]
 
 
+def test_two_restores_of_one_meeting_give_one_ok_and_one_clean_refusal(sandbox):
+    """The membership gate ran before the meeting lock, so the loser of
+    two parallel restores passed it, waited, then moved a folder the
+    winner had already moved. The panel got '[Errno 2] No such file or
+    directory: '<abs path>/.archive/...' -> '<abs path>/...''. The gate
+    runs again under the lock now, and a failed move is a plain message."""
+    import threading
+    from stt import review
+    _meeting("2026-01-22 Weekly Check-in")
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+    out = []
+    gate = threading.Barrier(2)
+    real = review.lock_meeting
+
+    calls = []
+
+    def slow_lock(base, *a, **k):
+        calls.append(base)
+        if len(calls) <= 2:
+            gate.wait(timeout=5)      # both callers are past the outer gate
+        return real(base, *a, **k)
+
+    review.lock_meeting = slow_lock
+    try:
+        ts = [threading.Thread(target=lambda: out.append(
+            archive.restore_meeting("2026-01-22 Weekly Check-in"))) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=10)
+    finally:
+        review.lock_meeting = real
+    assert sorted(r["ok"] for r in out) == [False, True]
+    bad = next(r for r in out if not r["ok"])
+    assert bad["error"] == "no archived meeting '2026-01-22 Weekly Check-in'"
+    assert str(config.meetings_dir()) not in bad["error"]
+    assert config.meeting_bases() == ["2026-01-22 Weekly Check-in"]
+
+    # a move the file system refuses is a plain message too
+    archive.archive_meeting("2026-01-22 Weekly Check-in")
+
+    def refuse(*a, **k):
+        raise PermissionError(13, "Permission denied", "/abs/path")
+    real_move = archive._move
+    archive._move = refuse
+    try:
+        r = archive.restore_meeting("2026-01-22 Weekly Check-in")
+    finally:
+        archive._move = real_move
+    assert r == {"ok": False, "error":
+                 "could not restore '2026-01-22 Weekly Check-in' (Permission denied)"}
+
+
 def test_a_new_name_can_never_collide_with_an_archived_one(sandbox):
     """Rename uniquifies against the archive too, so the ambiguity the test above
     has to clean up can't be created in the first place."""

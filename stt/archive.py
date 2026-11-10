@@ -117,7 +117,11 @@ def archive_meeting(base: str) -> dict:
     with review.lock_meeting(base):  # serialize with relabel/review/rename
         if not old_dir.is_dir():
             return {"ok": False, "error": f"no meeting folder for '{base}'"}
-        new_base = _move(base, old_dir, config.archive_dir())
+        try:
+            new_base = _move(base, old_dir, config.archive_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not archive '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # the index maps LIVE meetings only: an archived one is not a relabel
     # target, and leaving it in would resolve its id to a folder the live
     # store no longer holds. restore_meeting puts it back.
@@ -154,7 +158,16 @@ def restore_meeting(base: str) -> dict:
         return {"ok": False, "error": f"no archived meeting '{base}'"}
     src_dir = config.archive_dir() / base
     with review.lock_meeting(base):
-        new_base = _move(base, src_dir, config.meetings_dir())
+        # again under the lock: two restores of one meeting (a double click)
+        # both passed the gate above, and the loser's move raised a raw
+        # OSError that carried both absolute paths to the panel
+        if base not in config.archived_bases():
+            return {"ok": False, "error": f"no archived meeting '{base}'"}
+        try:
+            new_base = _move(base, src_dir, config.meetings_dir())
+        except OSError as e:
+            return {"ok": False, "error": f"could not restore '{base}' "
+                                          f"({e.strerror or type(e).__name__})"}
     # live again: the id resolves to this folder from here on (the meeting
     # kept its id through the archive — that is the whole point of stamping
     # the archive in the backfill)
