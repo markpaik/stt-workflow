@@ -10,6 +10,8 @@ The traps these lock down, in order of how much they'd hurt:
   - an archived meeting still answering on the live endpoints (search/Ask/export)
 """
 import json
+import os
+import stat
 
 import pytest
 
@@ -365,6 +367,33 @@ def test_deleting_one_of_two_same_named_meetings_spares_the_others_record(sandbo
     assert archive.delete_meeting("Weekly 05012026")["ok"]
     assert sorted(manifest.load()["processed"]) == ["archived.m4a"], \
         "the archived meeting's processing history is not the deleted one's"
+
+
+@pytest.mark.skipif(not hasattr(os, "chflags"), reason="needs file flags (macOS)")
+def test_a_delete_that_fails_part_way_leaves_the_meeting_whole(sandbox):
+    """rmtree ran first and the scrubs after it. One file it could not
+    remove (here an immutable one) could take the json first: the meeting
+    left the list, its audio and .txt stayed where nothing could reach
+    them, its manifest record stayed, and the call raised."""
+    base = "Locked Audio 05012026"
+    _meeting(base)
+    manifest.save({"processed": {"locked.m4a": {
+        "mtime": 1.0, "outputs": [str(config.meeting_file(base, ".json"))]}}})
+    audio = config.meeting_file(base, ".m4a")
+    os.chflags(audio, stat.UF_IMMUTABLE)
+    try:
+        r = archive.delete_meeting(base)
+        assert r["ok"] is False and "could not delete" in r["error"]
+        assert "Operation not permitted" in r["error"] and str(sandbox) not in r["error"]
+        assert config.meeting_bases() == [base]           # still in the list
+        assert config.meeting_file(base, ".txt").read_text() == "stub"
+        assert list(manifest.load()["processed"]) == ["locked.m4a"]
+    finally:
+        os.chflags(audio, 0)
+    # the flag is off: the retry finishes and scrubs as a delete does
+    assert archive.delete_meeting(base)["ok"]
+    assert config.meeting_bases() == [] and not config.meeting_dir(base).exists()
+    assert manifest.load()["processed"] == {}
 
 
 def test_delete_reports_the_space_it_freed(sandbox):
