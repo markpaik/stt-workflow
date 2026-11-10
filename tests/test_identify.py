@@ -592,6 +592,34 @@ def test_a_filename_that_differs_only_in_case_is_a_collision(sandbox):
     assert identify._unique_filename("alex rivera", reg) == "alex rivera_2.npy"
 
 
+def test_a_name_in_another_unicode_form_joins_the_existing_person(sandbox):
+    """APFS ignores Unicode normalization too. 'Jose' + U+0301 (pasted from
+    Finder) and 'Jos' + U+00E9 (typed) are one file there. The registry held
+    two entries on that one file, so the second enrollment replaced the
+    first one's samples. The second spelling is the same person now."""
+    from stt import config, unknowns
+    nfd, nfc = "José Perez", "José Perez"
+    identify.enroll(nfd, _near(0, 0))
+    identify.enroll(nfc, _near(0, 1))
+    reg = identify.load_registry()
+    assert list(reg) == [nfd]
+    assert reg[nfd]["n_samples"] == 2
+    assert identify.load_voiceprints()[nfd].shape[0] == 2
+    assert identify.canonical_name(nfc) == nfd
+    # a different name whose file stem is that same file is a collision
+    assert identify._unique_filename(nfc, {"X": {"file": f"{nfd}.npy"}}) == \
+        f"{nfc}_2.npy"
+    # naming an unknown voice with the other spelling joins the person too
+    v = _near(0, 2)
+    np.save(config.VOICEPRINTS_DIR / "U001.npy", (v / np.linalg.norm(v)).reshape(1, -1))
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(
+        '{"next": 2, "speakers": {"U001": {"file": "U001.npy", "meetings": ["m"]}}}')
+    assert unknowns.promote("U001", nfc) is True
+    reg = identify.load_registry()
+    assert list(reg) == [nfd]
+    assert identify.load_voiceprints()[nfd].shape[0] == 3
+
+
 def test_a_case_only_rename_keeps_the_samples(sandbox):
     """Renaming 'alex rivera' to 'Alex Rivera' is a spelling fix. On a
     case-insensitive disk the copy-then-unlink rename would delete the only

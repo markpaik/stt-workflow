@@ -18,6 +18,7 @@ import re
 import shutil
 import sys
 import threading
+import unicodedata
 from datetime import datetime
 
 import numpy as np
@@ -164,27 +165,38 @@ def _unique_filename(stem: str, reg: dict) -> str:
     for what's in use — not just an on-disk exists() check, since callers
     already remove/never-added the current person's own entry before calling
     this, so a legitimate re-enrollment is never blocked by itself)."""
-    # casefolded: the default macOS disk is case-insensitive, so
-    # "alex rivera.npy" IS "Alex Rivera.npy" there
-    claimed = {meta["file"].casefold() for meta in reg.values()}
+    # folded (_fold): the default macOS disk ignores case and Unicode
+    # normalization, so "alex rivera.npy" IS "Alex Rivera.npy" there, and an
+    # 'e' plus a combining accent IS the precomposed 'é'
+    claimed = {_fold(meta["file"]) for meta in reg.values()}
     # unknown voices keep their U###.npy stacks in the same folder, and a
     # file nobody claims may still be someone's only copy: never reuse either
     with contextlib.suppress(OSError, ValueError, AttributeError):
         unk = json.loads((config.VOICEPRINTS_DIR / "unknowns.json").read_text())
-        claimed |= {str(m.get("file", "")).casefold()
+        claimed |= {_fold(str(m.get("file", "")))
                     for m in (unk.get("speakers") or {}).values()}
     with contextlib.suppress(OSError):
-        claimed |= {p.name.casefold() for p in config.VOICEPRINTS_DIR.glob("*.npy")}
+        claimed |= {_fold(p.name) for p in config.VOICEPRINTS_DIR.glob("*.npy")}
     fname = f"{stem}.npy"
     n = 2
-    while fname.casefold() in claimed:
+    while _fold(fname) in claimed:
         fname = f"{stem}_{n}.npy"
         n += 1
     return fname
 
 
+def _fold(s: str) -> str:
+    """`s` as the default macOS disk compares a file name: case and Unicode
+    normalization both ignored. 'Jos' + U+00E9 (typed) and 'Jose' + U+0301
+    (pasted from Finder) are one file there, so they are one key here.
+    NFD on both sides of the casefold is the Unicode canonical caseless
+    match."""
+    return unicodedata.normalize(
+        "NFD", unicodedata.normalize("NFD", str(s)).casefold())
+
+
 def _name_key(name: str) -> str:
-    return " ".join(str(name).split()).casefold()
+    return _fold(" ".join(str(name).split()))
 
 
 _RESERVED = re.compile(r"U\d+|(?:speaker|voice)\s+\d+", re.IGNORECASE)
@@ -206,10 +218,12 @@ RESERVED_ERROR = ("Names like U7, Speaker 7 or Voice 3 are reserved for unknown 
 
 
 def canonical_name(name: str, reg: dict = None) -> str:
-    """The enrolled spelling of `name` when one differs only in case or
-    spacing, else `name` stripped. "alex rivera" typed for an enrolled
-    "Alex Rivera" is the same person: a second entry would point at the same
-    file on a case-insensitive disk and overwrite her samples."""
+    """The enrolled spelling of `name` when one differs only in case,
+    spacing or Unicode normalization, else `name` stripped. "alex rivera"
+    typed for an enrolled "Alex Rivera" is the same person: a second entry
+    would point at the same file on a case-insensitive disk and overwrite
+    her samples. A precomposed 'é' and an 'e' with a combining accent are
+    the same file on that disk too."""
     name = str(name or "").strip()
     if reg is None:
         reg = load_registry()
