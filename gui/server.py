@@ -2330,6 +2330,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif u.path == "/favicon.ico":
+                # the page names its own icon (an inline SVG in next.html).
+                # A client that asks here anyway gets an empty answer, not
+                # the 404 that was the only console error on every load
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             elif u.path == "/classic":
                 # The old page is deleted. A bookmark to it lands on the panel
                 # instead of a 404. The Location is relative, and a browser

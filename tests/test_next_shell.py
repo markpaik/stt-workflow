@@ -674,3 +674,17 @@ console.log(JSON.stringify({set,gone,old}));
     assert "Watched folder set" not in out["gone"]
     # a server from before the field: the old check
     assert mark(out["old"], "Watched folder set").group(1) == "ok"
+
+
+def test_the_page_names_an_icon_and_favicon_ico_is_no_404(running_server):
+    """Every load logged a 404 for /favicon.ico, the only console error,
+    and the tab had no icon."""
+    import urllib.parse as up
+    html = _get(running_server, "/")[2].decode()
+    m = re.search(r'<link rel="icon" href="data:image/svg\+xml,([^"]+)">', html)
+    assert m
+    svg = up.unquote(m.group(1))
+    assert svg.startswith("<svg") and svg.endswith("</svg>") and "#2F4BD6" in svg
+    assert html.index('rel="icon"') < html.index("</head>")
+    status, _, body = _get(running_server, "/favicon.ico")
+    assert (status, body) == (204, b"")
