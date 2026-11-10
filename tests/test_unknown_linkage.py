@@ -251,7 +251,8 @@ def test_a_new_meeting_still_cannot_link_to_a_drifted_stack(sandbox):
 
 # ---------- a damaged registry ----------
 
-@pytest.mark.parametrize("damage", ["{ not json", "[]", "null"])
+@pytest.mark.parametrize("damage", ["{ not json", "[]", "null",
+                                    '{"next": 2, "speakers": ["U001"]}'])
 def test_a_damaged_registry_is_never_written_over(sandbox, capsys, damage):
     """load() reads a damaged unknowns.json as empty. assign() ran on that
     empty registry, minted U001 again, saved the new voice over the old
@@ -338,3 +339,26 @@ def test_a_sample_write_that_dies_midway_keeps_the_old_stack(sandbox, monkeypatc
     assert npy.read_bytes() == old
     assert not list(config.VOICEPRINTS_DIR.glob("*.tmp"))
     assert unknowns.load()["speakers"]["U001"]["meetings"] == ["M1"]
+
+
+@pytest.mark.parametrize("entry", [5, None, "U001.npy", {"meetings": ["M0"]},
+                                   {"file": None, "meetings": ["M0"]}])
+def test_a_hand_edited_entry_never_stops_assign(sandbox, entry):
+    """An entry that is not an object raised TypeError in assign(), and one
+    with no 'file' raised KeyError, for every meeting after the edit. The
+    first kind now leaves the registry on load, the second has no samples,
+    and the number either one held is never handed out again."""
+    import json
+    e = _basis(seed=45)
+    (config.VOICEPRINTS_DIR / "unknowns.json").write_text(
+        json.dumps({"next": 2, "speakers": {"U001": entry}}))
+    out = unknowns.assign({"S0": e[0]}, {"S0": None}, "M1", stats={"S0": GOOD_STATS})
+    assert out == {"S0": "U002"}
+    reg = unknowns.load()
+    assert reg["next"] == 3
+    if isinstance(entry, dict):
+        # a merge of the file-less entry moves its meetings and raises nothing
+        assert unknowns.merge("U001", "U002")
+        assert unknowns.load()["speakers"]["U002"]["meetings"] == ["M1", "M0"]
+    else:
+        assert set(reg["speakers"]) == {"U002"}

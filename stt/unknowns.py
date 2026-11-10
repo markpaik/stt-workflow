@@ -105,6 +105,12 @@ def heal_next(reg: dict) -> dict:
     except (TypeError, ValueError):
         nxt = 1
     reg["next"] = max(nxt, next_floor(reg))
+    # an entry that is not an object (a hand edit: 5, null, a bare file
+    # name) holds no voice, and every reader takes an entry for a dict, so
+    # one such entry raised in assign() for every meeting. It leaves the
+    # registry here. Its number stays spent: `next` was measured with it.
+    reg["speakers"] = {u: m for u, m in reg["speakers"].items()
+                       if isinstance(m, dict)}
     return reg
 
 
@@ -123,12 +129,17 @@ class UnknownsUnreadable(UserError):
 
 def _read(p):
     """The registry in the file at `p`, or None when it is not a readable
-    JSON object (bad JSON, a list, a null, a file that cannot be read)."""
+    JSON object (bad JSON, a list, a null, a file that cannot be read), or
+    when its `speakers` is not an object. heal_next read such a `speakers`
+    as empty, and the next save wrote the empty one over it. The doctor
+    calls both kinds corrupt."""
     try:
         reg = json.loads(p.read_text())
     except (OSError, ValueError):
         return None
-    return reg if isinstance(reg, dict) else None
+    if not isinstance(reg, dict) or not isinstance(reg.get("speakers", {}), dict):
+        return None
+    return reg
 
 
 def _load_checked():
@@ -331,13 +342,21 @@ def forget_meeting_refs(base: str) -> int:
 _unreadable_warned = set()
 
 
+def _sample_file(meta):
+    """The sample file an entry names, or None when it names none. A hand
+    edit can leave an entry with no 'file', which raised KeyError in
+    assign() for every meeting."""
+    f = meta.get("file") if isinstance(meta, dict) else None
+    return config.VOICEPRINTS_DIR / f if isinstance(f, str) and f else None
+
+
 def _samples(reg, uid):
     """This unknown's sample stack (n, dim), or None when its file is not
     there or cannot be read. A damaged file reads as no samples: one
     truncated U###.npy raised inside assign() for every meeting after it,
     because each cluster is scored against every unknown."""
-    f = config.VOICEPRINTS_DIR / reg["speakers"][uid]["file"]
-    if not f.exists():
+    f = _sample_file(reg["speakers"][uid])
+    if f is None or not f.exists():
         return None
     try:
         arr = np.load(f, allow_pickle=False)
@@ -768,7 +787,9 @@ def merge(uid_src: str, uid_dst: str) -> bool:
             record_link(reg["speakers"][uid_dst], ln.get("meeting"),
                         ln.get("meeting_id"), ln.get("cluster"),
                         ln.get("score") or 0.0)
-        (config.VOICEPRINTS_DIR / reg["speakers"][uid_src]["file"]).unlink(missing_ok=True)
+        sf = _sample_file(reg["speakers"][uid_src])
+        if sf is not None:
+            sf.unlink(missing_ok=True)
         del reg["speakers"][uid_src]
         save(reg)
         return True
