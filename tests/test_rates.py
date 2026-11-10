@@ -212,3 +212,54 @@ def test_writing_stays_flat_so_long_meetings_do_not_inflate_it(
     assert rates.stage_tail("writing", 1, "parakeet") == L["tail"]["writing"]
     assert L["tail"]["writing"] == rates._median_model(
         rates._samples(rates._rows())["writing"], flat=True)[1]
+
+
+# ---- a damaged or hand-edited rates.jsonl (the reader skips what it cannot use) ----
+
+_BAD_LINES = ["123", "null", "[1, 2]", '"text"', "{not json",
+              '{"duration": 100, "secs": null}',
+              '{"duration": "x", "secs": {"transcribing": 5}}',
+              '{"duration": 1800, "secs": {"transcribing": "5"}}',
+              '{"duration": NaN, "secs": {"transcribing": 60}}',
+              '{"duration": 1800, "secs": {"transcribing": Infinity}}',
+              '{"duration": 1800, "asr": 5, "n": "two", "at": 7, "diar": [],'
+              ' "secs": {"transcribing": 60, "verifying": 90}}']
+
+
+def test_a_line_that_is_json_but_not_a_row_never_breaks_the_estimates(sandbox):
+    """One line of 123 raised AttributeError in _samples: every ETA, the
+    menu bar and the panel's /api/state failed until newer rows pushed it
+    out of the last 400 lines."""
+    for _ in range(3):
+        _run(spd=25.0)
+    with open(rates.RATES_LOG, "ab") as f:
+        f.write(("\n".join(_BAD_LINES) + "\n").encode())
+        f.write(b"\xff\xfe not text\n")
+    _reset_cache()
+    L = rates.learned()
+    # the three good rows, plus the last bad line kept with its defaults
+    assert L["runs"] == 4
+    assert rates.stage_secs("transcribing", 3600, 1, "parakeet") > 0
+    assert rates.summary()["runs"] == 4
+    est = status.stage_estimates(3600.0, verify=True)
+    assert all(v > 0 for v in est.values())
+
+
+def test_a_row_with_values_of_the_wrong_type_keeps_only_what_is_usable():
+    r = rates.parse_rows([_BAD_LINES[-1]])[0]
+    assert r["duration"] == 1800.0 and r["n"] == 1
+    assert "asr" not in r and "at" not in r and "diar" not in r
+    assert r["secs"] == {"transcribing": 60.0, "verifying": 90.0}
+    assert rates.parse_rows(_BAD_LINES[:-1]) == []
+
+
+def test_the_backtest_skips_the_same_lines(sandbox, tmp_path, capsys):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import eta_backtest
+    p = tmp_path / "rates.jsonl"
+    p.write_text("123\nnull\n" + '{"at": "2026-09-01T00:00:00", "duration": 1800,'
+                 ' "asr": "parakeet", "n": 1, "secs": {"transcribing": 60}}\n')
+    assert eta_backtest.main([str(p)]) == 0
+    assert capsys.readouterr().out.splitlines()[0].endswith("1 samples, 0 of 90 min or more")

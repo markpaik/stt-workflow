@@ -105,16 +105,61 @@ def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
         pass  # calibration must never break the pipeline
 
 
-def _rows():
-    if not RATES_LOG.exists():
-        return []
+def _num(v):
+    """v as a float when it is a finite number above zero, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    v = float(v)
+    return v if math.isfinite(v) and v > 0 else None
+
+
+def _clean_row(r):
+    """The row with only the values the model can use, or None. A line that
+    is JSON but not a row (123, null, a list) or a value of the wrong type
+    ("secs": null, a string duration) raised in _samples, so every ETA and
+    the panel's /api/state failed until newer rows pushed the line out.
+    record() writes only good rows: this guards a hand edit or a damaged
+    file."""
+    if not isinstance(r, dict):
+        return None
+    d, secs = _num(r.get("duration")), r.get("secs")
+    if not d or not isinstance(secs, dict):
+        return None
+    secs = {k: v for k, v in ((k, _num(v)) for k, v in secs.items())
+            if isinstance(k, str) and v}
+    if not secs:
+        return None
+    out = {**r, "duration": d, "secs": secs}
+    for key in ("asr", "diar", "at"):
+        if key in out and not isinstance(out[key], str):
+            del out[key]  # the readers' own default (parakeet, pyannote) applies
+    n = r.get("n", 1)
+    out["n"] = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
+    return out
+
+
+def parse_rows(lines) -> list:
+    """The usable rows among rates.jsonl `lines`, in file order. A line that
+    does not parse, or is not a usable row (_clean_row), is skipped.
+    tools/eta_backtest.py reads the log through this too."""
     rows = []
-    for ln in RATES_LOG.read_text().splitlines()[-400:]:
+    for ln in lines:
         try:
-            rows.append(json.loads(ln))
-        except json.JSONDecodeError:
+            r = _clean_row(json.loads(ln))
+        except ValueError:
             continue
+        if r is not None:
+            rows.append(r)
     return rows
+
+
+def _rows():
+    try:
+        # bytes that are not text spoil only their own line
+        text = RATES_LOG.read_text(errors="replace")
+    except OSError:
+        return []
+    return parse_rows(text.splitlines()[-400:])
 
 
 def _samples(rows, diarizer: str = None) -> dict:
