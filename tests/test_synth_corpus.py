@@ -2,6 +2,7 @@
 determinism (macOS `say` is byte-stable for fixed inputs — verified here on a
 real render), a tiny end-to-end generate, and the sandbox safety rails."""
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -214,6 +215,23 @@ def test_stages_refuse_outside_a_sandbox(sandbox, tmp_path, monkeypatch):
     (tmp_path / "not_a_home").mkdir()
     with pytest.raises(SystemExit):
         synth_corpus._assert_sandboxed()
+
+
+def test_stages_refuse_a_meetings_folder_the_homes_stt_env_moves(sandbox, tmp_path,
+                                                                 monkeypatch):
+    """_assert_sandboxed checked config.MEETINGS_DIR, where the environment
+    wins, while the stages write to config.meetings_dir(), where the home's
+    stt.env wins. A kept stt.env naming another folder passed the check."""
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    monkeypatch.setattr(config, "SEARCH_DB", tmp_path / "search.db")
+    (tmp_path / synth_corpus.HOME_MARKER).write_text("synthetic\n")
+    assert synth_corpus._assert_sandboxed() == tmp_path.resolve()
+    for key, label in (("STT_MEETINGS_DIR", "meetings_dir()"),
+                       ("STT_RECORDINGS_DIR", "recordings_dir()"),
+                       ("STT_ICLOUD_DIR", "source_dir()")):
+        (tmp_path / "stt.env").write_text(f"{key}={tmp_path.parent / 'decoy'}\n")
+        with pytest.raises(SystemExit, match=re.escape(f"config.{label} =")):
+            synth_corpus._assert_sandboxed()
 
 
 def test_ensure_corpus_refuses_unmarked_dir(sandbox, tmp_path, monkeypatch):

@@ -411,6 +411,29 @@ def test_the_evaluation_refuses_a_real_home(monkeypatch):
         ask_eval._guard()
 
 
+def test_the_evaluation_guard_follows_folder_redirects(sandbox, monkeypatch, tmp_path):
+    """_guard checked STT_HOME alone, and build() wrote into
+    config.meetings_dir() and rebuilt config.SEARCH_DB. A meetings folder
+    named in the home's stt.env or in STT_MEETINGS_DIR, or a PROJECT_DIR
+    elsewhere, put the 12 synthetic meetings beside a foreign folder's
+    files. The guard runs before build() writes anything."""
+    monkeypatch.setenv("STT_HOME", str(tmp_path))
+    assert ask_eval._guard() == tmp_path.resolve()
+    decoy = tmp_path.parent / (tmp_path.name + "-decoy")
+    (tmp_path / "stt.env").write_text(f"STT_MEETINGS_DIR={decoy}\n")
+    with pytest.raises(SystemExit, match="the meetings folder .* is outside STT_HOME"):
+        ask_eval._guard()
+    (tmp_path / "stt.env").unlink()
+    monkeypatch.setattr(config, "MEETINGS_DIR", decoy)   # STT_MEETINGS_DIR at import
+    with pytest.raises(SystemExit, match="the meetings folder"):
+        ask_eval._guard()
+    monkeypatch.setattr(config, "MEETINGS_DIR", tmp_path / "meetings")
+    monkeypatch.setattr(config, "SEARCH_DB", decoy / "search.db")  # STT_PROJECT_DIR
+    with pytest.raises(SystemExit, match="the search index"):
+        ask_eval._guard()
+    assert not decoy.exists()
+
+
 @pytest.mark.parametrize("fold", [str.lower, str.upper])
 def test_the_evaluation_guard_folds_letter_case(monkeypatch, fold):
     """APFS folds letter case and resolve() does not, so a home typed as

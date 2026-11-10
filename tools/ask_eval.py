@@ -183,6 +183,16 @@ def _guard():
         r = r.resolve()
         if _overlaps(h, r):
             sys.exit(f"refused: STT_HOME overlaps a real folder ({r})")
+    # build() writes into config.meetings_dir() and rebuilds config.SEARCH_DB.
+    # STT_MEETINGS_DIR or STT_PROJECT_DIR, in the shell or in the home's
+    # stt.env, moves them out of STT_HOME, and the check above saw only
+    # STT_HOME: a marked home wrote its 12 meetings into a foreign folder.
+    for label, p in (("meetings folder", config.meetings_dir()),
+                     ("search index", config.SEARCH_DB),
+                     ("settings folder", config.PROJECT_DIR)):
+        rp = Path(p).expanduser().resolve()
+        if not (rp == h or rp.is_relative_to(h)):
+            sys.exit(f"refused: the {label} {rp} is outside STT_HOME {h}")
     return h
 
 
