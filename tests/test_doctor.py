@@ -240,6 +240,24 @@ def test_registry_repairs_copy_the_voiceprints_first_and_undo(lib, monkeypatch):
     assert _tree(vp) == before
 
 
+@pytest.mark.parametrize("raw", [b'{"processed": {"a.m4a": {', b"\xff\xfe\x00bad", b""])
+def test_a_damaged_manifest_is_reported_and_never_planned_over(lib, raw):
+    """A truncated manifest read as an empty one: check named nothing
+    about it, and fix planned a fresh record for every meeting over it."""
+    config.MANIFEST_PATH.write_bytes(raw)
+    fs = doctor.check(registry=False)
+    bad = [f for f in fs if f.kind == "manifest_unreadable"]
+    assert len(bad) == 1 and bad[0].subject == "manifest.json" and not bad[0].fixable
+    assert not {"manifest_stale", "manifest_flat", "manifest_unlinked"} & {f.kind for f in fs}
+    assert doctor.manifest_plan() == []
+    r = doctor.fix(dry_run=False, registry=False)
+    assert r["plan"]["manifest"] == {}
+    assert config.MANIFEST_PATH.read_bytes() == raw
+    # no manifest at all is no finding: a new home has none yet
+    config.MANIFEST_PATH.unlink()
+    assert "manifest_unreadable" not in {f.kind for f in doctor.check(registry=False)}
+
+
 def test_the_batch_end_report_holds_counts_and_no_names(lib):
     doctor.run_check_at_batch_end()
     rep = (config.PROJECT_DIR / doctor.REPORT_PATH_NAME).read_text()

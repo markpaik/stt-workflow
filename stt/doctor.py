@@ -33,7 +33,8 @@ drops):
 - logs over their cap and calibration.jsonl over its cap.
 
 What it only reports: a folder name that disagrees with its `title` and
-date, a meeting json that is not readable (`unreadable_json`), a folder
+date, a meeting json that is not readable (`unreadable_json`), a
+manifest.json that is not readable (`manifest_unreadable`), a folder
 with no meeting json (`folder_without_json`), meetings missing the store
 keys (tools/backfill_keys.py adds them),
 scratch audio left in work/, an stt.env value that cannot be read and is
@@ -82,6 +83,25 @@ def _manifest() -> dict:
     m = fj.read_json(config.MANIFEST_PATH) or {}
     m.setdefault("processed", {})
     return m
+
+
+def _manifest_problem():
+    """Why manifest.json cannot be read, or None (no file is no problem).
+    A truncated or damaged file read as an empty manifest: check named
+    nothing, fix planned a record for every meeting over it, and the next
+    batch treated every source as new. The registry's own check reports a
+    damaged registry.json, so this reports the manifest the same way."""
+    try:
+        raw = config.MANIFEST_PATH.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"cannot be read ({e.strerror or e})"
+    try:
+        json.loads(raw)
+    except ValueError:              # bad JSON, or bytes that are not UTF-8
+        return "is not readable JSON"
+    return None
 
 
 def _core(rec) -> list:
@@ -141,6 +161,8 @@ def manifest_plan(store=None) -> list:
       "key": manifest key, "outputs": new outputs (not for retire),
       "meeting": base (not for retire), "mtime": (link only)}]"""
     store = _store(store)
+    if _manifest_problem():
+        return []                   # never plan, or write, over a damaged file
     m = _manifest()
     meets = _meetings(store)
     linked = _linked(m)
@@ -361,6 +383,13 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
                 if real and float(d["duration_sec"]) > real + 60:
                     out.append(Finding("duration_mismatch", b,
                                        "stored length is longer than the audio", False))
+    mp = _manifest_problem()
+    if mp:
+        out.append(Finding("manifest_unreadable", config.MANIFEST_PATH.name,
+                           f"manifest.json {mp}, so the next batch run treats "
+                           "every source as new. Restore it from a backup, or "
+                           "move it aside and run fix, which links each meeting "
+                           "back from its own keys", False))
     for a in manifest_plan(store):
         kind = {"flat": "manifest_flat", "relink_mtime": "manifest_stale",
                 "relink_title": "manifest_stale", "relink_tie": "manifest_stale",
