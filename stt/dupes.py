@@ -324,10 +324,20 @@ def library_signature(dest_dir=None) -> str:
     parts = []
     for base in sorted(config.meeting_bases(dest_dir)):
         try:
-            parts.append(f"{base}:{config.meeting_file(base, '.json', dest_dir).stat().st_mtime}")
+            st = config.meeting_file(base, '.json', dest_dir).stat()
         except OSError:
             continue
+        parts.append(f"{base}:" + ":".join(map(repr, _stamp(st))))
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def _stamp(st) -> tuple:
+    """(mtime, size, ctime) of one transcript: what says it is unchanged.
+    The mtime alone is not enough. A restore that keeps it (cp -p, rsync
+    -t, a backup) or a rewrite inside the same second left the old sketch
+    in place, and the pair list stayed wrong both ways. No user call can
+    set the ctime, so any write moves it."""
+    return (st.st_mtime, st.st_size, st.st_ctime)
 
 
 def _is_num(x) -> bool:
@@ -485,7 +495,7 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     """[{"a": base, "b": base, "score": float}] for every live pair that looks
     like the same recording, best score first.
 
-    Sketches are cached per meeting (keyed on the transcript's mtime), so the
+    Sketches are cached per meeting (keyed on the transcript's _stamp), so the
     steady-state cost is one new meeting's shingles. The pair walk is gated on
     duration first: same meeting means same length, and it keeps the comparison
     loop off O(N^2) Jaccards on a big library."""
@@ -496,14 +506,16 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
     for base in sorted(config.meeting_bases(dest_dir)):
         j = config.meeting_file(base, ".json", dest_dir)
         try:
-            mtime = j.stat().st_mtime
+            mtime, size, ctime = _stamp(j.stat())
         except OSError:
             continue
         prev = old.get(base)
         # "words" is required (_good_sketch): an entry cached by an older
         # build carries no word count, and the length gate below needs one
-        # whenever the duration is missing
-        if prev and abs(prev["mtime"] - mtime) < 1.0:
+        # whenever the duration is missing. An entry from an older build
+        # has no size or ctime either, so it is sketched once more.
+        if (prev and prev["mtime"] == mtime and prev.get("size") == size
+                and prev.get("ctime") == ctime):
             sketches[base] = prev["hashes"]
             durs[base] = prev.get("dur") or 0.0
             lens[base] = prev.get("words") or 0
@@ -519,7 +531,8 @@ def similar_meetings(threshold: float = None, dest_dir=None) -> list:
         sk = sketch(_text(d))
         dur, nwords = _length_signal(d)
         sketches[base], durs[base], lens[base] = sk, dur, nwords
-        old[base] = {"mtime": mtime, "dur": dur, "words": nwords, "hashes": sk}
+        old[base] = {"mtime": mtime, "size": size, "ctime": ctime,
+                     "dur": dur, "words": nwords, "hashes": sk}
     # drop cache entries for meetings that are gone (deleted, archived, renamed)
     cache["sketches"] = {b: v for b, v in old.items() if b in sketches}
 

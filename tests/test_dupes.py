@@ -222,6 +222,29 @@ def test_the_cache_follows_an_edited_transcript(sandbox):
     assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
 
 
+def test_the_cache_follows_a_replace_that_keeps_the_mtime(sandbox):
+    """cp -p, rsync -t or a backup restore puts new text under the old mtime.
+    The sketch keyed on the mtime alone stayed, and the pair list stayed
+    wrong both ways until the next real edit."""
+    import os
+    body = _words(400)
+    _meeting("A Mtg 05012026", "a.m4a", text=body, dur=600.0)
+    _meeting("B Mtg 05012026", "b.m4a", text=_words(400, "q"), dur=600.0)
+    assert dupes.similar_meetings(dest_dir=config.meetings_dir()) == []
+
+    j = mfile("B Mtg 05012026", ".json")
+    st = j.stat()
+    d = json.loads(j.read_text())
+    d["segments"] = [{"text": body}]          # now the same text as A
+    j.write_text(json.dumps(d))
+    os.utime(j, (st.st_atime, st.st_mtime))   # the old mtime, kept
+    assert j.stat().st_mtime == st.st_mtime
+    assert dupes.cache_is_current(config.meetings_dir()) is False
+    pairs = dupes.similar_meetings(dest_dir=config.meetings_dir())
+    assert [(p["a"], p["b"]) for p in pairs] == [("A Mtg 05012026", "B Mtg 05012026")]
+    assert dupes.cache_is_current(config.meetings_dir()) is True
+
+
 def test_similarity_is_an_honest_jaccard_estimate():
     a = dupes.sketch(_words(600))
     b = dupes.sketch(_words(600))
