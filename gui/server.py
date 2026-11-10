@@ -803,11 +803,18 @@ def _failed_sources(st):
 
 
 def _dismissed_failures() -> dict:
-    """{source_file: dismissed_at} — failures a human said to stop showing."""
+    """{source_file: dismissed_at} — failures a human said to stop showing.
+    A file of another shape ([], null, a string) or a time that is not text
+    silences nothing: the failure list raised AttributeError on it, and a
+    dismiss raised TypeError. The doctor's _stale_dismissals checks the
+    same way."""
     try:
-        return json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
+        d = json.loads((config.PROJECT_DIR / "dismissed_failures.json").read_text())
     except (OSError, ValueError):
         return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, str)}
 
 
 def _voice_ids(b):

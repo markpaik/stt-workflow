@@ -733,6 +733,23 @@ def test_a_gone_source_failure_is_honest_and_dismissible(sandbox, monkeypatch):
     assert srv.dismiss_failure("") is False
 
 
+@pytest.mark.parametrize("raw", ["[]", "null", '"x"', '{"ghost.m4a": 5}'])
+def test_a_dismissal_file_of_the_wrong_shape_silences_nothing_and_never_raises(
+        sandbox, monkeypatch, raw):
+    """_dismissed_failures returned whatever the file held. A [], null or
+    string file made the failure list raise AttributeError and a dismiss
+    raise TypeError, and a time that is not text made the compare raise."""
+    monkeypatch.setattr(srv, "_results_rows", lambda: [
+        {"name": "ghost.m4a", "at": "2026-08-20T10:00:00", "ok": False,
+         "summary": "failed"}])
+    p = config.PROJECT_DIR / "dismissed_failures.json"
+    p.write_text(raw)
+    assert srv._failed_sources({"recent": []}) == {"ghost.m4a": "failed"}
+    assert srv.dismiss_failure("ghost.m4a") is True
+    assert set(json.loads(p.read_text())) == {"ghost.m4a"}
+    assert srv._failed_sources({"recent": []}) == {}
+
+
 # ---------- fix pass 2 (2026-09-06) ----------
 
 def test_the_tray_failed_line_carries_the_gone_flag(sandbox, monkeypatch):
