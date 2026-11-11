@@ -525,3 +525,41 @@ def test_a_path_outside_the_container_is_never_eligible(tmp_path, kind):
     os.utime(inside, (1e9, 1e9))
     ok, why, _, _ = vm.eligible(dict(row, path=inside.name), 2e9, "2000-01-01", container)
     assert ok, why
+
+
+def test_memos_of_one_day_get_names_no_other_memo_holds(sandbox):
+    """The batch deletes a staged copy once it is stored, and the name check
+    looked at the staging folder alone. So four untitled memos of one day,
+    synced one run apart, were all staged as '<date> Voice Memo.m4a', and
+    one manifest record stood for all four. Each memo now gets a name that
+    no memo staged before holds."""
+    from stt import titles
+    rows = [{"start": f"2026-11-03 {9 + i:02d}:00:00", "title": f"New Recording {i + 1}",
+             "uuid": f"U-{i}"} for i in range(4)]
+    names = []
+    for n in range(1, 5):
+        _lib(rows[:n])
+        r = voicememos.sync(now=NOW)
+        assert r["counts"].get("copied") == 1 and r["counts"].get("already", 0) == n - 1
+        names += r["staged"]
+        for p in voicememos.staging_dir().iterdir():
+            p.unlink()                   # the batch stored it and deleted the copy
+    assert names == ["2026-11-03 Voice Memo.m4a", "2026-11-03 Voice Memo (2).m4a",
+                     "2026-11-03 Voice Memo (3).m4a", "2026-11-03 Voice Memo (4).m4a"]
+    staged = voicememos.load_state()["staged"]
+    assert sorted(e["name"] for e in staged.values()) == sorted(names)
+    # the twin suffix never reaches a title: each still asks for one
+    assert all(titles.clean_name(n) == "Voice Memo" and not titles.is_label(n)
+               for n in names)
+
+
+def test_a_staged_name_the_manifest_holds_is_never_reused(sandbox):
+    """A name with a manifest record (an earlier memo, or a file from the
+    watched folder) would let that one record stand for two recordings."""
+    from stt import manifest, titles
+    manifest.record("2026-11-04 Budget Review.m4a", 1.0, [])
+    manifest.record("2026-11-04 budget review (2).m4a", 1.0, [])   # case folds too
+    _lib([{"start": "2026-11-04 09:00:00", "title": "Budget Review"}])
+    r = voicememos.sync(now=NOW)
+    assert r["staged"] == ["2026-11-04 Budget Review (3).m4a"]
+    assert titles.clean_name(r["staged"][0]) == "Budget Review"

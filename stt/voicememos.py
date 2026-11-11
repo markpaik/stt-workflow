@@ -41,6 +41,9 @@ The copy lands in a staging folder that the batch watches, with a `.vm.json`
 sidecar (stt.provenance reads it): the true start, the title, whether a
 person typed that title, and the default place name as a location note. The
 batch deletes the staged copy after a verified store, never the original.
+Each copy gets a name that no memo staged before and no manifest record
+holds ('<date> Voice Memo (2).m4a'), so one manifest record never stands
+for two memos. The title rules peel the ' (N)' suffix off.
 
 Full Disk Access: macOS guards this container. A launchd job reads it only
 when the interpreter it runs holds Full Disk Access. A denied read is
@@ -444,7 +447,28 @@ def eligible(row: dict, now: float, since: str, container: Path):
     return True, "ok", start, from_path
 
 
-def _staged_name(row, start, typed, stage: Path) -> str:
+def _taken_names(state: dict) -> set:
+    """The staged names a new memo must not take, case folded (APFS folds
+    case): every name the sync staged before, whether or not its copy is
+    still in the staging folder, and every name the manifest holds a record
+    under. The batch deletes a staged copy once it is stored, so the folder
+    alone forgot a name: four memos of one day were all staged as
+    '<date> Voice Memo.m4a', and one manifest record stood for all four."""
+    taken = {str(e.get("name")).casefold() for e in (state.get("staged") or {}).values()
+             if isinstance(e, dict) and e.get("name")}
+    try:
+        from . import manifest
+        taken |= {str(k).casefold() for k in (manifest.load().get("processed") or {})}
+    except Exception:
+        pass
+    return taken
+
+
+def _staged_name(row, start, typed, stage: Path, taken=frozenset()) -> str:
+    """The memo's staged file name: '<start date> <title>.m4a', with a
+    ' (N)' twin suffix when another memo, a manifest record or a file in the
+    staging folder holds that name (`taken`, case folded). The title rules
+    peel the suffix off, so it never shows in a title."""
     stem = _safe(row.get("title")) if typed else ""
     stem = stem or "Voice Memo"
     # a typed title often carries its own date. The start goes in front
@@ -457,7 +481,8 @@ def _staged_name(row, start, typed, stage: Path) -> str:
     name = dates.restamp(stem, start.date().isoformat())
     cand, i = name, 2
     while ((stage / f"{cand}.m4a").exists()
-           or (stage / f"{cand}{SIDECAR_SUFFIX}").exists()):
+           or (stage / f"{cand}{SIDECAR_SUFFIX}").exists()
+           or f"{cand}.m4a".casefold() in taken):
         cand = f"{name} ({i})"
         i += 1
     return cand + ".m4a"
@@ -519,6 +544,7 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
     counts, staged = {}, []
     all_titles = [r.get("title") for r in rows]
     blocked = set(state["blocked"])
+    taken = None            # read once, at the first memo that is copied
     # a denial on ONE memo's file (its stat or its copy) no longer stops the
     # loop: the database read worked, so the other memos still copy, and the
     # denied one is retried on the next run. Only when every memo it tried
@@ -548,7 +574,9 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
             continue
         stage.mkdir(parents=True, exist_ok=True)
         os.chmod(stage, 0o700)
-        name = _staged_name(row, start, typed, stage)
+        if taken is None:
+            taken = _taken_names(state)
+        name = _staged_name(row, start, typed, stage, taken)
         dst = stage / name
         side = {"vm_uuid": row["uuid"], "vm_path": row["path"],
                 "duration": row.get("duration"),
@@ -583,6 +611,7 @@ def sync(now: float = None, container: Path = None, dry_run: bool = False) -> di
         ent = {"name": name, "at": datetime.now().isoformat(timespec="seconds")}
         state["staged"][row["uuid"]] = ent
         _note_staged(row["uuid"], ent)
+        taken.add(name.casefold())
         staged.append(name)
         counts["copied"] = counts.get("copied", 0) + 1
     if denied and not staged and not counts.get("would_copy"):
