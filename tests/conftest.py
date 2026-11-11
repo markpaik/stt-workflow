@@ -46,9 +46,9 @@ def _no_live_ollama(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_real_qwen(monkeypatch):
     """No test sees this Mac's .venv-qwen or model cache: Qwen3-ASR, the
-    default engine, reads as not set up (so the effective engine is
-    Parakeet, as on a fresh clone) unless a test sets it up itself. Each
-    test starts with no remembered engine failure."""
+    one local engine, reads as not set up (as on a fresh clone, where a
+    file it would transcribe fails with the fix) unless a test sets it up
+    itself. Each test starts with no remembered engine failure."""
     from stt import asr_qwen3
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: "not set up in tests")
     monkeypatch.setattr(asr_qwen3, "_unavailable", None)

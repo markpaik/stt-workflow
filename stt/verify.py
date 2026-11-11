@@ -15,9 +15,9 @@ clear them exactly like any other flag.
 
 The second engine is a LOCAL engine that did not write the transcript
 (LOCAL_ENGINES). A cloud engine is never used: the pass would send the whole
-meeting off the Mac. Parakeet is the only local engine, so a Parakeet
+meeting off the Mac. Qwen3-ASR is the only local engine, so a Qwen3-ASR
 transcript has no second opinion, and the pass adds no flags to it. A cloud
-transcript gets Parakeet as its second opinion.
+transcript gets Qwen3-ASR as its second opinion.
 """
 import difflib
 import json
@@ -104,17 +104,20 @@ def regions(primary_words, secondary_words):
 
 # The local engines a second opinion can come from, each named by its
 # stt.rates key. A new local engine goes here and in _module().
-LOCAL_ENGINES = ("parakeet",)
-NO_SECOND_ENGINE = ("verify: no second local engine for a Parakeet transcript, "
+LOCAL_ENGINES = ("qwen3",)
+NO_SECOND_ENGINE = ("verify: no second local engine for a Qwen3-ASR transcript, "
                     "so the second-opinion pass adds no flags")
 
 
 def _own_key(engine) -> str:
     """The stt.rates key of the engine that wrote a transcript: the engine
-    an ASR module returns ("mlx-community/parakeet-tdt-0.6b-v3") or a key
-    already ("parakeet", "cloud:scribe")."""
+    an ASR module returns ("mlx-community/Qwen3-ASR-1.7B-bf16",
+    "elevenlabs/scribe_v2") or a key already ("qwen3", "cloud:scribe")."""
+    from . import rates
     e = str(engine or "")
-    return "parakeet" if "parakeet" in e else e
+    if e in LOCAL_ENGINES or e.startswith("cloud:"):
+        return e
+    return rates.engine_key(e) or e
 
 
 def secondary_engine(primary_engine):
@@ -126,9 +129,9 @@ def secondary_engine(primary_engine):
 
 def _module(engine):
     """The ASR module of a LOCAL_ENGINES key."""
-    if engine == "parakeet":
-        from . import asr_parakeet
-        return asr_parakeet
+    if engine == "qwen3":
+        from . import asr_qwen3
+        return asr_qwen3
     raise ValueError(f"no local engine {engine!r}")
 
 

@@ -39,6 +39,7 @@ LONG_SEC = 90 * 60
 def predict_row(L, row, use_fit):
     """{stage: predicted seconds} for the stages this row actually ran,
     predicted the way status.stage_estimates does."""
+    # a row from before the "asr" field was a Parakeet run (stt/rates.py)
     d, n, asr = row["duration"], int(row.get("n", 1)), row.get("asr", "parakeet")
     out = {}
     for stage in row["secs"]:

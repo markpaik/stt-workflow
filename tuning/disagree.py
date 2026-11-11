@@ -15,7 +15,7 @@ in each disagreement. Three numbers decide the architecture question:
 Also prints the oracle WER: the error rate if an ideal arbiter always picked
 the better engine per disagreement — the ceiling any dual/tri-model rig can hit.
 
-Usage:  ./run.sh py tuning/disagree.py --engines parakeet <other-engine-tag>
+Usage:  ./run.sh py tuning/disagree.py --engines qwen3 <other-engine-tag>
 """
 import argparse
 import difflib
@@ -90,7 +90,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engines", nargs=2, required=True,
-                    help="two stt-stage cache tags, such as parakeet and another engine's")
+                    help="two stt-stage cache tags, such as qwen3 and another engine's")
     args = ap.parse_args()
     tag_a, tag_b = args.engines
 

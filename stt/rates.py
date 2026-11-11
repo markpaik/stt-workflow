@@ -65,30 +65,30 @@ def engine_key(engine):
     named. A finished file's seconds are learned under this. The setting
     read at the end of the file named a model that did not run when the
     model was switched in the panel mid-run, when a strict file ran locally
-    under a cloud setting, and when a cloud run fell back to Parakeet."""
+    under a cloud setting, and when a cloud run fell back to Qwen3-ASR.
+    A meeting from before Parakeet was removed names it: "parakeet", a key
+    no estimate reads. Any other engine is its own key."""
     if not isinstance(engine, str) or not engine:
         return None
-    if engine in (config.QWEN_ASR_MODEL, os.environ.get("STT_QWEN_ASR_MODEL")) \
-            or "qwen3-asr" in engine.lower():
+    from . import asr_qwen3
+    if engine in (config.QWEN_ASR_MODEL, os.environ.get("STT_QWEN_ASR_MODEL"),
+                  asr_qwen3.asr_model()) or "qwen3-asr" in engine.lower():
         return "qwen3"
+    if "parakeet" in engine.lower():
+        return "parakeet"
     head = engine.partition("/")[0]
-    if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
+    if head in _CLOUD_ENGINES:
         return f"cloud:{_CLOUD_ENGINES[head]}"
-    return "parakeet"
+    return engine
 
 
 def current_asr_key() -> str:
-    kv = config._env_file()
-    # the setting's own check, as pipeline._load_asr reads it: case and
-    # spaces are ignored and a typo (or the removed "mlxwhisper") runs
-    # Parakeet. The raw value filed a typo's Parakeet runs under the typo.
-    backend, _ = config._asr_problem(kv.get("STT_ASR_BACKEND"))
-    if backend == "qwen3":
-        # not set up on this Mac: the pipeline falls back to Parakeet, so
-        # the estimate must too (quick file checks only)
-        from . import asr_qwen3
-        if asr_qwen3.problem() is not None:
-            return "parakeet"
+    """The key of the engine a run started now uses. The setting's own
+    check, as pipeline._load_asr reads it: case and spaces are ignored, and
+    a typo or a removed engine ("mlxwhisper", "parakeet") runs qwen3. The
+    raw value filed a typo's runs under the typo. Qwen3-ASR not set up here
+    changes nothing: its files fail, and there is no other engine."""
+    backend, _ = config._asr_problem(config._env_file().get("STT_ASR_BACKEND"))
     return backend
 
 
@@ -115,9 +115,11 @@ def _est_diarize_rate() -> float:
 
 
 def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
-           diarizer: str = None):
+           diarizer: str = None, verify: str = None):
     """Append one completed file's measurements. Called by the batch parent only.
-    `diarizer` is the engine that actually ran (a fallback file is pyannote)."""
+    `diarizer` is the engine that actually ran (a fallback file is pyannote).
+    `verify` is the key of the engine that ran the second-opinion pass, when
+    one ran: its seconds teach that engine's estimate."""
     try:
         if not duration or duration < MIN_AUDIO_SEC:
             return
@@ -130,6 +132,8 @@ def record(duration: float, stage_secs: dict, asr_key: str, n_active: int = 1,
                "asr": asr_key, "n": int(n_active), "secs": secs}
         # rows written before this field were all pyannote (see _samples)
         row["diar"] = diarizer_family(diarizer) if diarizer else effective_diarizer()
+        if verify and secs.get("verifying"):
+            row["verify"] = str(verify)
         with open(RATES_LOG, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:
@@ -161,9 +165,11 @@ def _clean_row(r):
     if not secs:
         return None
     out = {**r, "duration": d, "secs": secs}
-    for key in ("asr", "diar", "at"):
+    for key in ("asr", "diar", "at", "verify"):
         if key in out and not isinstance(out[key], str):
-            del out[key]  # the readers' own default (parakeet, pyannote) applies
+            # the readers' own default applies: rows from before the field
+            # were Parakeet's (a key no estimate reads) and pyannote's
+            del out[key]
     n = r.get("n", 1)
     out["n"] = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
     return out
@@ -195,7 +201,7 @@ def _rows():
 
 def _samples(rows, diarizer: str = None) -> dict:
     """Bucket the rows into (duration, secs) samples per model key, oldest
-    first: {"convert": [...], "asr": {"parakeet@1": [...]}, "diarize": {"1":
+    first: {"convert": [...], "asr": {"qwen3@1": [...]}, "diarize": {"1":
     [...]}, "writing": [...]}. Pure, so tools/eta_backtest.py can replay any
     prefix of the log. Diarize samples count only for `diarizer` (default:
     effective_diarizer()): pyannote hours must not teach the speakrs estimate."""
@@ -208,18 +214,20 @@ def _samples(rows, diarizer: str = None) -> dict:
         if secs.get("converting"):
             buckets["convert"].append((d, secs["converting"]))
         if secs.get("transcribing"):
+            # a row from before the field was a Parakeet run: its legacy
+            # key teaches no estimate a run reads now
             buckets["asr"].setdefault(f"{r.get('asr', 'parakeet')}@{n}", []).append(
                 (d, secs["transcribing"]))
         if secs.get("diarizing") and r.get("diar", "pyannote") == want:
             buckets["diarize"].setdefault(n, []).append((d, secs["diarizing"]))
-        if secs.get("verifying"):
+        if secs.get("verifying") and r.get("verify"):
             # the verify pass IS a transcription by the secondary engine —
-            # its timing calibrates that engine's rate like any primary run
-            from . import verify as _verify
-            sec_key = _verify.secondary_engine(r.get("asr", "parakeet"))
-            if sec_key:
-                buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
-                    (d, secs["verifying"]))
+            # its timing calibrates that engine's rate like any primary run.
+            # A row names that engine ("verify"). A row from before the field
+            # was verified by Parakeet or Whisper, both gone, so it teaches
+            # no estimate: Parakeet's seconds must never teach Qwen3-ASR's.
+            buckets["asr"].setdefault(f"{r['verify']}@{n}", []).append(
+                (d, secs["verifying"]))
         if secs.get("writing"):
             buckets["writing"].append((d, secs["writing"]))
     return buckets
@@ -310,7 +318,7 @@ def _learn(rows, diarizer: str = None) -> dict:
 
 
 def learned() -> dict:
-    """{"convert": rate, "asr": {"parakeet@1": rate, ...}, "diarize": {"1": rate},
+    """{"convert": rate, "asr": {"qwen3@1": rate, ...}, "diarize": {"1": rate},
     "writing": secs, "runs": n, "fit": {...}, "tail": {...}} — see _learn.
     Cached until rates.jsonl changes."""
     try:
@@ -416,7 +424,7 @@ def summary() -> dict:
     """Compact human summary for the GUI settings row."""
     L = learned()
     parts = []
-    for key, label in [("parakeet", "Parakeet"), ("qwen3", "Qwen3-ASR")]:
+    for key, label in [("qwen3", "Qwen3-ASR")]:
         r = L["asr"].get(f"{key}@1")
         if r:
             parts.append(f"{label} {r:.0f}×")

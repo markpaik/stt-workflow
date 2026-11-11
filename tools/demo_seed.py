@@ -194,7 +194,7 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "date": iso,
         "processed_at": spec.get("arrived_at") or f"{iso}T20:14:07",
         "duration_sec": total_dur,
-        "asr_engine": spec.get("asr_engine", "parakeet"),
+        "asr_engine": spec.get("asr_engine", config.QWEN_ASR_MODEL),
         "diarizer": config.DIARIZATION_MODEL,
         "n_speakers": len(speakers),
         "strict": strict,
@@ -475,9 +475,9 @@ def meeting_specs(today=None):
         "category": "work", "series": "lt_weekly",
         "source_file": "LT Weekly Meeting 04082026.m4a",
         # flags with a second engine's words: a cloud transcript checked
-        # by Parakeet, the one pairing verify still runs
+        # by Qwen3-ASR, the one pairing verify runs
         "asr_engine": "elevenlabs/scribe_v2",
-        "verify_engine": config.PARAKEET_MODEL,
+        "verify_engine": config.QWEN_ASR_MODEL,
         "speakers": named(OWNER, "Alex Rivera", "Jordan Lee"),
         "decisions": [
             {"start": 0.5, "end": 2.2, "action": "accept", "text": None,

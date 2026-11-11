@@ -2,7 +2,7 @@
 from stt import config, rates, status
 
 
-def _run(spd=25.0, dspd=2.0, dur=1800, asr="parakeet", n=1):
+def _run(spd=25.0, dspd=2.0, dur=1800, asr="qwen3", n=1):
     rates.record(dur, {"converting": dur / 75, "transcribing": dur / spd,
                        "diarizing": dur / dspd, "writing": 18}, asr, n)
 
@@ -12,20 +12,20 @@ def _reset_cache():
 
 
 def test_no_data_uses_config_defaults(sandbox):
-    assert rates.asr_rate("parakeet", 1) == config.EST_RATES["asr"]["parakeet"]
+    assert rates.asr_rate("qwen3", 1) == config.EST_RATES["asr"]["qwen3"]
     assert rates.diarize_rate(1) == config.EST_RATES["diarize"][rates.effective_diarizer()]
     assert rates.writing_secs() == config.EST_RATES["writing_fixed_sec"]
 
 
 def test_short_audio_not_learned(sandbox):
-    rates.record(60, {"transcribing": 2}, "parakeet", 1)
+    rates.record(60, {"transcribing": 2}, "qwen3", 1)
     _reset_cache()
     assert rates.learned()["runs"] == 0
 
 
 def test_empty_or_zero_stages_not_learned(sandbox):
-    rates.record(1800, {}, "parakeet", 1)
-    rates.record(1800, {"transcribing": 0.0}, "parakeet", 1)
+    rates.record(1800, {}, "qwen3", 1)
+    rates.record(1800, {"transcribing": 0.0}, "qwen3", 1)
     _reset_cache()
     assert rates.learned()["runs"] == 0
 
@@ -34,19 +34,19 @@ def test_median_rejects_outlier(sandbox):
     for spd in (25, 26, 24, 2, 25):  # one sleep-corrupted outlier
         _run(spd=spd)
     _reset_cache()
-    assert 24 <= rates.asr_rate("parakeet", 1) <= 26
+    assert 24 <= rates.asr_rate("qwen3", 1) <= 26
 
 
 def test_models_learn_independently(sandbox):
-    _run(spd=25, asr="parakeet")
+    _run(spd=25, asr="qwen3")
     _run(spd=4.0, asr="cloud:scribe")
     _reset_cache()
-    assert rates.asr_rate("parakeet", 1) == 25
+    assert rates.asr_rate("qwen3", 1) == 25
     assert rates.asr_rate("cloud:scribe", 1) == 4.0
     # a model with no samples still falls back to config, then the 30x default
     assert rates.asr_rate("cloud:openai", 1) == 30.0
     assert "cloud:openai" not in config.EST_RATES["asr"]
-    assert set(config.EST_RATES["asr"]) == {"parakeet", "qwen3"}
+    assert set(config.EST_RATES["asr"]) == {"qwen3"}
 
 
 def test_parallel_contention_fallback_and_learning(sandbox):
@@ -62,13 +62,13 @@ def test_parallel_contention_fallback_and_learning(sandbox):
 def test_cache_invalidates_on_new_data(sandbox):
     _run(spd=25)
     _reset_cache()
-    assert rates.asr_rate("parakeet", 1) == 25
+    assert rates.asr_rate("qwen3", 1) == 25
     import os, time
     time.sleep(0.02)
     for _ in range(9):
         _run(spd=10)
     os.utime(rates.RATES_LOG)
-    assert rates.asr_rate("parakeet", 1) == 10  # mtime change busts the cache
+    assert rates.asr_rate("qwen3", 1) == 10  # mtime change busts the cache
 
 
 def test_corrupt_line_skipped(sandbox):
@@ -83,7 +83,7 @@ def test_corrupt_line_skipped(sandbox):
 def test_stage_estimates_consume_learned(sandbox, monkeypatch):
     _run(spd=20, dspd=2.5)
     _reset_cache()
-    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "qwen3")
     est = status.stage_estimates(3600, 1)
     assert abs(est["transcribing"] - 3600 / 20) < 1
     assert abs(est["diarizing"] - 3600 / 2.5) < 1
@@ -95,7 +95,7 @@ def test_summary_shape(sandbox):
     _run()
     _reset_cache()
     s = rates.summary()
-    assert s["runs"] == 1 and "Parakeet" in s["text"]
+    assert s["runs"] == 1 and "Qwen3-ASR" in s["text"] and "Parakeet" not in s["text"]
 
 
 # ---- the power law (A1): diarization's cost grows faster than the audio ----
@@ -106,7 +106,7 @@ def _diar_samples(durs, b=1.25, a=0.1, jitter=None):
     for i, d in enumerate(durs):
         f = jitter[i] if jitter else 1.0
         rates.record(d, {"transcribing": d / 60, "diarizing": a * d ** b * f,
-                         "writing": 10}, "parakeet", 1)
+                         "writing": 10}, "qwen3", 1)
 
 
 def test_diarizing_follows_a_power_law_so_long_meetings_are_not_short_changed(
@@ -115,7 +115,7 @@ def test_diarizing_follows_a_power_law_so_long_meetings_are_not_short_changed(
     median rate, taken mostly from short meetings, cannot describe a stage
     whose cost grows faster than the audio. With samples that span the
     lengths, the estimate follows secs = a * duration^b instead."""
-    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "qwen3")
     _diar_samples([1200, 1500, 1800, 2400, 2700, 3000, 3600, 10800])
     long = 4.5 * 3600
     truth = 0.1 * long ** 1.25
@@ -133,7 +133,7 @@ def test_diarizing_follows_a_power_law_so_long_meetings_are_not_short_changed(
 def test_the_fit_needs_six_samples_spanning_a_factor_of_two(sandbox, monkeypatch):
     """A slope read off too few samples, or off a narrow band of lengths, is
     noise: the estimate stays on the median rate until both hold."""
-    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "qwen3")
     _diar_samples([1200, 1800, 2400, 3000, 3600])            # five samples
     assert "1" not in rates.learned()["fit"]["diarize"]
     med = rates.diarize_rate(1)
@@ -162,7 +162,7 @@ def test_the_exponent_is_clamped(sandbox):
     f = rates.learned()["fit"]["diarize"]["1"]
     assert f["b"] == 0.8
     # refitted intercept: the prediction passes through the middle of the data
-    mid = rates.predict(rates.learned(), "diarizing", 1470, 1, "parakeet")
+    mid = rates.predict(rates.learned(), "diarizing", 1470, 1, "qwen3")
     assert 0.5 < mid / (50 * 1470 ** 0.3) < 2.0
 
 
@@ -171,7 +171,7 @@ def test_the_fit_uses_only_the_most_recent_samples(sandbox):
     FIT_SAMPLES samples, not the whole history."""
     _diar_samples([600, 900, 1200, 1800, 2400, 3600] * 5, b=1.0, a=5.0)   # old, slow
     _diar_samples([600, 900, 1200, 1800, 2400, 3600] * 4, b=1.0, a=1.0)   # the last 24
-    got = rates.predict(rates.learned(), "diarizing", 3600, 1, "parakeet")
+    got = rates.predict(rates.learned(), "diarizing", 3600, 1, "qwen3")
     assert abs(got - 3600) < 1
 
 
@@ -179,15 +179,15 @@ def test_each_model_carries_a_tail_from_its_own_residuals(sandbox):
     """The tail is how far past its prediction a stage tends to run: the 80th
     percentile of actual over predicted, minus one, floored. Never one
     constant for every stage and every machine."""
-    assert rates.stage_tail("diarizing", 1, "parakeet") == rates.DEFAULT_TAIL
+    assert rates.stage_tail("diarizing", 1, "qwen3") == rates.DEFAULT_TAIL
     # every sample 1.0x except two slow ones: the 80th percentile sits in them
     jit = [1.0] * 8 + [1.5, 1.5]
     _diar_samples([600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3600],
                   b=1.0, a=1.0, jitter=jit)
-    t = rates.stage_tail("diarizing", 1, "parakeet")
+    t = rates.stage_tail("diarizing", 1, "qwen3")
     assert rates.TAIL_RANGE[0] < t < 0.5, t
     # a stage that always lands on its prediction still gets the floor
-    assert rates.stage_tail("transcribing", 1, "parakeet") == rates.TAIL_RANGE[0]
+    assert rates.stage_tail("transcribing", 1, "qwen3") == rates.TAIL_RANGE[0]
 
 
 def test_writing_stays_flat_so_long_meetings_do_not_inflate_it(
@@ -198,20 +198,20 @@ def test_writing_stays_flat_so_long_meetings_do_not_inflate_it(
     near five times the median on the real rates.jsonl. Writing keeps its
     median seconds however long the meeting, while diarizing on the same
     samples still gets its curve."""
-    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "qwen3")
     durs = [600, 1200, 1800, 2400, 3000, 3600, 10800]
     for d, w in zip(durs, [9, 11, 10, 12, 8, 10, 11]):
         rates.record(d, {"transcribing": d / 60, "diarizing": 0.1 * d ** 1.25,
-                         "writing": w}, "parakeet", 1)
+                         "writing": w}, "qwen3", 1)
     L = rates.learned()
     assert "1" in L["fit"]["diarize"]          # the fit still runs where it fits
     assert not L["fit"].get("writing")
     long = 4.5 * 3600
     for dur in (600, 3600, long):
-        assert rates.predict(L, "writing", dur, 1, "parakeet") == 10
+        assert rates.predict(L, "writing", dur, 1, "qwen3") == 10
         assert status.stage_estimates(dur)["writing"] == 10
     # its tail comes from its own flat residuals, not a fit's
-    assert rates.stage_tail("writing", 1, "parakeet") == L["tail"]["writing"]
+    assert rates.stage_tail("writing", 1, "qwen3") == L["tail"]["writing"]
     assert L["tail"]["writing"] == rates._median_model(
         rates._samples(rates._rows())["writing"], flat=True)[1]
 
@@ -241,7 +241,7 @@ def test_a_line_that_is_json_but_not_a_row_never_breaks_the_estimates(sandbox):
     L = rates.learned()
     # the three good rows, plus the last bad line kept with its defaults
     assert L["runs"] == 4
-    assert rates.stage_secs("transcribing", 3600, 1, "parakeet") > 0
+    assert rates.stage_secs("transcribing", 3600, 1, "qwen3") > 0
     assert rates.summary()["runs"] == 4
     est = status.stage_estimates(3600.0, verify=True)
     assert all(v > 0 for v in est.values())
@@ -262,7 +262,7 @@ def test_the_backtest_skips_the_same_lines(sandbox, tmp_path, capsys):
     import eta_backtest
     p = tmp_path / "rates.jsonl"
     p.write_text("123\nnull\n" + '{"at": "2026-09-01T00:00:00", "duration": 1800,'
-                 ' "asr": "parakeet", "n": 1, "secs": {"transcribing": 60}}\n')
+                 ' "asr": "qwen3", "n": 1, "secs": {"transcribing": 60}}\n')
     assert eta_backtest.main([str(p)]) == 0
     assert capsys.readouterr().out.splitlines()[0].endswith("1 samples, 0 of 90 min or more")
 
@@ -274,24 +274,28 @@ def _env(text):
 
 
 def test_the_backend_setting_is_read_through_its_own_check(sandbox):
-    """pipeline._load_asr ignores case and spaces and runs Parakeet for a
-    typo. The raw value filed a typo's Parakeet runs under the typo. The
-    removed Whisper engine ("mlxwhisper") and its variant setting run
-    Parakeet and are estimated as Parakeet."""
-    for raw, key in (("MLXWhisper", "parakeet"), (" mlxwhisper ", "parakeet"),
-                     ('"mlxwhisper"', "parakeet"),
-                     ("mlx-whisper", "parakeet"), ("whisperx", "parakeet"),
-                     ("", "parakeet"), ("CLOUD:Scribe", "cloud:scribe")):
+    """pipeline._load_asr ignores case and spaces and runs qwen3 for a
+    typo. The raw value filed a typo's runs under the typo. The removed
+    engines ("mlxwhisper" with its variant setting, and "parakeet") run
+    qwen3 and are estimated as qwen3."""
+    for raw, key in (("MLXWhisper", "qwen3"), (" mlxwhisper ", "qwen3"),
+                     ('"mlxwhisper"', "qwen3"), ("parakeet", "qwen3"),
+                     (" Parakeet ", "qwen3"),
+                     ("mlx-whisper", "qwen3"), ("whisperx", "qwen3"),
+                     ("", "qwen3"), ("CLOUD:Scribe", "cloud:scribe")):
         _env(f"STT_ASR_BACKEND={raw}\n")
         assert rates.current_asr_key() == key, raw
     _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
-    assert rates.current_asr_key() == "parakeet"
-    assert rates.stage_secs("transcribing", 3600, 1) == 3600 / config.EST_RATES["asr"]["parakeet"]
+    assert rates.current_asr_key() == "qwen3"
+    assert rates.stage_secs("transcribing", 3600, 1) == 3600 / config.EST_RATES["asr"]["qwen3"]
     assert not hasattr(rates, "whisper_variant")
 
 
 def test_an_engine_name_maps_to_the_model_key_it_ran_as():
-    assert rates.engine_key(config.PARAKEET_MODEL) == "parakeet"
+    assert rates.engine_key(config.QWEN_ASR_MODEL) == "qwen3"
+    # a stored meeting from before Parakeet was removed keeps its own key
+    assert rates.engine_key("mlx-community/parakeet-tdt-0.6b-v3") == "parakeet"
+    assert rates.engine_key("some-org/other-engine") == "some-org/other-engine"
     assert rates.engine_key("elevenlabs/scribe_v1") == "cloud:scribe"
     assert rates.engine_key("openai/gpt-4o-transcribe") == "cloud:openai"
     assert rates.engine_key("mistral/voxtral-mini") == "cloud:voxtral"
@@ -300,7 +304,7 @@ def test_an_engine_name_maps_to_the_model_key_it_ran_as():
 
 def test_every_cloud_provider_has_its_engine_prefix():
     """A provider added to asr_cloud without a prefix here would be filed
-    under parakeet."""
+    under its raw engine name, never under its provider."""
     from pathlib import Path
 
     from stt import asr_cloud
@@ -308,3 +312,31 @@ def test_every_cloud_provider_has_its_engine_prefix():
     src = (Path(asr_cloud.__file__)).read_text()
     for head in rates._CLOUD_ENGINES:
         assert f'"engine": f"{head}/' in src, head
+
+
+def test_old_rows_under_the_parakeet_key_do_no_harm(sandbox):
+    """rates.jsonl keeps rows from before Parakeet was removed: under the
+    "parakeet" key, under no key at all (rows from before the field), and
+    verify passes Parakeet ran. None of them moves a Qwen3-ASR estimate, and
+    the panel's summary never names Parakeet."""
+    rows = [{"at": "2026-10-01T00:00:00", "duration": 3600, "asr": "parakeet", "n": 1,
+             "secs": {"transcribing": 40.0}},
+            {"at": "2026-10-01T01:00:00", "duration": 3600, "n": 1,
+             "secs": {"transcribing": 45.0}},
+            {"at": "2026-10-01T02:00:00", "duration": 3600, "asr": "cloud:scribe", "n": 1,
+             "secs": {"transcribing": 300.0, "verifying": 42.0}}]
+    import json
+    rates.RATES_LOG.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    _reset_cache()
+    L = rates.learned()
+    assert "qwen3@1" not in L["asr"]
+    assert rates.asr_rate("qwen3", 1) == config.EST_RATES["asr"]["qwen3"]
+    assert rates.stage_secs("transcribing", 3600, 1, "qwen3") == \
+        3600 / config.EST_RATES["asr"]["qwen3"]
+    assert "Parakeet" not in rates.summary()["text"]
+    # a verify pass that names its engine teaches that engine
+    rates.record(3600, {"transcribing": 300.0, "verifying": 250.0}, "cloud:scribe",
+                 verify="qwen3")
+    _reset_cache()
+    assert rates.learned()["asr"]["qwen3@1"] == round(3600 / 250.0, 2)
+    assert json.loads(rates.RATES_LOG.read_text().splitlines()[-1])["verify"] == "qwen3"

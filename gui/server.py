@@ -94,8 +94,7 @@ def _known_base(base) -> bool:
 
 ASR_CHOICES = [
     {"id": "qwen3", "label": "Qwen3-ASR 1.7B",
-     "note": "most accurate · local · about 3 times slower than Parakeet"},
-    {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
+     "note": "local · the engine for strict meetings and the cloud fallback"},
     # cloud engines: shown only once their key is set; words are transcribed
     # off-device, but diarization + speaker naming stay local — and strict
     # mode ALWAYS forces the local engine (sensitive audio never uploads)
@@ -109,7 +108,6 @@ ASR_CHOICES = [
 MODEL_REPOS = {
     "Qwen3-ASR 1.7B": "mlx-community/Qwen3-ASR-1.7B-bf16",
     "Qwen3 forced aligner 0.6B": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
-    "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
     # listed only when the optional MLX fallback is installed (check_updates)
     "Qwen3-8B (optional MLX fallback)": "mlx-community/Qwen3-8B-4bit",
@@ -172,8 +170,8 @@ def current_model():
 
 def _verify_engine():
     """The local engine a verify run would compare with under the current
-    engine setting, or None (stt.verify.secondary_engine). With Parakeet,
-    the only local engine, it is None."""
+    engine setting, or None (stt.verify.secondary_engine). With Qwen3-ASR,
+    the only local engine, it is None. A cloud engine gets qwen3."""
     from stt import verify
     return verify.secondary_engine(current_model())
 

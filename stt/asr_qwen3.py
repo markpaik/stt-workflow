@@ -1,15 +1,19 @@
-"""ASR backend: Qwen3-ASR 1.7B through mlx-audio, in a child process.
+"""ASR backend: Qwen3-ASR 1.7B through mlx-audio, in a child process. It is
+the one local engine: the default, the engine of every strict meeting, the
+fallback for a failed cloud run, the second listen, and the second opinion
+for a cloud transcript.
 
-Returns what asr_parakeet.transcribe returns:
+Returns what every ASR module returns:
 {"text", "words": [{start, end, word}], "engine"}.
 
-Why a child: mlx-audio needs a newer mlx than parakeet-mlx pins, so the
-model runs under its own interpreter, STT_QWEN_ASR_PY (stt/qwen3_worker.py
-is the child). This module imports neither; it plans the chunks, runs the
-loop guard and merges the result, so all of that is testable without MLX.
+Why a child: mlx-audio pins its own MLX and transformers, so the model runs
+under its own interpreter, STT_QWEN_ASR_PY (stt/qwen3_worker.py is the
+child), and .venv needs no MLX at all. This module imports neither; it
+plans the chunks, runs the loop guard and merges the result, so all of
+that is testable without MLX.
 
 The steps, measured on 7 meetings against Scribe v2 (qa/asr-bench):
-- 300 s chunks with 15 s overlap, as Parakeet runs.
+- 300 s chunks with 15 s overlap.
 - Loop guard. Qwen3-ASR can fall into a repeat loop on a chunk (one
   meeting, the same chunk on every run). A chunk fails when one 3- to
   6-word run repeats more than 8 times in a row, or when it has more than
@@ -50,10 +54,11 @@ The steps, measured on 7 meetings against Scribe v2 (qa/asr-bench):
   run of 4 or more of the same words at other times, then the middle of
   the overlap (merge_chunk_words).
 
-A missing interpreter, package or model is one EngineUnavailable error.
-The pipeline then warns once and transcribes with Parakeet (FIX says what
-to do), and the doctor reports it as asr_fallback. After the first such
-error a process does not try again.
+A missing interpreter, package or model is one EngineUnavailable error:
+one plain line that says what is missing and names the fix (FIX). There is
+no other local engine, so the file fails. The batch counts that as this
+Mac's fault and sets no file aside, and the doctor reports it as
+asr_unavailable. After the first such error a process does not try again.
 """
 import difflib
 import json
@@ -89,11 +94,17 @@ WORKER = Path(__file__).resolve().parent / "qwen3_worker.py"
 
 class EngineUnavailable(RuntimeError):
     """The engine cannot run on this Mac: no interpreter, no mlx-audio, or a
-    model that is not downloaded. One plain sentence, no traceback."""
+    model that is not downloaded. One plain sentence, no traceback. From
+    transcribe() it also names the fix (unavailable_message)."""
 
 
 FIX = "run ./init.sh, which builds .venv-qwen and downloads the two models"
-_unavailable = None   # why the engine could not start in this process, once it failed
+_unavailable = None   # the message once the engine could not start in this process
+
+
+def unavailable_message(why: str) -> str:
+    """The one line a file fails with when the engine cannot run here."""
+    return f"Qwen3-ASR cannot run on this Mac: {why}. To fix it, {FIX}."
 
 
 # ---------- pure helpers (no child process) ----------
@@ -577,8 +588,8 @@ def transcribe(wav_path: Path, chunk_duration: float = CHUNK_SEC,
     try:
         worker = _Worker(wav_path)
     except EngineUnavailable as e:
-        _unavailable = str(e)
-        raise
+        _unavailable = unavailable_message(str(e))
+        raise EngineUnavailable(_unavailable) from None
     words, bye, counts = [], None, {}
     try:
         prev_end, before = None, 0.0

@@ -142,7 +142,7 @@ def _expected(seconds):
 
 # ---------- the shape of the result ----------
 
-def test_the_result_has_the_parakeet_shape_and_every_word_once(fake_child, tmp_path):
+def test_the_result_has_the_word_shape_and_every_word_once(fake_child, tmp_path):
     """Three chunks (0-300, 285-585, 570-700), each aligned in windows: every
     word lands once, in order, at its true time, with its punctuation."""
     wav = _wav(tmp_path / "m.wav", 700)
@@ -344,42 +344,44 @@ def test_a_child_that_dies_mid_run_fails_the_file(fake_child, tmp_path, monkeypa
     assert not isinstance(e.value, asr_qwen3.EngineUnavailable)
 
 
-def test_an_engine_that_cannot_run_falls_back_to_parakeet_with_one_warning(
+def test_an_engine_that_cannot_run_fails_each_file_with_the_fix(
         sandbox, monkeypatch, tmp_path, capsys):
-    """No .venv-qwen: each file is transcribed by Parakeet, the meeting json
-    names Parakeet, and one warning per run names the fix."""
-    import types
-
-    from stt import asr_parakeet, audio
+    """No .venv-qwen, and no other local engine: each file fails with one
+    plain line that names the fix. No meeting folder is left behind, and
+    the second file does not try to start the child again."""
+    from stt import audio
     monkeypatch.setattr(config, "QWEN_ASR_PY", tmp_path / "no-such-venv/bin/python")
     monkeypatch.setattr(config, "ASR_BACKEND", "qwen3")
     monkeypatch.setattr(config, "PUNCTUATE", False)
-    ran = []
-
-    def _parakeet(wav, progress=None):
-        ran.append(wav)
-        return {"engine": config.PARAKEET_MODEL, "text": "hello there",
-                "words": [{"start": 0.2, "end": 0.5, "word": "hello"},
-                          {"start": 0.6, "end": 0.9, "word": "there"}]}
-    monkeypatch.setattr(asr_parakeet, "transcribe", _parakeet)
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: _wav(wav, 2))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    started = []
+    real = asr_qwen3._Worker
+
+    def _count(wav):
+        started.append(wav)
+        return real(wav)
+    monkeypatch.setattr(asr_qwen3, "_Worker", _count)
     for n in (1, 2):
-        src = config.PROJECT_DIR / f"Fallback Meeting {n} 05012026.m4a"
+        src = config.PROJECT_DIR / f"No Engine Meeting {n} 05012026.m4a"
         src.write_bytes(b"x")
-        res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
-                                    do_verify=False, track_unknowns=False)
-        assert json.loads(res["json"].read_text())["asr_engine"] == config.PARAKEET_MODEL
-    assert len(ran) == 2
-    warned = [ln for ln in capsys.readouterr().err.splitlines() if "Qwen3-ASR" in ln]
-    assert len(warned) == 1, warned
-    assert "./init.sh" in warned[0] and "Parakeet" in warned[0]
+        with pytest.raises(asr_qwen3.EngineUnavailable) as e:
+            pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                                  do_verify=False, track_unknowns=False)
+        msg = str(e.value)
+        assert "\n" not in msg and msg.startswith("Qwen3-ASR cannot run on this Mac:")
+        assert "STT_QWEN_ASR_PY" in msg and "./init.sh" in msg
+        assert "Parakeet" not in msg
+    assert len(started) == 1                       # the second file did not try again
+    assert config.meeting_bases(config.MEETINGS_DIR) == []
+    assert "Traceback" not in capsys.readouterr().err
 
 
-def test_the_estimate_follows_the_engine_that_will_run(sandbox, monkeypatch, tmp_path):
+def test_the_estimate_is_qwen3_whether_or_not_it_can_run(sandbox, monkeypatch, tmp_path):
+    """There is no fallback engine, so the estimate never switches to one."""
     (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: "no venv")
-    assert rates.current_asr_key() == "parakeet"
+    assert rates.current_asr_key() == "qwen3"
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
     assert rates.current_asr_key() == "qwen3"
 
@@ -395,34 +397,42 @@ def test_qwen3_is_the_default_backend(sandbox, monkeypatch, capsys):
     assert "STT_ASR_BACKEND" not in capsys.readouterr().err
     assert config._asr_problem("") == ("qwen3", None)
     assert config._asr_problem("qwen3") == ("qwen3", None)
-    assert config._asr_problem("parakeet") == ("parakeet", None)
+    assert config.ASR_BACKENDS == ("qwen3",)
     backend, why = config._asr_problem("qwen")
     assert backend == "qwen3" and "using qwen3" in why
-    # an stt.env with no engine line: the estimate and the panel say qwen3
-    # when it can run, and Parakeet when it will fall back
+    # Parakeet is gone: an old stt.env value names the removal and runs qwen3
+    backend, why = config._asr_problem(" Parakeet ")
+    assert backend == "qwen3" and "the Parakeet engine was removed" in why
+    # an stt.env with no engine line: the estimate and the panel say qwen3,
+    # whether or not it can run here
     (config.PROJECT_DIR / "stt.env").write_text("")
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
     assert rates.current_asr_key() == "qwen3"
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: "no venv")
-    assert rates.current_asr_key() == "parakeet"
+    assert rates.current_asr_key() == "qwen3"
 
 
 def test_qwen3_runs_are_filed_and_estimated_under_their_own_key(sandbox, monkeypatch):
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
     assert rates.engine_key(config.QWEN_ASR_MODEL) == "qwen3"
     assert rates.engine_key("mlx-community/Qwen3-ASR-0.6B-8bit") == "qwen3"
-    assert rates.engine_key(config.PARAKEET_MODEL) == "parakeet"
+    assert rates.engine_key("mlx-community/parakeet-tdt-0.6b-v3") == "parakeet"   # a stored meeting
     (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
     assert rates.current_asr_key() == "qwen3"
     assert rates.stage_secs("transcribing", 3600, 1) == pytest.approx(
         3600 / config.EST_RATES["asr"]["qwen3"])
     rates.record(1200.0, {"transcribing": 100.0}, "qwen3")
+    # an old row under the parakeet key does no harm: it teaches no estimate
     rates.record(1200.0, {"transcribing": 40.0}, "parakeet")
     learned = rates.learned()["asr"]
-    assert learned["qwen3@1"] == pytest.approx(12.0) and learned["parakeet@1"] == pytest.approx(30.0)
-    # a second opinion on a Qwen transcript comes from Parakeet
-    assert verify.secondary_engine(config.QWEN_ASR_MODEL) == "parakeet"
-    assert verify.secondary_engine("qwen3") == "parakeet"
+    assert learned["qwen3@1"] == pytest.approx(12.0)
+    assert rates.stage_secs("transcribing", 1200, 1) == pytest.approx(100.0)
+    assert "Parakeet" not in rates.summary()["text"]
+    # Qwen3-ASR is the one local engine: no second opinion for its own
+    # transcripts, and it is the second opinion for a cloud one
+    assert verify.secondary_engine(config.QWEN_ASR_MODEL) is None
+    assert verify.secondary_engine("qwen3") is None
+    assert verify.secondary_engine("elevenlabs/scribe_v2") == "qwen3"
 
 
 def test_the_worker_imports_nothing_from_this_package():
@@ -443,16 +453,16 @@ def test_the_worker_imports_nothing_from_this_package():
 def test_the_punctuator_skips_qwen_transcripts(monkeypatch):
     from stt import punctuate
     monkeypatch.setattr(config, "PUNCTUATE", True)
-    assert punctuate.runs_on(config.PARAKEET_MODEL)
+    assert punctuate.runs_on("mlx-community/parakeet-tdt-0.6b-v3")
     assert punctuate.runs_on("elevenlabs/scribe_v2")
     assert punctuate.runs_on(None)              # a meeting from before asr_engine
     assert not punctuate.runs_on(config.QWEN_ASR_MODEL)
     monkeypatch.setattr(config, "PUNCTUATE", False)
-    assert not punctuate.runs_on(config.PARAKEET_MODEL)
+    assert not punctuate.runs_on("mlx-community/parakeet-tdt-0.6b-v3")
 
 
 @pytest.mark.parametrize("engine, ran", [(config.QWEN_ASR_MODEL, False),
-                                         (config.PARAKEET_MODEL, True)])
+                                         ("mlx-community/parakeet-tdt-0.6b-v3", True)])
 def test_a_qwen_transcript_keeps_its_own_punctuation(sandbox, monkeypatch, engine, ran):
     """The pipeline and relabel both skip the punctuator on a Qwen transcript,
     and the meeting json says whether it ran."""

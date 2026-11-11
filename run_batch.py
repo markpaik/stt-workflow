@@ -747,7 +747,8 @@ def process_one(src_str: str, dest_str: str, opts: dict) -> dict:
             "outputs": [str(o) for o in outputs + [dest_audio]],
             "summary": summary, "who": who,
             "duration_sec": res["duration_sec"], "stage_secs": stage_secs,
-            "diarizer": res.get("diarizer"), "asr_engine": res.get("asr_engine")}
+            "diarizer": res.get("diarizer"), "asr_engine": res.get("asr_engine"),
+            "verify_engine": res.get("verify_engine")}
 
 
 def _descendants(pid: int) -> list:
@@ -800,20 +801,26 @@ def _stop_own_processes():
 
 
 def _machine_at_fault(e) -> bool:
-    """True when a failure is this Mac's, not the file's: a full disk, or a
-    folder the batch may not write. It never counts toward setting the file
-    aside, so the file runs again once space is freed."""
-    if isinstance(e, audio.WriteFailed):
+    """True when a failure is this Mac's, not the file's: a full disk, a
+    folder the batch may not write, or Qwen3-ASR not set up here (no
+    .venv-qwen, no mlx-audio, a model not downloaded). It never counts
+    toward setting the file aside, so the file runs again once space is
+    freed or ./init.sh has run."""
+    from stt import asr_qwen3
+    if isinstance(e, (audio.WriteFailed, asr_qwen3.EngineUnavailable)):
         return True
     return isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT,
                                                   errno.EROFS)
 
 
 def _trace(e):
-    """Print the traceback of a failed file, except for an ffmpeg failure:
-    its one-line reason (audio.UnreadableAudio, audio.WriteFailed) says it
-    all."""
-    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed)):
+    """Print the traceback of a failed file, except for an ffmpeg failure
+    and an engine that cannot run here: the one-line reason
+    (audio.UnreadableAudio, audio.WriteFailed, asr_qwen3.EngineUnavailable)
+    says it all, with the fix."""
+    from stt import asr_qwen3
+    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed,
+                          asr_qwen3.EngineUnavailable)):
         traceback.print_exc()
 
 
@@ -1146,7 +1153,8 @@ def _main():
             rates.record(res.get("duration_sec"), res.get("stage_secs"),
                          rates.engine_key(res.get("asr_engine"))
                          or rates.current_asr_key(), n_active=n_active,
-                         diarizer=res.get("diarizer"))
+                         diarizer=res.get("diarizer"),
+                         verify=rates.engine_key(res.get("verify_engine")))
             print(f"   done: {res['key']} — {res['summary']}.{res['who']}", flush=True)
             status.finish_file(res["key"], True, res["summary"] + (res["who"] or ""))
             processed += 1

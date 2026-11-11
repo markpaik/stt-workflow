@@ -1183,13 +1183,15 @@ def test_the_panel_reads_lengths_from_the_shared_helper(sandbox, monkeypatch):
 
 
 def test_the_state_names_the_second_engine_verify_would_use(sandbox):
-    """The Activity page hides Verify while this is None: with Parakeet,
+    """The Activity page hides Verify while this is None: with Qwen3-ASR,
     the only local engine, a verify run does nothing. A cloud engine has
-    Parakeet to compare with."""
+    Qwen3-ASR to compare with."""
     _meeting("Some Meeting 05012026")
-    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
     assert srv.gather_state()["verify_engine"] is None
-    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=mlxwhisper\n")
-    assert srv.gather_state()["verify_engine"] is None      # the removed engine runs Parakeet
+    for removed in ("mlxwhisper", "parakeet"):              # the removed engines run qwen3
+        (config.PROJECT_DIR / "stt.env").write_text(f"STT_ASR_BACKEND={removed}\n")
+        assert srv.gather_state()["verify_engine"] is None
+        assert srv.gather_state()["model"] == "qwen3"
     (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
-    assert srv.gather_state()["verify_engine"] == "parakeet"
+    assert srv.gather_state()["verify_engine"] == "qwen3"

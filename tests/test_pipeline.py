@@ -469,14 +469,14 @@ def _fake_asr_engine(engine):
 
 
 @pytest.mark.parametrize("primary, second", [
-    (config.PARAKEET_MODEL, None),              # Whisper was its second opinion
-    ("elevenlabs/scribe_v2", "parakeet")])      # a cloud transcript keeps one
+    (config.QWEN_ASR_MODEL, None),              # the one local engine: none
+    ("elevenlabs/scribe_v2", "qwen3")])         # a cloud transcript gets Qwen3-ASR
 def test_verify_runs_only_when_a_second_local_engine_exists(
         sandbox, monkeypatch, capsys, primary, second):
-    """With Parakeet the only local engine, verify on a Parakeet transcript
+    """With Qwen3-ASR the only local engine, verify on a Qwen3-ASR transcript
     has nothing to compare with. The run is the same as one without verify:
     no verifying stage, no second model, no sidecar, one warning. A cloud
-    transcript still gets Parakeet as its second opinion."""
+    transcript gets Qwen3-ASR as its second opinion."""
     from stt import verify
     monkeypatch.setattr(config, "_setting_warned", set())
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr_engine(primary))
@@ -487,7 +487,7 @@ def test_verify_runs_only_when_a_second_local_engine_exists(
 
     def _run(wav, words, engine, progress=None):
         ran.append(engine)
-        return [], config.PARAKEET_MODEL
+        return [], config.QWEN_ASR_MODEL
     monkeypatch.setattr(verify, "run", _run)
     stages = []
     for n in (1, 2):
@@ -507,6 +507,6 @@ def test_verify_runs_only_when_a_second_local_engine_exists(
         assert err.count("no second local engine") == 1     # once per process
     else:
         assert ran == [primary, primary] and "verifying" in stages
-        assert meta["verify_engine"] == config.PARAKEET_MODEL
+        assert meta["verify_engine"] == config.QWEN_ASR_MODEL
         assert verify.sidecar_path(base).exists()
         assert "no second local engine" not in err

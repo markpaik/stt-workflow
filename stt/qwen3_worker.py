@@ -1,8 +1,8 @@
 """The Qwen3-ASR child process: one model server for one recording.
 
 stt/asr_qwen3.py starts this file under its own interpreter
-(STT_QWEN_ASR_PY), because mlx-audio needs a newer mlx than parakeet-mlx
-pins in the main environment. It runs with `python -I`, so it imports
+(STT_QWEN_ASR_PY): mlx-audio pins its own MLX and transformers, which
+stay out of the main environment. It runs with `python -I`, so it imports
 nothing from this package: only the standard library, numpy, mlx_audio and
 huggingface_hub (for the cache lookup).
 
