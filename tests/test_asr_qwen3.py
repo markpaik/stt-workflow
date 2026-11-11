@@ -80,8 +80,13 @@ for line in sys.stdin:
         for tok in req["text"].split():
             digits = "".join(ch for ch in tok if ch.isdigit())
             t = int(digits) if digits else s       # loop text: at the window start
+            a, b = t + 0.2, t + 0.6
+            if mode == "misalign" and e - s > 100 and 100 <= t - s < 110:
+                a = b = s + 95 + 0.1 * (t - s - 100)   # packed early, no length
+            elif mode == "misalign" and e - s > 100 and t - s == 110:
+                a = s + 96.0                          # stretched to catch up
             items.append(["".join(ch for ch in tok if ch.isalnum()),
-                          round(t + 0.2 - s, 3), round(t + 0.6 - s, 3)])
+                          round(a - s, 3), round(b - s, 3)])
         send({"items": items})
 send({"bye": True, "peak_gb": 1.5})
 '''
@@ -402,3 +407,99 @@ def test_a_qwen_transcript_keeps_its_own_punctuation(sandbox, monkeypatch, engin
     assert relabel.relabel_one(base) is True
     data = json.loads(res["json"].read_text())
     assert data["punctuated"] is ran and bool(calls) is ran
+
+
+# ---------- repair of misplaced stretches ----------
+
+def _true_words(lo, hi):
+    return [{"start": t + 0.2, "end": t + 0.6, "word": f"w{t}"} for t in range(lo, hi)]
+
+
+def test_clean_words_have_no_suspect_stretch():
+    assert asr_qwen3.suspect_stretches(_true_words(0, 300)) == []
+    # a lone dash has no length by design and is no mark
+    ws = _true_words(0, 50)
+    ws.insert(10, {"start": 9.6, "end": 9.6, "word": "-"})
+    assert asr_qwen3.suspect_stretches(ws) == []
+
+
+def test_a_packed_burst_before_a_stretched_word_is_suspect():
+    ws = _true_words(0, 200)
+    for t in range(100, 110):
+        ws[t]["start"] = ws[t]["end"] = 95 + 0.1 * (t - 100)
+    ws[110]["start"] = 96.0
+    spans = asr_qwen3.suspect_stretches(ws)
+    assert len(spans) == 1
+    i0, i1 = spans[0]
+    assert i0 <= 100 and i1 >= 110
+
+
+class _FakeAligner:
+    """worker.align for repair_chunk: true times for w<t>, or `bad` times."""
+
+    def __init__(self, bad=False):
+        self.calls, self.bad = [], bad
+
+    def align(self, a, b, text):
+        self.calls.append((a, b))
+        out = []
+        for tok in text.split():
+            t = int(tok.strip("w."))
+            st, en = (a, a) if self.bad else (t + 0.2, t + 0.6)
+            out.append([tok.strip("."), st - a, en - a])
+        return out
+
+
+def test_a_suspect_stretch_is_aligned_again_between_its_neighbours():
+    ws = _true_words(0, 200)
+    for t in range(100, 110):
+        ws[t]["start"] = ws[t]["end"] = 95 + 0.1 * (t - 100)
+    ws[110]["start"] = 96.0
+    fake = _FakeAligner()
+    got = asr_qwen3.repair_chunk(fake, ws, 0.0, 300.0)
+    assert got == _true_words(0, 200)
+    # one call: words 90..122, between the end of w89 and the start of w123
+    assert fake.calls == [(89.6, 123.2)]
+
+
+def test_a_realignment_that_is_no_better_is_dropped():
+    ws = _true_words(0, 200)
+    for t in range(100, 110):
+        ws[t]["start"] = ws[t]["end"] = 95 + 0.1 * (t - 100)
+    ws[110]["start"] = 96.0
+    before = [dict(w) for w in ws]
+    got = asr_qwen3.repair_chunk(_FakeAligner(bad=True), ws, 0.0, 300.0)
+    assert got == before
+
+
+def test_the_engine_repairs_a_misplaced_stretch(fake_child, tmp_path, monkeypatch, capsys):
+    """The fake aligner misplaces 11 words in every long window; the engine
+    finds them and aligns them again on their own."""
+    monkeypatch.setenv("FAKE_QWEN_MODE", "misalign")
+    out = asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 700))
+    assert [w["word"].rstrip(".") for w in out["words"]] == _expected(700)
+    for w in out["words"]:
+        t = int(w["word"].strip("w."))
+        assert w["start"] == pytest.approx(t + 0.2), w
+    assert "word times repaired in" in capsys.readouterr().out
+
+
+# ---------- progress ----------
+
+def test_progress_moves_inside_every_chunk(fake_child, tmp_path):
+    seen = []
+    asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 700), progress=seen.append)
+    assert seen == sorted(seen) and seen[-1] == 1.0
+    assert len(seen) == 3 * 3                    # decode, align, repair per chunk
+    # the first chunk's decode is 300 of 730 audio seconds planned, 85 percent done
+    assert seen[0] == pytest.approx(300 * asr_qwen3.DECODE_SHARE / 730)
+
+
+def test_progress_counts_the_guard_re_decodes_and_never_steps_back(fake_child, tmp_path,
+                                                                  monkeypatch):
+    monkeypatch.setenv("FAKE_QWEN_LOOP_AT", "285")
+    monkeypatch.setenv("FAKE_QWEN_MODE", "half_loops")
+    seen = []
+    asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 700), progress=seen.append)
+    assert seen == sorted(seen) and seen[-1] == 1.0
+    assert len(seen) == 3 * 3 + 2                # two halves re-decoded

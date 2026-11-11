@@ -29,6 +29,20 @@ The steps, measured on 7 meetings against Scribe v2 (qa/asr-bench):
   the words up to the widest pause between ALIGN_CUT_SEC[0] and
   ALIGN_CUT_SEC[1] are kept, and the rest of the text is aligned again
   from that pause.
+- Repair. In some short stretches the aligner still puts words 2 to 20 s
+  off (2.3 percent of matched words on 7 meetings, against 0.1 percent for
+  Parakeet), and those words then get the wrong speaker far more often.
+  Such a stretch has a shape: a word stretched LONG_WORD_SEC or more while
+  the aligner catches up, 8 words packed into PACKED_SEC, or several words
+  with no length. Each flagged stretch is aligned again on its own, between
+  the words on either side of it, and the new times are kept only when
+  they have fewer of those marks. A stretch that does not improve is tried
+  once more with REPAIR_WIDEN words more on each side. Two passes. Scored
+  on two meetings (qa/asr-trial): words 1 s or more off fell 45 percent
+  (780 to 429), and the share with the right speaker rose 0.16 and 0.23
+  points, for about 3 percent more run time. Much of the rest is speech
+  that Qwen did not transcribe: the aligner cannot skip it, so it pulls
+  the next words into it.
 - Neighbouring chunks are joined by word time: inside the overlap, the
   longest run of the same words at the same times (within ANCHOR_TOL_SEC)
   is the seam, cut at the word nearest the middle of the overlap. Then a
@@ -60,6 +74,13 @@ ANCHOR_MIN_WORDS = 2
 MIN_DECODE_SEC = 0.5       # a stretch shorter than this has no speech to decode
 ALIGN_FULL_SEC = 240.0     # a stretch up to this long is aligned in one call
 ALIGN_CUT_SEC = (150.0, 190.0)  # a longer one is cut at a pause in this window
+LONG_WORD_SEC = 1.5        # repair: a word stretched this long marks a catch-up
+PACKED_SEC = 1.0           # repair: 8 words starting within this are packed
+REPAIR_PASSES = 2
+REPAIR_WIDEN = 20          # words added on each side when a stretch does not improve
+# progress within one chunk: share of its time spent decoding (the rest is
+# alignment and repair). Measured in the trial: decode ~85 percent.
+DECODE_SHARE = 0.85
 WORKER = Path(__file__).resolve().parent / "qwen3_worker.py"
 
 
@@ -336,20 +357,26 @@ class _Worker:
         return bye
 
 
-def _decode(worker, s, e, note):
-    """One chunk's text, through the loop guard and its fallbacks."""
+def _decode(worker, s, e, note, step=lambda sub: None):
+    """One chunk's text, through the loop guard and its fallbacks. `step`
+    gets the share of the chunk done (0..DECODE_SHARE) after each decode."""
     text = worker.transcribe(s, e)
+    step(DECODE_SHARE)
     reasons = guard_reasons(text, e - s)
     if not reasons:
         return text
     half = (e - s) / 2.0
     halves = ((s, min(e, s + half + OVERLAP_SEC / 2)), (max(s, s + half - OVERLAP_SEC / 2), e))
     merged, unresolved = [], False
-    for hs, he in halves:
+    # the re-decodes take about as long again: the bar holds near the
+    # decode share and creeps, so it never runs ahead and steps back
+    extra = (1.0 - DECODE_SHARE) / 4
+    for h, (hs, he) in enumerate(halves):
         ht = worker.transcribe(hs, he)
         if guard_reasons(ht, he - hs):
             ht = worker.transcribe(hs, he, repetition_penalty=REPETITION_PENALTY)
             unresolved = unresolved or bool(guard_reasons(ht, he - hs))
+        step(DECODE_SHARE + extra * (h + 1))
         merged = merge_text(merged, ht.split())
     note(f"   qwen3: the chunk at {s:.0f} s failed the loop guard ({'; '.join(reasons)}); "
          f"decoded again as two halves" + (", and a half still fails" if unresolved else ""))
@@ -390,6 +417,88 @@ def align_chunk(worker, s, e, text):
     return out
 
 
+def _no_length(w):
+    """A word with no length that should have one (a lone '-' has none)."""
+    return w["end"] - w["start"] <= 0.0 and any(ch.isalnum() for ch in w["word"])
+
+
+def _marks(words):
+    """How many repair marks a run of aligned words carries."""
+    n = sum(1 for w in words if w["end"] - w["start"] >= LONG_WORD_SEC)
+    n += sum(1 for k in range(len(words) - 7)
+             if words[k + 7]["start"] - words[k]["start"] < PACKED_SEC)
+    return n + sum(1 for w in words if _no_length(w))
+
+
+def suspect_stretches(words):
+    """[(i0, i1)] index ranges of aligned words that look misplaced: around a
+    word stretched LONG_WORD_SEC or more (12 words each side), around 8 words
+    packed into PACKED_SEC, and around two or more words with no length
+    within 13 words. Ranges closer than 4 words are joined."""
+    n = len(words)
+    flag = [False] * n
+
+    def mark(a, b):
+        for t in range(max(0, a), min(n, b)):
+            flag[t] = True
+    for k, w in enumerate(words):
+        if w["end"] - w["start"] >= LONG_WORD_SEC:
+            mark(k - 12, k + 13)
+        if (_no_length(w) and sum(1 for t in range(max(0, k - 6), min(n, k + 7))
+                                  if _no_length(words[t])) >= 2):
+            mark(k - 8, k + 9)
+    for k in range(n - 7):
+        if words[k + 7]["start"] - words[k]["start"] < PACKED_SEC:
+            mark(k - 4, k + 12)
+    out, i = [], 0
+    while i < n:
+        if not flag[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and any(flag[j + 1:j + 4]):
+            j += 1
+        out.append((i, j))
+        i = j + 1
+    return out
+
+
+def _realign(worker, words, i0, i1, s, e):
+    """Words i0..i1 aligned again on their own, between the end of the word
+    before and the start of the word after; None when there is no room or
+    the items do not line up."""
+    a = words[i0 - 1]["end"] if i0 > 0 else s
+    b = words[i1 + 1]["start"] if i1 + 1 < len(words) else e
+    part = words[i0:i1 + 1]
+    if b - a < 0.1 * len(part):
+        return None
+    text = " ".join(w["word"] for w in part)
+    new = attach_times(text, worker.align(a, b, text), a, b - a)
+    return new if len(new) == len(part) else None
+
+
+def repair_chunk(worker, words, s, e, counts=None):
+    """Align each suspect stretch of one chunk's words again (module notes).
+    Keeps new times only when they carry fewer marks. `counts`, a dict,
+    gets "flagged" and "repaired" added."""
+    words = list(words)
+    counts = {} if counts is None else counts
+    for _ in range(REPAIR_PASSES):
+        for i0, i1 in suspect_stretches(words):
+            counts["flagged"] = counts.get("flagged", 0) + 1
+            new = _realign(worker, words, i0, i1, s, e)
+            if new is not None and _marks(new) < _marks(words[i0:i1 + 1]):
+                words[i0:i1 + 1] = new
+                counts["repaired"] = counts.get("repaired", 0) + 1
+                continue
+            j0, j1 = max(0, i0 - REPAIR_WIDEN), min(len(words) - 1, i1 + REPAIR_WIDEN)
+            new = _realign(worker, words, j0, j1, s, e)
+            if new is not None and _marks(new) < _marks(words[j0:j1 + 1]):
+                words[j0:j1 + 1] = new
+                counts["repaired"] = counts.get("repaired", 0) + 1
+    return words
+
+
 def _duration(wav_path) -> float:
     with wave.open(str(wav_path), "rb") as w:
         return w.getnframes() / float(w.getframerate())
@@ -398,25 +507,35 @@ def _duration(wav_path) -> float:
 def transcribe(wav_path: Path, chunk_duration: float = CHUNK_SEC,
                overlap_duration: float = OVERLAP_SEC, progress=None) -> dict:
     """Transcribe a 16 kHz mono WAV (see the module notes).
-    progress: optional callable(fraction 0..1), called after each chunk."""
+    progress: optional callable(fraction 0..1), called after every step of
+    every chunk: its decode (and any guard re-decode), its alignment, and
+    its repair. Each chunk counts by its audio length."""
     note = lambda msg: print(msg, flush=True)  # noqa: E731
     plan = chunk_plan(_duration(wav_path), chunk_duration, overlap_duration)
+    total = sum(e - s for s, e in plan) or 1.0
     worker = _Worker(wav_path)
-    words, bye = [], None
+    words, bye, counts = [], None, {}
     try:
-        prev_end = None
-        for k, (s, e) in enumerate(plan):
-            text = _decode(worker, s, e, note)
+        prev_end, before = None, 0.0
+        for s, e in plan:
+            def step(sub, before=before, length=e - s):
+                if progress:
+                    progress(min(1.0, (before + sub * length) / total))
+            text = _decode(worker, s, e, note, step)
             cw = align_chunk(worker, s, e, text)
+            step(DECODE_SHARE + (1.0 - DECODE_SHARE) * 0.6)
+            cw = repair_chunk(worker, cw, s, e, counts)
+            step(1.0)
             if prev_end is None:
                 words = cw
             else:
                 words = merge_chunk_words(words, cw, s, prev_end)
-            prev_end = e
-            if progress:
-                progress(min(1.0, (k + 1) / len(plan)))
+            prev_end, before = e, before + (e - s)
     finally:
         bye = worker.close()
+    if counts.get("flagged"):
+        note(f"   qwen3: word times repaired in {counts.get('repaired', 0)} of "
+             f"{counts['flagged']} flagged stretches")
     if bye and bye.get("peak_gb"):
         note(f"   qwen3: child peak memory {bye['peak_gb']:.1f} GB")
     words = [w for w in words if str(w["word"]).strip()]
