@@ -518,6 +518,8 @@ def _import_asr(tmp_path, raw):
     (" MLXWhisper ", "parakeet", "stt.asr_parakeet", True),   # the removed engine
     ("mlxwhisper", "parakeet", "stt.asr_parakeet", True),
     ("parakeet", "parakeet", "stt.asr_parakeet", False),
+    ("qwen3", "qwen3", "stt.asr_qwen3", False),
+    ("qwen", "parakeet", "stt.asr_parakeet", True),
     ("cloud:scribe", "cloud:scribe", "stt.asr_cloud", False),
     ("", "parakeet", "stt.asr_parakeet", False)])
 def test_an_unknown_asr_backend_warns_and_keeps_parakeet(tmp_path, raw, want, mod, warns):

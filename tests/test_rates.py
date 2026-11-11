@@ -45,7 +45,8 @@ def test_models_learn_independently(sandbox):
     assert rates.asr_rate("cloud:scribe", 1) == 4.0
     # a model with no samples still falls back to config, then the 30x default
     assert rates.asr_rate("cloud:openai", 1) == 30.0
-    assert config.EST_RATES["asr"] == {"parakeet": 30.0}
+    assert "cloud:openai" not in config.EST_RATES["asr"]
+    assert set(config.EST_RATES["asr"]) == {"parakeet", "qwen3"}
 
 
 def test_parallel_contention_fallback_and_learning(sandbox):

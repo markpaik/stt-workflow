@@ -30,6 +30,9 @@ def _load_asr(strict=False):
         else:
             from . import asr_cloud
             return asr_cloud
+    if backend == "qwen3":
+        from . import asr_qwen3
+        return asr_qwen3
     from . import asr_parakeet
     return asr_parakeet
 

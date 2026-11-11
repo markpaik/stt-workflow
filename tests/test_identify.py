@@ -710,7 +710,9 @@ _NO_PRIVATE_DATA = {"tools/next_screens.py", "tools/token_contrast.py"}
 
 def test_every_script_imports_config_and_so_the_umask():
     """Every script with a __main__ block reaches stt.config (directly or
-    through another stt module), so the owner-only umask applies to it."""
+    through another stt module), so the owner-only umask applies to it. A
+    child that runs under another interpreter and cannot import the package
+    (stt/qwen3_worker.py) sets the same umask itself."""
     from pathlib import Path
     repo = Path(__file__).resolve().parent.parent
     files = [p for d in ("tools", "stt", "gui") for p in (repo / d).glob("*.py")]
@@ -724,7 +726,7 @@ def test_every_script_imports_config_and_so_the_umask():
         if rel in _NO_PRIVATE_DATA:
             continue
         if not ("from stt" in src or "from . import" in src or "import stt" in src
-                or "from .config" in src):
+                or "from .config" in src or "os.umask(0o077)" in src):
             missing.append(rel)
     assert missing == []
 

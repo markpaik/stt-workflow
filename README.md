@@ -685,7 +685,9 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
+| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `qwen3`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it, and it does not offer `qwen3` yet |
+| `STT_QWEN_ASR_PY` | `.venv-qwen/bin/python` in the checkout | For `qwen3`: the Python that runs Qwen3-ASR 1.7B and its forced aligner. They need mlx-audio, which needs a newer MLX than Parakeet, so this is a second environment, and `init.sh` does not build it yet. If it is missing, each file fails with one line and is not set aside |
+| `STT_QWEN_ASR_MODEL`, `STT_QWEN_ALIGNER_MODEL` | `mlx-community/Qwen3-ASR-1.7B-bf16`, `mlx-community/Qwen3-ForcedAligner-0.6B-8bit` | The two Qwen models. They load from the local Hugging Face cache only, so download them before the first run |
 | `STT_DIARIZER` | `speakrs` | `pyannote` forces the CPU path. Any other value prints a warning and keeps speakrs |
 | `STT_SPEAKRS_AHC` | `0.55` | The speakrs merge threshold. A value that is not a number 0 or above uses the default |
 | `STT_SPEAKRS_TIMEOUT_SEC` | `3600` | How long the speakrs helper may run on one file. A value that is not a whole number above 0 uses the default |

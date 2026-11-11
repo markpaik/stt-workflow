@@ -290,10 +290,11 @@ RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
 RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
 RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
-# ASR backend: "parakeet" (default, native MLX) or "cloud:<provider>".
+# ASR backend: "parakeet" (default, native MLX), "qwen3" (Qwen3-ASR 1.7B in
+# its own interpreter, stt/asr_qwen3.py) or "cloud:<provider>".
 # The local Whisper engine ("mlxwhisper") is gone: that value warns as an
 # unknown one does and runs Parakeet.
-ASR_BACKENDS = ("parakeet",)
+ASR_BACKENDS = ("parakeet", "qwen3")
 CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
 
 
@@ -308,7 +309,7 @@ def _asr_problem(raw):
     if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
         return v, None
     gone = " (the Whisper engine was removed)" if v == "mlxwhisper" else ""
-    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet or cloud:"
+    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet, qwen3 or cloud:"
                              f"{'/'.join(CLOUD_ASR)}{gone}; using parakeet")
 
 
@@ -321,6 +322,16 @@ def _asr_backend_setting() -> str:
 
 
 ASR_BACKEND = _asr_backend_setting()
+
+# Qwen3-ASR (STT_ASR_BACKEND=qwen3). mlx-audio needs a newer mlx than
+# parakeet-mlx pins, so the model runs under its own interpreter: a venv with
+# mlx-audio, outside .venv. The models load from the local Hugging Face cache
+# only (the child sets HF_HUB_OFFLINE), so they must be downloaded first.
+QWEN_ASR_PY = Path(os.environ.get("STT_QWEN_ASR_PY",
+                                  CODE_DIR / ".venv-qwen" / "bin" / "python"))
+QWEN_ASR_MODEL = os.environ.get("STT_QWEN_ASR_MODEL", "mlx-community/Qwen3-ASR-1.7B-bf16")
+QWEN_ALIGNER_MODEL = os.environ.get("STT_QWEN_ALIGNER_MODEL",
+                                    "mlx-community/Qwen3-ForcedAligner-0.6B-8bit")
 
 # --- Audio (video containers welcome too — ffmpeg extracts the audio track) ---
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".caf", ".m4b", ".flac",
@@ -532,7 +543,8 @@ BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 # (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
 EST_RATES = {
     "convert": 80.0,
-    "asr": {"parakeet": 30.0},
+    # qwen3: decode + forced alignment in its child, model load included
+    "asr": {"parakeet": 30.0, "qwen3": 12.0},
     # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
     # but the pyannote-embedder turn pass and model load dominate after it:

@@ -800,20 +800,26 @@ def _stop_own_processes():
 
 
 def _machine_at_fault(e) -> bool:
-    """True when a failure is this Mac's, not the file's: a full disk, or a
-    folder the batch may not write. It never counts toward setting the file
-    aside, so the file runs again once space is freed."""
+    """True when a failure is this Mac's, not the file's: a full disk, a
+    folder the batch may not write, or a speech engine that cannot run here
+    (asr_qwen3.EngineUnavailable). It never counts toward setting the file
+    aside, so the file runs again once space is freed or the engine is set up."""
     if isinstance(e, audio.WriteFailed):
         return True
+    from stt import asr_qwen3
+    if isinstance(e, asr_qwen3.EngineUnavailable):
+        return True     # no engine to run: no file is to blame
     return isinstance(e, OSError) and e.errno in (errno.ENOSPC, errno.EDQUOT,
                                                   errno.EROFS)
 
 
 def _trace(e):
-    """Print the traceback of a failed file, except for an ffmpeg failure:
-    its one-line reason (audio.UnreadableAudio, audio.WriteFailed) says it
-    all."""
-    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed)):
+    """Print the traceback of a failed file, except for an ffmpeg failure
+    or an engine that cannot run: its one-line reason (audio.UnreadableAudio,
+    audio.WriteFailed, asr_qwen3.EngineUnavailable) says it all."""
+    from stt import asr_qwen3
+    if not isinstance(e, (audio.UnreadableAudio, audio.WriteFailed,
+                          asr_qwen3.EngineUnavailable)):
         traceback.print_exc()
 
 

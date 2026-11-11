@@ -67,6 +67,8 @@ def engine_key(engine):
     under a cloud setting, and when a cloud run fell back to Parakeet."""
     if not isinstance(engine, str) or not engine:
         return None
+    if engine == config.QWEN_ASR_MODEL or "qwen3-asr" in engine.lower():
+        return "qwen3"
     head = engine.partition("/")[0]
     if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
         return f"cloud:{_CLOUD_ENGINES[head]}"
@@ -406,7 +408,7 @@ def summary() -> dict:
     """Compact human summary for the GUI settings row."""
     L = learned()
     parts = []
-    for key, label in [("parakeet", "Parakeet")]:
+    for key, label in [("parakeet", "Parakeet"), ("qwen3", "Qwen3-ASR")]:
         r = L["asr"].get(f"{key}@1")
         if r:
             parts.append(f"{label} {r:.0f}×")
