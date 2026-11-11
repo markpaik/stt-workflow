@@ -697,7 +697,7 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `qwen3`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
+| `STT_ASR_BACKEND` | `qwen3` | The transcription engine: `qwen3` (Qwen3-ASR 1.7B; on 7 meetings it made a quarter fewer word errors than Parakeet, at about 3.4 times the run time), `parakeet`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. When `qwen3` cannot run here, the batch uses Parakeet (next row). Any other value prints a warning and runs the default. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
 | `STT_QWEN_ASR_PY` | `.venv-qwen/bin/python` in the checkout | For `qwen3`: the Python that runs Qwen3-ASR 1.7B and its forced aligner. They need mlx-audio, which needs a newer MLX than Parakeet, so this is a second environment, which `init.sh` builds from `requirements-qwen.txt`. If it, mlx-audio or a model is missing, the batch warns once a run, names the fix, and transcribes with Parakeet; the meeting records Parakeet as its engine, and the doctor reports `asr_fallback` |
 | `STT_QWEN_ASR_MODEL`, `STT_QWEN_ALIGNER_MODEL` | `mlx-community/Qwen3-ASR-1.7B-bf16`, `mlx-community/Qwen3-ForcedAligner-0.6B-8bit` | The two Qwen models. They load from the local Hugging Face cache only, so download them before the first run |
 | `STT_DIARIZER` | `speakrs` | `pyannote` forces the CPU path. Any other value prints a warning and keeps speakrs |
@@ -902,13 +902,14 @@ line that reverses them.
 recorder / Voice Memos sync / watched folder / drop
         │
         ▼
-   ffmpeg ─► ASR: Parakeet TDT 0.6B v3 on MLX (or a cloud engine)
+   ffmpeg ─► ASR: Qwen3-ASR 1.7B and its forced aligner on MLX, in .venv-qwen
+        │        (Parakeet TDT 0.6B v3 when Qwen3-ASR is not set up, or a cloud engine)
         │
         ├─► speaker separation: speakrs on Core ML (pyannote on CPU as fallback)
         ├─► turn recluster (speakrs only)
         ├─► voiceprint matching and identity refinement
         ▼
-   words matched to speakers ─► punctuation ─► .txt + .json + cached embeddings
+   words matched to speakers ─► punctuation (Parakeet and cloud text) ─► .txt + .json + cached embeddings
         │
         ▼
    description and title: Qwen 3.8 on Ollama (Qwen3-8B on MLX if installed)

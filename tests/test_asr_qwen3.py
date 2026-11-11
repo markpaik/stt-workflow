@@ -17,6 +17,8 @@ import pytest
 
 from stt import asr_qwen3, config, pipeline, rates, verify
 
+_REAL_PROBLEM = asr_qwen3.problem   # conftest stubs it for every other test
+
 FAKE_WORKER = r'''
 import json, math, os, sys
 args = sys.argv[1:]
@@ -124,6 +126,7 @@ def _fresh_engine(monkeypatch):
     """Each test starts as a new process: no remembered failure, and no
     Qwen setting from the shell."""
     monkeypatch.setattr(asr_qwen3, "_unavailable", None)
+    monkeypatch.setattr(asr_qwen3, "problem", _REAL_PROBLEM)
     for k in ("STT_QWEN_ASR_PY", "STT_QWEN_ASR_MODEL", "STT_QWEN_ALIGNER_MODEL"):
         monkeypatch.delenv(k, raising=False)
 
@@ -383,16 +386,25 @@ def test_the_estimate_follows_the_engine_that_will_run(sandbox, monkeypatch, tmp
 
 # ---------- the setting ----------
 
-def test_qwen3_is_a_backend_and_parakeet_stays_the_default(sandbox, monkeypatch, capsys):
+def test_qwen3_is_the_default_backend(sandbox, monkeypatch, capsys):
     monkeypatch.setattr(config, "ASR_BACKEND", "qwen3")
     assert pipeline._load_asr() is asr_qwen3
     assert pipeline._load_asr(strict=True) is asr_qwen3      # local: strict changes nothing
     monkeypatch.setattr(config, "ASR_BACKEND", " QWEN3 ")
     assert pipeline._load_asr() is asr_qwen3
     assert "STT_ASR_BACKEND" not in capsys.readouterr().err
-    assert config._asr_problem("") == ("parakeet", None)
+    assert config._asr_problem("") == ("qwen3", None)
     assert config._asr_problem("qwen3") == ("qwen3", None)
-    assert "qwen3" in config._asr_problem("qwen")[1]          # the warning names it
+    assert config._asr_problem("parakeet") == ("parakeet", None)
+    backend, why = config._asr_problem("qwen")
+    assert backend == "qwen3" and "using qwen3" in why
+    # an stt.env with no engine line: the estimate and the panel say qwen3
+    # when it can run, and Parakeet when it will fall back
+    (config.PROJECT_DIR / "stt.env").write_text("")
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
+    assert rates.current_asr_key() == "qwen3"
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: "no venv")
+    assert rates.current_asr_key() == "parakeet"
 
 
 def test_qwen3_runs_are_filed_and_estimated_under_their_own_key(sandbox, monkeypatch):

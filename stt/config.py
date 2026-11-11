@@ -290,27 +290,30 @@ RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
 RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
 RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
-# ASR backend: "parakeet" (default, native MLX), "qwen3" (Qwen3-ASR 1.7B in
-# its own interpreter, stt/asr_qwen3.py) or "cloud:<provider>".
-# The local Whisper engine ("mlxwhisper") is gone: that value warns as an
-# unknown one does and runs Parakeet.
-ASR_BACKENDS = ("parakeet", "qwen3")
+# ASR backend: "qwen3" (the default since 2026-11: Qwen3-ASR 1.7B in its own
+# interpreter, stt/asr_qwen3.py; it falls back to Parakeet when it is not set
+# up), "parakeet" (native MLX) or "cloud:<provider>". On 7 meetings scored
+# against Scribe v2, Qwen made a quarter fewer word errors and fewer
+# who-said-what errors on all 7 (qa/asr-trial), at about 3.4 times the run
+# time. The local Whisper engine ("mlxwhisper") is gone: that value warns as
+# an unknown one does and runs the default.
+ASR_BACKENDS = ("qwen3", "parakeet")
 CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
 
 
 def _asr_problem(raw):
     """(backend, None) for a usable STT_ASR_BACKEND value, else
-    ("parakeet", why). Case and spaces are ignored. A typo once ran
-    Parakeet with no message. "mlxwhisper", the removed Whisper engine,
-    says so."""
+    ("qwen3", why): the default. Case and spaces are ignored. A typo once
+    ran the default with no message. "mlxwhisper", the removed Whisper
+    engine, says so."""
     v = str(raw or "").strip().lower()
     if not v:
         return ASR_BACKENDS[0], None
     if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
         return v, None
     gone = " (the Whisper engine was removed)" if v == "mlxwhisper" else ""
-    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet, qwen3 or cloud:"
-                             f"{'/'.join(CLOUD_ASR)}{gone}; using parakeet")
+    return ASR_BACKENDS[0], (f"{raw!r} is not qwen3, parakeet or cloud:"
+                             f"{'/'.join(CLOUD_ASR)}{gone}; using {ASR_BACKENDS[0]}")
 
 
 def _asr_backend_setting() -> str:
