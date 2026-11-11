@@ -290,26 +290,30 @@ RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
 RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
 RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
-# ASR backend: "parakeet" (default, native MLX) or "cloud:<provider>".
-# The local Whisper engine ("mlxwhisper") is gone: that value warns as an
-# unknown one does and runs Parakeet.
-ASR_BACKENDS = ("parakeet",)
+# ASR backend: "qwen3" (the default since 2026-11: Qwen3-ASR 1.7B in its own
+# interpreter, stt/asr_qwen3.py; it falls back to Parakeet when it is not set
+# up), "parakeet" (native MLX) or "cloud:<provider>". On 7 meetings scored
+# against Scribe v2, Qwen made a quarter fewer word errors and fewer
+# who-said-what errors on all 7 (qa/asr-trial), at about 3.4 times the run
+# time. The local Whisper engine ("mlxwhisper") is gone: that value warns as
+# an unknown one does and runs the default.
+ASR_BACKENDS = ("qwen3", "parakeet")
 CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
 
 
 def _asr_problem(raw):
     """(backend, None) for a usable STT_ASR_BACKEND value, else
-    ("parakeet", why). Case and spaces are ignored. A typo once ran
-    Parakeet with no message. "mlxwhisper", the removed Whisper engine,
-    says so."""
+    ("qwen3", why): the default. Case and spaces are ignored. A typo once
+    ran the default with no message. "mlxwhisper", the removed Whisper
+    engine, says so."""
     v = str(raw or "").strip().lower()
     if not v:
         return ASR_BACKENDS[0], None
     if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
         return v, None
     gone = " (the Whisper engine was removed)" if v == "mlxwhisper" else ""
-    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet or cloud:"
-                             f"{'/'.join(CLOUD_ASR)}{gone}; using parakeet")
+    return ASR_BACKENDS[0], (f"{raw!r} is not qwen3, parakeet or cloud:"
+                             f"{'/'.join(CLOUD_ASR)}{gone}; using {ASR_BACKENDS[0]}")
 
 
 def _asr_backend_setting() -> str:
@@ -321,6 +325,16 @@ def _asr_backend_setting() -> str:
 
 
 ASR_BACKEND = _asr_backend_setting()
+
+# Qwen3-ASR (STT_ASR_BACKEND=qwen3). mlx-audio needs a newer mlx than
+# parakeet-mlx pins, so the model runs under its own interpreter: a venv with
+# mlx-audio, outside .venv. The models load from the local Hugging Face cache
+# only (the child sets HF_HUB_OFFLINE), so they must be downloaded first.
+QWEN_ASR_PY = Path(os.environ.get("STT_QWEN_ASR_PY",
+                                  CODE_DIR / ".venv-qwen" / "bin" / "python"))
+QWEN_ASR_MODEL = os.environ.get("STT_QWEN_ASR_MODEL", "mlx-community/Qwen3-ASR-1.7B-bf16")
+QWEN_ALIGNER_MODEL = os.environ.get("STT_QWEN_ALIGNER_MODEL",
+                                    "mlx-community/Qwen3-ForcedAligner-0.6B-8bit")
 
 # --- Audio (video containers welcome too — ffmpeg extracts the audio track) ---
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aac", ".mp4", ".caf", ".m4b", ".flac",
@@ -529,15 +543,22 @@ CALIBRATION_LOG = PROJECT_DIR / "calibration.jsonl"
 BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 
 # --- Progress/ETA model: measured realtime multiples on this M5 Pro ---
-# (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
+# (speed = audio_seconds / wall_seconds). These are the FIRST-RUN defaults:
+# each engine's own samples in rates.jsonl replace them (stt/rates.py), and
+# a qwen3 sample never teaches the parakeet estimate or the other way round.
+# Measured 2026-11-11 on 6 meetings, 10.9 h of audio, nothing else on the GPU
+# (qa/asr-trial): Qwen3-ASR with its aligner repair 14.3x (2734 s of ASR),
+# Parakeet 85.6x (457 s), speakrs separation 108.7x (360 s), the same with
+# either engine. So a Qwen run spends about 88 percent of its time in ASR.
+# Parakeet's old default (30x) and speakrs' (30x, from a 24-minute meeting
+# before the per-turn pass got faster) made the panel say 2 to 3 times the
+# real time left on a first run.
 EST_RATES = {
     "convert": 80.0,
-    "asr": {"parakeet": 30.0},
+    "asr": {"qwen3": 14.3, "parakeet": 85.0},
     # keyed by the engine that will actually run (rates.effective_diarizer):
-    # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
-    # but the pyannote-embedder turn pass and model load dominate after it:
-    # 31.6x end to end on a 24-minute meeting. Learned rates replace this.
-    "diarize": {"pyannote": 2.25, "speakrs": 30.0},
+    # pyannote on CPU ~2.25x
+    "diarize": {"pyannote": 2.25, "speakrs": 108.0},
     "writing_fixed_sec": 20.0,  # merge + punctuation + output, roughly flat
 }
 

@@ -1,0 +1,16 @@
+# Qwen3-ASR, the default transcription engine (STT_ASR_BACKEND=qwen3), runs
+# in its OWN environment, .venv-qwen: mlx-audio needs mlx 0.32, and
+# parakeet-mlx in .venv runs on mlx 0.31. Never install these into .venv.
+# init.sh builds it:
+#   uv venv --python 3.12 .venv-qwen
+#   uv pip install --python .venv-qwen/bin/python -r requirements-qwen.txt
+# Pinned to the versions the 2026-11 trial measured (qa/asr-trial).
+mlx-audio==0.6.5
+mlx==0.32.4
+mlx-metal==0.32.4
+transformers==5.22.2
+tokenizers==0.23.3
+huggingface-hub==2.4.0
+safetensors==0.8.0
+numpy==2.5.4
+sentencepiece==0.2.3

@@ -511,29 +511,35 @@ def _import_asr(tmp_path, raw):
 
 
 @pytest.mark.parametrize("raw, want, mod, warns", [
-    ("mlx-whisper", "parakeet", "stt.asr_parakeet", True),
-    ("whisper", "parakeet", "stt.asr_parakeet", True),
-    ("whisperx", "parakeet", "stt.asr_parakeet", True),
-    ("cloud:typo", "parakeet", "stt.asr_parakeet", True),
-    (" MLXWhisper ", "parakeet", "stt.asr_parakeet", True),   # the removed engine
-    ("mlxwhisper", "parakeet", "stt.asr_parakeet", True),
+    ("mlx-whisper", "qwen3", "stt.asr_qwen3", True),
+    ("whisper", "qwen3", "stt.asr_qwen3", True),
+    ("whisperx", "qwen3", "stt.asr_qwen3", True),
+    ("cloud:typo", "qwen3", "stt.asr_qwen3", True),
+    (" MLXWhisper ", "qwen3", "stt.asr_qwen3", True),   # the removed engine
+    ("mlxwhisper", "qwen3", "stt.asr_qwen3", True),
     ("parakeet", "parakeet", "stt.asr_parakeet", False),
+    (" Parakeet ", "parakeet", "stt.asr_parakeet", False),
+    ("qwen3", "qwen3", "stt.asr_qwen3", False),
+    ("qwen", "qwen3", "stt.asr_qwen3", True),
     ("cloud:scribe", "cloud:scribe", "stt.asr_cloud", False),
-    ("", "parakeet", "stt.asr_parakeet", False)])
-def test_an_unknown_asr_backend_warns_and_keeps_parakeet(tmp_path, raw, want, mod, warns):
+    ("", "qwen3", "stt.asr_qwen3", False)])
+def test_an_unknown_asr_backend_warns_and_runs_the_default(tmp_path, raw, want, mod, warns):
     """A typo ('mlx-whisper', 'whisper', or the 'whisperx' stt.env.example
-    named) ran Parakeet with no message. "mlxwhisper" named the Whisper
-    engine, which is gone: it warns the same way and runs Parakeet."""
+    named) ran the default engine with no message. "mlxwhisper" named the
+    Whisper engine, which is gone: it warns the same way. The default is
+    qwen3, which falls back to Parakeet itself when it cannot run."""
     rc, out, err = _import_asr(tmp_path, raw)
     assert rc == 0, err
     assert out.split() == [want, mod]
-    assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
+    assert ("STT_ASR_BACKEND" in err and "using qwen3" in err) is warns
 
 
-def test_a_whisper_setting_left_in_stt_env_warns_once_and_runs_parakeet(tmp_path):
+def test_a_whisper_setting_left_in_stt_env_warns_once_and_runs_the_default(tmp_path):
     """An stt.env written before Whisper was removed still says
     STT_ASR_BACKEND=mlxwhisper (run.sh exports it). One process warns once,
-    names the removal, and runs, estimates and verifies as Parakeet."""
+    names the removal, and runs the default, qwen3. With no Qwen
+    environment here it estimates as Parakeet, the engine that will run,
+    and a Parakeet run has no second opinion."""
     import os
     import subprocess
     import sys
@@ -544,7 +550,8 @@ def test_a_whisper_setting_left_in_stt_env_warns_once_and_runs_parakeet(tmp_path
     e = {k: v for k, v in os.environ.items()
          if k not in ("STT_ASR_BACKEND", "STT_WHISPER_MLX_MODEL")}
     e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo),
-              "STT_ASR_BACKEND": "mlxwhisper", "STT_WHISPER_MLX_MODEL": "turbo"})
+              "STT_ASR_BACKEND": "mlxwhisper", "STT_WHISPER_MLX_MODEL": "turbo",
+              "STT_QWEN_ASR_PY": str(tmp_path / "no-venv-qwen" / "python")})
     code = ("from stt import config as c, pipeline as p, rates as r, verify as v; "
             "mods = {p._load_asr(False).__name__ for _ in range(3)}; "
             "print(c.ASR_BACKEND, *mods, r.current_asr_key(), "
@@ -552,11 +559,11 @@ def test_a_whisper_setting_left_in_stt_env_warns_once_and_runs_parakeet(tmp_path
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env=e, cwd=str(repo), timeout=60)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["parakeet", "stt.asr_parakeet", "parakeet", "None"]
+    assert r.stdout.split() == ["qwen3", "stt.asr_qwen3", "parakeet", "None"]
     warned = [ln for ln in r.stderr.splitlines() if "STT_ASR_BACKEND" in ln]
     assert len(warned) == 1, r.stderr
     assert "the Whisper engine was removed" in warned[0]
-    assert "using parakeet" in warned[0]
+    assert "using qwen3" in warned[0]
 
 
 def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
@@ -567,7 +574,7 @@ def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=mlxwhisper\n")
     [(name, why)] = config.setting_problems()
     assert name == "STT_ASR_BACKEND"
-    assert "the Whisper engine was removed" in why and "using parakeet" in why
+    assert "the Whisper engine was removed" in why and "using qwen3" in why
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
     assert config.setting_problems() == []
     from stt import asr_cloud
@@ -575,17 +582,18 @@ def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
 
 
 @pytest.mark.parametrize("value, mod, warns", [
-    ("garbage", "stt.asr_parakeet", True),
-    ("cloud:bogus", "stt.asr_parakeet", True),
-    (" MLXWhisper ", "stt.asr_parakeet", True),
-    ("parakeet", "stt.asr_parakeet", False)])
+    ("garbage", "stt.asr_qwen3", True),
+    ("cloud:bogus", "stt.asr_qwen3", True),
+    (" MLXWhisper ", "stt.asr_qwen3", True),
+    ("parakeet", "stt.asr_parakeet", False),
+    ("qwen3", "stt.asr_qwen3", False)])
 def test_a_backend_set_after_load_is_checked_too(sandbox, monkeypatch, capsys,
                                                 value, mod, warns):
     """The warning fired only when the config loaded. Code that set
-    config.ASR_BACKEND afterward ran Parakeet with no word, and
+    config.ASR_BACKEND afterward ran the default with no word, and
     'cloud:bogus' reached the cloud module."""
     from stt import pipeline
     monkeypatch.setattr(config, "ASR_BACKEND", value)
     assert pipeline._load_asr().__name__ == mod
     err = capsys.readouterr().err
-    assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
+    assert ("STT_ASR_BACKEND" in err and "using qwen3" in err) is warns

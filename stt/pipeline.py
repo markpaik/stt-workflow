@@ -30,16 +30,29 @@ def _load_asr(strict=False):
         else:
             from . import asr_cloud
             return asr_cloud
+    if backend == "qwen3":
+        from . import asr_qwen3
+        return asr_qwen3
     from . import asr_parakeet
     return asr_parakeet
 
 
 def _transcribe_with_fallback(asr, wav, progress=None) -> dict:
     """A cloud engine failing (network down, quota, bad key, size cap) must
-    degrade to the local engine, not kill the nightly run. Local engine
-    errors still propagate — there is nothing to fall back to."""
+    degrade to the local engine, not kill the nightly run. So must Qwen3-ASR
+    when it is not set up on this Mac (no .venv-qwen, no mlx-audio, a model
+    not downloaded): one warning per run names the fix, and Parakeet
+    transcribes. The meeting json names the engine that ran. Other local
+    engine errors still propagate."""
+    from . import asr_qwen3
     try:
         return asr.transcribe(wav, progress=progress)
+    except asr_qwen3.EngineUnavailable as e:
+        config._warn_once(("STT_ASR_BACKEND", "qwen3 unavailable"),
+                          f"Qwen3-ASR cannot run on this Mac: {e}. This run "
+                          f"transcribes with Parakeet. To fix it, {asr_qwen3.FIX}.")
+        from . import asr_parakeet
+        return asr_parakeet.transcribe(wav, progress=progress)
     except Exception as e:
         if not getattr(asr, "IS_CLOUD", False):
             raise
@@ -485,7 +498,8 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         segments, labeled_words = merge.assign_and_group(
             words, turns, names, overlaps=overlaps, spans=spans,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
-        if config.PUNCTUATE:
+        punctuated = punctuate.runs_on(asr_out["engine"])
+        if punctuated:
             punctuate.restore_segments(segments)
         if not do_diarize:
             for seg in segments:
@@ -588,7 +602,7 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             "n_speakers": len(labels),
             "strict": strict,
             "one_time_speakers": not track_unknowns,
-            "punctuated": bool(config.PUNCTUATE),
+            "punctuated": punctuated,
             "verify_engine": verify_engine,
             "overlap_spans": [[s, e] for s, e in overlaps],
             "refine_stats": diar["refine_stats"] if diar else None,

@@ -33,6 +33,7 @@ mid-run cannot poison the calibration.
 """
 import json
 import math
+import os
 from datetime import datetime
 from statistics import median
 
@@ -67,6 +68,9 @@ def engine_key(engine):
     under a cloud setting, and when a cloud run fell back to Parakeet."""
     if not isinstance(engine, str) or not engine:
         return None
+    if engine in (config.QWEN_ASR_MODEL, os.environ.get("STT_QWEN_ASR_MODEL")) \
+            or "qwen3-asr" in engine.lower():
+        return "qwen3"
     head = engine.partition("/")[0]
     if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
         return f"cloud:{_CLOUD_ENGINES[head]}"
@@ -79,6 +83,12 @@ def current_asr_key() -> str:
     # spaces are ignored and a typo (or the removed "mlxwhisper") runs
     # Parakeet. The raw value filed a typo's Parakeet runs under the typo.
     backend, _ = config._asr_problem(kv.get("STT_ASR_BACKEND"))
+    if backend == "qwen3":
+        # not set up on this Mac: the pipeline falls back to Parakeet, so
+        # the estimate must too (quick file checks only)
+        from . import asr_qwen3
+        if asr_qwen3.problem() is not None:
+            return "parakeet"
     return backend
 
 
@@ -406,7 +416,7 @@ def summary() -> dict:
     """Compact human summary for the GUI settings row."""
     L = learned()
     parts = []
-    for key, label in [("parakeet", "Parakeet")]:
+    for key, label in [("parakeet", "Parakeet"), ("qwen3", "Qwen3-ASR")]:
         r = L["asr"].get(f"{key}@1")
         if r:
             parts.append(f"{label} {r:.0f}×")

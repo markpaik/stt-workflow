@@ -869,3 +869,30 @@ def test_the_doctor_says_why_verify_does_nothing(sandbox, monkeypatch):
     (sandbox / "stt.env").write_text("")
     monkeypatch.setenv("STT_VERIFY", "1")                # the environment counts too
     assert "verify_no_second_engine" in kinds()
+
+
+def test_the_doctor_says_when_qwen3_falls_back_to_parakeet(sandbox, monkeypatch):
+    """qwen3 set, but its environment or a model is missing: the batch
+    transcribes with Parakeet, and the doctor names what is missing and the
+    fix. No finding for Parakeet, or once Qwen3-ASR can run."""
+    from stt import asr_qwen3
+    monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
+    seen = []
+
+    def _problem(deep=False):
+        seen.append(deep)
+        return "the model mlx-community/Qwen3-ForcedAligner-0.6B-8bit is not downloaded"
+    monkeypatch.setattr(asr_qwen3, "problem", _problem)
+
+    def kinds():
+        return {f.kind: f for f in doctor.check(registry=False)}
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
+    f = kinds()["asr_fallback"]
+    assert f.subject == "STT_ASR_BACKEND" and not f.fixable
+    assert "ForcedAligner" in f.detail and "./init.sh" in f.detail and "Parakeet" in f.detail
+    assert seen and all(seen)                 # the doctor runs the deep check
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    assert "asr_fallback" not in kinds()
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
+    assert "asr_fallback" not in kinds()

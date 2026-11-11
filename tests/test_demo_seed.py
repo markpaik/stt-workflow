@@ -430,9 +430,10 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     check` with missing_keys on every meeting and a registry_stale_next.
     The seed also used to build folder names with a colon the sanitizer
     never writes. The check runs in a fresh interpreter under STT_HOME, as
-    the finding's repro did. The two diarizer findings speak about the
-    machine (a Hugging Face token, a built speakrs helper), not the home,
-    so the check runs on a machine that has both settled."""
+    the finding's repro did. The two diarizer findings and asr_fallback
+    speak about the machine (a Hugging Face token, a built speakrs helper,
+    a Qwen3-ASR environment), not the home, so the check runs on a machine
+    that has all three settled."""
     from stt import provenance
     home = tmp_path / "demo_home"
     demo_seed.build(home)
@@ -450,7 +451,8 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     assert reg["next"] == unknowns.next_floor(reg)
     env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
     env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO),
-                "HF_TOKEN": "hf_synthetic", "STT_DIARIZER": "pyannote"})
+                "HF_TOKEN": "hf_synthetic", "STT_DIARIZER": "pyannote",
+                "STT_ASR_BACKEND": "parakeet"})
     out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
                          env=env, cwd=str(REPO), capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr

@@ -155,7 +155,8 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
             words, turns, names, overlaps=overlaps,
             spans=stats.get("spans", []) + loop_spans,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
-        if config.PUNCTUATE:
+        punctuated = punctuate.runs_on(data.get("asr_engine"))
+        if punctuated:
             punctuate.restore_segments(segments)
         # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)
         from stt import verify
@@ -193,7 +194,7 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         speaker_text.rerender(data, raw_turns=raw_turns, before=before)
         data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
         data["strict"] = strict
-        data["punctuated"] = bool(config.PUNCTUATE)
+        data["punctuated"] = punctuated
         data["overlap_spans"] = [[s, e] for s, e in overlaps]
 
         header = output.txt_header(output.header_name(base, data),

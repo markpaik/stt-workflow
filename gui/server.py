@@ -93,6 +93,8 @@ def _known_base(base) -> bool:
             and base in set(config.meeting_bases()))
 
 ASR_CHOICES = [
+    {"id": "qwen3", "label": "Qwen3-ASR 1.7B",
+     "note": "most accurate · local · about 3 times slower than Parakeet"},
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
     # cloud engines: shown only once their key is set; words are transcribed
     # off-device, but diarization + speaker naming stay local — and strict
@@ -105,6 +107,8 @@ ASR_CHOICES = [
      "note": "audio uploads to Mistral · strict mode stays local"},
 ]
 MODEL_REPOS = {
+    "Qwen3-ASR 1.7B": "mlx-community/Qwen3-ASR-1.7B-bf16",
+    "Qwen3 forced aligner 0.6B": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
     "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
     # listed only when the optional MLX fallback is installed (check_updates)
