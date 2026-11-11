@@ -350,3 +350,55 @@ def test_the_worker_imports_nothing_from_this_package():
     every |= {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     assert not any(m == "stt" or m.startswith("stt.") for m in every)
     assert not any(isinstance(n, ast.ImportFrom) and n.level for n in ast.walk(tree))
+
+
+# ---------- punctuation ----------
+
+def test_the_punctuator_skips_qwen_transcripts(monkeypatch):
+    from stt import punctuate
+    monkeypatch.setattr(config, "PUNCTUATE", True)
+    assert punctuate.runs_on(config.PARAKEET_MODEL)
+    assert punctuate.runs_on("elevenlabs/scribe_v2")
+    assert punctuate.runs_on(None)              # a meeting from before asr_engine
+    assert not punctuate.runs_on(config.QWEN_ASR_MODEL)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    assert not punctuate.runs_on(config.PARAKEET_MODEL)
+
+
+@pytest.mark.parametrize("engine, ran", [(config.QWEN_ASR_MODEL, False),
+                                         (config.PARAKEET_MODEL, True)])
+def test_a_qwen_transcript_keeps_its_own_punctuation(sandbox, monkeypatch, engine, ran):
+    """The pipeline and relabel both skip the punctuator on a Qwen transcript,
+    and the meeting json says whether it ran."""
+    import types
+
+    import relabel
+    from stt import audio, diarcache, punctuate
+    calls = []
+    monkeypatch.setattr(punctuate, "restore_segments", lambda segs: calls.append(len(segs)))
+    monkeypatch.setattr(config, "PUNCTUATE", True)
+    words = [{"start": 0.2, "end": 0.5, "word": "Hello,"},
+             {"start": 0.6, "end": 0.9, "word": "there."}]
+    asr = types.SimpleNamespace(transcribe=lambda wav, progress=None: {
+        "engine": engine, "text": "Hello, there.", "words": words})
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: asr)
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    src = config.PROJECT_DIR / "Punct Meeting 05012026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                                do_verify=False, track_unknowns=False)
+    data = json.loads(res["json"].read_text())
+    assert data["punctuated"] is ran and data["asr_engine"] == engine
+    assert bool(calls) is ran
+    assert data["segments"][0]["text"] == "Hello, there."
+    # relabel rebuilds the segments and makes the same choice
+    import numpy as np
+    calls.clear()
+    base = res["base"]
+    diarcache.save(config.meeting_file(base, ".diar.npz"),
+                   [{"start": 0.0, "end": 1.0, "cluster": "SPEAKER_00"}], [None],
+                   {"SPEAKER_00": np.ones(256)})
+    assert relabel.relabel_one(base) is True
+    data = json.loads(res["json"].read_text())
+    assert data["punctuated"] is ran and bool(calls) is ran

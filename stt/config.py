@@ -543,8 +543,10 @@ BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 # (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
 EST_RATES = {
     "convert": 80.0,
-    # qwen3: decode + forced alignment in its child, model load included
-    "asr": {"parakeet": 30.0, "qwen3": 12.0},
+    # qwen3: decode + forced alignment in its child, model load included.
+    # Measured 2026-11-11 on 6 meetings (10.9 h, no other GPU job): 16.1x
+    # real time, against 86x for Parakeet in the same runs
+    "asr": {"parakeet": 30.0, "qwen3": 16.0},
     # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
     # but the pyannote-embedder turn pass and model load dominate after it:

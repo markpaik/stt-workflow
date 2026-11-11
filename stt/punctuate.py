@@ -32,6 +32,18 @@ _CONFIG_FILENAME = "config.yaml"
 _MODEL_FILES = (_SPE_FILENAME, _ONNX_FILENAME, _CONFIG_FILENAME)
 
 
+def runs_on(engine) -> bool:
+    """Whether this module runs on a transcript that `engine` wrote (the
+    engine string an ASR module returns, stored as asr_engine): when
+    STT_PUNCTUATE=1, except for Qwen3-ASR, which writes its own punctuation
+    and casing. Measured 2026-11-11 on 7 meetings against Scribe v2
+    (qa/asr-trial): on Qwen output this model lowered sentence-end F1 from
+    0.82 to 0.63, comma F1 from 0.62 to 0.54, question-mark F1 from 0.74 to
+    0.53, and case agreement from 0.967 to 0.937."""
+    from . import config, rates
+    return bool(config.PUNCTUATE) and rates.engine_key(engine) != "qwen3"
+
+
 def _hf_cache_root() -> Path:
     """Where huggingface_hub keeps downloaded repos, honouring the same env
     overrides it does (so a machine with a relocated cache is read correctly)."""
