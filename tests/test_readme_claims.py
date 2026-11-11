@@ -93,3 +93,18 @@ def test_every_screenshot_the_readme_shows_is_in_docs_img_and_none_is_stray():
         assert head[:8] == b"\x89PNG\r\n\x1a\n", rel
         # the capture sizes at 2x: 1440x960 and 1440x1000 desktop, 390x844 phone
         assert struct.unpack(">II", head[16:24]) in SIZES, rel
+
+
+def test_no_published_file_installs_or_offers_the_removed_whisper_engine():
+    """The local Whisper engine is gone. The install no longer pulls
+    mlx-whisper, the example settings and the docs no longer offer it, and
+    the README names "mlxwhisper" only to say it was removed. The OpenAI
+    cloud engine's own model (whisper-1) is not the local engine."""
+    for name in ("requirements.txt", "requirements-dev.txt", "init.sh", "setup.sh",
+                 "stt.env.example", "gui/DESIGN.md"):
+        text = (REPO / name).read_text(encoding="utf-8").lower()
+        assert "mlx-whisper" not in text and "mlxwhisper" not in text, name
+        assert "whisper_mlx" not in text and "whisperx" not in text, name
+    assert not (REPO / "stt" / "asr_mlxwhisper.py").exists()
+    lines = [ln for ln in README.splitlines() if "whisper" in ln.lower()]
+    assert lines and all("the removed Whisper engine" in ln for ln in lines), lines

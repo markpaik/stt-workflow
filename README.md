@@ -37,7 +37,7 @@ is either a download or a feature you turn on yourself:
 
 | What | When | What it sends |
 |---|---|---|
-| Model downloads from Hugging Face | Install and first use: Parakeet, Whisper, the pyannote models, the speakrs Core ML models, and Qwen3-8B | Requests for model files. No audio or text |
+| Model downloads from Hugging Face | Install and first use: Parakeet, the pyannote models, the speakrs Core ML models, and Qwen3-8B | Requests for model files. No audio or text |
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
 | Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine, or pick it for Listen again on one line | The meeting audio, recompressed to 32 kbps MP3. Listen again sends only that line's clip. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
@@ -860,7 +860,7 @@ line that reverses them.
 recorder / Voice Memos sync / watched folder / drop
         │
         ▼
-   ffmpeg ─► ASR: Parakeet TDT 0.6B v3 on MLX (or Whisper, or a cloud engine)
+   ffmpeg ─► ASR: Parakeet TDT 0.6B v3 on MLX (or a cloud engine)
         │
         ├─► speaker separation: speakrs on Core ML (pyannote on CPU as fallback)
         ├─► turn recluster (speakrs only)

@@ -1,6 +1,5 @@
-# Core pipeline (Apple Silicon required — parakeet-mlx / mlx-whisper are MLX-only)
+# Core pipeline (Apple Silicon required — parakeet-mlx is MLX-only)
 parakeet-mlx>=0.5.2
-mlx-whisper>=0.4.3
 pyannote.audio>=4.0.7
 torch>=2.12
 torchaudio>=2.11
