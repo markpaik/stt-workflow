@@ -163,8 +163,10 @@ def _voxtral(path, key):
 _IMPL = {"scribe": _scribe, "openai": _openai, "voxtral": _voxtral}
 
 
-def transcribe(wav, progress=None) -> dict:
-    provider = provider_from_backend(config.ASR_BACKEND)
+def transcribe(wav, progress=None, provider=None) -> dict:
+    """`provider` names the cloud engine. None reads it from the engine
+    setting (config.ASR_BACKEND). The second listen passes it."""
+    provider = provider or provider_from_backend(config.ASR_BACKEND)
     if provider not in PROVIDERS:
         raise RuntimeError(f"unknown cloud provider {provider!r}")
     key = api_key(provider)

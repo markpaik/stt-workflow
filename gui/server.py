@@ -1729,6 +1729,23 @@ def _meeting_audio(base: str):
     return config.meeting_audio(base)
 
 
+def _listen_engines(strict) -> list:
+    """The second listen's engine menu for one meeting, Parakeet first (the
+    default): [{"id", "label", "note"}] in stt.retranscribe.offered() order.
+    A strict meeting gets Parakeet alone."""
+    from stt import asr_cloud, retranscribe
+    out = []
+    for e in retranscribe.offered(bool(strict)):
+        prov = asr_cloud.provider_from_backend(e)
+        if prov:
+            label = asr_cloud.PROVIDERS[prov]["label"]
+            out.append({"id": e, "label": label + " ☁",
+                        "note": f"Sends this line's audio to {label}."})
+        else:
+            out.append({"id": e, "label": e.capitalize(), "note": "Runs on this Mac."})
+    return out
+
+
 def _cloud_key_status() -> dict:
     """{provider: bool} — key presence only; actual keys never reach the page.
     'anthropic' is the assistant (summaries/Ask), not a transcription engine."""
@@ -2504,6 +2521,8 @@ class Handler(BaseHTTPRequestHandler):
                         for i, s in enumerate(d.get("segments", []))
                         if s.get("text", "").strip()]
                 self._json({"base": base, "strict": d.get("strict", False),
+                            # the engines a second listen on a line may use
+                            "listen_engines": _listen_engines(d.get("strict")),
                             # the save stamp of exactly these bytes: the meeting
                             # page records it so the next poll's row stamp is
                             # compared against what is really on screen
@@ -3582,11 +3601,20 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/retranscribe":
                 if not self._require_base(b.get("base")):
                     return
+                engine = b.text("engine", "") or "parakeet"
+                # a strict meeting never reaches a cloud engine, and an
+                # engine without its key starts no child (the child checks
+                # this again before any audio moves)
+                from stt import retranscribe as _rt
+                why = _rt.engine_problem(b["base"], engine)
+                if why:
+                    self._json({"error": why})
+                    return
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
                     [str(config.CODE_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
                      b["base"], str(b.number("start")), str(b.number("end")),
-                     b.text("engine", "") or "parakeet"],
+                     engine],
                     capture_output=True, text=True, timeout=180,
                     cwd=str(config.CODE_DIR),
                     env={**os.environ, "PYTHONPATH": str(config.CODE_DIR)})

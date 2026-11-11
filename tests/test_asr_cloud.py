@@ -55,6 +55,21 @@ def test_scribe_parses_words_and_drops_spacing(sandbox, fake_upload, monkeypatch
     assert "elevenlabs.io" in seen[0]["url"]
 
 
+def test_a_named_provider_wins_over_the_engine_setting(sandbox, fake_upload, monkeypatch):
+    """The second listen names its cloud engine. The engine setting may be
+    Parakeet or another provider, and the named one gets the upload."""
+    import requests
+    seen = []
+    monkeypatch.setattr(requests, "post", _post_returning({
+        "text": "hi", "words": [{"type": "word", "text": "hi", "start": 0.0, "end": 0.3}]},
+        seen))
+    monkeypatch.setattr(config, "ASR_BACKEND", "parakeet")
+    monkeypatch.setenv("STT_ELEVENLABS_KEY", "k")
+    out = asr_cloud.transcribe(sandbox / "x.wav", provider="scribe")
+    assert out["engine"].startswith("elevenlabs/")
+    assert len(seen) == 1 and "elevenlabs.io" in seen[0]["url"]
+
+
 def test_openai_parses_verbose_json_words(sandbox, fake_upload, monkeypatch):
     import requests
     seen = []

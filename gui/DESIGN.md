@@ -289,6 +289,10 @@ says unheard lines are kept as transcribed.
   inline), Split line (at the cursor, then each half's speaker), Play,
   Cancel, Save. Add line in the audio bar inserts at the playhead with a time
   field.
+- The engine menu is the transcript's `listen_engines`: Parakeet first, the
+  default, then each cloud engine with a key. A strict meeting gets
+  Parakeet alone. With one engine there is no menu, and a line says what
+  Listen again does.
 - The speaker menu lists this meeting's speakers, then enrolled people not
   already here, then "New person…", which opens a name box beside it. An
   empty box refuses the save. It never falls back to the first speaker.

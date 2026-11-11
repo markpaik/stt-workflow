@@ -23,7 +23,6 @@
 let MP=null;               // the open meeting page
 const ASK={};              // Ask threads, per meeting, in memory until reload
 const MRATES=[1,1.25,1.5,2,0.75];
-const ENGINES=[['parakeet','Parakeet, fast'],['mlxwhisper:large-v3','Whisper v3, thorough'],['mlxwhisper:turbo','Whisper turbo']];
 const MTABS=[['summary','Summary'],['transcript','Transcript'],['ask','Ask']];
 
 // #m/<base> and #m/<base>/t/<secs>: a meeting, or a meeting at a second
@@ -334,6 +333,7 @@ async function mLoad(reload){
  if(d.error){MP.err=d.error;MP.loaded=true;mPaintLines();return d;}
  MP.err=null;MP.loaded=true;MP.segs=d.segments||[];MP.noSpeech=!!d.no_speech;
  MP.spkOpts=d.speaker_options||[];MP.people=d.people||[];
+ MP.engines=d.listen_engines||[];MP.strict=!!d.strict;
  if(d.generated_at)MP.stamp=d.generated_at;
  MP.audioShort=d.audio_short_by||null;
  MP.voices=legendVoices(MP.spkOpts,base);
@@ -647,11 +647,20 @@ async function mRevMinor(){
 }
 
 /* the editor: the pencil on any line */
+// the second listen's engines, from the server: Parakeet first (the
+// default), then each cloud engine with a key, none for a strict meeting
+function mEngines(){return MP&&MP.engines&&MP.engines.length?MP.engines:[{id:'parakeet',label:'Parakeet',note:'Runs on this Mac.'}];}
+// one engine: no menu, a line that says what Listen again does
+function mEngPick(){
+ const e=mEngines();
+ if(e.length>1)return `<select id="mc-eng" class="mcsel" aria-label="Engine for a second listen">${e.map(x=>`<option value="${esc(x.id)}" title="${esc(x.note||'')}">${esc(x.label)}</option>`).join('')}</select>`;
+ const say=MP.strict?`Listen again runs ${e[0].label} on this Mac. A strict meeting uses no cloud engine.`:`Listen again runs ${e[0].label} on this line.`;
+ return `<span class="meta" id="mc-eng-note">${esc(say)}</span>`;
+}
 function mEdit(i){
  const g=MP.segs[i],el=document.getElementById('ln-'+i);if(!g||!el)return;
- const defEng=(S&&S.model==='parakeet')?'mlxwhisper:large-v3':'parakeet';
  mCardEl(`<div class="mc-row">${mSpkSelect('mc-spk',g.speaker)}
-   <select id="mc-eng" class="mcsel" aria-label="Engine for a second listen">${ENGINES.map(([v,l])=>`<option value="${v}" ${v===defEng?'selected':''}>${l}</option>`).join('')}</select>
+   ${mEngPick()}
    <button class="btn plain" type="button" data-act="mc-retrans" data-i="${i}">Listen again</button><span class="meta" id="mc-rx"></span></div>
   <textarea id="mc-text" class="mc-text" aria-label="Corrected text">${esc(g.text)}</textarea>
   <div class="mc-btns"><button class="btn plain" type="button" data-act="mc-del" data-i="${i}">Remove line</button><button class="btn plain" type="button" data-act="mc-split" data-i="${i}" title="Put the cursor where the second voice starts">Split line</button>
@@ -703,7 +712,7 @@ async function mSplitSave(i){
  mReload(r.index);
 }
 async function mRetrans(i){
- const g=MP.segs[i];const eng=(document.getElementById('mc-eng')||{}).value||'parakeet';
+ const g=MP.segs[i];const eng=(document.getElementById('mc-eng')||{}).value||mEngines()[0].id;
  const rx=document.getElementById('mc-rx');if(rx)rx.textContent='Listening again…';
  const base=MP.base;
  const r=await api('/api/retranscribe',{base,start:g.start,end:g.end,engine:eng}).catch(()=>({error:'The second listen failed.'}));

@@ -39,7 +39,7 @@ is either a download or a feature you turn on yourself:
 |---|---|---|
 | Model downloads from Hugging Face | Install and first use: Parakeet, Whisper, the pyannote models, the speakrs Core ML models, and Qwen3-8B | Requests for model files. No audio or text |
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
-| Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine | The meeting audio, recompressed to 32 kbps MP3. Speaker separation and voice matching still run locally |
+| Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine, or pick it for Listen again on one line | The meeting audio, recompressed to 32 kbps MP3. Listen again sends only that line's clip. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
 
 Strict meetings never upload, whatever the settings say: strict audio always
@@ -386,8 +386,10 @@ alt (`u`, the second engine's words, when verify ran), Skip, and Done. It
 also accepts all sub-second crumbs at once, and accepts every remaining line
 behind a confirm. The pencil on any line edits it: fix the text, change the
 speaker (including "New person..."), split a line, remove a line, or listen
-again with a different engine. Your edits live in a sidecar file and survive
-every relabel and reprocess.
+again. Listen again runs Parakeet on the line's audio, or a cloud engine
+whose key you added, picked from a menu. A strict meeting gets Parakeet
+only. Your edits live in a sidecar file and survive every relabel and
+reprocess.
 
 ### Titles
 
