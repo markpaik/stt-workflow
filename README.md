@@ -792,7 +792,8 @@ never the checkout's own, and exports land in `$STT_HOME/exports`. A fresh
 demo home passes `registry_doctor.py` with nothing to report. `doctor.py
 check` finds nothing wrong in the home itself. It can still name what the
 Mac lacks: `diarizer_no_token` when the demo home's `stt.env` has no token,
-and `diarizer_fallback` when the speakrs helper is not built.
+`diarizer_fallback` when the speakrs helper is not built, and
+`asr_fallback` when `.venv-qwen` or a Qwen3-ASR model is missing.
 
 ### Repairing the voice registries
 
