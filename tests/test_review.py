@@ -494,25 +494,10 @@ def test_redo_archives_decisions(sandbox):
     assert review.archive_decisions("Mtg") is False  # nothing left to archive
 
 
-_CLOUD_KEYS = ("STT_ELEVENLABS_KEY", "STT_OPENAI_KEY", "STT_MISTRAL_KEY")
-
-
-def _no_cloud_keys(monkeypatch):
-    for k in _CLOUD_KEYS:
-        monkeypatch.delenv(k, raising=False)
-
-
-def _listen_meeting(base, strict):
-    mfile(base, ".json").write_text(json.dumps({"strict": strict, "segments": []}))
-
-
-def test_retranscribe_engine_selection(sandbox, monkeypatch):
+def test_retranscribe_engine_selection(sandbox):
     from stt import retranscribe
     import stt.asr_parakeet
-    _no_cloud_keys(monkeypatch)
     assert retranscribe._asr_module("parakeet") is stt.asr_parakeet
-    cloud = retranscribe._asr_module("cloud:scribe")
-    assert cloud.IS_CLOUD and cloud.label == "ElevenLabs Scribe"
     # unknown engine -> clean error dict, not a crash
     assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "bogus")["error"]
 
@@ -522,99 +507,30 @@ def test_retranscribe_loads_no_model_it_does_not_list(sandbox, monkeypatch):
     could make the child load or fetch any repo or folder. Whisper is gone:
     every Whisper name, and any other engine not listed, is unknown."""
     from stt import retranscribe
-    _no_cloud_keys(monkeypatch)
     monkeypatch.delenv("STT_WHISPER_MLX_MODEL", raising=False)
     for engine in ("mlxwhisper:example-org/model", "mlxwhisper:", "mlxwhisper",
                    "mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper:/tmp/folder",
-                   "Parakeet", "cloud:", "cloud:bogus"):
+                   "Parakeet", "cloud:scribe", "cloud:openai", "cloud:voxtral"):
         with pytest.raises(ValueError, match="unknown engine"):
             retranscribe._asr_module(engine)
         assert "unknown engine" in retranscribe.retranscribe("Mtg", 0, 1, engine)["error"]
     assert "STT_WHISPER_MLX_MODEL" not in os.environ
 
 
-def test_the_second_listen_offers_parakeet_and_each_cloud_engine_with_a_key(
-        sandbox, monkeypatch):
-    """Parakeet first, then each cloud engine whose key is set. A strict
-    meeting gets Parakeet alone, whatever keys exist."""
-    from stt import retranscribe
-    _no_cloud_keys(monkeypatch)
-    assert retranscribe.offered(False) == ["parakeet"]
-    assert retranscribe.offered(True) == ["parakeet"]
+def test_the_second_listen_offers_only_local_engines(sandbox, monkeypatch):
+    """Before Whisper went, the second listen sent no audio off the Mac,
+    and it still sends none: a cloud key adds no engine. Parakeet is the
+    one local engine, and a new one is one row in LOCAL."""
+    from stt import asr_cloud, retranscribe
     (sandbox / "stt.env").write_text("STT_ELEVENLABS_KEY=synthetic-key\n"
-                                     "STT_MISTRAL_KEY=synthetic-key\n")
-    assert retranscribe.offered(False) == ["parakeet", "cloud:scribe", "cloud:voxtral"]
-    assert retranscribe.offered(True) == ["parakeet"]
-
-
-@pytest.mark.parametrize("stored", ['{"strict": true}', '{"strict": tr', "[]", None])
-def test_a_strict_meeting_never_reaches_a_cloud_engine_in_a_second_listen(
-        sandbox, monkeypatch, stored):
-    """A strict meeting's audio stays on this Mac. Metadata that does not
-    read, or is missing, fails private. Parakeet still listens."""
-    from stt import asr_cloud, retranscribe
-    _no_cloud_keys(monkeypatch)
-    (sandbox / "stt.env").write_text("STT_ELEVENLABS_KEY=synthetic-key\n")
-    if stored is not None:
-        mfile("Strict Mtg", ".json").write_text(stored)
-    sent = []
-    monkeypatch.setattr(asr_cloud, "transcribe", lambda *a, **k: sent.append(a))
-    out = retranscribe.retranscribe("Strict Mtg", 0, 1, "cloud:scribe")
-    assert "strict" in out["error"] and "Parakeet" in out["error"]
-    assert sent == []
-    assert retranscribe.engine_problem("Strict Mtg", "parakeet") is None
-
-
-def test_a_cloud_engine_without_its_key_is_refused(sandbox, monkeypatch):
-    from stt import asr_cloud, retranscribe
-    _no_cloud_keys(monkeypatch)
-    _listen_meeting("Mtg", strict=False)
-    sent = []
-    monkeypatch.setattr(asr_cloud, "transcribe", lambda *a, **k: sent.append(a))
-    out = retranscribe.retranscribe("Mtg", 0, 1, "cloud:openai")
-    assert out == {"error": "Add the OpenAI key in Settings first."}
-    assert sent == []
-
-
-def _silent_wav(base, secs=4):
-    import wave
-    w = mfile(base, ".wav")
-    with wave.open(str(w), "wb") as f:
-        f.setnchannels(1), f.setsampwidth(2), f.setframerate(16000)
-        f.writeframes(b"\0\0" * 16000 * secs)
-
-
-@pytest.mark.skipif(not (shutil.which(audio.FFMPEG) or os.path.exists(audio.FFMPEG)),
-                    reason="ffmpeg not installed")
-def test_a_cloud_second_listen_sends_only_the_clip_to_the_engine_picked(
-        sandbox, monkeypatch, capsys):
-    """The setting may name another engine: the picked provider gets the
-    clip of this line, and a cloud failure comes back as one line."""
-    import wave
-    from stt import asr_cloud, retranscribe
-    _no_cloud_keys(monkeypatch)
-    (sandbox / "stt.env").write_text("STT_ELEVENLABS_KEY=synthetic-key\n")
-    monkeypatch.setattr(config, "ASR_BACKEND", "parakeet")
-    _listen_meeting("Mtg", strict=False)
-    _silent_wav("Mtg")
-    sent = []
-
-    def _cloud(clip, progress=None, provider=None):
-        with wave.open(str(clip)) as c:
-            sent.append((provider, round(c.getnframes() / c.getframerate(), 2)))
-        return {"text": " we will ship it ", "engine": "elevenlabs/scribe_v2"}
-    monkeypatch.setattr(asr_cloud, "transcribe", _cloud)
-    out = retranscribe.retranscribe("Mtg", 1, 2, "cloud:scribe")
-    assert out == {"text": "we will ship it", "engine": "elevenlabs/scribe_v2"}
-    assert sent == [("scribe", 1.5)]                   # the line plus 0.25 s each side
-
-    def _down(clip, progress=None, provider=None):
-        raise RuntimeError("synthetic network failure")
-    monkeypatch.setattr(asr_cloud, "transcribe", _down)
-    out = retranscribe.retranscribe("Mtg", 1, 2, "cloud:scribe")
-    assert out == {"error": "ElevenLabs Scribe did not transcribe this line. "
-                            "Try again, or listen again with Parakeet."}
-    assert "synthetic network failure" in capsys.readouterr().err
+                                     "STT_OPENAI_KEY=synthetic-key\n")
+    assert asr_cloud.available("scribe")
+    assert retranscribe.offered() == ["parakeet"]
+    assert retranscribe.engine_problem("parakeet") is None
+    assert "unknown engine" in retranscribe.engine_problem("cloud:scribe")
+    monkeypatch.setattr(retranscribe, "LOCAL", ("parakeet", "other-local"))
+    assert retranscribe.offered() == ["parakeet", "other-local"]
+    assert retranscribe.engine_problem("other-local") is None
 
 
 @pytest.mark.skipif(not (shutil.which(audio.FFMPEG) or os.path.exists(audio.FFMPEG)),

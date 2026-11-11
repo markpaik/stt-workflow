@@ -333,7 +333,7 @@ async function mLoad(reload){
  if(d.error){MP.err=d.error;MP.loaded=true;mPaintLines();return d;}
  MP.err=null;MP.loaded=true;MP.segs=d.segments||[];MP.noSpeech=!!d.no_speech;
  MP.spkOpts=d.speaker_options||[];MP.people=d.people||[];
- MP.engines=d.listen_engines||[];MP.strict=!!d.strict;
+ MP.engines=d.listen_engines||[];
  if(d.generated_at)MP.stamp=d.generated_at;
  MP.audioShort=d.audio_short_by||null;
  MP.voices=legendVoices(MP.spkOpts,base);
@@ -647,15 +647,14 @@ async function mRevMinor(){
 }
 
 /* the editor: the pencil on any line */
-// the second listen's engines, from the server: Parakeet first (the
-// default), then each cloud engine with a key, none for a strict meeting
+// the second listen's engines, from the server: the local engines only,
+// the default first. Today that is Parakeet alone.
 function mEngines(){return MP&&MP.engines&&MP.engines.length?MP.engines:[{id:'parakeet',label:'Parakeet',note:'Runs on this Mac.'}];}
 // one engine: no menu, a line that says what Listen again does
 function mEngPick(){
  const e=mEngines();
  if(e.length>1)return `<select id="mc-eng" class="mcsel" aria-label="Engine for a second listen">${e.map(x=>`<option value="${esc(x.id)}" title="${esc(x.note||'')}">${esc(x.label)}</option>`).join('')}</select>`;
- const say=MP.strict?`Listen again runs ${e[0].label} on this Mac. A strict meeting uses no cloud engine.`:`Listen again runs ${e[0].label} on this line.`;
- return `<span class="meta" id="mc-eng-note">${esc(say)}</span>`;
+ return `<span class="meta" id="mc-eng-note">${esc(`Listen again runs ${e[0].label} on this line, on this Mac.`)}</span>`;
 }
 function mEdit(i){
  const g=MP.segs[i],el=document.getElementById('ln-'+i);if(!g||!el)return;

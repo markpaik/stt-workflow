@@ -1725,21 +1725,12 @@ def _meeting_audio(base: str):
     return config.meeting_audio(base)
 
 
-def _listen_engines(strict) -> list:
-    """The second listen's engine menu for one meeting, Parakeet first (the
-    default): [{"id", "label", "note"}] in stt.retranscribe.offered() order.
-    A strict meeting gets Parakeet alone."""
-    from stt import asr_cloud, retranscribe
-    out = []
-    for e in retranscribe.offered(bool(strict)):
-        prov = asr_cloud.provider_from_backend(e)
-        if prov:
-            label = asr_cloud.PROVIDERS[prov]["label"]
-            out.append({"id": e, "label": label + " ☁",
-                        "note": f"Sends this line's audio to {label}."})
-        else:
-            out.append({"id": e, "label": e.capitalize(), "note": "Runs on this Mac."})
-    return out
+def _listen_engines() -> list:
+    """The second listen's engine menu, the default first: [{"id", "label",
+    "note"}] in stt.retranscribe.offered() order. Local engines only."""
+    from stt import retranscribe
+    return [{"id": e, "label": e.capitalize(), "note": "Runs on this Mac."}
+            for e in retranscribe.offered()]
 
 
 def _cloud_key_status() -> dict:
@@ -2518,7 +2509,7 @@ class Handler(BaseHTTPRequestHandler):
                         if s.get("text", "").strip()]
                 self._json({"base": base, "strict": d.get("strict", False),
                             # the engines a second listen on a line may use
-                            "listen_engines": _listen_engines(d.get("strict")),
+                            "listen_engines": _listen_engines(),
                             # the save stamp of exactly these bytes: the meeting
                             # page records it so the next poll's row stamp is
                             # compared against what is really on screen
@@ -3593,11 +3584,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_base(b.get("base")):
                     return
                 engine = b.text("engine", "") or "parakeet"
-                # a strict meeting never reaches a cloud engine, and an
-                # engine without its key starts no child (the child checks
-                # this again before any audio moves)
+                # an engine the second listen does not offer starts no
+                # child (the child checks this again)
                 from stt import retranscribe as _rt
-                why = _rt.engine_problem(b["base"], engine)
+                why = _rt.engine_problem(engine)
                 if why:
                     self._json({"error": why})
                     return
