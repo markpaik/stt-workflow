@@ -157,8 +157,8 @@ def test_pyannote_samples_do_not_teach_the_speakrs_rate(tmp_path, monkeypatch):
 
 def test_record_tags_the_engine_that_ran(tmp_path, monkeypatch):
     monkeypatch.setattr(rates, "RATES_LOG", tmp_path / "rates.jsonl")
-    rates.record(600, {"diarizing": 300}, "parakeet", diarizer="pyannote/speaker-diarization-community-1")
-    rates.record(600, {"diarizing": 20}, "parakeet", diarizer="speakrs-0.7.0-coreml ahc=0.55")
+    rates.record(600, {"diarizing": 300}, "qwen3", diarizer="pyannote/speaker-diarization-community-1")
+    rates.record(600, {"diarizing": 20}, "qwen3", diarizer="speakrs-0.7.0-coreml ahc=0.55")
     rows = [json.loads(x) for x in (tmp_path / "rates.jsonl").read_text().splitlines()]
     assert [r["diar"] for r in rows] == ["pyannote", "speakrs"]
 

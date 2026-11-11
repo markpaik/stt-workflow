@@ -291,7 +291,7 @@ says unheard lines are kept as transcribed.
   Cancel, Save. Add line in the audio bar inserts at the playhead with a time
   field.
 - The engine menu is the transcript's `listen_engines`: the local engines
-  only, the default first. Today that is Parakeet alone, so there is no
+  only, the default first. Today that is Qwen3-ASR alone, so there is no
   menu, and a line says what Listen again does.
 - The speaker menu lists this meeting's speakers, then enrolled people not
   already here, then "New person…", which opens a name box beside it. An

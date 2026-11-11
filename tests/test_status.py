@@ -66,7 +66,7 @@ def test_missing_status_file_reads_empty(sandbox):
 def test_estimate_progress_verifying_stage(sandbox):
     """Verify runs report a 'verifying' stage — ETA must keep working there,
     and the extra pass must appear in the total only when actually verifying.
-    A cloud transcript has a second engine (Parakeet). A Parakeet one has none."""
+    A cloud transcript has a second engine (Qwen3-ASR). A Qwen3-ASR one has none."""
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
     plain, _ = status.estimate_progress({"stage": "transcribing", "duration": 600, "progress": 1.0})
     f, eta = status.estimate_progress({"stage": "verifying", "duration": 600, "progress": 0.5})
@@ -197,30 +197,31 @@ def test_verify_timings_calibrate_the_secondary_engine(sandbox):
     to the machine instead of staying on factory defaults forever."""
     from stt import rates
 
-    # 600s of audio, primary cloud: verify ran on Parakeet for 20s
-    rates.record(600.0, {"transcribing": 10.0, "verifying": 20.0}, "cloud:scribe")
+    # 600s of audio, primary cloud: verify ran on Qwen3-ASR for 20s
+    rates.record(600.0, {"transcribing": 10.0, "verifying": 20.0}, "cloud:scribe",
+                 verify="qwen3")
     L = rates.learned()
     assert L["asr"]["cloud:scribe@1"] == 60.0      # 600/10 primary
-    assert L["asr"]["parakeet@1"] == 30.0          # 600/20 from the verify pass
+    assert L["asr"]["qwen3@1"] == 30.0             # 600/20 from the verify pass
 
 
 def test_a_verify_run_with_no_second_engine_budgets_no_verifying(sandbox):
-    """A Parakeet transcript has no second local engine, so its verify run
+    """A Qwen3-ASR transcript has no second local engine, so its verify run
     runs no verifying stage. The ETA budgeted one at Whisper's rate, and a
     stray verifying sample was learned as Whisper's speed."""
     from stt import rates
-    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
     est = status.stage_estimates(3600.0, verify=True)
     assert "verifying" not in est
     assert est == status.stage_estimates(3600.0, verify=False)
     assert status.stage_tail("verifying") == rates.DEFAULT_TAIL
-    rates.record(600.0, {"transcribing": 10.0, "verifying": 60.0}, "parakeet")
-    assert set(rates.learned()["asr"]) == {"parakeet@1"}
-    assert rates.learned()["asr"]["parakeet@1"] == 60.0   # the primary run only
-    # a cloud setting keeps a verifying stage, budgeted at Parakeet's rate
+    rates.record(600.0, {"transcribing": 10.0, "verifying": 60.0}, "qwen3")
+    assert set(rates.learned()["asr"]) == {"qwen3@1"}
+    assert rates.learned()["asr"]["qwen3@1"] == 60.0      # the primary run only
+    # a cloud setting keeps a verifying stage, budgeted at Qwen3-ASR's rate
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
     est = status.stage_estimates(3600.0, verify=True)
-    assert est["verifying"] == rates.stage_secs("transcribing", 3600.0, 1, "parakeet")
+    assert est["verifying"] == rates.stage_secs("transcribing", 3600.0, 1, "qwen3")
 
 
 def test_set_stage_concurrent_no_lost_update(sandbox):
@@ -524,7 +525,7 @@ def test_the_tail_comes_from_the_models_residuals(sandbox, monkeypatch):
     model's own overrun fraction, which moves with the samples."""
     from stt import rates
     from stt import status as st
-    monkeypatch.setattr(rates, "current_asr_key", lambda: "parakeet")
+    monkeypatch.setattr(rates, "current_asr_key", lambda: "qwen3")
     import time as _t
     entry = {"stage": "diarizing", "duration": 3600.0, "progress": 0.87,
              "progress_at": _t.time() - 600}
@@ -535,7 +536,7 @@ def test_the_tail_comes_from_the_models_residuals(sandbox, monkeypatch):
     # samples that overran their prediction by 60 percent, three in ten
     for i, dur in enumerate([600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000, 3600]):
         rates.record(dur, {"diarizing": dur * (1.6 if i in (2, 5, 8) else 1.0),
-                           "writing": 10}, "parakeet", 1)
+                           "writing": 10}, "qwen3", 1)
     tail = st.stage_tail("diarizing")
     assert tail == rates.learned()["tail"]["diarize"]["1"] and tail > rates.DEFAULT_TAIL
     est = st.stage_estimates(3600.0)["diarizing"]

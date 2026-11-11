@@ -454,7 +454,7 @@ def test_writes_from_the_frame_are_posts():
               "restore_meeting", "delete_meeting", "export", "run", "stop", "pause", "resume",
               "queue_hold", "queue_delete", "name", "hide_unknown", "merge_speakers",
               "rename_speaker", "remove_speaker", "remove_sample", "reassign_sample",
-              "cloud_keys", "llm_backend", "automation", "schedule", "model", "punctuate",
+              "cloud_keys", "llm_backend", "automation", "schedule", "model",
               "mic_speaker", "seen", "suggest", "review", "ask", "forget", "dismiss_voice",
               "name_preview", "retranscribe")
     for w in writes:
@@ -834,14 +834,14 @@ console.log(JSON.stringify({home:home.includes('The recording captured NO audio.
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_verify_is_offered_only_while_a_second_local_engine_exists():
-    """With Parakeet, the only local engine, Verify would do nothing, so
-    the Activity page does not offer it, and a box ticked before Whisper
-    went stays off. A cloud engine has Parakeet to compare with."""
+    """With Qwen3-ASR, the only local engine, Verify would do nothing, so
+    the Activity page does not offer it, and a box ticked before stays
+    off. A cloud engine has Qwen3-ASR to compare with."""
     out = _run_node("""
 localStorage.getItem=k=>k==='stt_run_verify'?'1':null;
 const view=e=>{S={meetings:[],needs_you:[],timeline:[],queue:[],recent:[],queued_jobs:[],tray:[],verify_engine:e};
  return {html:activityView(),opts:runOpts()};};
-const none=view(null),cloud=view('parakeet');
+const none=view(null),cloud=view('qwen3');
 console.log(JSON.stringify({noneBox:none.html.includes('data-opt="stt_run_verify"'),noneVerify:none.opts.verify,
  strict:none.html.includes('data-opt="stt_run_strict"'),
  cloudBox:cloud.html.includes('data-opt="stt_run_verify"'),cloudVerify:cloud.opts.verify}));

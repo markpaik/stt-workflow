@@ -1,4 +1,4 @@
-"""Process one audio file: transcribe -> diarize -> name -> merge -> punctuate -> write.
+"""Process one audio file: transcribe -> diarize -> name -> merge -> write.
 
 This never touches the iCloud original; the batch orchestrator owns the
 copy/move/delete lifecycle. Output writes are atomic (see output._atomic_write).
@@ -11,13 +11,16 @@ from pathlib import Path
 import numpy as np
 
 from . import (audio, channels, config, diarcache, diarize, identify, merge,
-               output, sanitize, punctuate, unknowns, verify)
+               output, sanitize, unknowns, verify)
 
 
 def _load_asr(strict=False):
+    """The engine for one file: the cloud engine the setting names, or
+    Qwen3-ASR, the one local engine. A strict meeting never reaches a cloud
+    engine: it always runs Qwen3-ASR."""
     # read through the setting's own check, so a value set after the config
     # loaded (code that assigns config.ASR_BACKEND) warns as a typo in
-    # stt.env does, never runs Parakeet with no word
+    # stt.env does, never runs another engine with no word
     backend, why = config._asr_problem(config.ASR_BACKEND)
     if why:
         config._warn_once(("STT_ASR_BACKEND", why), f"STT_ASR_BACKEND={why}")
@@ -30,36 +33,29 @@ def _load_asr(strict=False):
         else:
             from . import asr_cloud
             return asr_cloud
-    if backend == "qwen3":
-        from . import asr_qwen3
-        return asr_qwen3
-    from . import asr_parakeet
-    return asr_parakeet
+    from . import asr_qwen3
+    return asr_qwen3
 
 
 def _transcribe_with_fallback(asr, wav, progress=None) -> dict:
     """A cloud engine failing (network down, quota, bad key, size cap) must
-    degrade to the local engine, not kill the nightly run. So must Qwen3-ASR
-    when it is not set up on this Mac (no .venv-qwen, no mlx-audio, a model
-    not downloaded): one warning per run names the fix, and Parakeet
-    transcribes. The meeting json names the engine that ran. Other local
-    engine errors still propagate."""
-    from . import asr_qwen3
+    degrade to the local engine, Qwen3-ASR, not kill the nightly run. The
+    meeting json names the engine that ran.
+
+    Qwen3-ASR not set up on this Mac (no .venv-qwen, no mlx-audio, a model
+    not downloaded) raises asr_qwen3.EngineUnavailable: one plain line
+    that names the fix. There is no other local engine, so the file fails,
+    and the batch counts it as this Mac's fault (run_batch._machine_at_fault):
+    no file is set aside for it. Other local engine errors propagate too."""
     try:
         return asr.transcribe(wav, progress=progress)
-    except asr_qwen3.EngineUnavailable as e:
-        config._warn_once(("STT_ASR_BACKEND", "qwen3 unavailable"),
-                          f"Qwen3-ASR cannot run on this Mac: {e}. This run "
-                          f"transcribes with Parakeet. To fix it, {asr_qwen3.FIX}.")
-        from . import asr_parakeet
-        return asr_parakeet.transcribe(wav, progress=progress)
     except Exception as e:
         if not getattr(asr, "IS_CLOUD", False):
             raise
         print(f"   cloud transcription failed ({e}) — falling back to the "
               "local engine", flush=True)
-        from . import asr_parakeet
-        return asr_parakeet.transcribe(wav, progress=progress)
+        from . import asr_qwen3
+        return asr_qwen3.transcribe(wav, progress=progress)
 
 
 def _meeting_date(src: Path, existing_json: Path = None) -> str:
@@ -498,9 +494,8 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         segments, labeled_words = merge.assign_and_group(
             words, turns, names, overlaps=overlaps, spans=spans,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
-        punctuated = punctuate.runs_on(asr_out["engine"])
-        if punctuated:
-            punctuate.restore_segments(segments)
+        # no punctuation pass: Qwen3-ASR and the cloud engines write their
+        # own punctuation and casing, and the words carry it
         if not do_diarize:
             for seg in segments:
                 seg["display"] = output.NOT_SEPARATED
@@ -602,7 +597,6 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             "n_speakers": len(labels),
             "strict": strict,
             "one_time_speakers": not track_unknowns,
-            "punctuated": punctuated,
             "verify_engine": verify_engine,
             "overlap_spans": [[s, e] for s, e in overlaps],
             "refine_stats": diar["refine_stats"] if diar else None,
@@ -687,4 +681,5 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         "duration_sec": dur, "n_speakers": len(labels), "identified": named,
         "diarizer": (diar or {}).get("engine"),
         "asr_engine": asr_out.get("engine"),  # the engine that ran (rates.engine_key)
+        "verify_engine": verify_engine,       # the second opinion's engine, or None
     }

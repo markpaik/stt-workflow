@@ -1598,13 +1598,14 @@ def test_the_model_endpoint_accepts_only_a_listed_choice(running_server):
     assert not envp.exists() or "parakeeet" not in envp.read_text()
 
     st, body = _post(running_server, "/api/model",
-                     {"model": "parakeet\nSTT_MEETINGS_DIR=/tmp/evil"})
+                     {"model": "qwen3\nSTT_MEETINGS_DIR=/tmp/evil"})
     assert st == 200 and body["ok"] is False
     assert not envp.exists() or "STT_MEETINGS_DIR" not in envp.read_text()
 
+    # Parakeet is gone: its old id is refused like any unlisted one
     st, body = _post(running_server, "/api/model", {"model": "parakeet"})
-    assert st == 200 and body["ok"] is True
-    assert "STT_ASR_BACKEND=parakeet" in envp.read_text()
+    assert st == 200 and body["ok"] is False
+    assert not envp.exists() or "parakeet" not in envp.read_text()
 
     st, body = _post(running_server, "/api/model", {"model": "qwen3"})
     assert st == 200 and body["ok"] is True
@@ -1612,12 +1613,15 @@ def test_the_model_endpoint_accepts_only_a_listed_choice(running_server):
 
 
 def test_the_settings_page_offers_no_whisper_engine(running_server):
-    """The Whisper engine is gone: the engine list and the update check
-    name no Whisper model, and a Whisper choice is refused like any
+    """The Whisper and Parakeet engines are gone: the engine list and the
+    update check name neither, and a Whisper choice is refused like any
     unlisted one. Only the OpenAI cloud engine's own model is Whisper."""
     envp = config.PROJECT_DIR / "stt.env"
     local = [c["id"] for c in srv.ASR_CHOICES if not c.get("cloud")]
-    assert local == ["qwen3", "parakeet"]
+    assert local == ["qwen3"]
+    assert not [c for c in srv.ASR_CHOICES
+                if "parakeet" in (c["id"] + c["label"] + c["note"]).lower()]
+    assert not [r for r in srv.MODEL_REPOS.values() if "parakeet" in r.lower()]
     assert not [c for c in srv.ASR_CHOICES if c["id"].startswith("mlxwhisper")]
     assert not [r for r in srv.MODEL_REPOS.values() if "whisper" in r]
     for choice in ("mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper"):

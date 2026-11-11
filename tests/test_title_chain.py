@@ -19,7 +19,6 @@ def _process(monkeypatch, src):
                                                "words": w}))
     monkeypatch.setattr(audio, "to_wav16k", lambda s, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 600.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(provenance, "probe_tags", lambda p: {"tags": {}, "duration": None})
     provenance._probe_cache.clear()
     return pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)

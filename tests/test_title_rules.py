@@ -111,7 +111,6 @@ def _process(monkeypatch, src, words=True):
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr(words))
     monkeypatch.setattr(audio, "to_wav16k", lambda s, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     return pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False)
 
 

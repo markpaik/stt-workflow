@@ -88,7 +88,6 @@ def test_dateless_source_gets_the_date_stamped_into_its_folder(sandbox, monkeypa
     meeting landed on top of it."""
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     src = _audio(tmp_path / "LT Weekly Meeting.m4a")
     res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                 do_diarize=False, do_verify=False)
@@ -101,7 +100,6 @@ def test_dateless_source_gets_the_date_stamped_into_its_folder(sandbox, monkeypa
 def test_a_source_that_already_has_a_date_moves_it_to_the_front(sandbox, monkeypatch, tmp_path):
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     src = _audio(tmp_path / "LT Weekly Meeting 05212026.m4a")
     res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                 do_diarize=False, do_verify=False)
@@ -118,7 +116,6 @@ def test_a_redo_never_renames_an_existing_meetings_folder(sandbox, monkeypatch, 
     stamp a date, land in a NEW folder, and orphan the old one."""
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     _meeting("Legacy Dateless")                            # a pre-existing meeting
     stored = _audio(config.meeting_file("Legacy Dateless", ".m4a"))
     res = pipeline.process_file(stored, dest_dir=config.MEETINGS_DIR,
@@ -177,7 +174,6 @@ def test_tagging_a_category_never_moves_the_folder(sandbox):
 def test_new_meetings_land_unreviewed_and_a_redo_keeps_the_state(sandbox, monkeypatch, tmp_path):
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     src = _audio(tmp_path / "Fresh 05012026.m4a")
     res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR,
                                 do_diarize=False, do_verify=False)
@@ -221,7 +217,6 @@ def test_plain_named_source_processes_end_to_end_into_the_stamped_folder(sandbox
     from stt import icloud, pipeline
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(icloud, "materialize", lambda p: True)
 
     src = _audio(config.source_dir() / "LT Weekly Meeting.m4a")

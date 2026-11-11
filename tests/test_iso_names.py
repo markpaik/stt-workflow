@@ -487,7 +487,6 @@ def test_the_pipeline_header_names_the_meeting(sandbox, monkeypatch, tmp_path):
     from stt.audio import FFMPEG
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     src = tmp_path / "Kim Weekly Check-in 08032026.m4a"
     subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
                     "sine=frequency=300:duration=2", "-ac", "1", "-c:a", "aac",

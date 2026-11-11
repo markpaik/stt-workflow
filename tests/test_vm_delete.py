@@ -48,8 +48,9 @@ log({{"cmd": "run", "name": name, "title": title, "argv": args}})
 if sc.get("sleep"):
     time.sleep(sc["sleep"])
 db = sqlite3.connect(sc["db"])
-# what the owner's Shortcut does: Find Recordings where Name is the input,
-# count them, delete only when there is exactly one, output the count
+# what the owner's Shortcut does: Find Recordings where Recording Name is
+# the Shortcut Input, count them, delete the Find result only when there is
+# exactly one, and output the count
 live = [r[0] for r in db.execute(
     "SELECT ZUNIQUEID FROM ZCLOUDRECORDING WHERE ZENCRYPTEDTITLE = ? "
     "AND ZEVICTIONDATE IS NULL", (title,))]
@@ -269,13 +270,49 @@ def test_a_renamed_meeting_is_found_by_its_id(vm):
     assert r["deleted"] and r["deleted"][0]["base"] == new
 
 
-def test_a_memo_stored_before_the_note_is_proved_by_its_manifest_record(vm):
+def test_a_memo_stored_before_the_note_is_proved_by_its_meeting_in_the_library(vm):
     _lib([{"uuid": "U-1", "title": "Budget Review"}])
-    _stored("U-1", "Budget Review", note=False)
+    _stored("U-1", "Budget Review", note=False, manifest_rec=False)
     r = _pass()
     assert r["deleted"]
-    # the proof is kept, so a later memo under the same staged name cannot hide it
-    assert voicememos.load_state()["staged"]["U-1"]["ingested"]["from"] == "manifest"
+    # the proof is kept, so the next pass reads it from the state
+    assert voicememos.load_state()["staged"]["U-1"]["ingested"]["from"] == "library"
+
+
+def test_memos_staged_under_one_name_are_each_proved_by_their_own_meeting(vm, monkeypatch):
+    """Four memos of one day were staged under one name before the names
+    were unique. The proof read the manifest record under that name, which
+    names only the last meeting, so three stored memos read as "not stored
+    yet". Each meeting json carries its memo's id, and that is the proof
+    now. The length check still holds a memo whose stored audio differs."""
+    monkeypatch.setattr(voicememos, "MAX_DELETES_PER_PASS", 5)
+    name = "2026-11-03 Voice Memo.m4a"
+    uuids = [f"U-{i}" for i in range(4)]
+    _lib([{"uuid": u, "title": f"New Recording {i + 1}"} for i, u in enumerate(uuids)])
+    d = voicememos.load_state()
+    bases = []
+    for i, u in enumerate(uuids):
+        d["staged"][u] = {"name": name, "at": f"2026-11-03T10:00:0{i}"}
+        base = "2026-11-03 Voice Memo" + ("" if i == 0 else f" ({i + 1})")
+        bases.append(base)
+        config.meeting_dir(base).mkdir(parents=True, exist_ok=True)
+        config.meeting_file(base, ".json").write_text(json.dumps(
+            {"meeting_id": config.new_meeting_id(), "vm_uuid": u, "segments": [],
+             "speakers": [], "words": []}))
+        config.meeting_file(base, ".m4a").write_bytes(b"synthetic stored audio")
+    voicememos._save_state(d)
+    # the one manifest record under the shared name: the last memo's meeting
+    manifest.record(name, 1.0, [str(config.meeting_file(bases[-1], ".json"))])
+    vm.durs[bases[2]] = 900.0                     # this copy is 5 minutes short
+    r = _pass()
+    plan = {i["uuid"]: (i["state"], i["reason"], i["base"]) for i in r["plan"]}
+    assert plan["U-2"] == ("waiting", "duration_mismatch", bases[2])
+    assert sorted(x["base"] for x in r["deleted"]) == sorted(
+        b for i, b in enumerate(bases) if i != 2)
+    rows = _rows()
+    assert [rows[u]["deleted"] for u in uuids] == [True, True, False, True]
+    assert sorted(c["title"] for c in vm.calls()) == [
+        "New Recording 1", "New Recording 2", "New Recording 4"]
 
 
 def test_a_pass_moves_at_most_the_limit(vm, monkeypatch):
@@ -301,8 +338,15 @@ def test_a_memo_the_sync_never_staged_is_never_deleted(vm):
 
 
 def test_a_memo_the_batch_has_not_stored_waits(vm):
+    """No note, and no meeting in the library carries the memo's id. A
+    manifest record under its staged name is no proof: the meeting it names
+    holds another memo."""
     _lib([{"uuid": "U-1", "title": "Budget Review"}])
-    _stored("U-1", "Budget Review", note=False, manifest_rec=False)
+    other = _stored("U-OTHER", "Budget Review", note=False, manifest_rec=True)
+    d = voicememos.load_state()
+    d["staged"] = {"U-1": dict(d["staged"].pop("U-OTHER"))}
+    voicememos._save_state(d)
+    assert config.meeting_file(other, ".json").exists()
     r = _pass()
     assert vm.calls() == [] and not _rows()["U-1"]["deleted"]
     assert [(i["state"], i["reason"]) for i in r["plan"]] == [("waiting", "not_ingested")]

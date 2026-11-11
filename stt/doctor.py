@@ -48,8 +48,8 @@ stt.env value that cannot be read and is replaced by its default
 (`bad_setting`), a missing Hugging Face token (`diarizer_no_token`), a
 speakrs helper, model set or sandbox-exec that is missing so pyannote
 runs instead (`diarizer_fallback`), STT_VERIFY=1 with no second local
-engine to compare with (`verify_no_second_engine`), the qwen3 engine set
-but not able to run here, so Parakeet transcribes (`asr_fallback`), and
+engine to compare with (`verify_no_second_engine`), Qwen3-ASR, the local
+engine, not able to run here, so its files fail (`asr_unavailable`), and
 (with deep=True) a stored duration longer than the audio.
 """
 import hashlib
@@ -539,21 +539,27 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
 def asr_findings() -> list:
     """(kind, detail) pairs for the transcription engine. Reads only.
 
-    asr_fallback: STT_ASR_BACKEND is qwen3 (the default), but its Python
-    environment does not run, does not import mlx_audio, or one of its two
-    models is not in the local cache. The batch then warns once a run and
-    transcribes with Parakeet (pipeline._transcribe_with_fallback)."""
+    asr_unavailable: Qwen3-ASR, the one local engine, cannot run here: its
+    Python environment does not run, does not import mlx_audio, or one of
+    its two models is not in the local cache. Under qwen3 (the default)
+    every file then fails with the fix. Under a cloud setting a strict
+    meeting fails, and so does a file whose cloud run fails
+    (pipeline._transcribe_with_fallback)."""
     backend, _ = config._asr_problem(config._env_file().get("STT_ASR_BACKEND")
                                      or os.environ.get("STT_ASR_BACKEND"))
-    if backend != "qwen3":
-        return []
     from . import asr_qwen3
     why = asr_qwen3.problem(deep=True)
     if why is None:
         return []
-    return [("asr_fallback",
-             f"STT_ASR_BACKEND is qwen3, but {why}, so the batch transcribes "
-             f"with Parakeet. To fix it, {asr_qwen3.FIX}")]
+    if backend == "qwen3":
+        what = "Qwen3-ASR transcribes every file, and each file fails until it can run"
+    else:
+        what = (f"STT_ASR_BACKEND is {backend}, but Qwen3-ASR transcribes every "
+                "strict meeting and every file whose cloud run fails, and those "
+                "fail until it can run")
+    return [("asr_unavailable",
+             f"Qwen3-ASR cannot run on this Mac: {why}. {what}. "
+             f"To fix it, {asr_qwen3.FIX}")]
 
 
 def verify_findings() -> list:
@@ -561,8 +567,8 @@ def verify_findings() -> list:
 
     verify_no_second_engine: STT_VERIFY=1, but the engine that writes the
     transcripts has no other local engine to compare with, so the setting
-    does nothing (stt/verify.py). Parakeet is the only local engine, so
-    this holds for every Parakeet run. A cloud engine gets Parakeet as its
+    does nothing (stt/verify.py). Qwen3-ASR is the only local engine, so
+    this holds for every Qwen3-ASR run. A cloud engine gets Qwen3-ASR as its
     second opinion, and then there is no finding."""
     from . import rates, verify
     raw = config._env_file().get("STT_VERIFY") or os.environ.get("STT_VERIFY")

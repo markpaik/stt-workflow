@@ -648,8 +648,8 @@ async function mRevMinor(){
 
 /* the editor: the pencil on any line */
 // the second listen's engines, from the server: the local engines only,
-// the default first. Today that is Parakeet alone.
-function mEngines(){return MP&&MP.engines&&MP.engines.length?MP.engines:[{id:'parakeet',label:'Parakeet',note:'Runs on this Mac.'}];}
+// the default first. Today that is Qwen3-ASR alone.
+function mEngines(){return MP&&MP.engines&&MP.engines.length?MP.engines:[{id:'qwen3',label:'Qwen3-ASR',note:'Runs on this Mac.'}];}
 // one engine: no menu, a line that says what Listen again does
 function mEngPick(){
  const e=mEngines();

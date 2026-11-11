@@ -830,7 +830,7 @@ def test_the_doctor_names_a_shell_style_line_that_sets_nothing(sandbox, monkeypa
     setting stayed at its default with no word anywhere."""
     _no_diar_env(monkeypatch)
     (sandbox / "stt.env").write_text(
-        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_PUNCTUATE=1\n_OK_2=x\n")
+        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_VERIFY=0\n_OK_2=x\n")
     bad = {f.subject: f.detail for f in doctor.check(registry=False)
            if f.kind == "bad_setting"}
     assert set(bad) == {"export STT_DIARIZER", "MY KEY"}
@@ -846,10 +846,10 @@ def test_stt_env_example_lists_every_diarizer_setting():
 
 
 def test_the_doctor_says_why_verify_does_nothing(sandbox, monkeypatch):
-    """Whisper was the second opinion for a Parakeet transcript. With it
-    gone, STT_VERIFY=1 on Parakeet adds no flags, and only a log line said
-    so. The doctor names it. A cloud engine still has Parakeet to compare
-    with, and the default (off) needs no word."""
+    """Qwen3-ASR is the only local engine, so STT_VERIFY=1 on a Qwen3-ASR
+    transcript adds no flags, and only a log line said so. The doctor names
+    it. A cloud engine has Qwen3-ASR to compare with, and the default (off)
+    needs no word."""
     monkeypatch.delenv("STT_VERIFY", raising=False)
     monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
 
@@ -859,9 +859,11 @@ def test_the_doctor_says_why_verify_does_nothing(sandbox, monkeypatch):
     (sandbox / "stt.env").write_text("STT_VERIFY=1\n")
     f = kinds()["verify_no_second_engine"]
     assert f.subject == "STT_VERIFY" and not f.fixable
-    assert "does nothing" in f.detail and "parakeet" in f.detail
-    (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=parakeet\n")
+    assert "does nothing" in f.detail and "qwen3" in f.detail
+    (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=qwen3\n")
     assert "verify_no_second_engine" in kinds()
+    (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=parakeet\n")
+    assert "verify_no_second_engine" in kinds()             # the removed engine runs qwen3
     (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=cloud:scribe\n")
     assert "verify_no_second_engine" not in kinds()
     (sandbox / "stt.env").write_text("STT_VERIFY=0\n")
@@ -871,10 +873,11 @@ def test_the_doctor_says_why_verify_does_nothing(sandbox, monkeypatch):
     assert "verify_no_second_engine" in kinds()
 
 
-def test_the_doctor_says_when_qwen3_falls_back_to_parakeet(sandbox, monkeypatch):
-    """qwen3 set, but its environment or a model is missing: the batch
-    transcribes with Parakeet, and the doctor names what is missing and the
-    fix. No finding for Parakeet, or once Qwen3-ASR can run."""
+def test_the_doctor_says_when_qwen3_cannot_run(sandbox, monkeypatch):
+    """Qwen3-ASR is the one local engine. When its environment or a model is
+    missing, the doctor names what is missing, what fails, and the fix:
+    every file under qwen3, and under a cloud setting the strict meetings
+    and the cloud fallbacks. No finding once Qwen3-ASR can run."""
     from stt import asr_qwen3
     monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
     seen = []
@@ -887,12 +890,17 @@ def test_the_doctor_says_when_qwen3_falls_back_to_parakeet(sandbox, monkeypatch)
     def kinds():
         return {f.kind: f for f in doctor.check(registry=False)}
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
-    f = kinds()["asr_fallback"]
+    f = kinds()["asr_unavailable"]
     assert f.subject == "STT_ASR_BACKEND" and not f.fixable
-    assert "ForcedAligner" in f.detail and "./init.sh" in f.detail and "Parakeet" in f.detail
-    assert seen and all(seen)                 # the doctor runs the deep check
-    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    assert "ForcedAligner" in f.detail and "./init.sh" in f.detail
+    assert "each file fails" in f.detail and "Parakeet" not in f.detail
     assert "asr_fallback" not in kinds()
+    assert seen and all(seen)                 # the doctor runs the deep check
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
+    f = kinds()["asr_unavailable"]
+    assert "strict meeting" in f.detail and "./init.sh" in f.detail
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    assert "asr_unavailable" in kinds()        # an old setting runs qwen3 too
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
     monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
-    assert "asr_fallback" not in kinds()
+    assert "asr_unavailable" not in kinds()

@@ -463,7 +463,7 @@ def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
 
     from stt import config, rates, summarize
 
-    engines = {"A.m4a": "elevenlabs/scribe_v2", "B.m4a": config.PARAKEET_MODEL,
+    engines = {"A.m4a": "elevenlabs/scribe_v2", "B.m4a": config.QWEN_ASR_MODEL,
                "C.m4a": None}
     for name in engines:
         (config.ICLOUD_DIR / name).write_bytes(b"\x00" * 64)
@@ -492,10 +492,10 @@ def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
     finally:
         signal.signal(signal.SIGTERM, old)
     # a result that names no engine (an older worker) keeps the setting
-    assert sorted(recorded.values()) == ["cloud:openai", "cloud:scribe", "parakeet"]
+    assert sorted(recorded.values()) == ["cloud:openai", "cloud:scribe", "qwen3"]
     rates._cache.update(sig=None, learned=None)
     assert set(rates.learned()["asr"]) == {"cloud:openai@1", "cloud:scribe@1",
-                                          "parakeet@1"}
+                                          "qwen3@1"}
 
 
 def test_process_one_passes_on_the_engine_process_file_ran(sandbox, monkeypatch):
@@ -1586,6 +1586,39 @@ def test_a_full_disk_never_sets_a_file_aside(sandbox, monkeypatch):
     assert "Board.m4a" not in (manifest.load().get("failed") or {})
 
 
+def test_qwen3_not_set_up_fails_each_file_with_the_fix_and_sets_none_aside(
+        sandbox, monkeypatch, capsys):
+    """Qwen3-ASR is the one local engine. Not set up on this Mac (conftest:
+    no .venv-qwen in the tests), each file fails with one plain line that
+    names the fix, and no traceback. That is this Mac's fault, so no file
+    is set aside: every run tries it again, and it runs once ./init.sh has
+    set the engine up."""
+    import wave
+
+    from stt import audio, config, manifest
+    (config.ICLOUD_DIR / "Board Session.m4a").write_bytes(b"\x00" * 64)
+
+    def _wav(src, wav):
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000)
+            w.writeframes(b"\0\0" * 16000 * 2)
+    monkeypatch.setattr(audio, "to_wav16k", _wav)
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    for _ in range(manifest.FAIL_PARK_AFTER + 2):
+        assert _run_main(monkeypatch) == 1
+    err = capsys.readouterr().err
+    failed = [ln for ln in err.splitlines() if "FAILED: Board Session.m4a" in ln]
+    assert len(failed) == manifest.FAIL_PARK_AFTER + 2, err
+    assert all("Qwen3-ASR cannot run on this Mac" in ln and "./init.sh" in ln
+               for ln in failed), failed
+    assert "Traceback" not in err and "Parakeet" not in err
+    assert "Board Session.m4a" not in (manifest.load().get("failed") or {})
+    assert "set aside" not in err
+    assert config.meeting_bases(config.MEETINGS_DIR) == []
+    from stt import asr_qwen3
+    assert run_batch._machine_at_fault(asr_qwen3.EngineUnavailable("x"))
+
+
 def test_a_second_batch_never_blanks_the_lock_holders_pid(sandbox):
     """acquire_lock opened batch.lock with "w", so every run that LOST the
     lock race (the folder watch fires often) truncated the pid the running
@@ -1663,7 +1696,6 @@ def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):
     from test_pipeline import _fake_asr
 
     from stt import audio, config, icloud, pipeline
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())

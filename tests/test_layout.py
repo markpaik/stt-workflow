@@ -165,7 +165,6 @@ def test_processed_at_stamped_by_a_run_and_preserved_across_edits(sandbox, monke
     from stt import pipeline, review
     from stt.audio import FFMPEG
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     src = tmp_path / "Sync 05012026.m4a"
     subprocess.run([FFMPEG, "-y", "-f", "lavfi", "-i",
@@ -197,7 +196,6 @@ def test_reprocess_after_rename_and_date_change(sandbox, monkeypatch, tmp_path):
     from stt.audio import FFMPEG
 
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     # 1. original processing from a watched-folder file
     src = tmp_path / "Team Sync 05012026.m4a"
@@ -299,7 +297,6 @@ def test_process_file_writes_under_the_meeting_lock(sandbox, monkeypatch, tmp_pa
     from stt import pipeline, review
     from stt.audio import FFMPEG
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     entered = []
     real = review.lock_meeting
@@ -336,7 +333,6 @@ def test_a_new_meeting_leaves_no_base_named_lock(sandbox, monkeypatch, tmp_path)
     orphan_lock. The id is decided first, and the lock is named for it."""
     from stt import pipeline, registry_doctor
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     src = tmp_path / "Fresh Mtg 05012026.m4a"
     _sine(src)
@@ -371,7 +367,6 @@ def test_two_first_runs_of_one_new_meeting_queue_on_one_lock(sandbox, monkeypatc
 
     from stt import output, pipeline
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     # no ffmpeg: both runs share one scratch wav, and the race under test is
     # the write lock, not the conversion
     monkeypatch.setattr(pipeline.audio, "to_wav16k", lambda s, w: Path(w).touch())

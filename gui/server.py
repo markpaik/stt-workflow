@@ -94,8 +94,7 @@ def _known_base(base) -> bool:
 
 ASR_CHOICES = [
     {"id": "qwen3", "label": "Qwen3-ASR 1.7B",
-     "note": "most accurate · local · about 3 times slower than Parakeet"},
-    {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
+     "note": "local · the engine for strict meetings and the cloud fallback"},
     # cloud engines: shown only once their key is set; words are transcribed
     # off-device, but diarization + speaker naming stay local — and strict
     # mode ALWAYS forces the local engine (sensitive audio never uploads)
@@ -109,7 +108,6 @@ ASR_CHOICES = [
 MODEL_REPOS = {
     "Qwen3-ASR 1.7B": "mlx-community/Qwen3-ASR-1.7B-bf16",
     "Qwen3 forced aligner 0.6B": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
-    "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
     # listed only when the optional MLX fallback is installed (check_updates)
     "Qwen3-8B (optional MLX fallback)": "mlx-community/Qwen3-8B-4bit",
@@ -172,8 +170,8 @@ def current_model():
 
 def _verify_engine():
     """The local engine a verify run would compare with under the current
-    engine setting, or None (stt.verify.secondary_engine). With Parakeet,
-    the only local engine, it is None."""
+    engine setting, or None (stt.verify.secondary_engine). With Qwen3-ASR,
+    the only local engine, it is None. A cloud engine gets qwen3."""
     from stt import verify
     return verify.secondary_engine(current_model())
 
@@ -1611,7 +1609,6 @@ def gather_state():
             "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir),
                       "source_exists": _dir_present(src_dir)},
-            "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
             "recorder_ready": recorder.available(),
             "rates": rates.summary(),
@@ -1745,7 +1742,7 @@ def _listen_engines() -> list:
     """The second listen's engine menu, the default first: [{"id", "label",
     "note"}] in stt.retranscribe.offered() order. Local engines only."""
     from stt import retranscribe
-    return [{"id": e, "label": e.capitalize(), "note": "Runs on this Mac."}
+    return [{"id": e, "label": retranscribe.label(e), "note": "Runs on this Mac."}
             for e in retranscribe.offered()]
 
 
@@ -3601,10 +3598,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/retranscribe":
                 if not self._require_base(b.get("base")):
                     return
-                engine = b.text("engine", "") or "parakeet"
                 # an engine the second listen does not offer starts no
                 # child (the child checks this again)
                 from stt import retranscribe as _rt
+                engine = b.text("engine", "") or _rt.default_engine()
                 why = _rt.engine_problem(engine)
                 if why:
                     self._json({"error": why})
@@ -3654,9 +3651,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({**r, **_relabel_targets(
                     names=[n for n in (b["name"], to) if n],
                     vector=identify.load_voiceprints().get(b["name"]))})
-            elif u.path == "/api/punctuate":
-                _env_file_set({"STT_PUNCTUATE": "1" if b.flag("on") else "0"})
-                self._json({"ok": True})
             elif u.path == "/api/mic_speaker":
                 # who "me" is on the meeting recorder's mic channel; enables the
                 # channel-aware path for new recordings (they process as mono

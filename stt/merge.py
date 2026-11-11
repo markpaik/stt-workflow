@@ -9,6 +9,8 @@ Uncertainty is span-based: words inside overlap regions or uncertainty spans
 words make up at least half of it — so a 0.2s doubtful fragment marks itself, not
 the 30-second clean turn it sits beside.
 """
+import bisect
+import difflib
 import re
 
 # flags that mean "verify against audio" (vs. confident provenance like "reassigned")
@@ -133,3 +135,57 @@ def assign_and_group(words, turns, names, overlaps=None, spans=None,
         if info.get("display"):
             seg["display"] = info["display"]
     return segments, labeled
+
+
+# what may differ between a stored word and its form in the stored line:
+# letter case and these marks. The removed punctuator changed nothing else.
+_CARRY_MARKS = re.compile(r"[.,!?;:]")
+
+
+def _carry_key(token) -> str:
+    return _CARRY_MARKS.sub("", str(token)).lower()
+
+
+def carry_text(words, segments) -> int:
+    """Put the stored lines' surface forms back onto their words, in place,
+    so a rebuild from the words (assign_and_group) keeps the stored text.
+
+    A meeting the removed punctuator cleaned up holds its capitals and stops
+    in the segment text only; the words kept the engine's raw forms. With no
+    punctuator left, a rebuild from those words lost them. Each line's
+    tokens are matched to the words that start inside it, by their letters:
+    a word takes a token's form only when the two differ in case and in
+    . , ! ? ; : alone, so no word is ever changed into another word. A line
+    a person typed (text_edited, inserted, an edit) is left out: its
+    review decision writes it again after the rebuild. Words whose form
+    already matches change nothing, so a meeting whose words carry their
+    own punctuation (Qwen3-ASR, the cloud engines) is unchanged. Returns
+    how many words changed."""
+    starts = [w["start"] for w in words]
+    changed = 0
+    for seg in segments or []:
+        if (not isinstance(seg, dict) or seg.get("inserted") or seg.get("text_edited")
+                or seg.get("reviewed") == "edited"):
+            continue
+        try:
+            lo = bisect.bisect_left(starts, float(seg["start"]) - 1e-6)
+            hi = bisect.bisect_right(starts, float(seg["end"]) + 1e-6)
+        except (KeyError, TypeError, ValueError):
+            continue
+        toks = [t for t in str(seg.get("text") or "").split() if _carry_key(t)]
+        idx = [i for i in range(lo, hi) if _carry_key(words[i]["word"])]
+        if not toks or not idx:
+            continue
+        tk = [_carry_key(t) for t in toks]
+        wk = [_carry_key(words[i]["word"]) for i in idx]
+        if tk == wk:
+            pairs = zip(idx, toks)
+        else:
+            sm = difflib.SequenceMatcher(None, wk, tk, autojunk=False)
+            pairs = [(idx[b.a + k], toks[b.b + k])
+                     for b in sm.get_matching_blocks() for k in range(b.size)]
+        for i, tok in pairs:
+            if words[i]["word"] != tok:
+                words[i]["word"] = tok
+                changed += 1
+    return changed

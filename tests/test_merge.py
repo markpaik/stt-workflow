@@ -117,3 +117,52 @@ def test_zero_duration_word_at_boundary_respects_previous_speaker():
 def test_zero_duration_word_inside_a_turn_is_assigned_to_it():
     _, words = merge.assign_and_group([_w(2.0, 2.0)], TURNS, NAMES)
     assert words[0]["speaker"] == "A"
+
+
+def _carry_words(text):
+    return [{"start": float(i), "end": i + 0.5, "word": w} for i, w in enumerate(text.split())]
+
+
+def test_carry_text_puts_the_stored_line_back_on_its_words():
+    from stt import merge
+    words = _carry_words("we met at nine the budget is fine")
+    segs = [{"start": 0.0, "end": 7.5, "speaker": "A",
+             "text": "We met at nine. The budget is fine."}]
+    assert merge.carry_text(words, segs) == 4
+    assert " ".join(w["word"] for w in words) == "We met at nine. The budget is fine."
+    assert merge.carry_text(words, segs) == 0          # a second pass changes nothing
+    # regrouped under other speaker turns, each word keeps its form
+    turns = [{"start": 0.0, "end": 3.9, "speaker": "A"},
+             {"start": 3.9, "end": 8.0, "speaker": "B"}]
+    out, _ = merge.assign_and_group(words, turns, {})
+    assert [s["text"] for s in out] == ["We met at nine.", "The budget is fine."]
+
+
+def test_carry_text_never_changes_a_word_into_another_word():
+    """Only case and . , ! ? ; : may differ. A line whose words differ (a
+    human's edit, a later Redo) carries only the words that still match."""
+    from stt import merge
+    words = _carry_words("we renewed the dashboard")
+    segs = [{"start": 0.0, "end": 3.5, "text": "We reviewed the dashboard!"}]
+    merge.carry_text(words, segs)
+    assert [w["word"] for w in words] == ["We", "renewed", "the", "dashboard!"]
+
+
+def test_carry_text_skips_the_lines_a_person_wrote():
+    from stt import merge
+    for flag in ({"text_edited": True}, {"inserted": True}, {"reviewed": "edited"}):
+        words = _carry_words("hello there")
+        seg = {"start": 0.0, "end": 1.5, "text": "Hello, there.", **flag}
+        assert merge.carry_text(words, [seg]) == 0, flag
+        assert [w["word"] for w in words] == ["hello", "there"]
+
+
+def test_carry_text_leaves_words_that_carry_their_own_punctuation():
+    """Qwen3-ASR and the cloud engines: the words already hold the line's
+    forms, so nothing changes."""
+    from stt import merge
+    words = _carry_words("Hello, there. How are you?")
+    segs = [{"start": 0.0, "end": 4.5, "text": "Hello, there. How are you?"}]
+    assert merge.carry_text(words, segs) == 0
+    assert merge.carry_text(words, []) == 0
+    assert merge.carry_text(words, [{"text": "no times"}, "not a line"]) == 0

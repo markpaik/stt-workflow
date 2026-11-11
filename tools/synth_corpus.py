@@ -548,9 +548,7 @@ def build_home(home: Path) -> Path:
         (home / sub).mkdir(parents=True, exist_ok=True)
     env = home / "stt.env"
     if not env.exists():
-        # punctuation off: irrelevant to attribution, skips an ONNX model load
-        env.write_text("# synthetic eval home — built by tools/synth_corpus.py\n"
-                       "STT_PUNCTUATE=0\n")
+        env.write_text("# synthetic eval home — built by tools/synth_corpus.py\n")
     (home / HOME_MARKER).write_text(
         "Synthetic eval STT_HOME built by tools/synth_corpus.py. Safe to delete.\n")
     return home

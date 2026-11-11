@@ -37,7 +37,7 @@ is either a download or a feature you turn on yourself:
 
 | What | When | What it sends |
 |---|---|---|
-| Model downloads from Hugging Face | Install and first use: Qwen3-ASR and its forced aligner (`init.sh` only; the engine itself never downloads), Parakeet, the pyannote models, the speakrs Core ML models, and Qwen3-8B if you install the optional MLX fallback | Requests for model files. No audio or text |
+| Model downloads from Hugging Face | Install and first use: Qwen3-ASR and its forced aligner (`init.sh` only; the engine itself never downloads), the pyannote models, the speakrs Core ML models, and Qwen3-8B if you install the optional MLX fallback | Requests for model files. No audio or text |
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
 | Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine | The meeting audio, recompressed to 32 kbps MP3. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
@@ -88,10 +88,10 @@ the machine (Apple Silicon, memory, disk), installs `ffmpeg` and `uv`,
 builds the Python 3.12 environment, builds a second one (`.venv-qwen`) for
 the Qwen3-ASR engine, builds the speakrs helper and fetches its models,
 asks where recordings arrive and where transcripts go, takes your Hugging
-Face token, offers to download the two Qwen3-ASR models (about 5.4 GB) and
-to pre-download Parakeet (about 3 GB), says how to get the local model on
-Ollama, and offers to install the automation. It does not install the
-optional MLX fallback.
+Face token, offers to download the two Qwen3-ASR models (about 5.4 GB),
+says how to get the local model on Ollama, and offers to install the
+automation. It does not install the optional MLX fallback. Nothing in
+`.venv` needs MLX.
 
 ### The same steps by hand
 
@@ -101,8 +101,8 @@ uv venv --python 3.12 .venv          # 3.13 and 3.14 lack wheels for some ML pac
 uv pip install --python .venv/bin/python -r requirements.txt
 uv pip install --python .venv/bin/python -r requirements-dev.txt   # only to run the tests
 
-# Qwen3-ASR: its own environment, because mlx-audio needs a newer MLX than
-# Parakeet. Never install requirements-qwen.txt into .venv.
+# Qwen3-ASR: its own environment, because mlx-audio pins its own MLX and
+# transformers. Never install requirements-qwen.txt into .venv.
 uv venv --python 3.12 .venv-qwen
 uv pip install --python .venv-qwen/bin/python -r requirements-qwen.txt
 .venv-qwen/bin/python -I -c "from huggingface_hub import snapshot_download as d; \
@@ -262,18 +262,30 @@ change itself. Build it once:
 1. Open the Shortcuts app and make a new shortcut. Name it
    `STT Delete Voice Memo`. Another name works if you set
    `STT_VM_DELETE_SHORTCUT` to it.
-2. In the shortcut's details, turn on input so the first block reads
-   **Receive Text input**. The batch passes the memo's title as a text file.
-3. Add **Get Text from Input**, with **Shortcut Input** as its input.
-4. Add **Find Recordings** (Voice Memos). Add the filter **Name** **is**,
-   and choose the **Text** from step 3 as its value. Leave sorting and the
-   limit off.
-5. Add **Count**, counting **Items** in **Recordings** from step 4.
-6. Add **If**: **Count** **is** **1**. Inside the If, add
-   **Delete Recording** (Voice Memos) with **Recordings** from step 4. Leave
-   the Otherwise branch empty.
-7. After **End If**, add **Text** holding only the **Count** variable, then
-   **Stop and Output** that **Text**.
+2. **Receive** input: in the shortcut's details, turn on input. The batch
+   passes the memo's title as a text file. Under **If there's no input**,
+   choose **Stop and Respond**.
+3. Add **Find Recordings** (Voice Memos). Add the filter **Recording Name**
+   **is**, and choose **Shortcut Input** as its value. Leave sorting and
+   the limit off.
+4. Add **Count**, counting **Items** in **Recordings** (the result of
+   step 3).
+5. Add **If**: **Count** **is** **1**. Inside the If, add
+   **Delete Recordings** (Voice Memos), with the **Recordings** variable from
+   step 3 as its input.
+
+   > **Pick the variable, never a memo.** Tap the input field and choose
+   > the **Recordings** variable. It shows the Voice Memos icon. Do not
+   > choose a recording from the list of memos that opens there: a memo
+   > picked from that list is fixed into the Shortcut, and every run then
+   > deletes that one recording, whatever title the batch passes.
+6. Leave **Otherwise** empty, then **End If**.
+7. After **End If**, add **Stop and Output** with the **Count** variable.
+
+The Shortcut then reads, top to bottom: Receive input (Stop and Respond if
+there is none), Find Recordings where Recording Name is Shortcut Input,
+Count Items in Recordings, If Count is 1: Delete Recordings, Otherwise,
+End If, Stop and Output Count.
 
 Then let it run without a prompt, and keep deleted memos recoverable:
 
@@ -407,8 +419,10 @@ alt (`u`, the second engine's words, when verify ran), Skip, and Done. It
 also accepts all sub-second crumbs at once, and accepts every remaining line
 behind a confirm. The pencil on any line edits it: fix the text, change the
 speaker (including "New person..."), split a line, remove a line, or listen
-again. Listen again runs Parakeet on the line's audio, on this Mac. Your
-edits live in a sidecar file and survive every relabel and reprocess.
+again. Listen again runs Qwen3-ASR and its aligner on the line's audio
+alone, on this Mac. If Qwen3-ASR cannot run here, Listen again says so and
+names the fix. Your edits live in a sidecar file and survive every relabel
+and reprocess.
 
 ### Titles
 
@@ -586,11 +600,11 @@ run options apply to the next manual run:
   speaker re-identify keeps it on.
 - **Verify** transcribes with a second, different local engine and flags
   every place the two disagree, with both readings. A cloud engine is never
-  the second engine. Parakeet is the second engine for a Qwen3-ASR or a
-  cloud transcript. Verify does nothing on a Parakeet transcript, because
-  Qwen3-ASR is never the second engine. The Activity page shows Verify only
-  while the current engine has a second local engine, so not with
-  Parakeet. With `STT_VERIFY=1` and Parakeet, the doctor reports
+  the second engine. Qwen3-ASR is the second engine for a cloud transcript.
+  Verify does nothing on a Qwen3-ASR transcript, because Qwen3-ASR is the
+  only local engine. The Activity page shows Verify only while the current
+  engine has a second local engine, so not with Qwen3-ASR. With
+  `STT_VERIFY=1` and Qwen3-ASR, the doctor reports
   `verify_no_second_engine`.
 - **One-time speakers**, for focus groups, never adds unnamed voices to the
   speaker library and keeps no samples of them.
@@ -697,15 +711,14 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_ASR_BACKEND` | `qwen3` | The transcription engine: `qwen3` (Qwen3-ASR 1.7B; on 7 meetings it made a quarter fewer word errors than Parakeet, at about 3.4 times the run time), `parakeet`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. When `qwen3` cannot run here, the batch uses Parakeet (next row). Any other value prints a warning and runs the default. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
-| `STT_QWEN_ASR_PY` | `.venv-qwen/bin/python` in the checkout | For `qwen3`: the Python that runs Qwen3-ASR 1.7B and its forced aligner. They need mlx-audio, which needs a newer MLX than Parakeet, so this is a second environment, which `init.sh` builds from `requirements-qwen.txt`. If it, mlx-audio or a model is missing, the batch warns once a run, names the fix, and transcribes with Parakeet; the meeting records Parakeet as its engine, and the doctor reports `asr_fallback` |
+| `STT_ASR_BACKEND` | `qwen3` | The transcription engine: `qwen3` (Qwen3-ASR 1.7B, the one local engine: on 7 meetings it made a quarter fewer word errors than the removed Parakeet engine), `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. A strict meeting and a failed cloud run always use `qwen3`. Any other value prints a warning and runs the default. `mlxwhisper` (the removed Whisper engine) and `parakeet` (the removed Parakeet engine) do the same, and the doctor lists either as `bad_setting`. A meeting keeps the engine name it was transcribed with. The Settings page writes it |
+| `STT_QWEN_ASR_PY` | `.venv-qwen/bin/python` in the checkout | The Python that runs Qwen3-ASR 1.7B and its forced aligner. They need mlx-audio, which pins its own MLX, so this is a second environment, which `init.sh` builds from `requirements-qwen.txt`. If it, mlx-audio or a model is missing, each file fails with one line that names the fix, no file is set aside for it, and the doctor reports `asr_unavailable` |
 | `STT_QWEN_ASR_MODEL`, `STT_QWEN_ALIGNER_MODEL` | `mlx-community/Qwen3-ASR-1.7B-bf16`, `mlx-community/Qwen3-ForcedAligner-0.6B-8bit` | The two Qwen models. They load from the local Hugging Face cache only, so download them before the first run |
 | `STT_DIARIZER` | `speakrs` | `pyannote` forces the CPU path. Any other value prints a warning and keeps speakrs |
 | `STT_SPEAKRS_AHC` | `0.55` | The speakrs merge threshold. A value that is not a number 0 or above uses the default |
 | `STT_SPEAKRS_TIMEOUT_SEC` | `3600` | How long the speakrs helper may run on one file. A value that is not a whole number above 0 uses the default |
 | `STT_RECLUSTER` | `1` | After speakrs, moves a turn whose voice fits another speaker in the meeting better than its own. `0` turns it off |
 | `STT_STRICT`, `STT_VERIFY` | `0` | Make strict or verify the default for every run |
-| `STT_PUNCTUATE` | `1` | Punctuation cleanup. It does not run on `qwen3` transcripts, which keep Qwen's own punctuation and casing: on 7 meetings scored against Scribe, the cleanup lowered Qwen's sentence-end, comma and question-mark scores and its casing |
 | `STT_NAMING_THRESHOLD`, `STT_NAMING_MARGIN` | `0.60`, `0.15` | The score and margin a voice needs to get a name |
 | `STT_ELEVENLABS_KEY`, `STT_OPENAI_KEY`, `STT_MISTRAL_KEY` | empty | Cloud transcription keys |
 | `STT_LLM_BACKEND` | `local` | `anthropic` or `openai` sends transcript text to that service for descriptions and Ask |
@@ -793,7 +806,7 @@ demo home passes `registry_doctor.py` with nothing to report. `doctor.py
 check` finds nothing wrong in the home itself. It can still name what the
 Mac lacks: `diarizer_no_token` when the demo home's `stt.env` has no token,
 `diarizer_fallback` when the speakrs helper is not built, and
-`asr_fallback` when `.venv-qwen` or a Qwen3-ASR model is missing.
+`asr_unavailable` when `.venv-qwen` or a Qwen3-ASR model is missing.
 
 ### Repairing the voice registries
 
@@ -849,13 +862,14 @@ line that reverses them.
   often because two memos share a title. A `voicememos_delete_halted`
   finding means a delete left another memo missing: check Voice Memos and
   its Recently Deleted, then run `tools/vm_delete.py --clear-halt`.
-- **Transcripts name Parakeet as their engine, not Qwen3-ASR.** The
+- **Every file fails with "Qwen3-ASR cannot run on this Mac".** The
   Qwen3-ASR environment (`.venv-qwen`), mlx-audio or one of its two models
-  is missing, so the batch fell back to Parakeet, and its log says why.
-  Re-run `./init.sh`: step 3 builds `.venv-qwen` and step 6 downloads the
-  models. The doctor reports this as `asr_fallback` and names what is
-  missing. Meetings already transcribed keep their Parakeet text until a
-  Redo.
+  is missing, and there is no other local engine. The line names what is
+  missing. Re-run `./init.sh`: step 3 builds `.venv-qwen` and step 6
+  downloads the models. The files are not set aside, so the next run
+  takes them. The doctor reports this as `asr_unavailable`. Meetings
+  transcribed before by the removed Parakeet engine keep their text and
+  their engine name until a Redo.
 - **Speaker separation is slow.** The speakrs helper or its models are
   missing, so the pipeline fell back to pyannote. Install Rust, then re-run
   `./init.sh`, or build `native/speakrs` and run
@@ -904,13 +918,13 @@ recorder / Voice Memos sync / watched folder / drop
         │
         ▼
    ffmpeg ─► ASR: Qwen3-ASR 1.7B and its forced aligner on MLX, in .venv-qwen
-        │        (Parakeet TDT 0.6B v3 when Qwen3-ASR is not set up, or a cloud engine)
+        │        (or a cloud engine; strict meetings and cloud failures use Qwen3-ASR)
         │
         ├─► speaker separation: speakrs on Core ML (pyannote on CPU as fallback)
         ├─► turn recluster (speakrs only)
         ├─► voiceprint matching and identity refinement
         ▼
-   words matched to speakers ─► punctuation (Parakeet and cloud text) ─► .txt + .json + cached embeddings
+   words matched to speakers ─► .txt + .json + cached embeddings
         │
         ▼
    description and title: Qwen 3.8 on Ollama (Qwen3-8B on MLX if installed)

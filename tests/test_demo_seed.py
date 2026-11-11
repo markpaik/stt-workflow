@@ -430,10 +430,11 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     check` with missing_keys on every meeting and a registry_stale_next.
     The seed also used to build folder names with a colon the sanitizer
     never writes. The check runs in a fresh interpreter under STT_HOME, as
-    the finding's repro did. The two diarizer findings and asr_fallback
+    the finding's repro did. The two diarizer findings and asr_unavailable
     speak about the machine (a Hugging Face token, a built speakrs helper,
     a Qwen3-ASR environment), not the home, so the check runs on a machine
-    that has all three settled."""
+    that has all three settled: a stand-in interpreter that imports
+    mlx_audio, and two model folders."""
     from stt import provenance
     home = tmp_path / "demo_home"
     demo_seed.build(home)
@@ -450,9 +451,18 @@ def test_a_fresh_demo_home_is_doctor_clean(tmp_path):
     reg = json.loads((home / "voiceprints" / "unknowns.json").read_text())
     assert reg["next"] == unknowns.next_floor(reg)
     env = {k: v for k, v in os.environ.items() if not k.startswith("STT_")}
+    py = tmp_path / "qwen-python"
+    py.write_text("#!/bin/sh\nexit 0\n")
+    py.chmod(0o755)
+    models = []
+    for name in ("asr-model", "aligner-model"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "config.json").write_text("{}")
+        models.append(str(tmp_path / name))
     env.update({"STT_HOME": str(home), "STT_OLLAMA_URL": "off", "PYTHONPATH": str(REPO),
                 "HF_TOKEN": "hf_synthetic", "STT_DIARIZER": "pyannote",
-                "STT_ASR_BACKEND": "parakeet"})
+                "STT_ASR_BACKEND": "qwen3", "STT_QWEN_ASR_PY": str(py),
+                "STT_QWEN_ASR_MODEL": models[0], "STT_QWEN_ALIGNER_MODEL": models[1]})
     out = subprocess.run([sys.executable, str(REPO / "tools" / "doctor.py"), "check"],
                          env=env, cwd=str(REPO), capture_output=True, text=True)
     assert out.returncode == 0, out.stdout + out.stderr

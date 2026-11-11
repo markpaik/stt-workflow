@@ -194,12 +194,11 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "date": iso,
         "processed_at": spec.get("arrived_at") or f"{iso}T20:14:07",
         "duration_sec": total_dur,
-        "asr_engine": spec.get("asr_engine", "parakeet"),
+        "asr_engine": spec.get("asr_engine", config.QWEN_ASR_MODEL),
         "diarizer": config.DIARIZATION_MODEL,
         "n_speakers": len(speakers),
         "strict": strict,
         "one_time_speakers": False,
-        "punctuated": True,
         "verify_engine": spec.get("verify_engine"),
         "overlap_spans": [[s["start"], s["end"]] for s in segments if s["overlap"]],
         "refine_stats": {"reassigned": 0, "smoothed": 0, "flagged": sum(1 for s in segments if s["flags"])},
@@ -324,8 +323,7 @@ def write_state(home: Path, built: list, queue_files: list, held: list,
     (home / "holds.json").write_text(json.dumps(sorted(held), indent=2))
     (home / "queued_jobs.json").write_text("[]")   # empty: nothing auto-spawns
     (home / "stt.env").write_text(
-        "# synthetic demo home — settings the panel reads via config._env_file()\n"
-        "STT_PUNCTUATE=1\n")
+        "# synthetic demo home — settings the panel reads via config._env_file()\n")
     (home / "work").mkdir(exist_ok=True)
     (home / "logs").mkdir(exist_ok=True)
 
@@ -475,9 +473,9 @@ def meeting_specs(today=None):
         "category": "work", "series": "lt_weekly",
         "source_file": "LT Weekly Meeting 04082026.m4a",
         # flags with a second engine's words: a cloud transcript checked
-        # by Parakeet, the one pairing verify still runs
+        # by Qwen3-ASR, the one pairing verify runs
         "asr_engine": "elevenlabs/scribe_v2",
-        "verify_engine": config.PARAKEET_MODEL,
+        "verify_engine": config.QWEN_ASR_MODEL,
         "speakers": named(OWNER, "Alex Rivera", "Jordan Lee"),
         "decisions": [
             {"start": 0.5, "end": 2.2, "action": "accept", "text": None,

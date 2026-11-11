@@ -64,7 +64,6 @@ def queued(monkeypatch):
     monkeypatch.setattr(srv, "RELABEL_QUEUE", q)
     monkeypatch.setattr(srv, "_spawn",
                         lambda cmd: pytest.fail(f"nothing may be spawned: {cmd}"))
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     return q
 
 
@@ -75,7 +74,6 @@ def spawned(monkeypatch):
     seen = []
     monkeypatch.setattr(srv, "RELABEL_QUEUE", None)
     monkeypatch.setattr(srv, "_spawn", lambda cmd: seen.append([str(a) for a in cmd]))
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     return seen
 
 

@@ -32,10 +32,10 @@ CACHE = config.PROJECT_DIR / "qa" / "tune_cache"
 CACHE.mkdir(parents=True, exist_ok=True)
 
 # (engine, env) per run: the engine names a module stt.asr_<engine>, and
-# env holds the settings that pick its variant. Parakeet is the only local
+# env holds the settings that pick its variant. Qwen3-ASR is the only local
 # engine; a new one is one more row.
 STT_ENGINES = [
-    ("parakeet", {}),
+    ("qwen3", {}),
 ]
 DIAR_GRID = {
     "clustering_threshold": [0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],

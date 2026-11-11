@@ -15,7 +15,7 @@ def _log(path, durs):
     rows = []
     for i, d in enumerate(durs):
         rows.append({"at": f"2026-09-{1 + i // 10:02d}T{i % 10:02d}:00:00",
-                     "duration": d, "asr": "parakeet", "n": 1,
+                     "duration": d, "asr": "qwen3", "n": 1,
                      "secs": {"converting": d / 900, "transcribing": d / 60,
                               "diarizing": 0.2 * d ** 1.2, "writing": 15.0}})
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -86,11 +86,11 @@ def test_a_slower_file_shows_too_little_time_left_and_the_report_names_each_engi
     assert recs[0]["err_pct"] < -10            # half the speed: the panel is short
     p = tmp_path / "rates.jsonl"
     p.write_text("".join(json.dumps(r) + "\n" for r in (
-        _row("parakeet", 3600, 80, 110, at="2026-11-11T10:00:00"),
+        _row("cloud:scribe", 3600, 80, 110, at="2026-11-11T10:00:00"),
         _row("qwen3", 3600, 16, 110, at="2026-11-11T11:00:00"),
         _row("qwen3", 7200, 16, 110, at="2026-11-11T12:00:00"))))
     assert eta_backtest.main(["--midrun", str(p)]) == 0
     out = capsys.readouterr().out.splitlines()
     assert [ln.split()[:3] for ln in out[1:]] == [
-        ["defaults", "only", "parakeet"], ["defaults", "only", "qwen3"],
-        ["learned", "parakeet", "n=1"], ["learned", "qwen3", "n=2"]]
+        ["defaults", "only", "cloud:scribe"], ["defaults", "only", "qwen3"],
+        ["learned", "cloud:scribe", "n=1"], ["learned", "qwen3", "n=2"]]

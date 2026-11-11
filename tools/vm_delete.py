@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from stt import config, status, voicememos  # noqa: E402
 
 WAITING = {
-    "not_ingested": "the batch has not stored it yet",
+    "not_ingested": "the batch has not stored it yet (no meeting in the library carries its id)",
     "meeting_gone": "its meeting is not in the library",
     "no_audio": "its meeting has no stored audio",
     "duration_mismatch": "the stored audio and the memo differ in length",

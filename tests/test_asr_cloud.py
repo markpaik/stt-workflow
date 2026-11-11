@@ -133,28 +133,84 @@ def test_empty_words_from_provider_raises(sandbox, fake_upload, monkeypatch):
 
 # ---------- pipeline policy ----------
 
-def test_strict_mode_forces_local_engine(sandbox, monkeypatch):
+@pytest.mark.parametrize("provider", ["scribe", "openai", "voxtral"])
+def test_strict_mode_forces_local_engine(sandbox, monkeypatch, provider):
     """The privacy contract: with a cloud engine selected globally, a strict
-    run STILL loads a local engine — sensitive audio never uploads."""
-    monkeypatch.setattr(config, "ASR_BACKEND", "cloud:scribe")
+    run STILL loads the local engine, Qwen3-ASR — sensitive audio never
+    uploads."""
+    from stt import asr_qwen3
+    monkeypatch.setattr(config, "ASR_BACKEND", f"cloud:{provider}")
     asr = pipeline._load_asr(strict=True)
-    assert not getattr(asr, "IS_CLOUD", False)
+    assert asr is asr_qwen3 and not getattr(asr, "IS_CLOUD", False)
     asr = pipeline._load_asr(strict=False)
     assert getattr(asr, "IS_CLOUD", False)
 
 
+def test_a_strict_meeting_never_reaches_a_cloud_engine(sandbox, monkeypatch):
+    """A strict file under a cloud setting runs Qwen3-ASR from the start. A
+    Qwen3-ASR failure there fails the file: no cloud engine is tried."""
+    from stt import asr_qwen3, audio
+    monkeypatch.setattr(config, "ASR_BACKEND", "cloud:scribe")
+    monkeypatch.setenv("STT_ELEVENLABS_KEY", "synthetic-key")
+    monkeypatch.setattr(asr_cloud, "transcribe",
+                        lambda *a, **k: pytest.fail("a strict file reached the cloud"))
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    ran = []
+
+    def _qwen(wav, progress=None):
+        ran.append(wav)
+        return {"engine": config.QWEN_ASR_MODEL, "text": "ok",
+                "words": [{"start": 0.0, "end": 0.5, "word": "ok"}]}
+    monkeypatch.setattr(asr_qwen3, "transcribe", _qwen)
+    src = sandbox / "Private Session 05012026.m4a"
+    src.write_bytes(b"x")
+    res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                                do_verify=False, track_unknowns=False, strict=True)
+    d = json.loads(res["json"].read_text())
+    assert ran and d["asr_engine"] == config.QWEN_ASR_MODEL and d["strict"] is True
+    monkeypatch.setattr(asr_qwen3, "transcribe", lambda *a, **k: (_ for _ in ()).throw(
+        asr_qwen3.EngineUnavailable("Qwen3-ASR cannot run on this Mac: synthetic.")))
+    src2 = sandbox / "Private Session 05022026.m4a"
+    src2.write_bytes(b"x")
+    with pytest.raises(asr_qwen3.EngineUnavailable):
+        pipeline.process_file(src2, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                              do_verify=False, track_unknowns=False, strict=True)
+
+
 def test_cloud_failure_falls_back_to_local(sandbox, monkeypatch):
-    from stt import asr_parakeet
+    """A failed cloud run falls back to Qwen3-ASR, the local engine."""
+    from stt import asr_qwen3
     cloudish = types.SimpleNamespace(
         IS_CLOUD=True,
         transcribe=lambda wav, progress=None: (_ for _ in ()).throw(
             RuntimeError("quota exceeded")))
-    local_out = {"engine": "parakeet", "text": "ok", "words": [
+    local_out = {"engine": config.QWEN_ASR_MODEL, "text": "ok", "words": [
         {"start": 0.0, "end": 0.5, "word": "ok"}]}
-    monkeypatch.setattr(asr_parakeet, "transcribe",
+    monkeypatch.setattr(asr_qwen3, "transcribe",
                         lambda wav, progress=None: local_out)
     out = pipeline._transcribe_with_fallback(cloudish, sandbox / "x.wav")
     assert out == local_out
+
+
+def test_a_cloud_failure_with_no_local_engine_fails_with_the_fix(sandbox):
+    """The cloud run fails and Qwen3-ASR cannot run here (conftest: it is
+    not set up in the tests): the file fails with the one line that names
+    the fix, not with the cloud error."""
+    import wave
+
+    from stt import asr_qwen3
+    wav = sandbox / "x.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000)
+        w.writeframes(b"\0\0" * 16000)
+    cloudish = types.SimpleNamespace(
+        IS_CLOUD=True,
+        transcribe=lambda wav, progress=None: (_ for _ in ()).throw(
+            RuntimeError("quota exceeded")))
+    with pytest.raises(asr_qwen3.EngineUnavailable, match=r"\./init\.sh") as e:
+        pipeline._transcribe_with_fallback(cloudish, wav)
+    assert "quota" not in str(e.value)
 
 
 def test_local_failure_still_propagates(sandbox):

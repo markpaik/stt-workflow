@@ -127,3 +127,38 @@ def test_no_published_file_installs_or_offers_the_removed_whisper_engine():
     assert not (REPO / "stt" / "asr_mlxwhisper.py").exists()
     lines = [ln for ln in README.splitlines() if "whisper" in ln.lower()]
     assert lines and all("the removed Whisper engine" in ln for ln in lines), lines
+
+
+def test_no_published_file_installs_or_offers_the_removed_parakeet_engine():
+    """Parakeet is gone, and the punctuator that cleaned up its text with it.
+    The install no longer pulls parakeet-mlx or punctuators, the example
+    settings and the docs no longer offer either, and the README names
+    Parakeet only to say it was removed. NOTICE.md keeps its attribution for
+    the transcripts it wrote."""
+    for name in ("requirements.txt", "requirements-dev.txt", "requirements-qwen.txt",
+                 "init.sh", "setup.sh", "run.sh", "stt.env.example", "gui/DESIGN.md"):
+        text = (REPO / name).read_text(encoding="utf-8").lower()
+        assert "parakeet" not in text and "punctuat" not in text, name
+    assert not (REPO / "stt" / "asr_parakeet.py").exists()
+    assert not (REPO / "stt" / "punctuate.py").exists()
+    lines = [ln for ln in README.splitlines() if "parakeet" in ln.lower()]
+    assert lines and all("the removed Parakeet engine" in ln for ln in lines), lines
+    assert "STT_PUNCTUATE" not in README
+    notice = (REPO / "NOTICE.md").read_text(encoding="utf-8")
+    assert "no longer uses" in notice and "parakeet-mlx" not in notice
+
+
+def test_the_shortcut_steps_match_the_working_build():
+    """The README builds the delete Shortcut the way the owner's working
+    build does: Shortcut Input straight into Find Recordings, Delete
+    Recordings fed the Find result as a variable, never a memo picked from
+    the list, and the count as the output. Examples use synthetic titles."""
+    text = " ".join(_section("Removing memos from Voice Memos").split())
+    for step in ("**Stop and Respond**", "**Recording Name** **is**",
+                 "choose **Shortcut Input** as its value",
+                 "**Delete Recordings** (Voice Memos), with the **Recordings** variable",
+                 "**Pick the variable, never a memo.**", "the Voice Memos icon",
+                 "**Stop and Output** with the **Count** variable"):
+        assert step in text, step
+    assert "Get Text from Input" not in text
+    assert "STT delete test" in text

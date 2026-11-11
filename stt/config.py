@@ -211,8 +211,6 @@ def env_int(name, default, minimum=None):
 
 
 # --- Models ---
-# Parakeet TDT 0.6B v3 (Nov 2026 swap from v2): closer to Scribe v2 in a shadow test, keeps fillers, ~15% slower.
-PARAKEET_MODEL = os.environ.get("STT_PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 DIARIZATION_MODEL = os.environ.get(
     "STT_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"
 )
@@ -291,28 +289,31 @@ RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
 RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
 # ASR backend: "qwen3" (the default since 2026-11: Qwen3-ASR 1.7B in its own
-# interpreter, stt/asr_qwen3.py; it falls back to Parakeet when it is not set
-# up), "parakeet" (native MLX) or "cloud:<provider>". On 7 meetings scored
-# against Scribe v2, Qwen made a quarter fewer word errors and fewer
-# who-said-what errors on all 7 (qa/asr-trial), at about 3.4 times the run
-# time. The local Whisper engine ("mlxwhisper") is gone: that value warns as
-# an unknown one does and runs the default.
-ASR_BACKENDS = ("qwen3", "parakeet")
+# interpreter, stt/asr_qwen3.py) or "cloud:<provider>". Qwen3-ASR is the one
+# local engine: strict meetings and a failed cloud run use it, and when it
+# cannot run here a file fails with the fix (stt/pipeline.py). On 7 meetings
+# scored against Scribe v2, Qwen made a quarter fewer word errors than
+# Parakeet and fewer who-said-what errors on all 7 (qa/asr-trial). The local
+# Whisper engine ("mlxwhisper") and Parakeet ("parakeet") are gone: either
+# value warns as an unknown one does and runs the default.
+ASR_BACKENDS = ("qwen3",)
 CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
+REMOVED_ASR = {"mlxwhisper": "the Whisper engine was removed",
+               "parakeet": "the Parakeet engine was removed"}
 
 
 def _asr_problem(raw):
     """(backend, None) for a usable STT_ASR_BACKEND value, else
     ("qwen3", why): the default. Case and spaces are ignored. A typo once
-    ran the default with no message. "mlxwhisper", the removed Whisper
-    engine, says so."""
+    ran the default with no message. "mlxwhisper" and "parakeet", the
+    removed engines, say so."""
     v = str(raw or "").strip().lower()
     if not v:
         return ASR_BACKENDS[0], None
     if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
         return v, None
-    gone = " (the Whisper engine was removed)" if v == "mlxwhisper" else ""
-    return ASR_BACKENDS[0], (f"{raw!r} is not qwen3, parakeet or cloud:"
+    gone = f" ({REMOVED_ASR[v]})" if v in REMOVED_ASR else ""
+    return ASR_BACKENDS[0], (f"{raw!r} is not qwen3 or cloud:"
                              f"{'/'.join(CLOUD_ASR)}{gone}; using {ASR_BACKENDS[0]}")
 
 
@@ -326,10 +327,11 @@ def _asr_backend_setting() -> str:
 
 ASR_BACKEND = _asr_backend_setting()
 
-# Qwen3-ASR (STT_ASR_BACKEND=qwen3). mlx-audio needs a newer mlx than
-# parakeet-mlx pins, so the model runs under its own interpreter: a venv with
-# mlx-audio, outside .venv. The models load from the local Hugging Face cache
-# only (the child sets HF_HUB_OFFLINE), so they must be downloaded first.
+# Qwen3-ASR (STT_ASR_BACKEND=qwen3). The model runs under its own
+# interpreter: a venv with mlx-audio, outside .venv, so its MLX and
+# transformers pins never meet the audio stack's. The models load from the
+# local Hugging Face cache only (the child sets HF_HUB_OFFLINE), so they
+# must be downloaded first.
 QWEN_ASR_PY = Path(os.environ.get("STT_QWEN_ASR_PY",
                                   CODE_DIR / ".venv-qwen" / "bin" / "python"))
 QWEN_ASR_MODEL = os.environ.get("STT_QWEN_ASR_MODEL", "mlx-community/Qwen3-ASR-1.7B-bf16")
@@ -515,9 +517,6 @@ STRICT = os.environ.get("STT_STRICT", "0") == "1"
 # Scribe benchmark ~94% of the time, so only disagreements need human ears.
 VERIFY = os.environ.get("STT_VERIFY", "0") == "1"
 
-# --- Punctuation restoration (fixes Parakeet's lowercase run-ons; word-preserving) ---
-PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
-
 # --- Channel-aware diarization (stereo recordings from the meeting recorder:
 # LEFT = mic/"me", RIGHT = system/"them"). Only engages when a recording
 # declares its layout AND names the mic speaker, who must be enrolled. Every
@@ -545,21 +544,20 @@ BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 # --- Progress/ETA model: measured realtime multiples on this M5 Pro ---
 # (speed = audio_seconds / wall_seconds). These are the FIRST-RUN defaults:
 # each engine's own samples in rates.jsonl replace them (stt/rates.py), and
-# a qwen3 sample never teaches the parakeet estimate or the other way round.
+# one engine's samples never teach another's estimate.
 # Measured 2026-11-11 on 6 meetings, 10.9 h of audio, nothing else on the GPU
 # (qa/asr-trial): Qwen3-ASR with its aligner repair 14.3x (2734 s of ASR),
-# Parakeet 85.6x (457 s), speakrs separation 108.7x (360 s), the same with
-# either engine. So a Qwen run spends about 88 percent of its time in ASR.
-# Parakeet's old default (30x) and speakrs' (30x, from a 24-minute meeting
+# speakrs separation 108.7x (360 s). So a Qwen run spends about 88 percent
+# of its time in ASR. speakrs' old default (30x, from a 24-minute meeting
 # before the per-turn pass got faster) made the panel say 2 to 3 times the
 # real time left on a first run.
 EST_RATES = {
     "convert": 80.0,
-    "asr": {"qwen3": 14.3, "parakeet": 85.0},
+    "asr": {"qwen3": 14.3},
     # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x
     "diarize": {"pyannote": 2.25, "speakrs": 108.0},
-    "writing_fixed_sec": 20.0,  # merge + punctuation + output, roughly flat
+    "writing_fixed_sec": 20.0,  # merge + output, roughly flat
 }
 
 # --- HuggingFace token (needed for the gated pyannote model) ---

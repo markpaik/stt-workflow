@@ -425,7 +425,6 @@ function settingsView(){
   </div>${errLine('auto')}</section>
   <section><div class="eyebrow">Transcription</div><div>
    ${kv('Model',esc(((S.asr_choices||[]).find(c=>c.id===S.model)||{}).note||''),model)}
-   ${kv('Punctuation cleanup','A light pass that fixes capitals and stops.',tog('set-punct',!!S.punctuate,false,'Punctuation cleanup'))}
    ${kv('Speed calibration',esc((S.rates||{}).text||'No runs measured yet'),`<span class="mono">${plural((S.rates||{}).runs||0,'run')}</span>`)}
    ${kv('Model updates',upd,`<button class="btn" type="button" data-act="check-updates">Check</button>`)}
   </div>${errLine('model')}</section>
@@ -732,7 +731,6 @@ document.addEventListener('change',e=>{
  else if(t.id==='set-watch')act('/api/automation',{watch:t.checked},'auto');
  else if(t.id==='set-nightly')act('/api/automation',{nightly:t.checked},'auto');
  else if(t.id==='set-time'){const [h,m]=(t.value||'').split(':').map(Number);if(!isNaN(h)&&!isNaN(m))act('/api/schedule',{hour:h,minute:m},'auto');}
- else if(t.id==='set-punct')act('/api/punctuate',{on:t.checked});
  else if(t.id==='set-model')act('/api/model',{model:t.value},'model');
  else if(t.id==='set-llm')act('/api/llm_backend',{backend:t.value},'llm');
  else if(t.id==='set-mic')act('/api/mic_speaker',{name:t.value});
