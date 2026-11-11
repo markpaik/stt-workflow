@@ -515,18 +515,48 @@ def _import_asr(tmp_path, raw):
     ("whisper", "parakeet", "stt.asr_parakeet", True),
     ("whisperx", "parakeet", "stt.asr_parakeet", True),
     ("cloud:typo", "parakeet", "stt.asr_parakeet", True),
-    (" MLXWhisper ", "mlxwhisper", "stt.asr_mlxwhisper", False),
+    (" MLXWhisper ", "parakeet", "stt.asr_parakeet", True),   # the removed engine
+    ("mlxwhisper", "parakeet", "stt.asr_parakeet", True),
     ("parakeet", "parakeet", "stt.asr_parakeet", False),
     ("cloud:scribe", "cloud:scribe", "stt.asr_cloud", False),
     ("", "parakeet", "stt.asr_parakeet", False)])
 def test_an_unknown_asr_backend_warns_and_keeps_parakeet(tmp_path, raw, want, mod, warns):
-    """_load_asr tests only == "mlxwhisper", so a typo ('mlx-whisper',
-    'whisper', or the 'whisperx' stt.env.example named) ran Parakeet with
-    no message while the owner believed Whisper was running."""
+    """A typo ('mlx-whisper', 'whisper', or the 'whisperx' stt.env.example
+    named) ran Parakeet with no message. "mlxwhisper" named the Whisper
+    engine, which is gone: it warns the same way and runs Parakeet."""
     rc, out, err = _import_asr(tmp_path, raw)
     assert rc == 0, err
     assert out.split() == [want, mod]
     assert ("STT_ASR_BACKEND" in err and "using parakeet" in err) is warns
+
+
+def test_a_whisper_setting_left_in_stt_env_warns_once_and_runs_parakeet(tmp_path):
+    """An stt.env written before Whisper was removed still says
+    STT_ASR_BACKEND=mlxwhisper (run.sh exports it). One process warns once,
+    names the removal, and runs, estimates and verifies as Parakeet."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    (tmp_path / "stt.env").write_text(
+        "STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+    e = {k: v for k, v in os.environ.items()
+         if k not in ("STT_ASR_BACKEND", "STT_WHISPER_MLX_MODEL")}
+    e.update({"STT_HOME": str(tmp_path), "PYTHONPATH": str(repo),
+              "STT_ASR_BACKEND": "mlxwhisper", "STT_WHISPER_MLX_MODEL": "turbo"})
+    code = ("from stt import config as c, pipeline as p, rates as r, verify as v; "
+            "mods = {p._load_asr(False).__name__ for _ in range(3)}; "
+            "print(c.ASR_BACKEND, *mods, r.current_asr_key(), "
+            "v.secondary_engine(r.current_asr_key()))")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env=e, cwd=str(repo), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["parakeet", "stt.asr_parakeet", "parakeet", "None"]
+    warned = [ln for ln in r.stderr.splitlines() if "STT_ASR_BACKEND" in ln]
+    assert len(warned) == 1, r.stderr
+    assert "the Whisper engine was removed" in warned[0]
+    assert "using parakeet" in warned[0]
 
 
 def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
@@ -535,6 +565,10 @@ def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
     monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
     assert [p[0] for p in config.setting_problems()] == ["STT_ASR_BACKEND"]
     (sandbox / "stt.env").write_text("STT_ASR_BACKEND=mlxwhisper\n")
+    [(name, why)] = config.setting_problems()
+    assert name == "STT_ASR_BACKEND"
+    assert "the Whisper engine was removed" in why and "using parakeet" in why
+    (sandbox / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
     assert config.setting_problems() == []
     from stt import asr_cloud
     assert set(config.CLOUD_ASR) == set(asr_cloud.PROVIDERS)
@@ -543,7 +577,7 @@ def test_the_doctor_names_an_unknown_asr_backend(sandbox, monkeypatch):
 @pytest.mark.parametrize("value, mod, warns", [
     ("garbage", "stt.asr_parakeet", True),
     ("cloud:bogus", "stt.asr_parakeet", True),
-    (" MLXWhisper ", "stt.asr_mlxwhisper", False),
+    (" MLXWhisper ", "stt.asr_parakeet", True),
     ("parakeet", "stt.asr_parakeet", False)])
 def test_a_backend_set_after_load_is_checked_too(sandbox, monkeypatch, capsys,
                                                 value, mod, warns):

@@ -175,7 +175,8 @@ assistant set, strict meetings are left out and the answer says how many.
 two-step.
 
 **Activity.** Process all new, Import files, Pause or Resume, Stop
-(two-step), the four run options for the next manual run, then Needs
+(two-step), the run options for the next manual run (Verify only while
+the current engine has a second local engine, `verify_engine`), then Needs
 attention, Running now, Queued runs with Cancel, Waiting (Process, Hold,
 two-step Delete), Failed (full error text, Retry, Dismiss), Finished
 recently, and Removed from Voice Memos (the memos the delete after ingest
@@ -289,6 +290,9 @@ says unheard lines are kept as transcribed.
   inline), Split line (at the cursor, then each half's speaker), Play,
   Cancel, Save. Add line in the audio bar inserts at the playhead with a time
   field.
+- The engine menu is the transcript's `listen_engines`: the local engines
+  only, the default first. Today that is Parakeet alone, so there is no
+  menu, and a line says what Listen again does.
 - The speaker menu lists this meeting's speakers, then enrolled people not
   already here, then "New person…", which opens a name box beside it. An
   empty box refuses the save. It never falls back to the first speaker.

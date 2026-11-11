@@ -113,3 +113,17 @@ def test_the_keep_alive_settings_and_defaults_are_the_codes():
         assert f"| `{name}` | `{default}` |" in table, name
         assert f"\n# {name}={default}\n" in example, name
 
+
+def test_no_published_file_installs_or_offers_the_removed_whisper_engine():
+    """The local Whisper engine is gone. The install no longer pulls
+    mlx-whisper, the example settings and the docs no longer offer it, and
+    the README names "mlxwhisper" only to say it was removed. The OpenAI
+    cloud engine's own model (whisper-1) is not the local engine."""
+    for name in ("requirements.txt", "requirements-dev.txt", "init.sh", "setup.sh",
+                 "stt.env.example", "gui/DESIGN.md"):
+        text = (REPO / name).read_text(encoding="utf-8").lower()
+        assert "mlx-whisper" not in text and "mlxwhisper" not in text, name
+        assert "whisper_mlx" not in text and "whisperx" not in text, name
+    assert not (REPO / "stt" / "asr_mlxwhisper.py").exists()
+    lines = [ln for ln in README.splitlines() if "whisper" in ln.lower()]
+    assert lines and all("the removed Whisper engine" in ln for ln in lines), lines

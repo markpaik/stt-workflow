@@ -37,7 +37,7 @@ is either a download or a feature you turn on yourself:
 
 | What | When | What it sends |
 |---|---|---|
-| Model downloads from Hugging Face | Install and first use: Parakeet, Whisper, the pyannote models, the speakrs Core ML models, and Qwen3-8B if you install the optional MLX fallback | Requests for model files. No audio or text |
+| Model downloads from Hugging Face | Install and first use: Parakeet, the pyannote models, the speakrs Core ML models, and Qwen3-8B if you install the optional MLX fallback | Requests for model files. No audio or text |
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
 | Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine | The meeting audio, recompressed to 32 kbps MP3. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
@@ -396,8 +396,8 @@ alt (`u`, the second engine's words, when verify ran), Skip, and Done. It
 also accepts all sub-second crumbs at once, and accepts every remaining line
 behind a confirm. The pencil on any line edits it: fix the text, change the
 speaker (including "New person..."), split a line, remove a line, or listen
-again with a different engine. Your edits live in a sidecar file and survive
-every relabel and reprocess.
+again. Listen again runs Parakeet on the line's audio, on this Mac. Your
+edits live in a sidecar file and survive every relabel and reprocess.
 
 ### Titles
 
@@ -566,15 +566,20 @@ local model. When the queue is empty, it does two more things:
 The Activity page holds the machinery: Process all new, Import files, Pause
 or Resume, Stop, queued runs, waiting files (Process, Hold, Delete), failures
 with their full error text (Retry, Dismiss), history, and duplicates. The
-four run options apply to the next manual run:
+run options apply to the next manual run:
 
 - **Two at a time** runs two workers, for a backlog.
 - **Strict**, for confidential conversations, never guesses an uncertain
   speaker (it flags the line instead) and never sends audio or text to a
   cloud service. A meeting processed in strict stays strict: a Redo or a
   speaker re-identify keeps it on.
-- **Verify** transcribes with a second, different engine and flags every
-  place the two disagree, with both readings.
+- **Verify** transcribes with a second, different local engine and flags
+  every place the two disagree, with both readings. A cloud engine is never
+  the second engine. Parakeet is the only local engine, so Verify does
+  nothing on a Parakeet transcript and checks a cloud transcript with
+  Parakeet. The Activity page shows Verify only while the current engine
+  has a second local engine, so not with Parakeet. With `STT_VERIFY=1`
+  and Parakeet, the doctor reports `verify_no_second_engine`.
 - **One-time speakers**, for focus groups, never adds unnamed voices to the
   speaker library and keeps no samples of them.
 
@@ -680,8 +685,7 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `mlxwhisper`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. The Settings page writes it |
-| `STT_WHISPER_MLX_MODEL` | `large-v3` | The Whisper variant for `mlxwhisper`: `large-v3` or `turbo` |
+| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
 | `STT_DIARIZER` | `speakrs` | `pyannote` forces the CPU path. Any other value prints a warning and keeps speakrs |
 | `STT_SPEAKRS_AHC` | `0.55` | The speakrs merge threshold. A value that is not a number 0 or above uses the default |
 | `STT_SPEAKRS_TIMEOUT_SEC` | `3600` | How long the speakrs helper may run on one file. A value that is not a whole number above 0 uses the default |
@@ -877,7 +881,7 @@ line that reverses them.
 recorder / Voice Memos sync / watched folder / drop
         │
         ▼
-   ffmpeg ─► ASR: Parakeet TDT 0.6B v3 on MLX (or Whisper, or a cloud engine)
+   ffmpeg ─► ASR: Parakeet TDT 0.6B v3 on MLX (or a cloud engine)
         │
         ├─► speaker separation: speakrs on Core ML (pyannote on CPU as fallback)
         ├─► turn recluster (speakrs only)

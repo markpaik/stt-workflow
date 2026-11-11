@@ -53,16 +53,6 @@ CONTENTION = 1.4       # measured diarize slowdown at 2 workers, when unmeasured
 _cache = {"sig": None, "learned": None}
 
 
-def whisper_variant(v) -> str:
-    """The name a Whisper variant's speed is learned and estimated under.
-    An alias of a known model is that model: large-v3-turbo runs the turbo
-    repo, but as its own key it had no default (the 30x Parakeet rate, an
-    ETA about 3.5 times too short) and its samples never taught turbo."""
-    from .asr_mlxwhisper import VARIANT_ALIASES
-    v = v or "large-v3"
-    return VARIANT_ALIASES.get(v, v)
-
-
 # the engine prefix of each cloud provider's transcripts (stt/asr_cloud.py
 # writes "elevenlabs/<model>"), and the provider it names
 _CLOUD_ENGINES = {"elevenlabs": "scribe", "openai": "openai", "mistral": "voxtral"}
@@ -70,16 +60,14 @@ _CLOUD_ENGINES = {"elevenlabs": "scribe", "openai": "openai", "mistral": "voxtra
 
 def engine_key(engine):
     """The model key of the engine that wrote a transcript (the "engine" an
-    ASR module returns, such as "mlx-whisper/turbo"), or None when none is
+    ASR module returns, such as "elevenlabs/scribe_v2"), or None when none is
     named. A finished file's seconds are learned under this. The setting
     read at the end of the file named a model that did not run when the
     model was switched in the panel mid-run, when a strict file ran locally
     under a cloud setting, and when a cloud run fell back to Parakeet."""
     if not isinstance(engine, str) or not engine:
         return None
-    head, _, tail = engine.partition("/")
-    if head == "mlx-whisper":
-        return f"mlxwhisper:{whisper_variant(tail)}"
+    head = engine.partition("/")[0]
     if engine != config.PARAKEET_MODEL and head in _CLOUD_ENGINES:
         return f"cloud:{_CLOUD_ENGINES[head]}"
     return "parakeet"
@@ -88,12 +76,9 @@ def engine_key(engine):
 def current_asr_key() -> str:
     kv = config._env_file()
     # the setting's own check, as pipeline._load_asr reads it: case and
-    # spaces are ignored and a typo runs Parakeet. The raw value ran Whisper
-    # for "MLXWhisper" but keyed it "MLXWhisper" (the 30x default, 120 s for
-    # an hour, not 857 s), and filed a typo's Parakeet runs under the typo.
+    # spaces are ignored and a typo (or the removed "mlxwhisper") runs
+    # Parakeet. The raw value filed a typo's Parakeet runs under the typo.
     backend, _ = config._asr_problem(kv.get("STT_ASR_BACKEND"))
-    if backend == "mlxwhisper":
-        return f"mlxwhisper:{whisper_variant(kv.get('STT_WHISPER_MLX_MODEL'))}"
     return backend
 
 
@@ -221,10 +206,10 @@ def _samples(rows, diarizer: str = None) -> dict:
             # the verify pass IS a transcription by the secondary engine —
             # its timing calibrates that engine's rate like any primary run
             from . import verify as _verify
-            backend, variant = _verify.secondary_engine(r.get("asr", "parakeet"))
-            sec_key = f"{backend}:{variant}" if variant else backend
-            buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
-                (d, secs["verifying"]))
+            sec_key = _verify.secondary_engine(r.get("asr", "parakeet"))
+            if sec_key:
+                buckets["asr"].setdefault(f"{sec_key}@{n}", []).append(
+                    (d, secs["verifying"]))
         if secs.get("writing"):
             buckets["writing"].append((d, secs["writing"]))
     return buckets
@@ -421,9 +406,7 @@ def summary() -> dict:
     """Compact human summary for the GUI settings row."""
     L = learned()
     parts = []
-    for key, label in [("parakeet", "Parakeet"),
-                       ("mlxwhisper:large-v3", "Whisper v3"),
-                       ("mlxwhisper:turbo", "Turbo")]:
+    for key, label in [("parakeet", "Parakeet")]:
         r = L["asr"].get(f"{key}@1")
         if r:
             parts.append(f"{label} {r:.0f}×")

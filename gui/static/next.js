@@ -270,9 +270,14 @@ function recListHTML(){
 
 /* ------------------------------------------------------------ activity ---- */
 const RUN_OPTS=[['stt_run_par2','Two at a time'],['stt_run_strict','Strict'],['stt_run_verify','Verify'],['stt_run_onetime','One-time speakers']];
+// Verify needs a second local engine for the current engine (S.verify_engine).
+// With none it would do nothing, so it is not offered, and a box ticked
+// before stays off.
+const verifyOn=()=>!!(S&&S.verify_engine);
+function runOptList(){return RUN_OPTS.filter(([k])=>k!=='stt_run_verify'||verifyOn());}
 function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
 function lsSet(k,v){try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,v);}catch(e){}}
-function runOpts(){const g=k=>lsGet(k)==='1';return {parallel:g('stt_run_par2')?2:1,strict:g('stt_run_strict'),verify:g('stt_run_verify'),onetime:g('stt_run_onetime')};}
+function runOpts(){const g=k=>lsGet(k)==='1';return {parallel:g('stt_run_par2')?2:1,strict:g('stt_run_strict'),verify:g('stt_run_verify')&&verifyOn(),onetime:g('stt_run_onetime')};}
 function waitingRowHTML(r){
  const dup=r.dup_of?`<div class="meta attn-t">Already processed as ${esc(r.dup_title||r.dup_of)}${r.dup_reason==='identical'?' (identical file)':''}</div>`:'';
  const conf=UI.confirm==='qdel:'+r.source_file;
@@ -291,7 +296,7 @@ function activityView(){
  const tools=`<div class="tools"><button class="btn primary" type="button" data-act="run-all">Process all new</button><button class="btn" type="button" data-act="import">Import files…</button>
   <button class="btn" type="button" data-act="pause">${S.paused?'Resume automatic runs':'Pause automatic runs'}</button>
   ${S.running?`<button class="btn danger" type="button" data-act="stop">${stopConf?'Confirm: stop processing':'Stop processing'}</button>`:''}</div>`;
- const opts=`<div class="tools">${RUN_OPTS.map(([k,l])=>`<label class="toggle"><input type="checkbox" data-opt="${k}" ${lsGet(k)==='1'?'checked':''}>${l}</label>`).join('')}<span class="meta">Options for the next run you start here.</span></div>`;
+ const opts=`<div class="tools">${runOptList().map(([k,l])=>`<label class="toggle"><input type="checkbox" data-opt="${k}" ${lsGet(k)==='1'?'checked':''}>${l}</label>`).join('')}<span class="meta">Options for the next run you start here.</span></div>`;
  const urg=urgent().filter(t=>t.kind!=='failed');   // failures have their own section here
  const attention=urg.length?`<section><div class="eyebrow">Needs attention <span class="n">${urg.length}</span></div><div class="stack">${urg.map(t=>{
    let a='';if(t.kind==='dupe_files'&&t.exact){const c=UI.confirm==='dupes-del';a=`<button class="btn ${c?'danger':'quiet'}" type="button" data-act="dupes-del">${c?`Confirm: delete ${t.exact} copies`:`Delete ${t.exact} exact copies`}</button>`;}

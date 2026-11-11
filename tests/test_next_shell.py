@@ -830,3 +830,21 @@ console.log(JSON.stringify({home:home.includes('The recording captured NO audio.
  noReset:!other.includes('data-act="rec-fix"'),text:other.includes('the helper is missing')}));
 """)
     assert out == {"home": True, "n": 1, "reset": True, "noReset": True, "text": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_verify_is_offered_only_while_a_second_local_engine_exists():
+    """With Parakeet, the only local engine, Verify would do nothing, so
+    the Activity page does not offer it, and a box ticked before Whisper
+    went stays off. A cloud engine has Parakeet to compare with."""
+    out = _run_node("""
+localStorage.getItem=k=>k==='stt_run_verify'?'1':null;
+const view=e=>{S={meetings:[],needs_you:[],timeline:[],queue:[],recent:[],queued_jobs:[],tray:[],verify_engine:e};
+ return {html:activityView(),opts:runOpts()};};
+const none=view(null),cloud=view('parakeet');
+console.log(JSON.stringify({noneBox:none.html.includes('data-opt="stt_run_verify"'),noneVerify:none.opts.verify,
+ strict:none.html.includes('data-opt="stt_run_strict"'),
+ cloudBox:cloud.html.includes('data-opt="stt_run_verify"'),cloudVerify:cloud.opts.verify}));
+""")
+    assert out == {"noneBox": False, "noneVerify": False, "strict": True,
+                   "cloudBox": True, "cloudVerify": True}

@@ -249,7 +249,7 @@ from huggingface_hub import snapshot_download
 for repo in ("mlx-community/parakeet-tdt-0.6b-v3",):
     print(f"  downloading {repo}…", flush=True)
     snapshot_download(repo)
-print("  done — Whisper/diarization models fetch on first use (token-gated).")
+print("  done — the diarization models fetch on first use (token-gated).")
 PY
 fi
 

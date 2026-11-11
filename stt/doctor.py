@@ -47,7 +47,8 @@ are held (`source_missing`), a folder with no meeting json
 stt.env value that cannot be read and is replaced by its default
 (`bad_setting`), a missing Hugging Face token (`diarizer_no_token`), a
 speakrs helper, model set or sandbox-exec that is missing so pyannote
-runs instead (`diarizer_fallback`), and (with deep=True) a stored
+runs instead (`diarizer_fallback`), STT_VERIFY=1 with no second local
+engine to compare with (`verify_no_second_engine`), and (with deep=True) a stored
 duration longer than the audio.
 """
 import hashlib
@@ -527,7 +528,30 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         out.append(Finding("bad_setting", name, why, False))
     for kind, detail in diarizer_findings():
         out.append(Finding(kind, "diarizer", detail, False))
+    for kind, detail in verify_findings():
+        out.append(Finding(kind, "STT_VERIFY", detail, False))
     return out
+
+
+def verify_findings() -> list:
+    """(kind, detail) pairs for the second-opinion pass. Reads only.
+
+    verify_no_second_engine: STT_VERIFY=1, but the engine that writes the
+    transcripts has no other local engine to compare with, so the setting
+    does nothing (stt/verify.py). Parakeet is the only local engine, so
+    this holds for every Parakeet run. A cloud engine gets Parakeet as its
+    second opinion, and then there is no finding."""
+    from . import rates, verify
+    raw = config._env_file().get("STT_VERIFY") or os.environ.get("STT_VERIFY")
+    if raw != "1":
+        return []
+    primary = rates.current_asr_key()
+    if verify.secondary_engine(primary) is not None:
+        return []
+    return [("verify_no_second_engine",
+             f"STT_VERIFY=1 does nothing: {primary} writes the transcripts, and "
+             "no other local engine is installed to compare with (a cloud "
+             "engine is never the second opinion)")]
 
 
 def diarizer_findings() -> list:

@@ -281,7 +281,8 @@ def test_every_example_setting_reads_as_its_value_once_uncommented(tmp_path):
     example = (Path(__file__).resolve().parent.parent / "stt.env.example").read_text()
     lines = [ln[2:] for ln in example.splitlines()
              if re.match(r"# [A-Z][A-Z0-9_]*=", ln)]
-    assert len(lines) >= 10
+    # the two dead WhisperX lines went with the Whisper engine
+    assert len(lines) >= 8
     f = tmp_path / "stt.env"
     f.write_text("\n".join(lines) + "\n")
     for key, value in envfile.parse(f).items():

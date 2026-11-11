@@ -843,3 +843,29 @@ def test_stt_env_example_lists_every_diarizer_setting():
                  "STT_SPEAKRS_BIN", "STT_SPEAKRS_MODELS", "HF_TOKEN"):
         assert f"{name}=" in text, name
     assert "BOTH engines" in text
+
+
+def test_the_doctor_says_why_verify_does_nothing(sandbox, monkeypatch):
+    """Whisper was the second opinion for a Parakeet transcript. With it
+    gone, STT_VERIFY=1 on Parakeet adds no flags, and only a log line said
+    so. The doctor names it. A cloud engine still has Parakeet to compare
+    with, and the default (off) needs no word."""
+    monkeypatch.delenv("STT_VERIFY", raising=False)
+    monkeypatch.delenv("STT_ASR_BACKEND", raising=False)
+
+    def kinds():
+        return {f.kind: f for f in doctor.check(registry=False)}
+    assert "verify_no_second_engine" not in kinds()
+    (sandbox / "stt.env").write_text("STT_VERIFY=1\n")
+    f = kinds()["verify_no_second_engine"]
+    assert f.subject == "STT_VERIFY" and not f.fixable
+    assert "does nothing" in f.detail and "parakeet" in f.detail
+    (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=parakeet\n")
+    assert "verify_no_second_engine" in kinds()
+    (sandbox / "stt.env").write_text("STT_VERIFY=1\nSTT_ASR_BACKEND=cloud:scribe\n")
+    assert "verify_no_second_engine" not in kinds()
+    (sandbox / "stt.env").write_text("STT_VERIFY=0\n")
+    assert "verify_no_second_engine" not in kinds()
+    (sandbox / "stt.env").write_text("")
+    monkeypatch.setenv("STT_VERIFY", "1")                # the environment counts too
+    assert "verify_no_second_engine" in kinds()

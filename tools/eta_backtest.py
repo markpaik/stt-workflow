@@ -19,13 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stt import rates  # noqa: E402
+from stt import rates, verify  # noqa: E402
 
 LONG_SEC = 90 * 60
-
-
-def _secondary(asr):
-    return "mlxwhisper:turbo" if asr == "parakeet" else "parakeet"
 
 
 def predict_row(L, row, use_fit):
@@ -37,8 +33,11 @@ def predict_row(L, row, use_fit):
         if stage == "downloading":
             out[stage] = 5.0                    # a constant in both models
         elif stage == "verifying":
-            out[stage] = rates.predict(L, "transcribing", d, n, _secondary(asr),
-                                       use_fit=use_fit)
+            # no second engine: status.stage_estimates budgets no verifying
+            second = verify.secondary_engine(asr)
+            if second:
+                out[stage] = rates.predict(L, "transcribing", d, n, second,
+                                           use_fit=use_fit)
         else:
             out[stage] = rates.predict(L, stage, d, n, asr, use_fit=use_fit)
     return out

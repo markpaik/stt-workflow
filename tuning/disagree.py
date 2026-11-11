@@ -1,21 +1,21 @@
 #!/usr/bin/env python
 """Cross-engine disagreement analysis: is a dual-model setup worth it?
 
-Aligns Parakeet vs Whisper transcripts of the same audio (from the stt-stage
-cache), splits tokens into agree/disagree regions, then asks which side Scribe
-takes in each disagreement. Three numbers decide the architecture question:
+Aligns two engines' transcripts of the same audio (from the stt-stage cache),
+splits tokens into agree/disagree regions, then asks which side Scribe takes
+in each disagreement. Three numbers decide the architecture question:
 
   - agree%          — how much of the transcript needs no second opinion
   - agree-match%    — when engines agree, how often Scribe agrees too
                       (high => agreement is a reliable confidence signal)
-  - sides-with      — in disagreements, who Scribe backs (parakeet/whisper/
+  - sides-with      — in disagreements, who Scribe backs (engine A/engine B/
                       neither/tie). "neither" is where a third opinion could
                       help; a lopsided split means "just prefer engine X".
 
 Also prints the oracle WER: the error rate if an ideal arbiter always picked
 the better engine per disagreement — the ceiling any dual/tri-model rig can hit.
 
-Usage:  ./run.sh py tuning/disagree.py [--engines parakeet mlxwhisper_large-v3]
+Usage:  ./run.sh py tuning/disagree.py --engines parakeet <other-engine-tag>
 """
 import argparse
 import difflib
@@ -89,7 +89,8 @@ def analyze(base, ref, tag_a, tag_b):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--engines", nargs=2, default=["parakeet", "mlxwhisper_large-v3"])
+    ap.add_argument("--engines", nargs=2, required=True,
+                    help="two stt-stage cache tags, such as parakeet and another engine's")
     args = ap.parse_args()
     tag_a, tag_b = args.engines
 

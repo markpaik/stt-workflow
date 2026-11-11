@@ -39,12 +39,13 @@ def test_median_rejects_outlier(sandbox):
 
 def test_models_learn_independently(sandbox):
     _run(spd=25, asr="parakeet")
-    _run(spd=4.0, asr="mlxwhisper:large-v3")
+    _run(spd=4.0, asr="cloud:scribe")
     _reset_cache()
     assert rates.asr_rate("parakeet", 1) == 25
-    assert rates.asr_rate("mlxwhisper:large-v3", 1) == 4.0
-    # unknown model still falls back to config
-    assert rates.asr_rate("mlxwhisper:turbo", 1) == config.EST_RATES["asr"]["mlxwhisper:turbo"]
+    assert rates.asr_rate("cloud:scribe", 1) == 4.0
+    # a model with no samples still falls back to config, then the 30x default
+    assert rates.asr_rate("cloud:openai", 1) == 30.0
+    assert config.EST_RATES["asr"] == {"parakeet": 30.0}
 
 
 def test_parallel_contention_fallback_and_learning(sandbox):
@@ -271,43 +272,25 @@ def _env(text):
     (config.PROJECT_DIR / "stt.env").write_text(text)
 
 
-def test_the_large_v3_turbo_alias_is_estimated_and_learned_as_turbo(sandbox):
-    """asr_mlxwhisper runs the turbo repo for large-v3-turbo. As its own key
-    it got the 30x default: 120 s for an hour, not turbo's 419 s."""
-    _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
-    turbo = rates.stage_secs("transcribing", 3600, 1)
-    _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=large-v3-turbo\n")
-    assert rates.current_asr_key() == "mlxwhisper:turbo"
-    assert rates.stage_secs("transcribing", 3600, 1) == turbo
-    assert round(turbo) == round(3600 / config.EST_RATES["asr"]["mlxwhisper:turbo"])
-    _env("STT_ASR_BACKEND=mlxwhisper\n")
-    assert rates.current_asr_key() == "mlxwhisper:large-v3"
-    assert rates.whisper_variant("large-v3") == "large-v3"
-
-
 def test_the_backend_setting_is_read_through_its_own_check(sandbox):
     """pipeline._load_asr ignores case and spaces and runs Parakeet for a
-    typo. The raw value keyed 'MLXWhisper' (a Whisper run) at the 30x
-    default and filed a typo's Parakeet runs under the typo."""
-    _env("STT_ASR_BACKEND=mlxwhisper\n")
-    whisper = rates.stage_secs("transcribing", 3600, 1)
-    for raw, key in (("MLXWhisper", "mlxwhisper:large-v3"),
-                     (" mlxwhisper ", "mlxwhisper:large-v3"),
-                     ('"mlxwhisper"', "mlxwhisper:large-v3"),
+    typo. The raw value filed a typo's Parakeet runs under the typo. The
+    removed Whisper engine ("mlxwhisper") and its variant setting run
+    Parakeet and are estimated as Parakeet."""
+    for raw, key in (("MLXWhisper", "parakeet"), (" mlxwhisper ", "parakeet"),
+                     ('"mlxwhisper"', "parakeet"),
                      ("mlx-whisper", "parakeet"), ("whisperx", "parakeet"),
                      ("", "parakeet"), ("CLOUD:Scribe", "cloud:scribe")):
         _env(f"STT_ASR_BACKEND={raw}\n")
         assert rates.current_asr_key() == key, raw
-    _env("STT_ASR_BACKEND=MLXWhisper\n")
-    assert rates.stage_secs("transcribing", 3600, 1) == whisper
-    _env("STT_ASR_BACKEND=mlx-whisper\n")
+    _env("STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+    assert rates.current_asr_key() == "parakeet"
     assert rates.stage_secs("transcribing", 3600, 1) == 3600 / config.EST_RATES["asr"]["parakeet"]
+    assert not hasattr(rates, "whisper_variant")
 
 
 def test_an_engine_name_maps_to_the_model_key_it_ran_as():
     assert rates.engine_key(config.PARAKEET_MODEL) == "parakeet"
-    assert rates.engine_key("mlx-whisper/large-v3") == "mlxwhisper:large-v3"
-    assert rates.engine_key("mlx-whisper/large-v3-turbo") == "mlxwhisper:turbo"
     assert rates.engine_key("elevenlabs/scribe_v1") == "cloud:scribe"
     assert rates.engine_key("openai/gpt-4o-transcribe") == "cloud:openai"
     assert rates.engine_key("mistral/voxtral-mini") == "cloud:voxtral"

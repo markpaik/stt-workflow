@@ -460,3 +460,53 @@ def test_cap_name_never_splits_a_character():
     assert capped.encode("utf-8").decode("utf-8") == capped and name.startswith(capped)
     assert config.cap_name("short") == "short"
     assert config.cap_name("a" * 119 + " b") == "a" * 119     # no trailing space
+
+
+def _fake_asr_engine(engine):
+    import types
+    return types.SimpleNamespace(transcribe=lambda wav, progress=None: {
+        **_fake_asr().transcribe(wav), "engine": engine})
+
+
+@pytest.mark.parametrize("primary, second", [
+    (config.PARAKEET_MODEL, None),              # Whisper was its second opinion
+    ("elevenlabs/scribe_v2", "parakeet")])      # a cloud transcript keeps one
+def test_verify_runs_only_when_a_second_local_engine_exists(
+        sandbox, monkeypatch, capsys, primary, second):
+    """With Parakeet the only local engine, verify on a Parakeet transcript
+    has nothing to compare with. The run is the same as one without verify:
+    no verifying stage, no second model, no sidecar, one warning. A cloud
+    transcript still gets Parakeet as its second opinion."""
+    from stt import verify
+    monkeypatch.setattr(config, "_setting_warned", set())
+    monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr_engine(primary))
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    ran = []
+
+    def _run(wav, words, engine, progress=None):
+        ran.append(engine)
+        return [], config.PARAKEET_MODEL
+    monkeypatch.setattr(verify, "run", _run)
+    stages = []
+    for n in (1, 2):
+        src = config.PROJECT_DIR / f"Verify Meeting {n} 05012026.m4a"
+        src.write_bytes(b"x")
+        pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                              do_verify=True, track_unknowns=False,
+                              report=lambda stage, *a, **k: stages.append(stage))
+    base = "2026-05-01 Verify Meeting 1"
+    import json
+    meta = json.loads(config.meeting_file(base, ".json").read_text())
+    err = capsys.readouterr().err
+    if second is None:
+        assert ran == [] and "verifying" not in stages
+        assert meta["verify_engine"] is None
+        assert not verify.sidecar_path(base).exists()
+        assert err.count("no second local engine") == 1     # once per process
+    else:
+        assert ran == [primary, primary] and "verifying" in stages
+        assert meta["verify_engine"] == config.PARAKEET_MODEL
+        assert verify.sidecar_path(base).exists()
+        assert "no second local engine" not in err

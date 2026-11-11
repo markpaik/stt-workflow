@@ -290,25 +290,26 @@ RECLUSTER_MOVE_MIN_DUR = env_float("STT_RECLUSTER_MOVE_MIN_DUR", 0.3)
 RECLUSTER_DST_MIN_SECS = env_float("STT_RECLUSTER_DST_MIN_SECS", 120.0)
 RECLUSTER_ITERS = env_int("STT_RECLUSTER_ITERS", 2)
 
-# ASR backend: "parakeet" (default, native MLX), "mlxwhisper" (Whisper on the
-# GPU, the variant in STT_WHISPER_MLX_MODEL), or "cloud:<provider>".
-ASR_BACKENDS = ("parakeet", "mlxwhisper")
+# ASR backend: "parakeet" (default, native MLX) or "cloud:<provider>".
+# The local Whisper engine ("mlxwhisper") is gone: that value warns as an
+# unknown one does and runs Parakeet.
+ASR_BACKENDS = ("parakeet",)
 CLOUD_ASR = ("scribe", "openai", "voxtral")      # asr_cloud.PROVIDERS
 
 
 def _asr_problem(raw):
     """(backend, None) for a usable STT_ASR_BACKEND value, else
-    ("parakeet", why). Case and spaces are ignored. pipeline._load_asr runs
-    Whisper only on an exact "mlxwhisper", so a typo ('mlx-whisper',
-    'whisper', or the 'whisperx' an older stt.env.example named) ran
-    Parakeet with no message."""
+    ("parakeet", why). Case and spaces are ignored. A typo once ran
+    Parakeet with no message. "mlxwhisper", the removed Whisper engine,
+    says so."""
     v = str(raw or "").strip().lower()
     if not v:
         return ASR_BACKENDS[0], None
     if v in ASR_BACKENDS or (v.startswith("cloud:") and v[6:] in CLOUD_ASR):
         return v, None
-    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet, mlxwhisper, or cloud:"
-                             f"{'/'.join(CLOUD_ASR)}; using parakeet")
+    gone = " (the Whisper engine was removed)" if v == "mlxwhisper" else ""
+    return ASR_BACKENDS[0], (f"{raw!r} is not parakeet or cloud:"
+                             f"{'/'.join(CLOUD_ASR)}{gone}; using parakeet")
 
 
 def _asr_backend_setting() -> str:
@@ -531,7 +532,7 @@ BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 # (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
 EST_RATES = {
     "convert": 80.0,
-    "asr": {"parakeet": 30.0, "mlxwhisper:large-v3": 4.2, "mlxwhisper:turbo": 8.6},
+    "asr": {"parakeet": 30.0},
     # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
     # but the pyannote-embedder turn pass and model load dominate after it:

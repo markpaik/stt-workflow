@@ -1,14 +1,15 @@
-"""Re-transcribe one segment of a meeting with a chosen engine.
+"""Re-transcribe one segment of a meeting with a chosen engine: the second
+listen on a transcript line.
 
 Run as a one-shot subprocess (`python -m stt.retranscribe <base> <start> <end>
 [engine]`) so the long-lived GUI never loads a multi-GB ASR model into its own
-memory. Engines: "parakeet", "mlxwhisper:large-v3", "mlxwhisper:turbo". Using a
-DIFFERENT engine from the one that produced the transcript gives an independent
-second opinion — exactly what you want when the first engine hallucinated.
+memory. Engines (offered()): the local engines only, so no audio leaves the
+Mac. Today that is Parakeet. A different engine from the one that wrote the
+transcript gives an independent second opinion, which is what you want when
+the first engine misheard.
 """
 import json
 import math
-import os
 import subprocess
 import sys
 import tempfile
@@ -18,20 +19,35 @@ from pathlib import Path
 from . import config
 from .audio import FFMPEG
 
-ENGINES = ("parakeet", "mlxwhisper:large-v3", "mlxwhisper:turbo")
+# the local engines, as the panel and the child name them, the default
+# first. A new local engine is one row here and one branch in _asr_module().
+LOCAL = ("parakeet",)
+
+
+def offered() -> list:
+    """The engine ids a second listen may use, the default first. Only
+    local engines: a second listen never sends audio off the Mac."""
+    return list(LOCAL)
+
+
+def engine_problem(engine: str):
+    """Why `engine` may not listen again, or None."""
+    if engine in offered():
+        return None
+    return f"unknown engine {engine!r} (choose from {', '.join(offered())})"
 
 
 def _asr_module(engine: str):
-    # only the listed engines: any "mlxwhisper:<text>" set <text> as the
-    # Whisper model, and the child loaded (or fetched) that repo or folder
-    if engine not in ENGINES:
-        raise ValueError(f"unknown engine {engine!r} (choose from {ENGINES})")
+    """The ASR module of a listed engine. Only the listed engines: any
+    "mlxwhisper:<text>" once set <text> as the Whisper model, and the child
+    loaded (or fetched) that repo or folder."""
+    why = engine_problem(engine)
+    if why:
+        raise ValueError(why)
     if engine == "parakeet":
         from . import asr_parakeet
         return asr_parakeet
-    os.environ["STT_WHISPER_MLX_MODEL"] = engine.split(":", 1)[1]
-    from . import asr_mlxwhisper
-    return asr_mlxwhisper
+    raise ValueError(f"no module for the local engine {engine!r}")
 
 
 def meeting_audio(base: str):
@@ -62,7 +78,7 @@ def _frames(clip: Path) -> int:
 
 def retranscribe(base: str, start: float, end: float,
                  engine: str = "parakeet") -> dict:
-    why = span_problem(start, end)
+    why = span_problem(start, end) or engine_problem(engine)
     if why:
         return {"error": why}
     try:

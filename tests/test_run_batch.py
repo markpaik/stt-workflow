@@ -463,13 +463,12 @@ def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
 
     from stt import config, rates, summarize
 
-    engines = {"A.m4a": "mlx-whisper/large-v3", "B.m4a": config.PARAKEET_MODEL,
+    engines = {"A.m4a": "elevenlabs/scribe_v2", "B.m4a": config.PARAKEET_MODEL,
                "C.m4a": None}
     for name in engines:
         (config.ICLOUD_DIR / name).write_bytes(b"\x00" * 64)
-    # the panel switched the model to turbo after this run started
-    (config.PROJECT_DIR / "stt.env").write_text(
-        "STT_ASR_BACKEND=mlxwhisper\nSTT_WHISPER_MLX_MODEL=turbo\n")
+    # the panel switched the model to OpenAI after this run started
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=cloud:openai\n")
 
     def stub(src_str, dest_str, opts):
         name = Path(src_str).name
@@ -493,10 +492,9 @@ def test_a_rate_sample_is_filed_under_the_engine_that_ran(sandbox, monkeypatch):
     finally:
         signal.signal(signal.SIGTERM, old)
     # a result that names no engine (an older worker) keeps the setting
-    assert sorted(recorded.values()) == ["mlxwhisper:large-v3", "mlxwhisper:turbo",
-                                         "parakeet"]
+    assert sorted(recorded.values()) == ["cloud:openai", "cloud:scribe", "parakeet"]
     rates._cache.update(sig=None, learned=None)
-    assert set(rates.learned()["asr"]) == {"mlxwhisper:large-v3@1", "mlxwhisper:turbo@1",
+    assert set(rates.learned()["asr"]) == {"cloud:openai@1", "cloud:scribe@1",
                                           "parakeet@1"}
 
 
@@ -519,13 +517,13 @@ def test_process_one_passes_on_the_engine_process_file_ran(sandbox, monkeypatch)
         t.write_text("x")
         return {"base": base, "txt": t, "json": j, "emb": None,
                 "duration_sec": 1.0, "n_speakers": 1, "identified": [],
-                "asr_engine": "mlx-whisper/turbo"}
+                "asr_engine": "elevenlabs/scribe_v2"}
     monkeypatch.setattr(pipeline, "process_file", fake_process_file)
     monkeypatch.setattr(icloud, "materialize", lambda p: True)
     opts = {"do_diarize": False, "strict": False, "verify": False,
             "track_unknowns": True, "allowed": None, "do_move": False}
     res = run_batch.process_one(str(audio_src), str(config.MEETINGS_DIR), opts)
-    assert res["asr_engine"] == "mlx-whisper/turbo"
+    assert res["asr_engine"] == "elevenlabs/scribe_v2"
 
 
 def test_summarize_one_drafts_only_when_missing(sandbox, monkeypatch):

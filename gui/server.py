@@ -94,8 +94,6 @@ def _known_base(base) -> bool:
 
 ASR_CHOICES = [
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
-    {"id": "mlxwhisper:large-v3", "label": "Whisper large-v3 (MLX)", "note": "best punctuation robustness · ~4x realtime"},
-    {"id": "mlxwhisper:turbo", "label": "Whisper large-v3-turbo (MLX)", "note": "Whisper punctuation · ~9x realtime"},
     # cloud engines: shown only once their key is set; words are transcribed
     # off-device, but diarization + speaker naming stay local — and strict
     # mode ALWAYS forces the local engine (sensitive audio never uploads)
@@ -108,8 +106,6 @@ ASR_CHOICES = [
 ]
 MODEL_REPOS = {
     "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
-    "Whisper large-v3 (MLX)": "mlx-community/whisper-large-v3-mlx",
-    "Whisper large-v3-turbo (MLX)": "mlx-community/whisper-large-v3-turbo",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
     # listed only when the optional MLX fallback is installed (check_updates)
     "Qwen3-8B (optional MLX fallback)": "mlx-community/Qwen3-8B-4bit",
@@ -168,6 +164,14 @@ def _env_file_set(updates: dict, remove=()):
 
 def current_model():
     return rates.current_asr_key()  # single source of truth for the model key
+
+
+def _verify_engine():
+    """The local engine a verify run would compare with under the current
+    engine setting, or None (stt.verify.secondary_engine). With Parakeet,
+    the only local engine, it is None."""
+    from stt import verify
+    return verify.secondary_engine(current_model())
 
 
 def read_schedule():
@@ -1596,6 +1600,9 @@ def gather_state():
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
             "schedule": read_schedule(), "model": current_model(),
+            # the second engine a verify run would use with the current
+            # engine, or None: the Activity page hides Verify while it is None
+            "verify_engine": _verify_engine(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir),
@@ -1728,6 +1735,14 @@ def set_folder(which: str, path: str, confirm: bool = False):
 
 def _meeting_audio(base: str):
     return config.meeting_audio(base)
+
+
+def _listen_engines() -> list:
+    """The second listen's engine menu, the default first: [{"id", "label",
+    "note"}] in stt.retranscribe.offered() order. Local engines only."""
+    from stt import retranscribe
+    return [{"id": e, "label": e.capitalize(), "note": "Runs on this Mac."}
+            for e in retranscribe.offered()]
 
 
 def _cloud_key_status() -> dict:
@@ -2505,6 +2520,8 @@ class Handler(BaseHTTPRequestHandler):
                         for i, s in enumerate(d.get("segments", []))
                         if s.get("text", "").strip()]
                 self._json({"base": base, "strict": d.get("strict", False),
+                            # the engines a second listen on a line may use
+                            "listen_engines": _listen_engines(),
                             # the save stamp of exactly these bytes: the meeting
                             # page records it so the next poll's row stamp is
                             # compared against what is really on screen
@@ -2700,12 +2717,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not asr_cloud.available(prov):
                         self._json({"ok": False, "error": "Add this provider's API key first (Cloud keys… in Settings)."})
                         return
-                if choice.startswith("mlxwhisper"):
-                    variant = choice.split(":", 1)[1] if ":" in choice else "large-v3"
-                    _env_file_set({"STT_ASR_BACKEND": "mlxwhisper",
-                                   "STT_WHISPER_MLX_MODEL": variant})
-                else:
-                    _env_file_set({"STT_ASR_BACKEND": choice})
+                _env_file_set({"STT_ASR_BACKEND": choice})
                 self._json({"ok": True, "model": current_model()})
             elif u.path == "/api/name_preview":
                 # What a save from the naming panel would DO, before it does
@@ -3585,11 +3597,19 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/retranscribe":
                 if not self._require_base(b.get("base")):
                     return
+                engine = b.text("engine", "") or "parakeet"
+                # an engine the second listen does not offer starts no
+                # child (the child checks this again)
+                from stt import retranscribe as _rt
+                why = _rt.engine_problem(engine)
+                if why:
+                    self._json({"error": why})
+                    return
                 # one-shot subprocess: the panel must never hold a 2GB ASR model
                 r = subprocess.run(
                     [str(config.CODE_DIR / ".venv/bin/python"), "-m", "stt.retranscribe",
                      b["base"], str(b.number("start")), str(b.number("end")),
-                     b.text("engine", "") or "parakeet"],
+                     engine],
                     capture_output=True, text=True, timeout=180,
                     cwd=str(config.CODE_DIR),
                     env={**os.environ, "PYTHONPATH": str(config.CODE_DIR)})
