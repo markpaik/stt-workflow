@@ -127,3 +127,22 @@ def test_no_published_file_installs_or_offers_the_removed_whisper_engine():
     assert not (REPO / "stt" / "asr_mlxwhisper.py").exists()
     lines = [ln for ln in README.splitlines() if "whisper" in ln.lower()]
     assert lines and all("the removed Whisper engine" in ln for ln in lines), lines
+
+
+def test_no_published_file_installs_or_offers_the_removed_parakeet_engine():
+    """Parakeet is gone, and the punctuator that cleaned up its text with it.
+    The install no longer pulls parakeet-mlx or punctuators, the example
+    settings and the docs no longer offer either, and the README names
+    Parakeet only to say it was removed. NOTICE.md keeps its attribution for
+    the transcripts it wrote."""
+    for name in ("requirements.txt", "requirements-dev.txt", "requirements-qwen.txt",
+                 "init.sh", "setup.sh", "run.sh", "stt.env.example", "gui/DESIGN.md"):
+        text = (REPO / name).read_text(encoding="utf-8").lower()
+        assert "parakeet" not in text and "punctuat" not in text, name
+    assert not (REPO / "stt" / "asr_parakeet.py").exists()
+    assert not (REPO / "stt" / "punctuate.py").exists()
+    lines = [ln for ln in README.splitlines() if "parakeet" in ln.lower()]
+    assert lines and all("the removed Parakeet engine" in ln for ln in lines), lines
+    assert "STT_PUNCTUATE" not in README
+    notice = (REPO / "NOTICE.md").read_text(encoding="utf-8")
+    assert "no longer uses" in notice and "parakeet-mlx" not in notice
