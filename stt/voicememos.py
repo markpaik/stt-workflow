@@ -52,9 +52,12 @@ memo to Voice Memos' Recently Deleted. It never erases a memo for good. A
 memo is a candidate only when all of these hold:
 
 - the sync staged it (its id is in the state's "staged" map);
-- the batch stored its staged copy (run_batch notes it right after the
-  manifest records it; a memo stored before that note existed is proved by
-  its manifest record, whose meeting carries the memo's id);
+- the batch stored its staged copy: run_batch notes it right after the
+  manifest records it, and a memo stored before that note existed is proved
+  by a meeting in the library whose json carries the memo's id (vm_uuid).
+  The manifest is no proof: its record is keyed by the staged file name,
+  and memos staged under one name before the names were unique share one
+  record;
 - that meeting is still in the library, its json carries the memo's id, and
   its stored audio is there and runs within DURATION_SLACK_SEC of the memo's
   ZDURATION;
@@ -708,7 +711,7 @@ def note_ingested(uuid, key, base, meeting_id=None, source="batch") -> bool:
     """Record that the batch stored this staged memo. run_batch calls it
     right after the manifest records the file, for a run into the library
     only. The delete step needs this proof, and keeps one it found in the
-    manifest the same way (source="manifest"). Returns True when it was
+    library the same way (source="library"). Returns True when it was
     recorded."""
     if not uuid:
         return False
@@ -810,46 +813,55 @@ def _meeting_json(base, store):
     return d if isinstance(d, dict) else None
 
 
-def _in_store(json_path: Path, store: Path) -> bool:
-    """True when json_path is <store>/<base>/<base>.json."""
-    try:
-        folder = json_path.parent
-        if json_path.name != folder.name + ".json":
-            return False
-        a, b = folder.parent, Path(store)
-        if a.exists() and b.exists():
-            return os.path.samefile(a, b)
-        return a.resolve() == b.resolve()
-    except OSError:
-        return False
+class _Library:
+    """The library's meetings by the memo id their json carries (vm_uuid),
+    read once per pass and only when a proof needs it. A json that does not
+    hold the text "vm_uuid" is not parsed, so the read stays a byte scan."""
+
+    def __init__(self, store: Path):
+        self.store = Path(store)
+        self._by = None
+
+    def bases(self, uuid) -> list:
+        if self._by is None:
+            self._by = {}
+            for b in config.meeting_bases(self.store):
+                try:
+                    raw = config.meeting_file(b, ".json", self.store).read_bytes()
+                except OSError:
+                    continue
+                if b'"vm_uuid"' not in raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and d.get("vm_uuid"):
+                    self._by.setdefault(str(d["vm_uuid"]), []).append(b)
+        return list(self._by.get(str(uuid), []))
 
 
-def _ingest_proof(uuid, ent: dict, store: Path, man: dict):
+def _ingest_proof(uuid, ent: dict, store: Path, library: "_Library"):
     """The proof that the batch stored this memo, or None. The batch's own
-    note first. Else the manifest record under the staged name, when the
-    meeting it names is in the library and carries this memo's id (a memo
-    stored before the note existed)."""
+    note first. Else a meeting in the library whose json carries this
+    memo's id (a memo stored before the note existed). The proof found in
+    the library is kept as a note ("keep")."""
     ing = ent.get("ingested")
     if isinstance(ing, dict) and (ing.get("base") or ing.get("meeting_id")):
         return ing
-    rec = (man.get("processed") or {}).get(ent.get("name"))
-    if not isinstance(rec, dict):
+    found = library.bases(uuid)
+    if not found:
         return None
-    for o in rec.get("outputs") or []:
-        jp = Path(str(o))
-        if jp.suffix != ".json" or not _in_store(jp, store):
-            continue
-        d = _meeting_json(jp.parent.name, store)
-        if d and d.get("vm_uuid") == uuid:
-            return {"at": rec.get("processed_at"), "key": ent.get("name"),
-                    "base": jp.parent.name, "meeting_id": d.get("meeting_id"),
-                    "from": "manifest", "keep": True}
-    return None
+    d = _meeting_json(found[0], store) or {}
+    return {"at": None, "key": ent.get("name"), "base": found[0],
+            "meeting_id": d.get("meeting_id"), "from": "library", "keep": True}
 
 
-def _locate(uuid, proof: dict, store: Path):
+def _locate(uuid, proof: dict, store: Path, library: "_Library" = None):
     """The library meeting that holds this memo: its base, or None. Its
-    stable id finds it after a rename. The json must carry the memo's id."""
+    stable id finds it after a rename. The json must carry the memo's id.
+    When the meeting the proof names no longer does, the library is asked
+    by the memo's id."""
     bases = []
     mid = proof.get("meeting_id")
     if mid:
@@ -859,6 +871,10 @@ def _locate(uuid, proof: dict, store: Path):
     if proof.get("base"):
         bases.append(proof["base"])
     for b in dict.fromkeys(bases):
+        d = _meeting_json(b, store)
+        if d and d.get("vm_uuid") == uuid:
+            return b
+    for b in (library.bases(uuid) if library is not None else []):
         d = _meeting_json(b, store)
         if d and d.get("vm_uuid") == uuid:
             return b
@@ -897,7 +913,7 @@ MANUAL_REASONS = {
 }
 
 
-def _evaluate(uuid, ent, rec, row, store, man, now):
+def _evaluate(uuid, ent, rec, row, store, library, now):
     """One staged memo against the candidate rules, with no write. Returns
     a plan item {uuid, name, title, state, reason, base, detail, proof}.
 
@@ -930,12 +946,12 @@ def _evaluate(uuid, ent, rec, row, store, man, now):
                     detail=datetime.fromtimestamp(float(rec["next_at"]))
                     .isoformat(timespec="minutes"))
         return item
-    proof = _ingest_proof(uuid, ent, store, man)
+    proof = _ingest_proof(uuid, ent, store, library)
     if proof is None:
         item.update(state="waiting", reason="not_ingested")
         return item
     item["proof"] = proof
-    base = _locate(uuid, proof, store)
+    base = _locate(uuid, proof, store, library)
     if base is None:
         item.update(state="waiting", reason="meeting_gone")
         return item
@@ -1141,15 +1157,14 @@ def _pass(out, store, dry_run, now, log, warn):
         if not dry_run:
             _write_delete_last(out["status"], detail=out["detail"])
         return out
-    from . import manifest
-    man = manifest.load()
+    library = _Library(store)
     by = {r["uuid"]: r for r in rows}
     entries = [(u, e) for u, e in state["staged"].items() if isinstance(e, dict)] \
         if dry_run else pending
     entries.sort(key=lambda kv: str(kv[1].get("at") or ""))
     plan = []
     for u, ent in entries:
-        item = _evaluate(u, ent, state["delete"].get(u), by.get(u), store, man, now)
+        item = _evaluate(u, ent, state["delete"].get(u), by.get(u), store, library, now)
         if item["state"] == "candidate":
             why = _title_problem(by[u], rows)
             item["would"] = f"manual:{why}" if why else "delete"
@@ -1185,11 +1200,11 @@ def _pass(out, store, dry_run, now, log, warn):
             # (the meeting left the library, say), so the memo must stay
             _forget_delete(u)
         elif (item.get("proof") or {}).get("keep"):
-            # keep a proof found in the manifest: a later memo staged under
-            # the same name would replace the record it came from
+            # keep a proof found in the library, so the next pass reads it
+            # from the state and need not scan the library again
             p = item["proof"]
             note_ingested(u, p.get("key"), p.get("base"), p.get("meeting_id"),
-                          source="manifest")
+                          source="library")
 
     counts = {}
     for item in plan:
