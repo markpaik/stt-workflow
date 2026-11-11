@@ -6,7 +6,13 @@ This pipeline uses the following open models, both licensed **CC-BY-4.0**
 - **NVIDIA Parakeet TDT 0.6B v3** — https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 - **pyannote speaker-diarization-community-1** — https://huggingface.co/pyannote/speaker-diarization-community-1
 
-Runtimes / libraries: `parakeet-mlx` (Apache-2.0), `pyannote.audio` (MIT), MLX, PyTorch.
+The Qwen3-ASR engine (`STT_ASR_BACKEND=qwen3`) uses two more open models,
+both licensed **Apache-2.0** (as their model cards state):
+
+- **Qwen3-ASR 1.7B** (MLX conversion of Qwen/Qwen3-ASR-1.7B): https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16
+- **Qwen3-ForcedAligner 0.6B** (MLX 8-bit conversion of Qwen/Qwen3-ForcedAligner-0.6B): https://huggingface.co/mlx-community/Qwen3-ForcedAligner-0.6B-8bit
+
+Runtimes / libraries: `parakeet-mlx` (Apache-2.0), `mlx-audio` (MIT), `pyannote.audio` (MIT), MLX, PyTorch.
 
 The control panel's UI typeface is **Figtree** by Erik Kennedy
 (https://github.com/erikdkennedy/figtree), licensed under the **SIL Open Font

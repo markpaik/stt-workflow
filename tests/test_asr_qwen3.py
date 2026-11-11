@@ -112,10 +112,20 @@ def fake_child(tmp_path, monkeypatch):
     py.chmod(0o755)
     log = tmp_path / "requests.jsonl"
     monkeypatch.setattr(config, "QWEN_ASR_PY", py)
+    monkeypatch.setattr(asr_qwen3, "model_dir", lambda repo: tmp_path)
     monkeypatch.setenv("FAKE_QWEN_LOG", str(log))
     monkeypatch.delenv("FAKE_QWEN_MODE", raising=False)
     monkeypatch.delenv("FAKE_QWEN_LOOP_AT", raising=False)
     return log
+
+
+@pytest.fixture(autouse=True)
+def _fresh_engine(monkeypatch):
+    """Each test starts as a new process: no remembered failure, and no
+    Qwen setting from the shell."""
+    monkeypatch.setattr(asr_qwen3, "_unavailable", None)
+    for k in ("STT_QWEN_ASR_PY", "STT_QWEN_ASR_MODEL", "STT_QWEN_ALIGNER_MODEL"):
+        monkeypatch.delenv(k, raising=False)
 
 
 def _requests(log):
@@ -280,6 +290,36 @@ def test_no_interpreter_is_one_plain_error(sandbox, monkeypatch, tmp_path):
     with pytest.raises(asr_qwen3.EngineUnavailable) as e:
         asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 5))
     assert "STT_QWEN_ASR_PY" in str(e.value) and "\n" not in str(e.value)
+    # the next file in the same run does not try again
+    monkeypatch.setattr(asr_qwen3, "_Worker", lambda wav: pytest.fail("tried again"))
+    with pytest.raises(asr_qwen3.EngineUnavailable):
+        asr_qwen3.transcribe(_wav(tmp_path / "m2.wav", 5))
+
+
+def test_a_model_not_in_the_cache_is_named_before_any_child_starts(sandbox, monkeypatch,
+                                                                    tmp_path, fake_child):
+    monkeypatch.setattr(asr_qwen3, "model_dir",
+                        lambda repo: None if "Aligner" in repo else tmp_path)
+    assert "ForcedAligner" in asr_qwen3.problem()
+    with pytest.raises(asr_qwen3.EngineUnavailable, match="is not downloaded"):
+        asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 5))
+    assert not fake_child.exists()              # no child was started
+
+
+def test_the_settings_are_read_fresh_from_stt_env(sandbox, tmp_path):
+    (config.PROJECT_DIR / "stt.env").write_text(
+        f"STT_QWEN_ASR_PY={tmp_path}/py\nSTT_QWEN_ASR_MODEL=org/Qwen3-ASR-test\n")
+    assert asr_qwen3.interpreter() == tmp_path / "py"
+    assert asr_qwen3.asr_model() == "org/Qwen3-ASR-test"
+    assert asr_qwen3.aligner_model() == config.QWEN_ALIGNER_MODEL
+
+
+def test_a_model_folder_needs_its_config_and_weights(tmp_path):
+    d = tmp_path / "local-model"
+    d.mkdir()
+    assert asr_qwen3.model_dir(str(d)) is None
+    (d / "config.json").write_text("{}")
+    assert asr_qwen3.model_dir(str(d)) == d
 
 
 def test_a_missing_model_is_one_plain_error(fake_child, tmp_path, monkeypatch):
@@ -301,16 +341,44 @@ def test_a_child_that_dies_mid_run_fails_the_file(fake_child, tmp_path, monkeypa
     assert not isinstance(e.value, asr_qwen3.EngineUnavailable)
 
 
-def test_the_batch_blames_the_mac_not_the_file_and_prints_no_traceback(capsys):
-    import run_batch
-    err = asr_qwen3.EngineUnavailable("Qwen3-ASR did not start: model x is not downloaded")
-    assert run_batch._machine_at_fault(err)
-    assert not run_batch._machine_at_fault(RuntimeError("Qwen3-ASR: bad reply"))
-    try:
-        raise err
-    except asr_qwen3.EngineUnavailable as e:
-        run_batch._trace(e)
-    assert "Traceback" not in capsys.readouterr().err
+def test_an_engine_that_cannot_run_falls_back_to_parakeet_with_one_warning(
+        sandbox, monkeypatch, tmp_path, capsys):
+    """No .venv-qwen: each file is transcribed by Parakeet, the meeting json
+    names Parakeet, and one warning per run names the fix."""
+    import types
+
+    from stt import asr_parakeet, audio
+    monkeypatch.setattr(config, "QWEN_ASR_PY", tmp_path / "no-such-venv/bin/python")
+    monkeypatch.setattr(config, "ASR_BACKEND", "qwen3")
+    monkeypatch.setattr(config, "PUNCTUATE", False)
+    ran = []
+
+    def _parakeet(wav, progress=None):
+        ran.append(wav)
+        return {"engine": config.PARAKEET_MODEL, "text": "hello there",
+                "words": [{"start": 0.2, "end": 0.5, "word": "hello"},
+                          {"start": 0.6, "end": 0.9, "word": "there"}]}
+    monkeypatch.setattr(asr_parakeet, "transcribe", _parakeet)
+    monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: _wav(wav, 2))
+    monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
+    for n in (1, 2):
+        src = config.PROJECT_DIR / f"Fallback Meeting {n} 05012026.m4a"
+        src.write_bytes(b"x")
+        res = pipeline.process_file(src, dest_dir=config.MEETINGS_DIR, do_diarize=False,
+                                    do_verify=False, track_unknowns=False)
+        assert json.loads(res["json"].read_text())["asr_engine"] == config.PARAKEET_MODEL
+    assert len(ran) == 2
+    warned = [ln for ln in capsys.readouterr().err.splitlines() if "Qwen3-ASR" in ln]
+    assert len(warned) == 1, warned
+    assert "./init.sh" in warned[0] and "Parakeet" in warned[0]
+
+
+def test_the_estimate_follows_the_engine_that_will_run(sandbox, monkeypatch, tmp_path):
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=qwen3\n")
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: "no venv")
+    assert rates.current_asr_key() == "parakeet"
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
+    assert rates.current_asr_key() == "qwen3"
 
 
 # ---------- the setting ----------
@@ -327,7 +395,8 @@ def test_qwen3_is_a_backend_and_parakeet_stays_the_default(sandbox, monkeypatch,
     assert "qwen3" in config._asr_problem("qwen")[1]          # the warning names it
 
 
-def test_qwen3_runs_are_filed_and_estimated_under_their_own_key(sandbox):
+def test_qwen3_runs_are_filed_and_estimated_under_their_own_key(sandbox, monkeypatch):
+    monkeypatch.setattr(asr_qwen3, "problem", lambda deep=False: None)
     assert rates.engine_key(config.QWEN_ASR_MODEL) == "qwen3"
     assert rates.engine_key("mlx-community/Qwen3-ASR-0.6B-8bit") == "qwen3"
     assert rates.engine_key(config.PARAKEET_MODEL) == "parakeet"

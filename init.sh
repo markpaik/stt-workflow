@@ -7,10 +7,13 @@
 # What it does, in order:
 #   1. Machine checks   — Apple Silicon, memory, free disk
 #   2. Tools            — Homebrew, ffmpeg, uv (offers to install the missing)
-#   3. Python env       — .venv (3.12) + pipeline dependencies
+#   3. Python env       — .venv (3.12) + pipeline dependencies, and .venv-qwen
+#                         (3.12) for the Qwen3-ASR engine (requirements-qwen.txt)
 #   4. Folders          — where recordings arrive, where transcripts land
 #   5. Hugging Face     — token for the license-gated diarization model
-#   6. Models           — optional pre-download (~3 GB) so night one isn't slow
+#   6. Models           — the two Qwen3-ASR models (~5.4 GB; the engine loads
+#                         them only from the local cache), and an optional
+#                         Parakeet pre-download (~3 GB)
 #   7. Optional extras  — the local model for descriptions and titles (Qwen 3.8
 #                         on Ollama; the weights of an MLX fallback only when
 #                         you installed one by hand); automation (LaunchAgents)
@@ -102,6 +105,51 @@ setup_local_llm() {
   fi
 }
 
+# Qwen3-ASR, the default transcription engine, runs in its own environment:
+# mlx-audio needs mlx 0.32, and parakeet-mlx in .venv runs on 0.31, so
+# mlx-audio never goes into .venv. The engine loads its two models from the
+# local Hugging Face cache only, so they are fetched here, with the file
+# patterns mlx-audio's own loader asks for. Without either, the batch warns
+# once a run and transcribes with Parakeet. These defaults match
+# stt/config.py (tests/test_init_sh.py checks).
+QWEN_PY="$BASE/.venv-qwen/bin/python"
+QWEN_ASR_REPO="mlx-community/Qwen3-ASR-1.7B-bf16"
+QWEN_ALIGNER_REPO="mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+setup_qwen_env() {
+  if [ -x "$QWEN_PY" ]; then
+    ok ".venv-qwen exists ($("$QWEN_PY" -V 2>&1))"
+  else
+    echo "  Creating .venv-qwen (Python 3.12) for the Qwen3-ASR engine…"
+    uv venv --python 3.12 "$BASE/.venv-qwen" || { warn "uv venv failed, so transcription uses Parakeet"; return 1; }
+  fi
+  if ! "$QWEN_PY" -I -c "import mlx_audio" 2>/dev/null; then
+    echo "  Installing mlx-audio into .venv-qwen (a minute or two on first run)…"
+    uv pip install --python "$QWEN_PY" -r "$BASE/requirements-qwen.txt" \
+      || { warn "the Qwen3-ASR install failed, so transcription uses Parakeet"; return 1; }
+  fi
+  ok "Qwen3-ASR environment ready (.venv-qwen)"
+}
+qwen_models_cached() {
+  [ -x "$QWEN_PY" ] && "$QWEN_PY" -I - "$QWEN_ASR_REPO" "$QWEN_ALIGNER_REPO" >/dev/null 2>&1 <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS
+for repo in sys.argv[1:]:
+    snapshot_download(repo, local_files_only=True, allow_patterns=DEFAULT_ALLOW_PATTERNS)
+PY
+}
+fetch_qwen_models() {
+  [ -x "$QWEN_PY" ] || { warn "no .venv-qwen, so the Qwen3-ASR models were not fetched"; return 1; }
+  "$QWEN_PY" -I - "$QWEN_ASR_REPO" "$QWEN_ALIGNER_REPO" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS
+for repo in sys.argv[1:]:
+    print(f"  downloading {repo}…", flush=True)
+    snapshot_download(repo, allow_patterns=DEFAULT_ALLOW_PATTERNS)
+PY
+}
+
 # sourced (the tests load the helpers above): stop before the setup steps
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
@@ -135,7 +183,7 @@ else
 fi
 
 FREE_GB=$(df -g "$BASE" | awk 'NR==2 {print $4}')
-NEED_GB=15   # ~3 GB models + ~5 GB venvs/caches + headroom for audio
+NEED_GB=21   # ~3 GB Parakeet + ~5.4 GB Qwen3-ASR models + ~5.5 GB venvs/caches + headroom for audio
 if [ "$FREE_GB" -lt "$NEED_GB" ]; then
   fail "${FREE_GB} GB free on this volume — need at least ${NEED_GB} GB (models, environments, audio)"
   yes_no "Continue anyway?" || exit 1
@@ -177,6 +225,7 @@ if ! "$BASE/.venv/bin/python" -c "import parakeet_mlx, pyannote.audio" 2>/dev/nu
     || { fail "dependency install failed"; exit 1; }
 fi
 ok "pipeline dependencies installed"
+setup_qwen_env
 
 # speakrs: the fast Core ML speaker-separation helper (native/speakrs).
 # Without it the pipeline falls back to pyannote on CPU, much slower.
@@ -242,7 +291,15 @@ fi
 
 # ---------- 6. models ----------
 bold "6/7  Models"
-echo "  First transcription downloads the models automatically (~3 GB)."
+if qwen_models_cached; then
+  ok "Qwen3-ASR models downloaded"
+elif yes_no "Download the two Qwen3-ASR models now (~5.4 GB)? Without them transcription uses Parakeet."; then
+  fetch_qwen_models && ok "Qwen3-ASR models downloaded" \
+    || warn "the Qwen3-ASR download failed. Re-run init.sh. Transcription uses Parakeet until then"
+else
+  warn "skipped. Transcription uses Parakeet until init.sh downloads the Qwen3-ASR models"
+fi
+echo "  First transcription downloads the Parakeet model automatically (~3 GB)."
 if yes_no "Pre-download them now so the first run is fast?"; then
   "$BASE/.venv/bin/python" - <<'PY' || warn "pre-download hit an error — models will download on first use instead"
 from huggingface_hub import snapshot_download

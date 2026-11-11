@@ -62,3 +62,91 @@ def test_the_skipped_token_text_matches_what_the_batch_does():
         assert stale not in INIT
     assert "the batch does not run until it is set" in INIT
     assert "the batch stops at its start until HF_TOKEN is set" in INIT
+
+
+# ---------- the Qwen3-ASR environment (steps 3 and 6) ----------
+
+FAKE_UV = r'''#!/bin/bash
+echo "uv $*" >> "$FAKE_LOG"
+if [ "$1" = venv ]; then
+  mkdir -p "$4/bin"
+  cat > "$4/bin/python" <<'PYEOF'
+#!/bin/bash
+echo "python $*" >> "$FAKE_LOG"
+if [ "$1" = "-V" ]; then echo "Python 3.12.13"; exit 0; fi
+if [ "$1" = "-I" ] && [ "$2" = "-c" ]; then [ -f "$FAKE_MARK" ]; exit $?; fi
+if [ "$1" = "-I" ] && [ "$2" = "-" ]; then
+  echo "--- script" >> "$FAKE_LOG"; cat >> "$FAKE_LOG"; [ -f "$FAKE_MARK" ]; exit $?
+fi
+PYEOF
+  chmod +x "$4/bin/python"
+fi
+if [ "$1" = pip ]; then touch "$FAKE_MARK"; fi
+'''
+
+
+def _scratch_init(tmp_path):
+    """A copy of init.sh and requirements-qwen.txt in a scratch checkout, a
+    fake uv on PATH, and the log both fakes write."""
+    co = tmp_path / "checkout"
+    co.mkdir()
+    (co / "init.sh").write_text(INIT)
+    (co / "requirements-qwen.txt").write_text((REPO / "requirements-qwen.txt").read_text())
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "uv").write_text(FAKE_UV)
+    (bin_ / "uv").chmod(0o755)
+    env = {"PATH": f"{bin_}:/usr/bin:/bin", "HOME": str(tmp_path),
+           "FAKE_LOG": str(tmp_path / "log"), "FAKE_MARK": str(tmp_path / "installed")}
+    return co, env
+
+
+def _run(co, env, body):
+    sh = f'source "{co}/init.sh"; {body}'
+    return subprocess.run(["/bin/bash", "-c", sh], capture_output=True, text=True,
+                          env=env, start_new_session=True, stdin=subprocess.DEVNULL)
+
+
+def test_init_builds_the_qwen_environment_once_and_never_touches_venv(tmp_path):
+    co, env = _scratch_init(tmp_path)
+    r = _run(co, env, "setup_qwen_env; echo ONE; setup_qwen_env; echo TWO")
+    assert r.returncode == 0, r.stderr
+    log = (tmp_path / "log").read_text().splitlines()
+    uv = [ln for ln in log if ln.startswith("uv ")]
+    assert uv == [f"uv venv --python 3.12 {co}/.venv-qwen",
+                  f"uv pip install --python {co}/.venv-qwen/bin/python "
+                  f"-r {co}/requirements-qwen.txt"]
+    assert not (co / ".venv").exists()
+    assert r.stdout.count("Qwen3-ASR environment ready") == 2
+
+
+def test_init_fetches_both_models_with_mlx_audio_patterns(tmp_path):
+    co, env = _scratch_init(tmp_path)
+    r = _run(co, env, "setup_qwen_env >/dev/null; qwen_models_cached && echo CACHED; "
+                      "fetch_qwen_models && echo FETCHED")
+    assert r.returncode == 0, r.stderr
+    assert "CACHED" in r.stdout and "FETCHED" in r.stdout
+    log = (tmp_path / "log").read_text()
+    from stt import config
+    call = f"python -I - {config.QWEN_ASR_MODEL} {config.QWEN_ALIGNER_MODEL}"
+    assert log.count(call) == 2
+    scripts = log.split("--- script")[1:]
+    assert "local_files_only=True" in scripts[0]
+    for sc in scripts:
+        assert "allow_patterns=DEFAULT_ALLOW_PATTERNS" in sc
+        assert "from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS" in sc
+
+
+def test_a_failed_qwen_install_is_a_warning_not_a_stop(tmp_path):
+    co, env = _scratch_init(tmp_path)
+    (tmp_path / "bin" / "uv").write_text('#!/bin/bash\necho "uv $*" >> "$FAKE_LOG"; exit 1\n')
+    r = _run(co, env, "setup_qwen_env; echo rc=$?; fetch_qwen_models; echo rc=$?")
+    assert "rc=1" in r.stdout and "uses Parakeet" in r.stdout
+
+
+def test_the_qwen_install_lines_name_only_the_qwen_environment():
+    lines = [ln for ln in INIT.splitlines() if "requirements-qwen" in ln
+             and not ln.lstrip().startswith("#")]
+    assert lines and all("$QWEN_PY" in ln for ln in lines)
+    assert "mlx-audio" not in (REPO / "requirements.txt").read_text()
+    assert "mlx-audio==" in (REPO / "requirements-qwen.txt").read_text()

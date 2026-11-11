@@ -48,8 +48,9 @@ stt.env value that cannot be read and is replaced by its default
 (`bad_setting`), a missing Hugging Face token (`diarizer_no_token`), a
 speakrs helper, model set or sandbox-exec that is missing so pyannote
 runs instead (`diarizer_fallback`), STT_VERIFY=1 with no second local
-engine to compare with (`verify_no_second_engine`), and (with deep=True) a stored
-duration longer than the audio.
+engine to compare with (`verify_no_second_engine`), the qwen3 engine set
+but not able to run here, so Parakeet transcribes (`asr_fallback`), and
+(with deep=True) a stored duration longer than the audio.
 """
 import hashlib
 import json
@@ -530,7 +531,29 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         out.append(Finding(kind, "diarizer", detail, False))
     for kind, detail in verify_findings():
         out.append(Finding(kind, "STT_VERIFY", detail, False))
+    for kind, detail in asr_findings():
+        out.append(Finding(kind, "STT_ASR_BACKEND", detail, False))
     return out
+
+
+def asr_findings() -> list:
+    """(kind, detail) pairs for the transcription engine. Reads only.
+
+    asr_fallback: STT_ASR_BACKEND is qwen3 (the default), but its Python
+    environment does not run, does not import mlx_audio, or one of its two
+    models is not in the local cache. The batch then warns once a run and
+    transcribes with Parakeet (pipeline._transcribe_with_fallback)."""
+    backend, _ = config._asr_problem(config._env_file().get("STT_ASR_BACKEND")
+                                     or os.environ.get("STT_ASR_BACKEND"))
+    if backend != "qwen3":
+        return []
+    from . import asr_qwen3
+    why = asr_qwen3.problem(deep=True)
+    if why is None:
+        return []
+    return [("asr_fallback",
+             f"STT_ASR_BACKEND is qwen3, but {why}, so the batch transcribes "
+             f"with Parakeet. To fix it, {asr_qwen3.FIX}")]
 
 
 def verify_findings() -> list:

@@ -1606,6 +1606,10 @@ def test_the_model_endpoint_accepts_only_a_listed_choice(running_server):
     assert st == 200 and body["ok"] is True
     assert "STT_ASR_BACKEND=parakeet" in envp.read_text()
 
+    st, body = _post(running_server, "/api/model", {"model": "qwen3"})
+    assert st == 200 and body["ok"] is True
+    assert "STT_ASR_BACKEND=qwen3" in envp.read_text()
+
 
 def test_the_settings_page_offers_no_whisper_engine(running_server):
     """The Whisper engine is gone: the engine list and the update check
@@ -1613,7 +1617,7 @@ def test_the_settings_page_offers_no_whisper_engine(running_server):
     unlisted one. Only the OpenAI cloud engine's own model is Whisper."""
     envp = config.PROJECT_DIR / "stt.env"
     local = [c["id"] for c in srv.ASR_CHOICES if not c.get("cloud")]
-    assert local == ["parakeet"]
+    assert local == ["qwen3", "parakeet"]
     assert not [c for c in srv.ASR_CHOICES if c["id"].startswith("mlxwhisper")]
     assert not [r for r in srv.MODEL_REPOS.values() if "whisper" in r]
     for choice in ("mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper"):

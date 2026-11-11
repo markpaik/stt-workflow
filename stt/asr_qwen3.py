@@ -50,7 +50,9 @@ The steps, measured on 7 meetings against Scribe v2 (qa/asr-bench):
   the overlap (merge_chunk_words).
 
 A missing interpreter, package or model is one EngineUnavailable error.
-The batch counts it as this Mac's fault, never the file's.
+The pipeline then warns once and transcribes with Parakeet (FIX says what
+to do), and the doctor reports it as asr_fallback. After the first such
+error a process does not try again.
 """
 import difflib
 import json
@@ -87,6 +89,11 @@ WORKER = Path(__file__).resolve().parent / "qwen3_worker.py"
 class EngineUnavailable(RuntimeError):
     """The engine cannot run on this Mac: no interpreter, no mlx-audio, or a
     model that is not downloaded. One plain sentence, no traceback."""
+
+
+FIX = ("run ./init.sh, which builds .venv-qwen and downloads the two models, "
+       "or set STT_ASR_BACKEND=parakeet")
+_unavailable = None   # why the engine could not start in this process, once it failed
 
 
 # ---------- pure helpers (no child process) ----------
@@ -262,34 +269,85 @@ def merge_chunk_words(prev, nxt, ov_start, ov_end):
 
 # ---------- the child process ----------
 
+def _setting(name, default) -> str:
+    """The environment, then stt.env read fresh (the panel is long-lived and
+    launchd gives it no stt.env), then the default."""
+    return os.environ.get(name) or config._env_file().get(name) or str(default)
+
+
 def interpreter() -> Path:
-    return Path(config.QWEN_ASR_PY).expanduser()
+    return Path(_setting("STT_QWEN_ASR_PY", config.QWEN_ASR_PY)).expanduser()
+
+
+def asr_model() -> str:
+    return _setting("STT_QWEN_ASR_MODEL", config.QWEN_ASR_MODEL)
+
+
+def aligner_model() -> str:
+    return _setting("STT_QWEN_ALIGNER_MODEL", config.QWEN_ALIGNER_MODEL)
+
+
+def model_dir(repo):
+    """The local folder that holds `repo`'s config and weights: the path
+    itself, or its snapshot in the Hugging Face cache. None when it is not
+    downloaded. Reads the cache only, never the network."""
+    p = Path(repo).expanduser()
+    if p.is_dir():
+        return p if (p / "config.json").is_file() else None
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        found = try_to_load_from_cache(repo, "config.json")
+    except Exception:
+        return None
+    if not isinstance(found, str) or not os.path.isfile(found):
+        return None
+    d = Path(found).parent
+    return d if any(d.glob("*.safetensors")) else None
+
+
+def problem(deep=False):
+    """Why this engine cannot run on this Mac, or None. Quick checks: the
+    interpreter and both models in the local cache. deep=True also runs
+    the interpreter to import mlx_audio (a second or two)."""
+    py = interpreter()
+    if not (py.is_file() and os.access(py, os.X_OK)):
+        return f"there is no Python environment at STT_QWEN_ASR_PY ({py})"
+    for repo in (asr_model(), aligner_model()):
+        if model_dir(repo) is None:
+            return f"the model {repo} is not downloaded"
+    if deep:
+        try:
+            r = subprocess.run([str(py), "-I", "-c", "import mlx_audio"],
+                               capture_output=True, text=True, timeout=120)
+            if r.returncode:
+                return f"mlx-audio does not import in {py}"
+        except (OSError, subprocess.SubprocessError):
+            return f"{py} does not run"
+    return None
 
 
 class _Worker:
     """The running child: one request line out, one reply line back."""
 
     def __init__(self, wav_path):
+        why = problem()
+        if why:
+            raise EngineUnavailable(why)
         py = interpreter()
-        if not (py.is_file() and os.access(py, os.X_OK)):
-            raise EngineUnavailable(
-                f"Qwen3-ASR needs its own Python environment with mlx-audio, and "
-                f"STT_QWEN_ASR_PY ({py}) is not one. Build it (README, Engines: "
-                f"STT_QWEN_ASR_PY) or set STT_ASR_BACKEND=parakeet.")
         self.err = tempfile.TemporaryFile(mode="w+b")
         env = dict(os.environ)
         env["HF_HUB_OFFLINE"] = "1"          # cache only: never a download mid-run
         env.pop("PYTHONPATH", None)
         self.proc = subprocess.Popen(
             [str(py), "-I", str(WORKER), "--wav", str(wav_path),
-             "--asr", config.QWEN_ASR_MODEL, "--aligner", config.QWEN_ALIGNER_MODEL],
+             "--asr", asr_model(), "--aligner", aligner_model()],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.err,
             env=env, text=True, bufsize=1)
         first = self._read()
         if first is None or first.get("unavailable") or not first.get("ready"):
             why = (first or {}).get("error") or self._stderr_tail() or "no reply"
             self.close()
-            raise EngineUnavailable(f"Qwen3-ASR did not start: {why}")
+            raise EngineUnavailable(f"the Qwen3-ASR child did not start: {why}")
 
     def _stderr_tail(self, n=6) -> str:
         try:
@@ -511,9 +569,16 @@ def transcribe(wav_path: Path, chunk_duration: float = CHUNK_SEC,
     every chunk: its decode (and any guard re-decode), its alignment, and
     its repair. Each chunk counts by its audio length."""
     note = lambda msg: print(msg, flush=True)  # noqa: E731
+    global _unavailable
+    if _unavailable:
+        raise EngineUnavailable(_unavailable)
     plan = chunk_plan(_duration(wav_path), chunk_duration, overlap_duration)
     total = sum(e - s for s, e in plan) or 1.0
-    worker = _Worker(wav_path)
+    try:
+        worker = _Worker(wav_path)
+    except EngineUnavailable as e:
+        _unavailable = str(e)
+        raise
     words, bye, counts = [], None, {}
     try:
         prev_end, before = None, 0.0
@@ -547,4 +612,4 @@ def transcribe(wav_path: Path, chunk_duration: float = CHUNK_SEC,
             break
         prev = max(prev, w["start"])
     text = " ".join(w["word"] for w in words)
-    return {"text": text, "words": words, "engine": config.QWEN_ASR_MODEL}
+    return {"text": text, "words": words, "engine": asr_model()}
