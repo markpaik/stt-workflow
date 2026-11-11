@@ -198,7 +198,15 @@ def test_a_non_loopback_ollama_url_is_refused(sandbox, monkeypatch):
     calls = []
     _fake_urlopen(monkeypatch, calls)
     assert summarize._ollama_url() is None
+    # with the optional MLX fallback installed, MLX answers instead
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
     assert summarize.local_engine() == "mlx"
+    assert summarize.backend_available("local") is True
+    # without it, nothing local is set up: Ollama is the only engine, and off
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "no-venv-llm" / "python")
+    assert summarize.local_engine() == "ollama"
+    assert summarize.backend_available("local") is False
+    assert calls == []                        # the remote host was never called
 
 
 @pytest.mark.parametrize("raw,url", [
@@ -230,14 +238,32 @@ def test_an_unusable_ollama_url_turns_ollama_off_and_says_why(sandbox, monkeypat
                                                              raw, why):
     from stt import doctor
     _ollama_on(monkeypatch, sandbox, url=raw)
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))   # fallback installed
     assert summarize._ollama_url() is None
     assert summarize._ollama_url() is None
     assert summarize.local_engine() == "mlx"
     err = capsys.readouterr().err
     assert err.count(f"STT_OLLAMA_URL={raw!r}") == 1 and why in err
     assert summarize.ollama_url_problem().startswith(f"{raw!r} {why}")
+    assert summarize.ollama_url_problem().endswith("Ollama is off and the MLX model answers")
     found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
     assert [f.subject for f in found] == ["STT_OLLAMA_URL"] and why in found[0].detail
+
+
+def test_without_the_fallback_an_unusable_url_never_claims_mlx_answers(sandbox, monkeypatch,
+                                                                       capsys):
+    """The doctor and the warning named the MLX model as the one that
+    answers. Without .venv-llm nothing local answers, and the text says so,
+    with no offer to install anything."""
+    from stt import doctor
+    _ollama_on(monkeypatch, sandbox, url="http://10.0.0.5:11434")
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "no-venv-llm" / "python")
+    assert summarize._ollama_url() is None
+    err = capsys.readouterr().err
+    found = [f for f in doctor.check(registry=False) if f.kind == "bad_setting"]
+    for text in (err, summarize.ollama_url_problem(), found[0].detail):
+        assert "Ollama is off, so no local model answers" in text
+        assert "MLX" not in text and ".venv-llm" not in text
 
 
 def test_ollama_down_falls_back_to_mlx_at_lowered_priority(sandbox, monkeypatch):
@@ -800,3 +826,194 @@ def test_renice_holds_the_setting_over_repeated_calls(sandbox, monkeypatch):
     finally:
         p.kill()
         p.wait()
+
+
+# ------------------------------------------------ the optional MLX fallback ---
+# .venv-llm is optional and not installed by default. Without it Ollama is
+# the only local engine, and an outage is a plain OllamaDown: never the old
+# ".venv-llm missing — run: uv venv ..." setup step. Ollama is faked: every
+# call to it is refused, so nothing reaches the real server.
+PLAIN = "the local model (Ollama) is not reachable"
+
+
+def _no_fallback(monkeypatch, sandbox):
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "no-venv-llm" / "bin" / "python")
+
+
+def _ollama_down(monkeypatch, sandbox, extra=""):
+    """Ollama set up on loopback, and every call to it refused."""
+    import urllib.error
+    import urllib.request
+    (sandbox / "stt.env").write_text("STT_MIC_SPEAKER=Owen Park\n"
+                                     "STT_OLLAMA_URL=http://localhost:11434\n" + extra)
+    monkeypatch.delenv("STT_OLLAMA_URL", raising=False)
+    seen = []
+
+    def refused(req, timeout=None):
+        seen.append(req if isinstance(req, str) else req.full_url)
+        raise urllib.error.URLError("refused")
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+    return seen
+
+
+def _no_runner(monkeypatch):
+    """Record every subprocess.run: with quiet mode off, only the MLX runner
+    would call it."""
+    ran = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **k: ran.append(args)
+                        or subprocess.CompletedProcess(args, 0, stdout="", stderr=""))
+    return ran
+
+
+def test_without_the_fallback_an_ollama_outage_is_a_plain_failure(sandbox, monkeypatch):
+    base = _meeting()
+    _no_fallback(monkeypatch, sandbox)
+    seen = _ollama_down(monkeypatch, sandbox)
+    ran = _no_runner(monkeypatch)
+    monkeypatch.setattr(summarize, "ollama_up",
+                        lambda ttl=10.0: pytest.fail("no probe: Ollama is the only engine"))
+    assert summarize.local_engine() == "ollama"
+    # set up, only not answering: the batch tries, the panel keeps Ask on
+    assert summarize.backend_available("local") is True and summarize.available() is True
+    for call in (lambda: summarize.describe(base), lambda: summarize.suggest_title(base),
+                 lambda: summarize.answer_question(base, "Who owns the posting?")):
+        with pytest.raises(summarize.OllamaDown) as e:
+            call()
+        assert str(e.value) == PLAIN
+    assert ran == []                                   # the MLX runner never started
+    assert seen and all(u == "http://localhost:11434/api/chat" for u in seen)
+    assert "ai_gist" not in _load(base)
+
+
+def test_with_the_fallback_an_ollama_outage_still_runs_on_mlx(sandbox, monkeypatch):
+    """The MLX path keeps working for anyone who installs .venv-llm."""
+    base = _meeting()
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    seen = _ollama_down(monkeypatch, sandbox)
+    # the probe said yes, then Ollama stopped answering
+    monkeypatch.setattr(summarize, "ollama_up", lambda ttl=10.0: True)
+    ran = []
+
+    def runner(args, **k):
+        ran.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"text": REPLY}), stderr="")
+    monkeypatch.setattr(subprocess, "run", runner)
+    desc = summarize.describe(base)
+    assert desc["engine"] == "mlx" and desc["model"] == summarize.MODEL
+    assert desc["series"] == "weekly_checkin"
+    assert ran and ran[-1][0] == sys.executable
+    assert seen == ["http://localhost:11434/api/chat"]
+
+
+def test_only_an_explicit_mlx_pick_without_the_fallback_names_the_install(sandbox, monkeypatch):
+    """STT_LOCAL_LLM=mlx asks for the optional model by name: it is the one
+    case whose help says how to get it. It is not "set up", so the batch
+    never tries it."""
+    _no_fallback(monkeypatch, sandbox)
+    (sandbox / "stt.env").write_text("STT_LOCAL_LLM=mlx\n")
+    ran = _no_runner(monkeypatch)
+    assert summarize.local_engine() == "mlx"
+    assert summarize.backend_available("local") is False
+    with pytest.raises(summarize.UserError, match="STT_LOCAL_LLM=mlx"):
+        summarize._generate("hi")
+    assert ran == []
+
+
+def test_a_strict_meeting_with_ollama_down_and_no_fallback_stays_local(sandbox, monkeypatch):
+    base = _meeting(strict=True)
+    _no_fallback(monkeypatch, sandbox)
+    _ollama_down(monkeypatch, sandbox, extra="STT_LLM_BACKEND=anthropic\nSTT_ANTHROPIC_KEY=k\n")
+    cloud = []
+    monkeypatch.setattr(summarize, "_generate_anthropic",
+                        lambda *a, **k: cloud.append(a) or REPLY)
+    # Ollama is set up: the strict meeting downgrades to it, and the outage
+    # is the plain failure. Nothing goes to the cloud.
+    assert summarize._backend_for(base) == "local"
+    with pytest.raises(summarize.OllamaDown, match="not reachable"):
+        summarize.suggest_title(base)
+    with pytest.raises(summarize.OllamaDown, match="not reachable"):
+        summarize.answer_question(base, "what was said?")
+    # Ollama off too: nothing local is set up, so it refuses, and the help
+    # never offers the MLX environment
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=off\nSTT_LLM_BACKEND=anthropic\n"
+                                     "STT_ANTHROPIC_KEY=k\n")
+    r = summarize.answer_question(base, "what was said?")
+    assert r["ok"] is False and "strict" in r["error"]
+    with pytest.raises(summarize.UserError, match="strict") as e:
+        summarize.suggest_title(base)
+    for text in (r["error"], str(e.value)):
+        assert ".venv-llm" not in text and "uv venv" not in text
+    assert cloud == []
+    # a non-strict meeting with the same settings does use the cloud
+    assert summarize._backend_for(_meeting("Open Mtg 10022026")) == "anthropic"
+
+
+def test_the_batch_owes_a_description_ollama_could_not_write_and_writes_it_later(
+        sandbox, monkeypatch, capsys):
+    """The batch's description step treats the outage as a failure to
+    retry later: the meeting goes on the out-of-date list as owed, with
+    the usual back-off, and an idle run writes it once Ollama is back."""
+    import time as _t
+
+    import run_batch
+    base = _meeting()
+    config.index_set("mid-1", base)
+    _no_fallback(monkeypatch, sandbox)
+    _ollama_down(monkeypatch, sandbox)
+    assert run_batch.summarize_one(base + ".m4a", base) is False
+    err = capsys.readouterr().err
+    assert PLAIN in err and "backing off" in err
+    assert "Traceback" not in err and ".venv-llm" not in err and "uv venv" not in err
+    idx = json.loads(summarize._stale_path().read_text())
+    assert idx["mid-1"]["owed"] is True and idx["mid-1"]["fails"] == 1
+    assert idx["mid-1"]["error"] == PLAIN
+    assert "ai_stale" not in _load(base)        # no old description to mark
+    assert summarize.stale_bases() == []        # backed off
+    later = _t.time() + summarize.STALE_BACKOFF_SEC + 1
+    assert summarize.stale_bases(now=later) == [base]
+    # Ollama is back: the idle run writes it and runs the title chain's
+    # last step, which the failed first pass never reached
+    monkeypatch.setattr(summarize, "_generate", lambda *a, **k: REPLY)
+    monkeypatch.setattr(summarize, "stale_bases",
+                        lambda now=None, real=summarize.stale_bases: real(now=later))
+    monkeypatch.setattr(config, "llm_rest", lambda *a, **k: 0)
+    assert run_batch.regenerate_stale() == 1
+    assert json.loads(summarize._stale_path().read_text()) == {}
+    (new,) = config.meeting_bases()
+    d = _load(new)
+    assert d["ai_gist"] and "ai_stale" not in d
+    assert d["title_state"] == "provisional" and new != base
+
+
+def test_an_owed_entry_drops_once_the_meeting_has_a_description(sandbox, monkeypatch):
+    base = _meeting()
+    config.index_set("mid-1", base)
+    summarize.stale_owe(base, PLAIN)
+    d = _load(base)
+    d["ai_summary"] = "written by Regenerate meanwhile"
+    config.meeting_file(base, ".json").write_text(json.dumps(d))
+    assert summarize.stale_bases(now=1e12) == []
+    assert json.loads(summarize._stale_path().read_text()) == {}
+
+
+def test_an_idle_refresh_stops_at_the_first_ollama_outage(owner, sandbox, monkeypatch, capsys):
+    import run_batch
+    # no fallback: with .venv-llm in the checkout, describe() would retry
+    # the meeting on MLX, as it should
+    _no_fallback(monkeypatch, sandbox)
+    _stale_meeting("Mtg a 10012026", "mid-a")
+    _stale_meeting("Mtg b 10022026", "mid-b")
+    monkeypatch.setattr(summarize, "available", lambda: True)
+    monkeypatch.setattr(config, "llm_rest", lambda *a, **k: 0)
+    calls = []
+
+    def down(*a, **k):
+        calls.append(1)
+        raise summarize.OllamaDown(PLAIN)
+    monkeypatch.setattr(summarize, "_generate", down)
+    assert run_batch.regenerate_stale() == 0
+    assert len(calls) == 1                     # the second waits for a later run
+    idx = json.loads(summarize._stale_path().read_text())
+    assert idx["mid-a"]["fails"] == 1 and idx["mid-b"]["fails"] == 0
+    err = capsys.readouterr().err
+    assert f"backing off): {PLAIN}" in err and "Traceback" not in err

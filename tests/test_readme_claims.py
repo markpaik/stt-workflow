@@ -32,6 +32,14 @@ def test_the_readme_never_mentions_the_classic_page():
     assert "classic" not in README.lower()
 
 
+def test_the_readme_says_the_mlx_fallback_is_optional():
+    """The MLX fallback (.venv-llm) is optional and not installed by
+    default. No line may still claim a smaller Mac or init.sh uses it."""
+    assert "**Optional: the MLX fallback.** It is not installed by default" in README
+    assert "Smaller Macs use the 8B MLX" not in README
+    assert "and the local 8B model (about 4.5 GB)" not in README
+
+
 def test_every_in_page_link_lands_on_a_heading():
     heads = {_anchor(h) for h in re.findall(r"^#{2,3} (.+)$", README, re.M)}
     links = set(re.findall(r"\]\(#([\w-]+)\)", README))

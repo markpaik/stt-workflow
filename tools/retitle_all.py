@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Retitle every meeting by the series catalog, and write the new description.
 
-The local model (Qwen 3.8 on Ollama, else Qwen3-8B) reads each meeting once.
+The local model (Qwen 3.8 on Ollama, or Qwen3-8B when the optional MLX
+fallback is installed and Ollama does not answer) reads each meeting once.
 It names a series from stt/series.py (or one_off), the other person for a
 1:1 series, and a short topic, and it writes the new description: a gist,
 Decisions, Open questions, and 3 to 5 topic tags. Code builds

@@ -207,25 +207,26 @@ def test_init_updates_a_key_in_place_and_appends_a_new_one(tmp_path):
 
 # ---------- init.sh's local model step ----------
 
-def _run_llm_step(tmp_path, cached: bool):
-    """setup_local_llm() from a copy of init.sh, with a fake uv and a fake
-    .venv-llm python that log their arguments. Nothing is installed or
-    downloaded, and Ollama is not on the PATH."""
+def _run_llm_step(tmp_path, venv: bool, cached: bool = False):
+    """setup_local_llm() from a copy of init.sh, with a fake uv that logs
+    its arguments and, when `venv`, a .venv-llm already in place whose fake
+    python logs its own. Nothing is installed or downloaded, and Ollama is
+    not on the PATH."""
     shutil.copy(REPO / "init.sh", tmp_path / "init.sh")
     bin_ = tmp_path / "fakebin"
     bin_.mkdir()
     log = tmp_path / "calls.log"
-    fake_py = ("#!/bin/bash\n"
-               f'echo "py $*" >> "{log}"\n'
-               + ('exit 0\n' if cached else
-                  'case "$*" in *local_files_only*) exit 1 ;; esac\nexit 0\n'))
-    (bin_ / "uv").write_text(
-        "#!/bin/bash\n"
-        f'echo "uv $*" >> "{log}"\n'
-        'if [ "$1" = venv ]; then d="${@: -1}"; mkdir -p "$d/bin"; '
-        f"cat > \"$d/bin/python\" <<'PYEOF'\n{fake_py}PYEOF\n"
-        'chmod +x "$d/bin/python"; fi\n')
+    log.write_text("")
+    (bin_ / "uv").write_text(f'#!/bin/bash\necho "uv $*" >> "{log}"\n')
     (bin_ / "uv").chmod(0o755)
+    if venv:
+        py = tmp_path / ".venv-llm" / "bin" / "python"
+        py.parent.mkdir(parents=True)
+        py.write_text("#!/bin/bash\n"
+                      f'echo "py $*" >> "{log}"\n'
+                      + ('exit 0\n' if cached else
+                         'case "$*" in *local_files_only*) exit 1 ;; esac\nexit 0\n'))
+        py.chmod(0o755)
     sh = (f'source "{tmp_path}/init.sh"; '
           f'yes_no() {{ echo "ask $1" >> "{log}"; return 0; }}; setup_local_llm')
     r = subprocess.run(["/bin/bash", "-c", sh], capture_output=True, text=True,
@@ -235,23 +236,34 @@ def _run_llm_step(tmp_path, cached: bool):
     return r.stdout, log.read_text().splitlines()
 
 
-def test_init_downloads_the_fallback_weights_it_promises(tmp_path):
-    """The prompt said '~4.5 GB, fully offline' but init.sh installed only
-    the mlx-lm package: the Qwen3-8B weights came down on the first
-    description. It now offers the download, of the model summarize.py
-    runs, and names Ollama's model as the preferred one."""
+def test_init_never_sets_up_or_offers_the_optional_mlx_fallback(tmp_path):
+    """The MLX fallback is optional and not installed by default: without
+    .venv-llm the step installs nothing, asks nothing, and names no MLX
+    setup. It names Ollama's model and how to pull it."""
     from stt import summarize
-    out, calls = _run_llm_step(tmp_path, cached=False)
-    assert any(c.startswith("uv venv --python 3.12") for c in calls)
-    assert any("mlx-lm" in c for c in calls if c.startswith("uv pip install"))
+    out, calls = _run_llm_step(tmp_path, venv=False)
+    assert calls == []                       # no uv call, no question asked
+    assert not (tmp_path / ".venv-llm").exists()
+    assert summarize.OLLAMA_MODEL in out and "ollama pull" in out
+    for word in ("MLX", ".venv-llm", "Qwen3-8B", "4.5 GB"):
+        assert word not in out, word
+
+
+def test_init_downloads_the_weights_of_a_fallback_already_installed(tmp_path):
+    """The prompt said '~4.5 GB, fully offline' but the mlx-lm install has
+    no weights: they came down on the first description. A .venv-llm put
+    in by hand still gets the offer, of the model summarize.py runs."""
+    from stt import summarize
+    out, calls = _run_llm_step(tmp_path, venv=True, cached=False)
+    assert not any(c.startswith("uv ") for c in calls)   # it installs nothing
     downloads = [c for c in calls if c.startswith("py ") and "local_files_only" not in c]
     assert len(downloads) == 1 and f"d('{summarize.MODEL}')" in downloads[0]
-    assert summarize.OLLAMA_MODEL in out and "ollama pull" in out
+    assert "Optional MLX fallback (Qwen3-8B) installed" in out
     assert "fully offline" not in (REPO / "init.sh").read_text()
 
 
 def test_init_skips_the_download_when_the_weights_are_there(tmp_path):
-    out, calls = _run_llm_step(tmp_path, cached=True)
+    out, calls = _run_llm_step(tmp_path, venv=True, cached=True)
     assert [c for c in calls if c.startswith("py ")] == \
         [c for c in calls if "local_files_only" in c]
     assert not any("Download the Qwen3-8B" in c for c in calls)

@@ -11,9 +11,9 @@
 #   4. Folders          — where recordings arrive, where transcripts land
 #   5. Hugging Face     — token for the license-gated diarization model
 #   6. Models           — optional pre-download (~3 GB) so night one isn't slow
-#   7. Optional extras  — the local model for descriptions and titles (the MLX
-#                         fallback and its ~4.5 GB of weights; Ollama is
-#                         preferred when present); automation (LaunchAgents)
+#   7. Optional extras  — the local model for descriptions and titles (Qwen 3.8
+#                         on Ollama; the weights of an MLX fallback only when
+#                         you installed one by hand); automation (LaunchAgents)
 set -uo pipefail
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENVF="$BASE/stt.env"
@@ -72,41 +72,33 @@ env_set() {  # env_set KEY VALUE — update-or-append, preserving other lines
   mv -f "$tmp" "$ENVF"
 }
 
-# The local model for descriptions, title drafts and Ask (stt/summarize.py).
-# Ollama with OLLAMA_MODEL is preferred when it answers; the fallback is
-# LLM_REPO on MLX in its own .venv-llm. The weights are NOT part of the
-# mlx-lm install: without the download below, the first description fetches
-# them from Hugging Face, and the old prompt's offline promise was not true.
+# The local model for descriptions, title drafts and Ask (stt/summarize.py)
+# is OLLAMA_MODEL on Ollama. An MLX fallback (LLM_REPO in its own .venv-llm)
+# is optional and not installed by default, so this step never sets one up:
+# the README shows the two commands for anyone who wants it. When a
+# .venv-llm is already there, its weights are checked. They are NOT part of
+# the mlx-lm install: without the download below, the first description the
+# fallback writes fetches them from Hugging Face.
 LLM_REPO="mlx-community/Qwen3-8B-4bit"
 OLLAMA_MODEL="qwen3.8:27b-mlx"
 LLM_PY="$BASE/.venv-llm/bin/python"
 setup_local_llm() {
-  echo "  Descriptions, title drafts and Ask use a local model on this Mac."
-  echo "  Preferred: Qwen 3.8 (27B) on Ollama, about 29 GB in memory (a 48 GB Mac)."
-  echo "  Fallback:  Qwen3-8B on MLX, about 4.5 GB of weights, set up here."
+  echo "  Descriptions, title drafts and Ask use Qwen 3.8 (27B) on Ollama on this"
+  echo "  Mac, about 29 GB in memory (a 48 GB Mac)."
   if command -v ollama >/dev/null 2>&1; then
     ok "Ollama found. If the model is not pulled yet: ollama pull $OLLAMA_MODEL"
   else
-    echo "  (For the preferred model, install Ollama from https://ollama.com,"
-    echo "   then run: ollama pull $OLLAMA_MODEL)"
+    echo "  (Install Ollama from https://ollama.com, then run: ollama pull $OLLAMA_MODEL)"
   fi
-  if [ -x "$LLM_PY" ]; then
-    ok "MLX fallback environment already installed"
-  elif yes_no "Set up the MLX fallback (a small environment now; the weights next)?"; then
-    uv venv --python 3.12 "$BASE/.venv-llm" \
-      && uv pip install --python "$LLM_PY" mlx-lm 'transformers<5' \
-      && ok "MLX fallback environment installed" \
-      || { warn "MLX install failed — everything else still works"; return 0; }
-  else
-    return 0
-  fi
+  [ -x "$LLM_PY" ] || return 0
+  ok "Optional MLX fallback (Qwen3-8B) installed"
   if "$LLM_PY" -c "from huggingface_hub import snapshot_download as d; d('$LLM_REPO', local_files_only=True)" \
        >/dev/null 2>&1; then
-    ok "Qwen3-8B weights already downloaded (descriptions work offline)"
-  elif yes_no "Download the Qwen3-8B weights now (~4.5 GB)? If not, the first description downloads them."; then
+    ok "Qwen3-8B weights already downloaded (the fallback works offline)"
+  elif yes_no "Download the Qwen3-8B weights for the MLX fallback now (~4.5 GB)? If not, its first description downloads them."; then
     "$LLM_PY" -c "from huggingface_hub import snapshot_download as d; d('$LLM_REPO')" \
-      && ok "Qwen3-8B weights downloaded (descriptions work offline)" \
-      || warn "download failed — the first description downloads the weights instead"
+      && ok "Qwen3-8B weights downloaded (the fallback works offline)" \
+      || warn "download failed — the fallback's first description downloads the weights instead"
   fi
 }
 
