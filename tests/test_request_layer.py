@@ -289,6 +289,22 @@ def test_an_ollama_outage_without_the_mlx_fallback_reads_plainly(running_server,
     assert ".venv-llm" not in out["error"]
 
 
+def test_panel_requests_keep_the_model_briefly_and_never_end_a_run(running_server, sandbox,
+                                                                   monkeypatch):
+    """Regenerate and Ask through the panel are single requests: each keeps
+    the model STT_OLLAMA_KEEP_ALIVE_PANEL (5m), never the run's 30m, and
+    none of them sends the end-of-run release. Ollama is a FakeOllama."""
+    from conftest import fake_ollama
+    _make_meeting("2026-04-08 Team Weekly")
+    fake = fake_ollama(monkeypatch, sandbox, reply=lambda p: "It was hello [00:01].")
+    st, out = _post(running_server, "/api/ask", {"base": "2026-04-08 Team Weekly",
+                                                 "question": "what was said?"})
+    assert st == 200 and out["ok"] is True
+    _post(running_server, "/api/suggest", {"base": "2026-04-08 Team Weekly"})
+    assert fake.keep_alives() == ["5m", "5m"]
+    assert "/api/ps" not in fake.paths() and "/api/generate" not in fake.paths()
+
+
 def test_an_unknown_export_format_is_a_400(running_server):
     _make_meeting("2026-04-08 Team Weekly")
     st, out = _post(running_server, "/api/export",

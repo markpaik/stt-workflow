@@ -700,7 +700,17 @@ where it is.
 | `STT_LOCAL_LLM` | `auto` | `auto` uses Ollama. With the optional MLX fallback installed, it uses MLX when Ollama does not answer. `ollama` or `mlx` picks one. `mlx` needs the fallback installed |
 | `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A value with no scheme (`localhost:11434`) is read as `http://`, and one with no port either (`127.0.0.1`) is on port 11434, as Ollama reads its own `OLLAMA_HOST`. A host that is not loopback, a port that is not a number, or a scheme other than http or https turns Ollama off with one warning |
 | `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | The Ollama model |
-| `STT_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded after a call |
+| `STT_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded after a call during a run (the batch, `tools/retitle_all.py`), so the model stays loaded between meetings |
+| `STT_OLLAMA_KEEP_ALIVE_PANEL` | `5m` | The same for one panel request (Regenerate, Ask) |
+| `STT_OLLAMA_KEEP_ALIVE_AFTER` | `5m` | At the end of a run that used the model, how long Ollama keeps it loaded. `0` unloads it at once. It is sent only when Ollama lists the model as loaded, so this step never loads it, and a failure here never fails the run. A run that sent no request leaves the model alone |
+
+The three keep-alive values are a duration Ollama reads (`5m`, `1h30m`)
+or a whole number of seconds. A negative value keeps the model loaded
+until Ollama stops. Any other value prints one warning and uses the
+default, and the doctor names it as a `bad_setting`. The 27B model holds
+about 29 GB while loaded, so a short value frees that memory for other
+local models sooner. A Stop exits at once and sends nothing: the model
+then unloads when its last `STT_OLLAMA_KEEP_ALIVE` runs out.
 
 ### Hardware limits for the local model
 

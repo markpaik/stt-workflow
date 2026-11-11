@@ -101,3 +101,15 @@ def test_every_screenshot_the_readme_shows_is_in_docs_img_and_none_is_stray():
         assert head[:8] == b"\x89PNG\r\n\x1a\n", rel
         # the capture sizes at 2x: 1440x960 and 1440x1000 desktop, 390x844 phone
         assert struct.unpack(">II", head[16:24]) in SIZES, rel
+
+
+def test_the_keep_alive_settings_and_defaults_are_the_codes():
+    """The README table and stt.env.example list each keep_alive setting
+    with the default summarize.py uses."""
+    table = _section("The local model")
+    example = (REPO / "stt.env.example").read_text(encoding="utf-8")
+    assert len(summarize.KEEP_ALIVE_DEFAULTS) == 3
+    for name, default in summarize.KEEP_ALIVE_DEFAULTS.items():
+        assert f"| `{name}` | `{default}` |" in table, name
+        assert f"\n# {name}={default}\n" in example, name
+

@@ -738,6 +738,7 @@ def setting_problems() -> list:
     why = summarize.ollama_url_problem()
     if why:
         out.append(("STT_OLLAMA_URL", why))
+    out.extend(summarize.keep_alive_problems())
     _, why = _asr_problem(_env_file().get("STT_ASR_BACKEND")
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:

@@ -869,6 +869,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    """The batch is one model run (summarize.model_run): each local model
+    request keeps the model loaded STT_OLLAMA_KEEP_ALIVE between meetings,
+    and the run sets its expiry to STT_OLLAMA_KEEP_ALIVE_AFTER after its last
+    model step. A crash still does it. A Stop (SIGTERM) exits at once and
+    does not: the model then expires on its own."""
+    from stt import summarize
+    with summarize.model_run(log=print):
+        return _main()
+
+
+def _main():
     args = build_parser().parse_args()
 
     if control.is_paused() and not args.ignore_pause and not args.dry_run:
@@ -1372,6 +1383,12 @@ def main():
         n_re = regenerate_stale()
         if n_re:
             print(f"  refreshed {n_re} out-of-date description(s)", flush=True)
+
+    # the last model step is done: set the local model's expiry to
+    # STT_OLLAMA_KEEP_ALIVE_AFTER (summarize.release_model), before a chained
+    # job starts. A no-op when this run sent Ollama nothing. Never fails.
+    if not args.dry_run:
+        _summarize.release_model(log=print)
 
     # the descriptions are written: move the memos this library now holds
     # to Voice Memos' Recently Deleted (off unless STT_VM_DELETE_AFTER_INGEST=1)

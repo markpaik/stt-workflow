@@ -24,7 +24,9 @@ ignores the cache.
 The dry run keeps the owner's hardware limits (stt/config.py): the model
 runs at lowered priority, one request at a time, and the run rests after
 each meeting for STT_LLM_REST_RATIO times its wall time (at least
-STT_LLM_REST_MIN_SEC), logging each rest.
+STT_LLM_REST_MIN_SEC), logging each rest. The model stays loaded between
+meetings (STT_OLLAMA_KEEP_ALIVE), and when the loop ends its expiry goes to
+STT_OLLAMA_KEEP_ALIVE_AFTER (summarize.model_run).
 
 --apply calls no model. It applies proposals.json as reviewed: each rename
 goes through summarize.apply_meeting_edits (so the registries, the
@@ -231,7 +233,15 @@ def _predict_base(title: str, d: dict, old_base: str, taken: set) -> str:
 
 
 def dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
-    """Write the proposal file. Changes nothing in the library."""
+    """Write the proposal file. Changes nothing in the library. The loop is
+    one model run (summarize.model_run): each request keeps the model loaded
+    between meetings, and when the loop ends, crash or not, its expiry goes
+    to STT_OLLAMA_KEEP_ALIVE_AFTER."""
+    with summarize.model_run(log=log):
+        return _dry_run(only=only, limit=limit, refresh=refresh, log=log)
+
+
+def _dry_run(only=None, limit=None, refresh=False, log=print) -> dict:
     pv = prompt_version()
     bases = config.meeting_bases()
     if only:

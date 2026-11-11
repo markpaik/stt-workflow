@@ -413,3 +413,27 @@ def test_undo_returns_an_iso_named_meeting_json_to_its_content(sandbox, monkeypa
     follows_audio = {"source_file", "title"}
     assert ({k: v for k, v in after.items() if k not in follows_audio}
             == {k: v for k, v in before.items() if k not in follows_audio})
+
+
+def test_the_dry_run_keeps_the_model_for_the_loop_and_lets_it_go_at_the_end(
+        sandbox, monkeypatch, tmp_path):
+    """The dry run is one model run: each meeting's request keeps the model
+    30m, so it stays loaded between meetings, and when the loop ends the
+    expiry goes to 5m with Ollama's own call, once, after the last request.
+    Ollama is a FakeOllama (conftest): the real one is never called."""
+    from conftest import fake_ollama
+    monkeypatch.setenv("STT_MIGRATION_DIR", str(tmp_path / "migration"))
+    _m("LT Weekly Meeting 10022026", "mid-b", date="2026-10-02")
+    _m("Recording 10032026 1200", "mid-d", date="2026-10-03")
+    fake = fake_ollama(monkeypatch, sandbox, reply=lambda p: _reply("lt_weekly", "Budget"))
+    logs = []
+    doc = rt.dry_run(log=logs.append)
+    assert len([p for p in doc["proposals"] if not p.get("skip")]) == 2
+    assert fake.keep_alives() == ["30m", "30m"]
+    assert fake.paths() == ["/api/chat", "/api/chat", "/api/ps", "/api/generate"]
+    assert fake.calls[-1][1] == {"model": summarize.OLLAMA_MODEL, "keep_alive": "5m"}
+    assert logs[-1] == "  local model unloads in 5m if unused (STT_OLLAMA_KEEP_ALIVE_AFTER)"
+    # a second dry run reads the cache: no model call, so nothing to let go
+    fake.calls.clear()
+    rt.dry_run(log=logs.append)
+    assert fake.calls == []

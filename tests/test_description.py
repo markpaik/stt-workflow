@@ -7,12 +7,13 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 from stt import config, series, summarize, titles
-from conftest import mfile
+from conftest import fake_ollama, mfile
 
 DASH = "–"
 SPOKEN = [{"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00", "text": "we will ship it"},
@@ -1017,3 +1018,144 @@ def test_an_idle_refresh_stops_at_the_first_ollama_outage(owner, sandbox, monkey
     assert idx["mid-a"]["fails"] == 1 and idx["mid-b"]["fails"] == 0
     err = capsys.readouterr().err
     assert f"backing off): {PLAIN}" in err and "Traceback" not in err
+
+
+# ------------------------------------- how long Ollama keeps the model ---
+# The 18 GB model holds memory other local models could use. A run keeps
+# it loaded between meetings (STT_OLLAMA_KEEP_ALIVE, 30m), a panel request
+# keeps it briefly (STT_OLLAMA_KEEP_ALIVE_PANEL, 5m), and the end of a run
+# sets its expiry to STT_OLLAMA_KEEP_ALIVE_AFTER (5m; 0 unloads at once).
+# Ollama is a FakeOllama throughout (conftest): the real one is never called.
+def test_a_panel_request_keeps_the_model_5m_and_a_run_keeps_it_30m(sandbox, monkeypatch):
+    fake = fake_ollama(monkeypatch, sandbox)
+    summarize._generate("hi")                       # a panel request: no run
+    with summarize.model_run():
+        summarize._generate("hi")                   # a batch or a tool loop
+        summarize._generate("hi")
+    summarize._generate("hi")                       # the run is over
+    assert fake.keep_alives() == ["5m", "30m", "30m", "5m"]
+
+
+def test_regenerate_and_ask_outside_a_run_send_the_panel_keep_alive(owner, monkeypatch, sandbox):
+    base = _meeting()
+    fake = fake_ollama(monkeypatch, sandbox, env="STT_MIC_SPEAKER=Owen Park\n",
+                       reply=lambda prompt: REPLY)
+    assert summarize.suggest_title(base)["stored"] is True
+    summarize.answer_question(base, "Who owns the posting?")
+    assert fake.keep_alives() == ["5m", "5m"]
+    # a panel request never ends a run: nothing asks to release the model
+    assert "/api/ps" not in fake.paths() and "/api/generate" not in fake.paths()
+
+
+def test_the_keep_alive_settings_are_read_fresh(sandbox, monkeypatch, capsys):
+    fake = fake_ollama(monkeypatch, sandbox, env="STT_OLLAMA_KEEP_ALIVE_PANEL=90\n"
+                                                 "STT_OLLAMA_KEEP_ALIVE=1h\n")
+    summarize._generate("hi")
+    with summarize.model_run():
+        summarize._generate("hi")
+    # a whole number is seconds, sent as a number, as Ollama reads it
+    assert fake.keep_alives() == [90, "1h"]
+    assert config.setting_problems() == []
+    # a value Ollama cannot read warns once, uses the default, and the
+    # doctor names it
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=http://localhost:11434\n"
+                                     "STT_OLLAMA_KEEP_ALIVE_PANEL=5 minutes\n")
+    summarize._generate("hi")
+    summarize._generate("hi")
+    assert fake.keep_alives()[-2:] == ["5m", "5m"]
+    assert capsys.readouterr().err.count("STT_OLLAMA_KEEP_ALIVE_PANEL='5 minutes'") == 1
+    assert [s for s, _ in config.setting_problems()] == ["STT_OLLAMA_KEEP_ALIVE_PANEL"]
+
+
+def test_the_end_of_a_run_sets_the_expiry_to_5m_with_ollamas_own_call(sandbox, monkeypatch):
+    fake = fake_ollama(monkeypatch, sandbox)
+    logs = []
+    with summarize.model_run(log=logs.append):
+        summarize._generate("hi")
+        assert fake.paths() == ["/api/chat"]        # loaded for the whole run
+    assert fake.paths() == ["/api/chat", "/api/ps", "/api/generate"]
+    # Ollama's documented call: the model and keep_alive, and no prompt
+    assert fake.calls[-1][1] == {"model": summarize.OLLAMA_MODEL, "keep_alive": "5m"}
+    assert fake.loaded == [summarize.OLLAMA_MODEL]  # Ollama lets it go 5m from now
+    assert logs == ["  local model unloads in 5m if unused (STT_OLLAMA_KEEP_ALIVE_AFTER)"]
+
+
+def test_keep_alive_after_0_unloads_the_model_at_once(sandbox, monkeypatch):
+    fake = fake_ollama(monkeypatch, sandbox, env="STT_OLLAMA_KEEP_ALIVE_AFTER=0\n")
+    logs = []
+    with summarize.model_run(log=logs.append):
+        summarize._generate("hi")
+    assert fake.calls[-1] == ("/api/generate", {"model": summarize.OLLAMA_MODEL,
+                                                "keep_alive": 0})
+    assert fake.loaded == [] and logs == ["  local model unloaded (STT_OLLAMA_KEEP_ALIVE_AFTER=0)"]
+
+
+def test_the_release_never_loads_the_model(sandbox, monkeypatch):
+    """A generate call for a model Ollama has not loaded would load all of
+    it. The release asks /api/ps first and sends nothing when the model is
+    not listed."""
+    fake = fake_ollama(monkeypatch, sandbox)
+    with summarize.model_run():
+        summarize._generate("hi")
+        fake.loaded = ["another-model:7b"]          # ours went away meanwhile
+    assert fake.paths() == ["/api/chat", "/api/ps"]
+    assert fake.loaded == ["another-model:7b"]
+    # the name Ollama lists can be the model field only
+    fake.calls.clear()
+    fake.ps_body = json.dumps({"models": [{"model": summarize.OLLAMA_MODEL}]}).encode()
+    with summarize.model_run():
+        summarize._generate("hi")
+    assert fake.paths() == ["/api/chat", "/api/ps", "/api/generate"]
+
+
+def test_a_run_that_sent_no_request_leaves_the_model_alone(sandbox, monkeypatch):
+    """The watch trigger starts an empty batch every few minutes. It must
+    not shorten the expiry of a model a panel request or another app
+    loaded: it asks Ollama nothing at all."""
+    fake = fake_ollama(monkeypatch, sandbox, loaded=[summarize.OLLAMA_MODEL])
+    with summarize.model_run():
+        pass
+    assert fake.calls == [] and summarize.release_model() is False
+    # Ollama off: nothing is called either, even after a request was tried
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=off\n")
+    summarize._RUN["used"] = True
+    assert summarize.release_model() is False and fake.calls == []
+
+
+@pytest.mark.parametrize("fail,ps_body", [
+    ({"/api/ps": urllib.error.URLError("refused")}, None),
+    ({"/api/generate": urllib.error.URLError("refused")}, None),
+    ({"/api/generate": TimeoutError("timed out")}, None),
+    ({"/api/ps": RuntimeError("anything at all")}, None),
+    ({}, b"<html>not json</html>"),
+    ({}, b'{"models": "not a list"}'),
+])
+def test_the_release_never_fails_the_run(sandbox, monkeypatch, fail, ps_body):
+    fake = fake_ollama(monkeypatch, sandbox, fail=fail, ps_body=ps_body)
+    logs = []
+    with summarize.model_run(log=logs.append):     # no exception leaves the run
+        summarize._generate("hi")
+    assert logs == [] and summarize._RUN == {"depth": 0, "used": False}
+    summarize._RUN["used"] = True
+    assert summarize.release_model() is False
+
+
+def test_only_the_outermost_run_lets_the_model_go(sandbox, monkeypatch):
+    fake = fake_ollama(monkeypatch, sandbox)
+    with summarize.model_run():
+        with summarize.model_run():
+            summarize._generate("hi")
+        assert fake.paths() == ["/api/chat"]        # still inside the run
+        summarize._generate("hi")
+    assert fake.paths() == ["/api/chat", "/api/chat", "/api/ps", "/api/generate"]
+    assert fake.keep_alives() == ["30m", "30m"]
+
+
+def test_a_run_that_crashes_still_lets_the_model_go(sandbox, monkeypatch):
+    fake = fake_ollama(monkeypatch, sandbox)
+    with pytest.raises(ZeroDivisionError):
+        with summarize.model_run():
+            summarize._generate("hi")
+            1 / 0
+    assert fake.paths()[-2:] == ["/api/ps", "/api/generate"]
+    assert summarize._RUN["depth"] == 0
