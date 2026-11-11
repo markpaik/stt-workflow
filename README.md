@@ -37,7 +37,7 @@ is either a download or a feature you turn on yourself:
 
 | What | When | What it sends |
 |---|---|---|
-| Model downloads from Hugging Face | Install and first use: Parakeet, Whisper, the pyannote models, the speakrs Core ML models, and Qwen3-8B | Requests for model files. No audio or text |
+| Model downloads from Hugging Face | Install and first use: Parakeet, Whisper, the pyannote models, the speakrs Core ML models, and Qwen3-8B if you install the optional MLX fallback | Requests for model files. No audio or text |
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
 | Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine | The meeting audio, recompressed to 32 kbps MP3. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
@@ -46,8 +46,9 @@ Strict meetings never upload, whatever the settings say: strict audio always
 uses a local engine, and strict transcripts always use the local model.
 
 Ollama is only ever called on a loopback address (`localhost`, `127.0.0.1`,
-or `::1`). For any other host, the code turns Ollama off with a warning and
-the MLX model answers instead. The speakrs helper runs under `sandbox-exec`
+or `::1`). For any other host, the code turns Ollama off with a warning. The
+MLX model answers instead only if you installed the optional MLX fallback.
+The speakrs helper runs under `sandbox-exec`
 with all network access denied. The panel listens on `127.0.0.1` only, and
 it refuses a request whose Host header is not `127.0.0.1`, `localhost`, or
 `[::1]`, so open it by one of those names.
@@ -62,8 +63,8 @@ To make the model downloads impossible after setup, set `HF_HUB_OFFLINE=1` in
   Linux are not supported.
 - 16 GB of memory runs the pipeline. 24 GB or more is better for two files
   at a time. Qwen 3.8 (27B) on Ollama needs about 29 GB resident with its
-  64k-token context, so it suits a 48 GB Mac. Smaller Macs use the 8B MLX
-  model instead.
+  64k-token context, so it suits a 48 GB Mac. A smaller Mac can install the
+  optional 8B MLX model instead (see Install).
 - About 15 GB of free disk for models, environments, and working audio.
 - macOS 14 or later.
 - [Homebrew](https://brew.sh). `init.sh` installs `ffmpeg` and
@@ -86,8 +87,9 @@ git clone https://github.com/markpaik/stt-workflow && cd stt-workflow
 the machine (Apple Silicon, memory, disk), installs `ffmpeg` and `uv`,
 builds the Python 3.12 environment, builds the speakrs helper and fetches
 its models, asks where recordings arrive and where transcripts go, takes
-your Hugging Face token, offers to pre-download the models (about 3 GB) and
-the local 8B model (about 4.5 GB), and offers to install the automation.
+your Hugging Face token, offers to pre-download the models (about 3 GB),
+says how to get the local model on Ollama, and offers to install the
+automation. It does not install the optional MLX fallback.
 
 ### The same steps by hand
 
@@ -112,20 +114,28 @@ speakers, but naming and the per-turn voice checks use the gated pyannote
 embedder, so without a token the batch stops at its start. The doctor
 reports a missing token as `diarizer_no_token`.
 
-**Local models for descriptions, titles, and Ask.** The 8B fallback has its
-own environment, because its `transformers` version conflicts with the audio
-packages:
+**The local model for descriptions, titles, and Ask.** Install Ollama and
+run `ollama pull qwen3.8:27b-mlx`. New meetings use it when Ollama answers
+on this Mac. When Ollama is set up but does not answer, a description fails
+with "the local model (Ollama) is not reachable", and the batch tries it
+again when it is idle, waiting longer after each failure. With Ollama off
+(`STT_OLLAMA_URL=off`) and no fallback, everything else still works, and
+the description, title drafts, and Ask stay off.
+
+**Optional: the MLX fallback.** It is not installed by default, and
+nothing needs it. It is Qwen3-8B (4-bit, MLX), for a Mac too small for the
+27B model, or to keep descriptions coming while Ollama is down. It has its
+own environment, because its `transformers` version conflicts with the
+audio packages:
 
 ```bash
 uv venv --python 3.12 .venv-llm
 uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'
 ```
 
-For the preferred model, install Ollama and run `ollama pull
-qwen3.8:27b-mlx`. When Ollama answers on this Mac with that model, new
-meetings use it. When it does not, they use Qwen3-8B (4-bit, MLX). With
-neither installed, everything else still works, and the description, title
-drafts, and Ask stay off.
+With `.venv-llm` in place, a local request uses Ollama when it answers and
+Qwen3-8B otherwise. Its first description downloads the weights (about
+4.5 GB), or `./init.sh` offers the download.
 
 **Automation.**
 
@@ -687,10 +697,20 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LOCAL_LLM` | `auto` | `auto` uses Ollama when it answers and MLX otherwise. `ollama` or `mlx` picks one |
+| `STT_LOCAL_LLM` | `auto` | `auto` uses Ollama. With the optional MLX fallback installed, it uses MLX when Ollama does not answer. `ollama` or `mlx` picks one. `mlx` needs the fallback installed |
 | `STT_OLLAMA_URL` | `http://localhost:11434` | `off` turns Ollama off. A value with no scheme (`localhost:11434`) is read as `http://`, and one with no port either (`127.0.0.1`) is on port 11434, as Ollama reads its own `OLLAMA_HOST`. A host that is not loopback, a port that is not a number, or a scheme other than http or https turns Ollama off with one warning |
 | `STT_OLLAMA_MODEL` | `qwen3.8:27b-mlx` | The Ollama model |
-| `STT_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded after a call |
+| `STT_OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded after a call during a run (the batch, `tools/retitle_all.py`), so the model stays loaded between meetings |
+| `STT_OLLAMA_KEEP_ALIVE_PANEL` | `5m` | The same for one panel request (Regenerate, Ask) |
+| `STT_OLLAMA_KEEP_ALIVE_AFTER` | `5m` | At the end of a run that used the model, how long Ollama keeps it loaded. `0` unloads it at once. It is sent only when Ollama lists the model as loaded, so this step never loads it, and a failure here never fails the run. A run that sent no request leaves the model alone |
+
+The three keep-alive values are a duration Ollama reads (`5m`, `1h30m`)
+or a whole number of seconds. A negative value keeps the model loaded
+until Ollama stops. Any other value prints one warning and uses the
+default, and the doctor names it as a `bad_setting`. The 27B model holds
+about 29 GB while loaded, so a short value frees that memory for other
+local models sooner. A Stop exits at once and sends nothing: the model
+then unloads when its last `STT_OLLAMA_KEEP_ALIVE` runs out.
 
 ### Hardware limits for the local model
 
@@ -701,7 +721,7 @@ between meetings. If the fan bothers you, quiet mode is opt-in: raise
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_LLM_NICE` | `0` | `0` keeps normal priority. Above 0 is quiet mode: before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers their GPU priority). The MLX fallback starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run |
+| `STT_LLM_NICE` | `0` | `0` keeps normal priority. Above 0 is quiet mode: before each Ollama call, the `ollama` server and runner processes are set to this nice value and put on background QoS (`taskpolicy -b`, which also lowers their GPU priority). The optional MLX fallback, when installed, starts at this nice value under `taskpolicy -b`. The value is absolute, so repeated calls never push it higher. A process already above it stays there, because macOS lets a user lower priority but not raise it. A failure here never stops a run |
 | `STT_LLM_QUIET_HOURS` | `07:00-22:00` | The daytime window for the rest rule. It may wrap past midnight. The two times may be joined by `-`, an en dash, or `to`, and a bare hour works (`10-12`). The same time at both ends (`10:00-10:00`) means all day, so the model rests after every meeting. A value that cannot be read uses the default |
 | `STT_LLM_REST_RATIO` | `0` | Inside the quiet hours, a loop over many meetings (`tools/retitle_all.py`, the batch's description sweeps) rests after each meeting for this multiple of the time that meeting took |
 | `STT_LLM_REST_MIN_SEC` | `0` | The shortest rest inside the quiet hours |
@@ -815,9 +835,11 @@ line that reverses them.
   `./init.sh`, or build `native/speakrs` and run
   `tools/fetch_speakrs_models.py`. The doctor reports this as
   `diarizer_fallback` and names what is missing.
-- **No descriptions or titles.** Neither local model is available. Check
-  that Ollama answers at `STT_OLLAMA_URL` with the model pulled, or that
-  `.venv-llm` exists. A `bad_setting` finding from the doctor names a value
+- **No descriptions or titles.** The local model did not answer. Check
+  that Ollama answers at `STT_OLLAMA_URL` with the model pulled (`ollama
+  list`). A description that failed with "the local model (Ollama) is not
+  reachable" is written when the batch is next idle after Ollama is back,
+  or press Regenerate. A `bad_setting` finding from the doctor names a value
   it could not read.
 - **A description is out of date.** A Redo marks it so. The batch refreshes
   it when the queue is empty, or press Regenerate.
@@ -864,7 +886,7 @@ recorder / Voice Memos sync / watched folder / drop
    words matched to speakers ─► punctuation ─► .txt + .json + cached embeddings
         │
         ▼
-   description and title: Qwen 3.8 on Ollama, else Qwen3-8B on MLX
+   description and title: Qwen 3.8 on Ollama (Qwen3-8B on MLX if installed)
         │
         ▼
    panel: review edits (sidecar), naming (relabel from cache), FTS5 search, Ask

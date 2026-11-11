@@ -667,6 +667,9 @@ def test_a_fact_near_the_end_of_a_long_meeting_reaches_the_summary(sandbox, monk
     assert body.index("PLUM-417") < len(body) - 4000      # outside the old tail
     prompts = []
     monkeypatch.setattr(summarize, "_generate", _fake_model(prompts))
+    # the MLX sizing: with Ollama off (conftest), the optional fallback
+    # installed is what makes the 8B model the engine
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
     r = summarize.suggest_title("Long")
     assert "PLUM-417" in r["summary"]
     parts = [p for p, _ in prompts if p.startswith("Below is part")]

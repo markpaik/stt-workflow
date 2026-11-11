@@ -758,6 +758,36 @@ def test_check_updates_passes_a_timeout_to_hf_api(monkeypatch):
     assert all(t is not None and t > 0 for t in calls)
 
 
+def test_check_updates_asks_about_the_mlx_model_only_when_it_is_installed(monkeypatch,
+                                                                         tmp_path):
+    """The MLX fallback is optional: with no .venv-llm the update check
+    neither lists Qwen3-8B nor asks Hugging Face about it."""
+    import sys
+
+    import huggingface_hub
+    from stt import summarize
+    asked = []
+
+    class FakeInfo:
+        sha = "abc123"
+
+    class FakeApi:
+        def model_info(self, repo, timeout=None, **kw):
+            asked.append(repo)
+            return FakeInfo()
+
+    class FakeCache:
+        repos = []
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda: FakeCache())
+    monkeypatch.setattr(summarize, "LLM_PY", tmp_path / "no-venv-llm" / "python")
+    repos = [m["repo"] for m in srv.check_updates()["models"]]
+    assert summarize.MODEL not in repos and summarize.MODEL not in asked and repos
+    monkeypatch.setattr(summarize, "LLM_PY", Path(sys.executable))
+    assert summarize.MODEL in [m["repo"] for m in srv.check_updates()["models"]]
+
+
 # ---------- pick_folder AppleScript injection (finding #1) ----------
 
 def test_pick_folder_does_not_interpolate_prompt_into_applescript(monkeypatch):

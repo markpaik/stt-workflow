@@ -613,7 +613,7 @@ def mic_speaker() -> str | None:
 
 
 # --- Local LLM hardware limits (opt-in quiet mode) ---
-# By default local LLM runs (Ollama Qwen 3.8, or the MLX Qwen3-8B fallback)
+# By default local LLM runs (Ollama Qwen 3.8, or the optional MLX Qwen3-8B fallback)
 # run at full speed: normal priority, no rest between meetings. Quiet mode is
 # opt-in. With STT_LLM_NICE above 0, before each call the Ollama processes are
 # set to that nice (an absolute value, never an increment) and put on
@@ -738,6 +738,7 @@ def setting_problems() -> list:
     why = summarize.ollama_url_problem()
     if why:
         out.append(("STT_OLLAMA_URL", why))
+    out.extend(summarize.keep_alive_problems())
     _, why = _asr_problem(_env_file().get("STT_ASR_BACKEND")
                           or os.environ.get("STT_ASR_BACKEND"))
     if why:

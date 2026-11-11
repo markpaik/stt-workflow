@@ -1,5 +1,7 @@
 """Shared fixture: run every test against a throwaway sandbox so no test can
 touch real voiceprints, manifests, status, or transcripts."""
+import io
+
 import pytest
 
 from stt import config, control, holds, jobs, manifest, rates, status
@@ -15,6 +17,11 @@ def _no_live_ollama(monkeypatch):
     monkeypatch.setenv("STT_LLM_REST_RATIO", "0")
     from stt import summarize
     monkeypatch.setattr(summarize, "_ollama_seen", {"at": 0.0, "up": False, "key": None})
+    # each test starts outside any model run, with no request sent, and with
+    # the keep_alive defaults whatever the shell running the tests sets
+    monkeypatch.setattr(summarize, "_RUN", {"depth": 0, "used": False})
+    for name in summarize.KEEP_ALIVE_DEFAULTS:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +41,84 @@ def mfile(base, suffix):
     p = config.meeting_file(base, suffix)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+class _OllamaResp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeOllama:
+    """Ollama's /api/tags, /api/ps, /api/chat and /api/generate, in memory,
+    in place of urllib.request.urlopen: no test reaches the real server.
+    `loaded` is what /api/ps lists. A chat loads its model, as Ollama does,
+    and so does a generate for a model that is not loaded. A generate with
+    keep_alive 0 unloads it. `fail` maps a path to the exception it raises.
+    `reply(prompt)` is the chat answer. Every call lands in `calls` as
+    (path, body)."""
+
+    def __init__(self, loaded=None, fail=None, ps_body=None, reply=None):
+        self.loaded = list(loaded or [])
+        self.fail = dict(fail or {})
+        self.ps_body = ps_body
+        self.reply = reply or (lambda prompt: "ANSWER")
+        self.calls = []
+
+    def __call__(self, req, timeout=None):
+        import json
+        url = req if isinstance(req, str) else req.full_url
+        path = url.split(":11434", 1)[-1]
+        data = None if isinstance(req, str) else req.data
+        body = json.loads(data) if data else None
+        self.calls.append((path, body))
+        if path in self.fail:
+            raise self.fail[path]
+        if path == "/api/tags":
+            from stt import summarize
+            out = {"models": [{"name": summarize.ollama_model()}]}
+        elif path == "/api/ps":
+            if self.ps_body is not None:
+                return _OllamaResp(self.ps_body)
+            out = {"models": [{"name": m, "model": m} for m in self.loaded]}
+        elif path == "/api/chat":
+            if body["model"] not in self.loaded:
+                self.loaded.append(body["model"])
+            out = {"message": {"content": self.reply(body["messages"][-1]["content"])}}
+        elif path == "/api/generate":
+            if body.get("keep_alive") == 0:
+                self.loaded = [m for m in self.loaded if m != body["model"]]
+            elif body["model"] not in self.loaded:
+                self.loaded.append(body["model"])
+            out = {"model": body["model"], "done": True,
+                   "done_reason": "unload" if body.get("keep_alive") == 0 else "load"}
+        else:
+            raise AssertionError(f"unexpected Ollama call {path}")
+        return _OllamaResp(json.dumps(out).encode())
+
+    def paths(self):
+        return [p for p, _ in self.calls]
+
+    def keep_alives(self, path="/api/chat"):
+        return [b["keep_alive"] for p, b in self.calls if p == path]
+
+
+def fake_ollama(monkeypatch, sandbox, env="", **kw):
+    """Turn Ollama on at its default loopback URL in the sandbox's stt.env
+    (plus `env` lines) and answer every urlopen with a FakeOllama."""
+    import urllib.request
+
+    from stt import summarize
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=http://localhost:11434\n" + env)
+    monkeypatch.delenv("STT_OLLAMA_URL", raising=False)
+    monkeypatch.setattr(summarize, "renice_ollama", lambda: 0)
+    # Ollama is the engine: no MLX fallback, whatever the checkout holds
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "no-venv-llm" / "bin" / "python")
+    fake = FakeOllama(**kw)
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return fake
 
 
 def decision_count(base) -> int:

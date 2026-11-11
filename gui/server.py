@@ -111,7 +111,8 @@ MODEL_REPOS = {
     "Whisper large-v3 (MLX)": "mlx-community/whisper-large-v3-mlx",
     "Whisper large-v3-turbo (MLX)": "mlx-community/whisper-large-v3-turbo",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
-    "Qwen3-8B (rename/summary)": "mlx-community/Qwen3-8B-4bit",
+    # listed only when the optional MLX fallback is installed (check_updates)
+    "Qwen3-8B (optional MLX fallback)": "mlx-community/Qwen3-8B-4bit",
 }
 
 
@@ -3189,9 +3190,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "unknown assistant backend"}, 400)
                     return
                 if not summarize.backend_available(backend):
-                    self._json({"error": "that assistant isn't set up yet — add "
-                                         "its API key (or install .venv-llm) "
-                                         "first"}, 400)
+                    self._json({"error": "the local model isn't set up yet — "
+                                         "Ollama is off (STT_OLLAMA_URL)"
+                                if backend == "local" else
+                                "that assistant isn't set up yet — add its "
+                                "API key first"}, 400)
                     return
                 _env_file_set({"STT_LLM_BACKEND": backend})
                 self._json({"ok": True, "backend": backend})
@@ -3672,7 +3675,10 @@ def check_updates():
     except Exception:
         pass
     out = []
+    from stt import summarize
     for label, repo in MODEL_REPOS.items():
+        if repo == summarize.MODEL and not summarize.mlx_installed():
+            continue   # the optional MLX fallback is not installed: nothing to update
         try:
             # offline/stalled connections must not hang "Check updates"
             # indefinitely — the button has no cancel

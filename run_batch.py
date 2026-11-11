@@ -201,12 +201,15 @@ def spawn_chained_job(job: dict):
 
 
 def summarize_one(key, base=None, track=None) -> bool:
-    """Draft the AI title/summary for ONE just-finished meeting (local Qwen
-    via .venv-llm). Runs right after the file completes, not at end-of-run:
+    """Draft the AI title/summary for ONE just-finished meeting (the local
+    model: Qwen 3.8 on Ollama). Runs right after the file completes, not at end-of-run:
     with a long backlog the end is hours away, and a Stop before it would
     lose the summaries for everything already finished. Quietly a no-op when
-    the LLM venv isn't installed or the meeting already has a summary; a
+    no assistant is set up or the meeting already has a summary; a
     failure never breaks the run (the end-of-run sweep retries it).
+    When Ollama is not reachable and no MLX fallback is installed, the
+    meeting goes on the out-of-date list as owed (summarize.stale_owe),
+    so an idle run retries it later with a back-off.
     `base` is the RESOLVED meeting folder — date-stamped for plain-named
     sources, so it can differ from the source stem. The automatic title can
     rename that folder; a `track` dict gets the folder's final name under
@@ -238,6 +241,16 @@ def summarize_one(key, base=None, track=None) -> bool:
         summarize.suggest_title(base)
         st.note_summary(time.monotonic() - t0)
         done = True
+    except summarize.OllamaDown as e:
+        # no model answered: a failure to retry later, not a setup problem.
+        # The meeting waits on the out-of-date list with a back-off.
+        try:
+            note = (f"{summarize.stale_owe(base, str(e))} so far, backing off; "
+                    "an idle run retries it")
+        except OSError:
+            note = "not retried: the out-of-date list could not be written"
+        print(f"   summary waits for {base}: {e} ({note})", file=sys.stderr, flush=True)
+        return False
     except Exception as e:
         print(f"   summary failed for {base}: {e}", file=sys.stderr, flush=True)
         return False
@@ -275,13 +288,17 @@ STALE_PER_RUN = 3
 
 def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
     """Regenerate up to `limit` descriptions marked out of date (ai_stale,
-    set by a Redo), shortest transcript first. Runs only when the batch is
+    set by a Redo), or owed (a first description that failed because the
+    local model was not reachable), shortest transcript first. Runs only when the batch is
     idle: the caller calls it after the queue is done, and it stops early
     when a "stop after this file" is asked or a panel job is queued. The
-    meeting's title is never touched. Only a description that was really
+    title of an out-of-date meeting is never touched. An owed meeting gets
+    the title chain's last step once its description lands (_auto_title).
+    Only a description that was really
     stored counts. A meeting with no speech has its flag cleared. A failure
     backs the meeting off (summarize.stale_failed), so one bad meeting is
-    not retried on every run. Returns how many were regenerated."""
+    not retried on every run. When Ollama is not reachable, the rest wait
+    for a later run. Returns how many were regenerated."""
     from stt import status as st, summarize
     if limit <= 0 or not summarize.available():
         return 0
@@ -294,9 +311,11 @@ def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
             summarize.clear_stale(base)
             print(f"   no speech in {base}: out-of-date flag cleared", flush=True)
             continue
-        print(f"   refreshing the out-of-date description of {base}", flush=True)
+        owed = summarize.description_owed(base)
+        print(f"   {'writing the owed' if owed else 'refreshing the out-of-date'} "
+              f"description of {base}", flush=True)
         t0 = time.monotonic()
-        ok, why = False, ""
+        ok, why, down = False, "", False
         try:
             st.set_stage(base, "summarizing", base=base, est_sec=st.summary_estimate())
             r = summarize.suggest_title(base)
@@ -304,16 +323,23 @@ def regenerate_stale(limit: int = STALE_PER_RUN) -> int:
                 ok = True
             else:
                 why = (r or {}).get("error") or "the description was not stored"
+        except summarize.OllamaDown as e:
+            why, down = str(e), True
         except Exception as e:
             why = str(e)
         finally:
             st.clear_stage(base)
         if ok:
             n += 1
+            if owed:
+                _auto_title(base)
         else:
             fails = summarize.stale_failed(base, why)
             print(f"   description refresh failed for {base} ({fails} so far, "
                   f"backing off): {why}", file=sys.stderr, flush=True)
+            if down:
+                # every other one would fail the same way: they wait too
+                break
         # the duty cycle (stt/config.py): rest after each one, except the
         # last this run will do
         if n < limit and i + 1 < len(todo):
@@ -843,6 +869,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    """The batch is one model run (summarize.model_run): each local model
+    request keeps the model loaded STT_OLLAMA_KEEP_ALIVE between meetings,
+    and the run sets its expiry to STT_OLLAMA_KEEP_ALIVE_AFTER after its last
+    model step. A crash still does it. A Stop (SIGTERM) exits at once and
+    does not: the model then expires on its own."""
+    from stt import summarize
+    with summarize.model_run(log=print):
+        return _main()
+
+
+def _main():
     args = build_parser().parse_args()
 
     if control.is_paused() and not args.ignore_pause and not args.dry_run:
@@ -1346,6 +1383,12 @@ def main():
         n_re = regenerate_stale()
         if n_re:
             print(f"  refreshed {n_re} out-of-date description(s)", flush=True)
+
+    # the last model step is done: set the local model's expiry to
+    # STT_OLLAMA_KEEP_ALIVE_AFTER (summarize.release_model), before a chained
+    # job starts. A no-op when this run sent Ollama nothing. Never fails.
+    if not args.dry_run:
+        _summarize.release_model(log=print)
 
     # the descriptions are written: move the memos this library now holds
     # to Voice Memos' Recently Deleted (off unless STT_VM_DELETE_AFTER_INGEST=1)

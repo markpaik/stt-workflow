@@ -32,6 +32,14 @@ def test_the_readme_never_mentions_the_classic_page():
     assert "classic" not in README.lower()
 
 
+def test_the_readme_says_the_mlx_fallback_is_optional():
+    """The MLX fallback (.venv-llm) is optional and not installed by
+    default. No line may still claim a smaller Mac or init.sh uses it."""
+    assert "**Optional: the MLX fallback.** It is not installed by default" in README
+    assert "Smaller Macs use the 8B MLX" not in README
+    assert "and the local 8B model (about 4.5 GB)" not in README
+
+
 def test_every_in_page_link_lands_on_a_heading():
     heads = {_anchor(h) for h in re.findall(r"^#{2,3} (.+)$", README, re.M)}
     links = set(re.findall(r"\]\(#([\w-]+)\)", README))
@@ -93,3 +101,15 @@ def test_every_screenshot_the_readme_shows_is_in_docs_img_and_none_is_stray():
         assert head[:8] == b"\x89PNG\r\n\x1a\n", rel
         # the capture sizes at 2x: 1440x960 and 1440x1000 desktop, 390x844 phone
         assert struct.unpack(">II", head[16:24]) in SIZES, rel
+
+
+def test_the_keep_alive_settings_and_defaults_are_the_codes():
+    """The README table and stt.env.example list each keep_alive setting
+    with the default summarize.py uses."""
+    table = _section("The local model")
+    example = (REPO / "stt.env.example").read_text(encoding="utf-8")
+    assert len(summarize.KEEP_ALIVE_DEFAULTS) == 3
+    for name, default in summarize.KEEP_ALIVE_DEFAULTS.items():
+        assert f"| `{name}` | `{default}` |" in table, name
+        assert f"\n# {name}={default}\n" in example, name
+

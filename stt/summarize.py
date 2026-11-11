@@ -1,8 +1,11 @@
 """LLM features: title/summary suggestions and per-meeting Q&A.
 
 The DEFAULT backend is local and fully on-device: Qwen 3.8 (27B) served by
-Ollama on this Mac, with Qwen3-8B (4-bit, MLX) as the fallback when Ollama is
-not reachable (local_engine). Transcripts never leave the machine, which
+Ollama on this Mac. Qwen3-8B (4-bit, MLX) is an OPTIONAL fallback for when
+Ollama is not reachable (local_engine). It is not installed by default:
+without .venv-llm, Ollama is the only local engine, and an outage is
+OllamaDown ("the local model (Ollama) is not reachable"), a failure to retry
+later, never a setup step. Transcripts never leave the machine, which
 matters because some recordings are sensitive. A cloud
 assistant (Anthropic Claude or OpenAI) can be selected in Settings for machines
 that can't run the local model or want faster answers; transcript text is then
@@ -27,6 +30,7 @@ from . import config
 from .errors import UserError
 
 MODEL = "mlx-community/Qwen3-8B-4bit"
+# The optional MLX fallback. It is not installed by default (mlx_installed).
 # mlx-lm lives in its OWN venv (.venv-llm): its transformers pin conflicts with the
 # audio stack's. We shell out rather than import.
 # This is the one code path that keys off PROJECT_DIR and not CODE_DIR, on
@@ -67,12 +71,14 @@ def llm_backend() -> str:
 
 
 # --- the local engines -----------------------------------------------------
-# "local" is two engines behind one name. Qwen 3.8 (27B) served by Ollama on
-# this Mac is the default. Qwen3-8B through mlx-lm (.venv-llm) is the
-# fallback when Ollama is not reachable. Both run on-device, so both keep
-# the strict rule: Ollama is only ever called on a loopback address.
+# "local" is up to two engines behind one name. Qwen 3.8 (27B) served by
+# Ollama on this Mac is the default. Qwen3-8B through mlx-lm (.venv-llm) is
+# an optional fallback when Ollama is not reachable: it is not installed by
+# default, and without it Ollama is the only engine. Both run on-device, so
+# both keep the strict rule: Ollama is only ever called on a loopback address.
 # STT_LOCAL_LLM picks: "auto" (the default: Ollama when it answers, else
-# MLX), "ollama", or "mlx". STT_OLLAMA_URL="off" turns Ollama off.
+# MLX when it is installed), "ollama", or "mlx". STT_OLLAMA_URL="off" turns
+# Ollama off.
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_MODEL = "qwen3.8:27b-mlx"
 # Measured 2026-11-05 on this Mac (48 GB): prompt ~350-450 tokens/s, answer
@@ -119,11 +125,18 @@ def _ollama_check():
     return url, None
 
 
+def _ollama_off_note() -> str:
+    """What an unusable STT_OLLAMA_URL leaves: the MLX model only when the
+    optional fallback is installed."""
+    return ("Ollama is off and the MLX model answers" if mlx_installed()
+            else "Ollama is off, so no local model answers")
+
+
 def ollama_url_problem():
     """Why STT_OLLAMA_URL turns Ollama off, or None when it is fine or
     'off'. For the doctor (config.setting_problems)."""
     url, why = _ollama_check()
-    return f"{why}; Ollama is off and the MLX model answers" if why else None
+    return f"{why}; {_ollama_off_note()}" if why else None
 
 
 def _ollama_url():
@@ -133,7 +146,7 @@ def _ollama_url():
     url, why = _ollama_check()
     if why:
         config._warn_once(("STT_OLLAMA_URL", why),
-                          f"STT_OLLAMA_URL={why}; Ollama is off and the MLX model answers")
+                          f"STT_OLLAMA_URL={why}; {_ollama_off_note()}")
     return url
 
 
@@ -165,11 +178,26 @@ def ollama_up(ttl: float = 10.0) -> bool:
     return up
 
 
+def mlx_installed() -> bool:
+    """True when the optional MLX fallback (.venv-llm) is installed. It is
+    not by default."""
+    return LLM_PY.exists()
+
+
+def _local_pick() -> str:
+    return (_setting("STT_LOCAL_LLM", "auto") or "auto").strip().lower()
+
+
 def local_engine() -> str:
-    """Which on-device engine a local request uses now: "ollama" or "mlx"."""
-    pick = (_setting("STT_LOCAL_LLM", "auto") or "auto").strip().lower()
+    """Which on-device engine a local request uses now: "ollama" or "mlx".
+    Without the optional MLX fallback it is "ollama" whether Ollama answers
+    or not, so an outage is OllamaDown and never a setup message. Only
+    STT_LOCAL_LLM=mlx names MLX outright, installed or not."""
+    pick = _local_pick()
     if pick == "mlx":
         return "mlx"
+    if not mlx_installed():
+        return "ollama"
     if pick == "ollama":
         return "ollama" if _ollama_url() else "mlx"
     return "ollama" if ollama_up() else "mlx"
@@ -180,9 +208,19 @@ def local_model_name(engine: str = None) -> str:
     return ollama_model() if engine == "ollama" else MODEL
 
 
+def local_set_up() -> bool:
+    """The local model is set up: the optional MLX fallback is installed, or
+    Ollama has a usable loopback URL. Whether Ollama answers right now is
+    another question. An outage is OllamaDown, a failure the batch retries
+    later, and not a missing install."""
+    if mlx_installed():
+        return True
+    return _local_pick() != "mlx" and _ollama_url() is not None
+
+
 def backend_available(backend: str) -> bool:
     if backend == "local":
-        return LLM_PY.exists() or ollama_up()
+        return local_set_up()
     if backend == "anthropic":
         return bool(_setting("STT_ANTHROPIC_KEY"))
     if backend == "openai":
@@ -206,15 +244,17 @@ def _strict_meeting(base: str) -> bool:
 
 def _backend_for(base: str) -> str:
     """The backend a given meeting may use: the selected one, except that a
-    strict meeting downgrades to local (or refuses if local isn't installed)."""
+    strict meeting downgrades to local (or refuses if local isn't set up).
+    Ollama set up but not answering still downgrades to local: the local
+    request then fails with OllamaDown, and nothing goes to the cloud."""
     backend = llm_backend()
     if backend != "local" and _strict_meeting(base):
-        if LLM_PY.exists() or ollama_up():
+        if local_set_up():
             return "local"
         raise UserError(
             "this is a strict recording — its transcript never leaves this "
-            "Mac, and the local model isn't installed. Install .venv-llm or "
-            "switch the assistant back to the local model.")
+            "Mac, and the local model is not set up: Ollama is off "
+            "(STT_OLLAMA_URL). Turn Ollama on to describe it on this Mac.")
     return backend
 
 
@@ -272,17 +312,22 @@ def _generate(prompt: str, max_tokens: int = 2000, lock_timeout: float | None = 
             with _llm_lock(lock_timeout):
                 return _generate_ollama(prompt, max_tokens, think)
         except OllamaDown:
-            if backend == "ollama" or not LLM_PY.exists():
-                # still an OllamaDown: describe() catches it, re-sizes the
-                # prompt for the 8B model and falls back to MLX
+            if backend == "ollama" or not mlx_installed():
+                # still an OllamaDown. With the MLX fallback installed,
+                # describe() catches it, re-sizes the prompt for the 8B
+                # model and falls back to MLX. Without it, this plain
+                # message is the whole answer: the batch retries later
                 raise OllamaDown("the local model (Ollama) is not reachable")
             _ollama_seen.update(at=time.monotonic(), up=False)
             # the fallback: Qwen3-8B, under the same lock semantics below
 
     import subprocess
-    if not LLM_PY.exists():
-        raise UserError(".venv-llm missing — run: uv venv --python 3.12 .venv-llm && "
-                           "uv pip install --python .venv-llm/bin/python mlx-lm 'transformers<5'")
+    if not mlx_installed():
+        # only STT_LOCAL_LLM=mlx gets here without .venv-llm: it names the
+        # optional model outright, so the help is how to get it
+        raise UserError("STT_LOCAL_LLM=mlx asks for the optional MLX model, and "
+                        ".venv-llm is not installed. Set STT_LOCAL_LLM=auto to use "
+                        "Ollama, or install the MLX fallback as the README shows.")
     with _llm_lock(lock_timeout):
         # in quiet mode the MLX fallback runs at lowered priority too:
         # background QoS (taskpolicy -b) and nice config.llm_nice(). `nice -n`
@@ -380,6 +425,127 @@ def renice_ollama() -> int:
     return n
 
 
+# --- how long Ollama keeps the model loaded --------------------------------
+# The model holds about 29 GB while loaded (OLLAMA_NUM_CTX), memory other
+# local models could use. A run (the batch, a tool loop over meetings:
+# model_run) sends STT_OLLAMA_KEEP_ALIVE (30m) with each request, so the
+# model stays loaded between meetings. When the run ends, release_model()
+# sets its expiry to STT_OLLAMA_KEEP_ALIVE_AFTER (5m; 0 unloads it at
+# once). A single panel request (Regenerate, Ask) sends
+# STT_OLLAMA_KEEP_ALIVE_PANEL (5m). Each value is a duration Ollama reads
+# ("5m", "1h30m") or a whole number of seconds; a negative one keeps the
+# model until Ollama stops. Any other value warns once and uses the default,
+# and the doctor names it (keep_alive_problems). Read fresh: no restart.
+KEEP_ALIVE_DEFAULTS = {"STT_OLLAMA_KEEP_ALIVE": "30m",
+                       "STT_OLLAMA_KEEP_ALIVE_PANEL": "5m",
+                       "STT_OLLAMA_KEEP_ALIVE_AFTER": "5m"}
+_KEEP_ALIVE_RULE = "a duration such as 5m or a whole number of seconds"
+_KEEP_ALIVE_SECONDS = re.compile(r"[+-]?\d+")
+_KEEP_ALIVE_DURATION = re.compile(r"[+-]?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ns|us|µs|μs|ms|s|m|h))+")
+OLLAMA_RELEASE_TIMEOUT = 5
+# depth: how many model_run blocks this process is inside. used: this
+# process sent Ollama a request since the last release.
+_RUN = {"depth": 0, "used": False}
+
+
+def _keep_alive_ok(raw: str) -> bool:
+    return bool(_KEEP_ALIVE_SECONDS.fullmatch(raw) or _KEEP_ALIVE_DURATION.fullmatch(raw))
+
+
+def keep_alive_problems() -> list:
+    """[(setting, why)] for each keep_alive setting Ollama could not read.
+    For the doctor (config.setting_problems)."""
+    out = []
+    for name, default in KEEP_ALIVE_DEFAULTS.items():
+        raw = (_setting(name) or "").strip()
+        if raw and not _keep_alive_ok(raw):
+            out.append((name, f"{raw!r} is not {_KEEP_ALIVE_RULE}; using {default}"))
+    return out
+
+
+def keep_alive(name: str):
+    """The keep_alive Ollama gets for the setting `name`: a whole number of
+    seconds as a number (0 unloads), else the duration text."""
+    default = KEEP_ALIVE_DEFAULTS[name]
+    raw = (_setting(name) or "").strip() or default
+    if not _keep_alive_ok(raw):
+        config._warn_setting(name, raw, _KEEP_ALIVE_RULE, default)
+        raw = default
+    return int(raw) if _KEEP_ALIVE_SECONDS.fullmatch(raw) else raw
+
+
+def request_keep_alive():
+    """What one Ollama request sends: the run's value inside model_run (a
+    batch, a tool loop), else the panel's (one Regenerate or Ask)."""
+    return keep_alive("STT_OLLAMA_KEEP_ALIVE" if _RUN["depth"]
+                      else "STT_OLLAMA_KEEP_ALIVE_PANEL")
+
+
+@contextlib.contextmanager
+def model_run(log=None):
+    """One run over many model requests: the batch, or a tool loop over
+    meetings. Inside it each Ollama request keeps the model loaded
+    STT_OLLAMA_KEEP_ALIVE, so it stays between meetings. When the outermost
+    run ends, crash or not, release_model() lets it go. A run may call
+    release_model() itself earlier: the end then has nothing left to do."""
+    _RUN["depth"] += 1
+    try:
+        yield
+    finally:
+        _RUN["depth"] -= 1
+        if not _RUN["depth"]:
+            release_model(log=log)
+
+
+def _release_note(ka) -> str:
+    if ka == 0:
+        return "  local model unloaded (STT_OLLAMA_KEEP_ALIVE_AFTER=0)"
+    if str(ka).startswith("-"):
+        return "  local model stays loaded (STT_OLLAMA_KEEP_ALIVE_AFTER is negative)"
+    shown = f"{ka}s" if isinstance(ka, int) else ka
+    return f"  local model unloads in {shown} if unused (STT_OLLAMA_KEEP_ALIVE_AFTER)"
+
+
+def release_model(log=None) -> bool:
+    """The end of a run: set the model's expiry to STT_OLLAMA_KEEP_ALIVE_AFTER
+    with Ollama's documented call, POST /api/generate with the model and
+    keep_alive and no prompt. Only when this process sent Ollama a request
+    since the last release (an empty run leaves alone a model a panel
+    request or another app loaded), and only when /api/ps lists the model,
+    so this step never loads it. Never raises: a failure here never fails
+    the run. True when the call went through."""
+    if not _RUN["used"]:
+        return False
+    _RUN["used"] = False
+    try:
+        import urllib.request
+        url = _ollama_url()
+        if not url:
+            return False
+        model = ollama_model()
+        with urllib.request.urlopen(url + "/api/ps", timeout=OLLAMA_RELEASE_TIMEOUT) as r:
+            ps = json.loads(r.read().decode("utf-8"))
+        models = ps.get("models") if isinstance(ps, dict) else None
+        loaded = {m.get(k) for m in (models if isinstance(models, list) else [])
+                  if isinstance(m, dict) for k in ("name", "model")}
+        if model not in loaded:
+            return False
+        ka = keep_alive("STT_OLLAMA_KEEP_ALIVE_AFTER")
+        req = urllib.request.Request(url + "/api/generate",
+                                     data=json.dumps({"model": model, "keep_alive": ka}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=OLLAMA_RELEASE_TIMEOUT) as r:
+            r.read()
+    except Exception:
+        return False
+    if log:
+        try:
+            log(_release_note(ka))
+        except Exception:
+            pass
+    return True
+
+
 def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
     """One chat turn to Ollama on this Mac. The caller holds llm.lock: one
     large model works at a time, whichever engine serves it. A connection
@@ -394,9 +560,10 @@ def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
     renice_ollama()
     body = {"model": ollama_model(), "stream": False, "think": bool(think),
             "messages": [{"role": "user", "content": prompt}],
-            # long enough that a run over many meetings never reloads the
-            # 18 GB model between them
-            "keep_alive": _setting("STT_OLLAMA_KEEP_ALIVE", "30m"),
+            # inside a run, long enough that a run over many meetings never
+            # reloads the 18 GB model between them; a panel request, short
+            # (request_keep_alive)
+            "keep_alive": request_keep_alive(),
             # extraction wants a steady hand: low temperature, Qwen's
             # non-thinking top_p
             # the reasoning trace counts against num_predict: give it its own
@@ -408,6 +575,8 @@ def _generate_ollama(prompt: str, max_tokens: int, think: bool = True) -> str:
                         "temperature": 0.3, "top_p": 0.8}}
     req = urllib.request.Request(url + "/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
+    # this process asked Ollama for the model: the end of a run lets it go
+    _RUN["used"] = True
     try:
         with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as r:
             d = json.loads(r.read().decode("utf-8"))
@@ -935,8 +1104,9 @@ def describe(base: str, old_title: str = None, backend: str = None,
 
     One model call per meeting, unless the transcript is longer than one
     prompt holds (_summary_source). When Ollama stops answering after the
-    probe, the meeting is re-sized for Qwen3-8B and runs on MLX, as the
-    README promises. The reply (`raw`) and the context it was read in
+    probe and the optional MLX fallback is installed, the meeting is
+    re-sized for Qwen3-8B and runs on MLX. Without the fallback the
+    OllamaDown goes to the caller. The reply (`raw`) and the context it was read in
     (`ctx`) are part of the result, so build_description() can re-parse a
     cached reply with no model call."""
     from . import dates, series
@@ -961,7 +1131,7 @@ def describe(base: str, old_title: str = None, backend: str = None,
     try:
         out, parts = run(engine)
     except OllamaDown:
-        if backend != "local" or not LLM_PY.exists():
+        if backend != "local" or not mlx_installed():
             raise
         _ollama_seen.update(at=time.monotonic(), up=False)
         engine = "mlx"
@@ -1134,6 +1304,8 @@ def suggest_title(base: str) -> dict:
 # meeting here, keyed by meeting_id. The batch reads only this small file
 # when it is idle, never every meeting's json. A failed regeneration backs
 # the meeting off: STALE_BACKOFF_SEC doubled per failure, capped at a day.
+# A new meeting whose first description failed because Ollama was not
+# reachable is listed here too, as "owed" (stale_owe), with no ai_stale.
 STALE_INDEX_NAME = "stale_descriptions.json"
 STALE_BACKOFF_SEC = 900
 STALE_BACKOFF_MAX_SEC = 86400
@@ -1232,11 +1404,37 @@ def stale_failed(base: str, error: str = "") -> int:
         return e["fails"]
 
 
+def _has_description(d: dict) -> bool:
+    return bool(d.get("ai_summary") or d.get("ai_gist"))
+
+
+def description_owed(base: str) -> bool:
+    """True when the meeting has no description yet: its first one is
+    owed. An unreadable json is not owed."""
+    try:
+        return not _has_description(json.loads(config.meeting_file(base, ".json").read_text()))
+    except (OSError, ValueError):
+        return False
+
+
+def stale_owe(base: str, error: str = "") -> int:
+    """List a meeting whose FIRST description failed because the local
+    model was not reachable (OllamaDown), so an idle batch retries it with
+    the same back-off as a failed refresh (stale_failed). The entry is
+    marked "owed". The meeting json is not touched: it has no old
+    description to mark ai_stale. Returns the failure count."""
+    key = _stale_key(base)
+    with _stale_index() as idx:
+        idx.setdefault(key, {"base": base, "fails": 0, "next_after": 0})["owed"] = True
+    return stale_failed(base, error)
+
+
 def stale_bases(now: float = None) -> list:
-    """Live meetings whose description a Redo left out of date and that are
-    due (not backed off), shortest transcript first. Reads the index, and
-    the json of the listed meetings only. An entry whose meeting is gone or
-    no longer stale is dropped."""
+    """Live meetings whose description a Redo left out of date, or whose
+    first description is still owed (stale_owe), and that are due (not
+    backed off), shortest transcript first. Reads the index, and the json
+    of the listed meetings only. An entry whose meeting is gone, no longer
+    stale, or described since is dropped."""
     now = time.time() if now is None else now
     try:
         with _stale_index() as idx:
@@ -1252,7 +1450,7 @@ def stale_bases(now: float = None) -> list:
         except (OSError, ValueError):
             drop.append(key)
             continue
-        if not d.get("ai_stale"):
+        if not (d.get("ai_stale") or (e.get("owed") and not _has_description(d))):
             drop.append(key)
             continue
         if float(e.get("next_after") or 0) > now:

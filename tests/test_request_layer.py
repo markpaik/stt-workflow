@@ -255,6 +255,56 @@ def test_a_message_written_for_the_user_reaches_the_user(running_server,
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_an_ollama_outage_without_the_mlx_fallback_reads_plainly(running_server, sandbox,
+                                                                 monkeypatch, capsys):
+    """No .venv-llm and Ollama down, with nothing faked above the network:
+    the panel keeps Ask on (the local model is set up), and Regenerate and
+    Ask answer 503 with the plain message. It is never "not installed" and
+    never the old '.venv-llm missing — run: uv venv ...' step. Every call
+    to Ollama is refused here, so the real one is never reached."""
+    import urllib.error
+    import urllib.request
+    from stt import summarize
+    _make_meeting("2026-04-08 Team Weekly")
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=http://localhost:11434\n")
+    monkeypatch.delenv("STT_OLLAMA_URL", raising=False)
+    monkeypatch.setattr(summarize, "LLM_PY", sandbox / "no-venv-llm" / "bin" / "python")
+    tried = []
+
+    def refused(req, *a, **k):
+        tried.append(req if isinstance(req, str) else req.full_url)
+        raise urllib.error.URLError("refused")
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+    plain = {"ok": False, "error": "the local model (Ollama) is not reachable"}
+    assert _post(running_server, "/api/suggest", {"base": "2026-04-08 Team Weekly"}) == (503, plain)
+    assert _post(running_server, "/api/ask", {"base": "2026-04-08 Team Weekly",
+                                              "question": "who?"}) == (503, plain)
+    assert tried and all(u.startswith("http://localhost:11434/") for u in tried)
+    assert "Traceback" not in capsys.readouterr().err
+    # Ollama off as well: nothing local is set up. Picking the local
+    # assistant says why, and offers no MLX environment
+    (sandbox / "stt.env").write_text("STT_OLLAMA_URL=off\n")
+    st, out = _post(running_server, "/api/llm_backend", {"backend": "local"})
+    assert st == 400 and "Ollama is off" in out["error"]
+    assert ".venv-llm" not in out["error"]
+
+
+def test_panel_requests_keep_the_model_briefly_and_never_end_a_run(running_server, sandbox,
+                                                                   monkeypatch):
+    """Regenerate and Ask through the panel are single requests: each keeps
+    the model STT_OLLAMA_KEEP_ALIVE_PANEL (5m), never the run's 30m, and
+    none of them sends the end-of-run release. Ollama is a FakeOllama."""
+    from conftest import fake_ollama
+    _make_meeting("2026-04-08 Team Weekly")
+    fake = fake_ollama(monkeypatch, sandbox, reply=lambda p: "It was hello [00:01].")
+    st, out = _post(running_server, "/api/ask", {"base": "2026-04-08 Team Weekly",
+                                                 "question": "what was said?"})
+    assert st == 200 and out["ok"] is True
+    _post(running_server, "/api/suggest", {"base": "2026-04-08 Team Weekly"})
+    assert fake.keep_alives() == ["5m", "5m"]
+    assert "/api/ps" not in fake.paths() and "/api/generate" not in fake.paths()
+
+
 def test_an_unknown_export_format_is_a_400(running_server):
     _make_meeting("2026-04-08 Team Weekly")
     st, out = _post(running_server, "/api/export",

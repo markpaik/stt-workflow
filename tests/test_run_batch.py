@@ -1879,3 +1879,101 @@ def test_the_folder_picker_leaves_the_panels_environment_alone(sandbox, monkeypa
     assert "STT_MEETINGS_DIR" not in os.environ
     assert run_batch.config.meetings_dir() == pick
     assert f"STT_MEETINGS_DIR={pick}" in (sandbox / "stt.env").read_text()
+
+
+# ---------- the local model: loaded for the run, let go at its end ----------
+
+_DESC_REPLY = ("SERIES: one_off\nPERSON: none\nTOPIC: Vendor Pricing Review\n"
+               "GIST: Vendor pricing reviewed and the spring order approved.\n"
+               "TAGS: budget-finance, goals-okrs, team-operations\n"
+               "DECISIONS:\n- Approve the spring order.\nOPEN QUESTIONS:\n- none\n")
+
+
+def _one_file_run(sandbox, monkeypatch, name="A Mtg"):
+    """main() over one source file, the pipeline stubbed and the description
+    step REAL against a fake Ollama (conftest.FakeOllama)."""
+    import json
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from conftest import fake_ollama, mfile
+    from stt import config
+    monkeypatch.setattr(config, "resolve_hf_token", lambda: "synthetic")
+    monkeypatch.setattr(run_batch, "battery_ok", lambda: True)
+    src = sandbox / "source"
+    (src / f"{name}.m4a").write_bytes(b"\x00" * 64)
+
+    def fake_process_one(src_str, dest_str, opts):
+        base = _P(src_str).stem
+        j = mfile(base, ".json")
+        j.write_text(json.dumps({"meeting_id": "mid-run", "source_file": f"{base}.m4a",
+                                 "segments": SPOKEN, "speakers": [], "words": []}))
+        mfile(base, ".txt").write_text("[00:00] A: we will ship it")
+        return {"ok": True, "key": f"{base}.m4a",
+                "mtime": (src / f"{base}.m4a").stat().st_mtime,
+                "outputs": [str(j)], "summary": "1 speaker(s), 1.0 min",
+                "who": "", "duration_sec": 60.0, "stage_secs": {}}
+    monkeypatch.setattr(run_batch, "process_one", fake_process_one)
+    monkeypatch.setattr(_sys, "argv", ["run_batch.py", "--files", f"{name}.m4a", "--force",
+                                       "--ignore-battery", "--ignore-pause"])
+    return fake_ollama(monkeypatch, sandbox, reply=lambda prompt: _DESC_REPLY)
+
+
+def test_the_batch_keeps_the_model_for_the_run_and_lets_it_go_before_a_chained_job(
+        sandbox, monkeypatch, capsys):
+    """Drive the REAL main(): every request of the run keeps the model
+    30m, and after the last model step, before the next queued job starts,
+    the run sets its expiry to 5m with Ollama's own call. Once."""
+    import json
+    import signal
+
+    from stt import config, jobs, summarize
+    fake = _one_file_run(sandbox, monkeypatch)
+    jobs.add({"files": ["Later.m4a"], "paths": []})
+    at_chain = []
+    monkeypatch.setattr(run_batch, "spawn_chained_job",
+                        lambda job: at_chain.append(list(fake.paths())))
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        assert run_batch.main() == 0
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    (base,) = config.meeting_bases()
+    assert json.loads(config.meeting_file(base, ".json").read_text())["ai_gist"]
+    assert fake.keep_alives() and set(fake.keep_alives()) == {"30m"}
+    # the release ran before the chained job, and only once
+    assert at_chain and at_chain[0][-2:] == ["/api/ps", "/api/generate"]
+    assert fake.paths() == at_chain[0] and fake.paths().count("/api/generate") == 1
+    assert fake.calls[-1][1] == {"model": summarize.OLLAMA_MODEL, "keep_alive": "5m"}
+    assert "local model unloads in 5m if unused" in capsys.readouterr().out
+    assert summarize._RUN == {"depth": 0, "used": False}
+
+
+def test_a_batch_that_crashes_after_using_the_model_still_lets_it_go(sandbox, monkeypatch):
+    import signal
+
+    fake = _one_file_run(sandbox, monkeypatch)
+
+    def crash(keys):
+        raise RuntimeError("synthetic crash after the description step")
+    monkeypatch.setattr(run_batch, "auto_summarize", crash)
+    old = signal.getsignal(signal.SIGTERM)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic crash"):
+            run_batch.main()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    assert "/api/chat" in fake.paths()
+    assert fake.paths()[-2:] == ["/api/ps", "/api/generate"]
+
+
+def test_a_batch_that_never_used_the_model_asks_ollama_nothing(sandbox, monkeypatch):
+    """An empty watch run every few minutes must not cut short a model a
+    panel request or another app loaded."""
+    from stt import summarize
+    fake = _one_file_run(sandbox, monkeypatch)
+    fake.loaded = [summarize.OLLAMA_MODEL]
+    monkeypatch.setattr(run_batch, "summarize_one", lambda *a, **k: False)
+    monkeypatch.setattr(run_batch, "auto_summarize", lambda *a, **k: 0)
+    _run_main(monkeypatch)
+    assert fake.calls == [] and fake.loaded == [summarize.OLLAMA_MODEL]
