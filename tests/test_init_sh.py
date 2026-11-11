@@ -141,7 +141,8 @@ def test_a_failed_qwen_install_is_a_warning_not_a_stop(tmp_path):
     co, env = _scratch_init(tmp_path)
     (tmp_path / "bin" / "uv").write_text('#!/bin/bash\necho "uv $*" >> "$FAKE_LOG"; exit 1\n')
     r = _run(co, env, "setup_qwen_env; echo rc=$?; fetch_qwen_models; echo rc=$?")
-    assert "rc=1" in r.stdout and "uses Parakeet" in r.stdout
+    assert "rc=1" in r.stdout and "every file fails until it is fixed" in r.stdout
+    assert "Parakeet" not in r.stdout + r.stderr
 
 
 def test_the_qwen_install_lines_name_only_the_qwen_environment():
@@ -150,3 +151,34 @@ def test_the_qwen_install_lines_name_only_the_qwen_environment():
     assert lines and all("$QWEN_PY" in ln for ln in lines)
     assert "mlx-audio" not in (REPO / "requirements.txt").read_text()
     assert "mlx-audio==" in (REPO / "requirements-qwen.txt").read_text()
+
+
+def test_nothing_in_the_main_environment_needs_mlx():
+    """parakeet-mlx was the one reason .venv held MLX. With it gone, no
+    module that runs in .venv imports mlx, and requirements.txt lists no
+    MLX package and none of the packages only Parakeet or the punctuator
+    used. The Qwen3-ASR child runs in .venv-qwen, and the optional
+    summary fallback's runner text runs in .venv-llm."""
+    import ast
+    import re
+    other_env = {REPO / "stt" / "qwen3_worker.py"}
+    found = []
+    files = [p for d in ("stt", "gui", "tools", "tuning") for p in (REPO / d).rglob("*.py")]
+    files += [REPO / n for n in ("run_batch.py", "relabel.py", "enroll.py")]
+    for p in files:
+        if p in other_env:
+            continue
+        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            names = ([a.name for a in node.names] if isinstance(node, ast.Import)
+                     else [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            found += [f"{p.name}: {n}" for n in names
+                      if n.split(".")[0] in ("mlx", "mlx_lm", "mlx_audio", "parakeet_mlx",
+                                             "punctuators", "librosa", "numba")]
+    assert found == []
+    req = (REPO / "requirements.txt").read_text().lower()
+    pkgs = {re.split(r"[<>=!~\[ ]", ln.strip(), 1)[0] for ln in req.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")}
+    assert not pkgs & {"mlx", "mlx-metal", "parakeet-mlx", "punctuators", "numba",
+                       "librosa", "onnxruntime"}, pkgs
+    init = INIT.lower()
+    assert "parakeet" not in init and "punctuat" not in init
