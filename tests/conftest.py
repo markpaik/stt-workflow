@@ -1,10 +1,29 @@
 """Shared fixture: run every test against a throwaway sandbox so no test can
 touch real voiceprints, manifests, status, or transcripts."""
 import io
+import os
 
 import pytest
 
 from stt import config, control, holds, jobs, manifest, rates, status
+
+
+# The environment the test run started with. Importing run_batch (a test
+# module does it at collection) loads the checkout's stt.env into os.environ,
+# and monkeypatch.delenv on such a key RESTORES the leaked value at teardown.
+# In an owner's checkout that handed later tests, and every subprocess a test
+# starts, the real library paths and keys.
+_ENV_AT_START = dict(os.environ)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    """Every test starts from the environment the run started with, before
+    any fixture runs. A reset at setup holds whatever order fixtures tear
+    down in."""
+    os.environ.clear()
+    os.environ.update(_ENV_AT_START)
+    yield
 
 
 @pytest.fixture(autouse=True)

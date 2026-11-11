@@ -48,8 +48,13 @@ def test_stt_home_backwards_compatible():
     # "STT_workflow" once and is "stt_workflow" now, and a worktree is named
     # for its branch. PROJECT_DIR defaults to the folder holding stt/.
     assert Path(p["project"]).name == REPO.name
-    # the neutral default init.sh offers, never a person's own library path
-    assert p["meetings"] == str(Path.home() / "Documents/Meeting Transcripts")
+    # the neutral default init.sh offers, never a person's own library path,
+    # unless this checkout's own stt.env names the library (an owner's
+    # checkout does; a fresh clone and a worktree do not)
+    from stt import envfile
+    own = envfile.parse(REPO / "stt.env").get("STT_MEETINGS_DIR") if (REPO / "stt.env").exists() else None
+    assert p["meetings"] == str(Path(own).expanduser() if own else
+                                Path.home() / "Documents/Meeting Transcripts")
     assert Path(p["voiceprints"]).name == "voiceprints"
 
 
