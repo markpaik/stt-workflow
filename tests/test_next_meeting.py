@@ -1424,7 +1424,7 @@ console.log(JSON.stringify({h,e}));
 
 _SECOND_LISTEN = """
 const segs=[seg(0,0,4,'S1','Speaker 1','we will ship it friday')];
-const P={id:'parakeet',label:'Parakeet',note:'Runs on this Mac.'};
+const P={id:'qwen3',label:'Qwen3-ASR',note:'Runs on this Mac.'};
 const Q={id:'other-local',label:'Other-local',note:'Runs on this Mac.'};
 async function card(base,tr){
  await openPage(base,Object.assign({segments:segs,speaker_options:[opt('S1','Ana Ortiz')]},tr));
@@ -1433,7 +1433,7 @@ async function card(base,tr){
 async function listen(eng){
  delete __els['mc-eng'];if(eng)__els['mc-eng']={value:eng};
  __els['mc-rx']={textContent:''};__els['mc-text']={value:''};
- answer=()=>({text:'we will ship it on friday',engine:'mlx-community/parakeet-tdt-0.6b-v3'});
+ answer=()=>({text:'we will ship it on friday',engine:'mlx-community/Qwen3-ASR-1.7B-bf16'});
  await mRetrans(0);await flush();
  return calls.filter(c=>c[0]==='/api/retranscribe').pop()[1].engine;
 }
@@ -1443,9 +1443,9 @@ async function listen(eng){
 @needs_node
 def test_one_engine_needs_no_menu_and_says_what_it_does():
     """The menu listed two Whisper engines from a fixed list. The server
-    lists the local engines now, Parakeet alone today: the card shows no
+    lists the local engines now, Qwen3-ASR alone today: the card shows no
     menu, a line says what Listen again does, and the listen runs on
-    Parakeet."""
+    Qwen3-ASR. A server that sends no list gets Qwen3-ASR too."""
     out = _run(_SECOND_LISTEN + """
 const plain=await card('L2',{listen_engines:[P]});
 const plainEng=await listen(null);
@@ -1453,23 +1453,25 @@ const old=await card('L4',{});              // a server that sends no list
 console.log(JSON.stringify({plain,plainEng,old,text:__els['mc-text'].value}));
 """)
     assert "<select" not in out["plain"]
-    assert "Listen again runs Parakeet on this line, on this Mac." in out["plain"]
+    assert "Listen again runs Qwen3-ASR on this line, on this Mac." in out["plain"]
     assert "whisper" not in out["plain"].lower()
-    assert out["plainEng"] == "parakeet"
+    assert "parakeet" not in out["plain"].lower()
+    assert out["plainEng"] == "qwen3"
     assert out["text"] == "we will ship it on friday"
-    assert "Listen again runs Parakeet" in out["old"]
+    assert "Listen again runs Qwen3-ASR on this line" in out["old"]
+    assert "parakeet" not in out["old"].lower()
 
 
 @needs_node
-def test_a_second_local_engine_gets_a_menu_with_parakeet_first():
+def test_a_second_local_engine_gets_a_menu_with_qwen3_first():
     """A later local engine is one row on the server. The card then shows
-    a menu, Parakeet first and the default, and posts the one picked."""
+    a menu, Qwen3-ASR first and the default, and posts the one picked."""
     out = _run(_SECOND_LISTEN + """
 const menu=await card('L1',{listen_engines:[P,Q]});
 const picked=await listen('other-local');
 console.log(JSON.stringify({menu,picked}));
 """)
     assert out["menu"].startswith('<select id="mc-eng"')
-    assert out["menu"].index('value="parakeet"') < out["menu"].index('value="other-local"')
-    assert "selected" not in out["menu"]            # Parakeet, the first, is the default
+    assert out["menu"].index('value="qwen3"') < out["menu"].index('value="other-local"')
+    assert "selected" not in out["menu"]            # Qwen3-ASR, the first, is the default
     assert out["picked"] == "other-local"

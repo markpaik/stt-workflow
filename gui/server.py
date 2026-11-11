@@ -1745,7 +1745,7 @@ def _listen_engines() -> list:
     """The second listen's engine menu, the default first: [{"id", "label",
     "note"}] in stt.retranscribe.offered() order. Local engines only."""
     from stt import retranscribe
-    return [{"id": e, "label": e.capitalize(), "note": "Runs on this Mac."}
+    return [{"id": e, "label": retranscribe.label(e), "note": "Runs on this Mac."}
             for e in retranscribe.offered()]
 
 
@@ -3601,10 +3601,10 @@ class Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/retranscribe":
                 if not self._require_base(b.get("base")):
                     return
-                engine = b.text("engine", "") or "parakeet"
                 # an engine the second listen does not offer starts no
                 # child (the child checks this again)
                 from stt import retranscribe as _rt
+                engine = b.text("engine", "") or _rt.default_engine()
                 why = _rt.engine_problem(engine)
                 if why:
                     self._json({"error": why})

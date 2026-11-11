@@ -220,13 +220,13 @@ def test_a_failed_second_listen_names_no_path(running_server, monkeypatch, capsy
 
 @pytest.mark.parametrize("strict", [False, True])
 def test_the_transcript_lists_the_second_listen_engines(running_server, strict):
-    """The local engines only, whatever cloud keys are set: today Parakeet
-    alone. No Whisper engine is offered."""
+    """The local engines only, whatever cloud keys are set: today Qwen3-ASR
+    alone. No Whisper or Parakeet engine is offered."""
     (config.PROJECT_DIR / "stt.env").write_text("STT_OPENAI_KEY=synthetic-key\n")
     _make_meeting("2026-04-08 Team Weekly", strict=strict)
     st, out = _get(running_server, "/api/transcript?base=2026-04-08%20Team%20Weekly")
     assert st == 200
-    assert out["listen_engines"] == [{"id": "parakeet", "label": "Parakeet",
+    assert out["listen_engines"] == [{"id": "qwen3", "label": "Qwen3-ASR",
                                       "note": "Runs on this Mac."}]
 
 
@@ -238,7 +238,7 @@ def test_a_second_listen_with_an_engine_it_does_not_offer_starts_no_child(
     _make_meeting("2026-04-08 Team Weekly")
     spawned = []
     monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: spawned.append(a))
-    for engine in ("cloud:scribe", "mlxwhisper:turbo"):
+    for engine in ("cloud:scribe", "mlxwhisper:turbo", "parakeet"):
         st, out = _post(running_server, "/api/retranscribe",
                         {"base": "2026-04-08 Team Weekly", "start": 1, "end": 2,
                          "engine": engine})

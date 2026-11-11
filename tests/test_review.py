@@ -495,11 +495,14 @@ def test_redo_archives_decisions(sandbox):
 
 
 def test_retranscribe_engine_selection(sandbox):
-    from stt import retranscribe
-    import stt.asr_parakeet
-    assert retranscribe._asr_module("parakeet") is stt.asr_parakeet
+    from stt import asr_qwen3, retranscribe
+    assert retranscribe._asr_module("qwen3") is asr_qwen3
+    assert retranscribe.default_engine() == "qwen3"
+    assert retranscribe.label("qwen3") == "Qwen3-ASR"
     # unknown engine -> clean error dict, not a crash
     assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "bogus")["error"]
+    # Parakeet is gone: its old id is unknown too
+    assert "unknown engine" in retranscribe.retranscribe("x", 0, 1, "parakeet")["error"]
 
 
 def test_retranscribe_loads_no_model_it_does_not_list(sandbox, monkeypatch):
@@ -510,7 +513,8 @@ def test_retranscribe_loads_no_model_it_does_not_list(sandbox, monkeypatch):
     monkeypatch.delenv("STT_WHISPER_MLX_MODEL", raising=False)
     for engine in ("mlxwhisper:example-org/model", "mlxwhisper:", "mlxwhisper",
                    "mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper:/tmp/folder",
-                   "Parakeet", "cloud:scribe", "cloud:openai", "cloud:voxtral"):
+                   "Parakeet", "parakeet", "Qwen3", "cloud:scribe", "cloud:openai",
+                   "cloud:voxtral"):
         with pytest.raises(ValueError, match="unknown engine"):
             retranscribe._asr_module(engine)
         assert "unknown engine" in retranscribe.retranscribe("Mtg", 0, 1, engine)["error"]
@@ -519,17 +523,18 @@ def test_retranscribe_loads_no_model_it_does_not_list(sandbox, monkeypatch):
 
 def test_the_second_listen_offers_only_local_engines(sandbox, monkeypatch):
     """Before Whisper went, the second listen sent no audio off the Mac,
-    and it still sends none: a cloud key adds no engine. Parakeet is the
+    and it still sends none: a cloud key adds no engine. Qwen3-ASR is the
     one local engine, and a new one is one row in LOCAL."""
     from stt import asr_cloud, retranscribe
     (sandbox / "stt.env").write_text("STT_ELEVENLABS_KEY=synthetic-key\n"
                                      "STT_OPENAI_KEY=synthetic-key\n")
     assert asr_cloud.available("scribe")
-    assert retranscribe.offered() == ["parakeet"]
-    assert retranscribe.engine_problem("parakeet") is None
+    assert retranscribe.offered() == ["qwen3"]
+    assert retranscribe.engine_problem("qwen3") is None
     assert "unknown engine" in retranscribe.engine_problem("cloud:scribe")
-    monkeypatch.setattr(retranscribe, "LOCAL", ("parakeet", "other-local"))
-    assert retranscribe.offered() == ["parakeet", "other-local"]
+    assert "unknown engine" in retranscribe.engine_problem("parakeet")
+    monkeypatch.setattr(retranscribe, "LOCAL", ("qwen3", "other-local"))
+    assert retranscribe.offered() == ["qwen3", "other-local"]
     assert retranscribe.engine_problem("other-local") is None
 
 

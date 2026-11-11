@@ -4,9 +4,9 @@ listen on a transcript line.
 Run as a one-shot subprocess (`python -m stt.retranscribe <base> <start> <end>
 [engine]`) so the long-lived GUI never loads a multi-GB ASR model into its own
 memory. Engines (offered()): the local engines only, so no audio leaves the
-Mac. Today that is Parakeet. A different engine from the one that wrote the
-transcript gives an independent second opinion, which is what you want when
-the first engine misheard.
+Mac. Today that is Qwen3-ASR, with its forced aligner, on the line's audio
+alone. A cloud transcript gets an independent second opinion from it. A
+Qwen3-ASR transcript gets the same engine again, on the line's audio alone.
 """
 import json
 import math
@@ -20,14 +20,25 @@ from . import config
 from .audio import FFMPEG
 
 # the local engines, as the panel and the child name them, the default
-# first. A new local engine is one row here and one branch in _asr_module().
-LOCAL = ("parakeet",)
+# first. A new local engine is one row here, its label, and one branch in
+# _asr_module().
+LOCAL = ("qwen3",)
+LABELS = {"qwen3": "Qwen3-ASR"}
 
 
 def offered() -> list:
     """The engine ids a second listen may use, the default first. Only
     local engines: a second listen never sends audio off the Mac."""
     return list(LOCAL)
+
+
+def default_engine() -> str:
+    return offered()[0]
+
+
+def label(engine: str) -> str:
+    """The name the panel shows for a listed engine."""
+    return LABELS.get(engine, str(engine).capitalize())
 
 
 def engine_problem(engine: str):
@@ -44,9 +55,9 @@ def _asr_module(engine: str):
     why = engine_problem(engine)
     if why:
         raise ValueError(why)
-    if engine == "parakeet":
-        from . import asr_parakeet
-        return asr_parakeet
+    if engine == "qwen3":
+        from . import asr_qwen3
+        return asr_qwen3
     raise ValueError(f"no module for the local engine {engine!r}")
 
 
@@ -76,8 +87,16 @@ def _frames(clip: Path) -> int:
         return 0
 
 
-def retranscribe(base: str, start: float, end: float,
-                 engine: str = "parakeet") -> dict:
+def unavailable_error() -> str:
+    """The panel's line when the engine cannot run here. It names the fix
+    and no path: the detail goes to the panel log."""
+    from . import asr_qwen3
+    return (f"Qwen3-ASR cannot run on this Mac, so Listen again cannot run. "
+            f"To fix it, {asr_qwen3.FIX}.")
+
+
+def retranscribe(base: str, start: float, end: float, engine: str = None) -> dict:
+    engine = engine or default_engine()
     why = span_problem(start, end) or engine_problem(engine)
     if why:
         return {"error": why}
@@ -89,6 +108,7 @@ def retranscribe(base: str, start: float, end: float,
     if src is None:
         return {"error": f"no stored audio for {base}"}
     pad = 0.25
+    from . import asr_qwen3
     with tempfile.TemporaryDirectory() as td:
         clip = Path(td) / "clip.wav"
         subprocess.run(
@@ -100,11 +120,15 @@ def retranscribe(base: str, start: float, end: float,
             # past the end ffmpeg writes an empty wav, and the model crashed
             # on it with a Metal allocation error
             return {"error": "That span starts after the recording ends."}
-        out = asr.transcribe(clip)
+        try:
+            out = asr.transcribe(clip)
+        except asr_qwen3.EngineUnavailable as e:
+            print(f"retranscribe: {e}", file=sys.stderr, flush=True)
+            return {"error": unavailable_error()}
     return {"text": out["text"].strip(), "engine": out["engine"]}
 
 
 if __name__ == "__main__":
     print(json.dumps(retranscribe(
         sys.argv[1], float(sys.argv[2]), float(sys.argv[3]),
-        sys.argv[4] if len(sys.argv) > 4 else "parakeet")))
+        sys.argv[4] if len(sys.argv) > 4 else None)))

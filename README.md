@@ -407,8 +407,10 @@ alt (`u`, the second engine's words, when verify ran), Skip, and Done. It
 also accepts all sub-second crumbs at once, and accepts every remaining line
 behind a confirm. The pencil on any line edits it: fix the text, change the
 speaker (including "New person..."), split a line, remove a line, or listen
-again. Listen again runs Parakeet on the line's audio, on this Mac. Your
-edits live in a sidecar file and survive every relabel and reprocess.
+again. Listen again runs Qwen3-ASR and its aligner on the line's audio
+alone, on this Mac. If Qwen3-ASR cannot run here, Listen again says so and
+names the fix. Your edits live in a sidecar file and survive every relabel
+and reprocess.
 
 ### Titles
 

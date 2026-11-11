@@ -584,3 +584,52 @@ def test_progress_counts_the_guard_re_decodes_and_never_steps_back(fake_child, t
     asr_qwen3.transcribe(_wav(tmp_path / "m.wav", 700), progress=seen.append)
     assert seen == sorted(seen) and seen[-1] == 1.0
     assert len(seen) == 3 * 3 + 2                # two halves re-decoded
+
+
+# ---------- the second listen ----------
+
+def _have_ffmpeg() -> bool:
+    import shutil
+
+    from stt import audio
+    return bool(shutil.which(audio.FFMPEG)) or Path(audio.FFMPEG).exists()
+
+
+needs_ffmpeg = pytest.mark.skipif(not _have_ffmpeg(), reason="ffmpeg not installed")
+
+
+@needs_ffmpeg
+def test_the_second_listen_runs_qwen3_with_the_aligner_on_a_short_clip(
+        sandbox, fake_child, tmp_path):
+    """Listen again cuts the line's few seconds (plus 0.25 s each side) and
+    runs Qwen3-ASR on that clip alone, decode and alignment, on this Mac.
+    The default engine is qwen3."""
+    from conftest import mfile
+
+    from stt import retranscribe
+    _wav(mfile("Short Line", ".wav"), 12)
+    out = retranscribe.retranscribe("Short Line", 4.0, 7.0)
+    assert out == {"text": "w0 w1 w2", "engine": config.QWEN_ASR_MODEL}, out
+    ops = [r["op"] for r in _requests(fake_child)]
+    assert ops[:2] == ["transcribe", "align"] and ops[-1] == "quit"
+    first = _requests(fake_child)[0]
+    assert first["start"] == 0.0 and first["end"] == pytest.approx(3.5, abs=0.01)
+
+
+def test_the_second_listen_says_plainly_when_qwen3_cannot_run(sandbox, tmp_path,
+                                                             monkeypatch, capsys):
+    """No .venv-qwen: Listen again answers with one line that names the
+    fix and no path. The detail goes to the log."""
+    from conftest import mfile
+
+    from stt import audio, retranscribe
+    monkeypatch.setattr(config, "QWEN_ASR_PY", tmp_path / "no-such-venv/bin/python")
+    _wav(mfile("Short Line", ".wav"), 6)
+    monkeypatch.setattr(audio, "FFMPEG", "ffmpeg")
+    monkeypatch.setattr(retranscribe.subprocess, "run",
+                        lambda cmd, **k: _wav(Path(cmd[-1]), 2))
+    out = retranscribe.retranscribe("Short Line", 1.0, 2.0)
+    assert set(out) == {"error"}
+    assert "./init.sh" in out["error"] and "\n" not in out["error"]
+    assert str(tmp_path) not in out["error"] and "Parakeet" not in out["error"]
+    assert "STT_QWEN_ASR_PY" in capsys.readouterr().err

@@ -92,8 +92,7 @@ class EngineUnavailable(RuntimeError):
     model that is not downloaded. One plain sentence, no traceback."""
 
 
-FIX = ("run ./init.sh, which builds .venv-qwen and downloads the two models, "
-       "or set STT_ASR_BACKEND=parakeet")
+FIX = "run ./init.sh, which builds .venv-qwen and downloads the two models"
 _unavailable = None   # why the engine could not start in this process, once it failed
 
 
