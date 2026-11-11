@@ -22,7 +22,7 @@ BASELINE_KEYS = {
     'active', 'archived_count', 'asr_choices', 'battery', 'cloud_keys',
     'enrolled', 'llm_available', 'llm_backend', 'llm_backends', 'max_samples',
     'meetings', 'mem_mb', 'mic_speaker', 'model', 'overall_eta_sec', 'paths',
-    'paused', 'pending', 'punctuate', 'queue', 'queued_jobs', 'rates', 'recent',
+    'paused', 'pending', 'queue', 'queued_jobs', 'rates', 'recent',
     'recorder_note', 'recorder_ready', 'recording', 'relabel_pending', 'running',
     'schedule', 'unknowns'}
 
@@ -247,7 +247,6 @@ def test_a_redo_deliberately_forgets_dismissals(sandbox, monkeypatch, tmp_path):
     from stt.audio import FFMPEG
     from tests.test_layout import _fake_asr
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     src = tmp_path / "Redo Voice 05012026.m4a"
     subprocess.run([FFMPEG, "-y", "-loglevel", "error", "-f", "lavfi", "-i",

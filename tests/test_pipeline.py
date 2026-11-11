@@ -58,7 +58,6 @@ def test_diarized_run_writes_a_loadable_embeddings_cache(sandbox, monkeypatch):
     monkeypatch.setattr(diarize, "diarize", lambda *a, **k: _fake_diar())
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     src = config.PROJECT_DIR / "Diarized Meeting 05012026.m4a"
     src.write_bytes(b"x")
@@ -90,7 +89,6 @@ def test_a_redo_that_saves_no_embeddings_leaves_no_old_speaker_cache(
     monkeypatch.setattr(diarize, "diarize", lambda *a, **k: _fake_diar())
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     src = config.PROJECT_DIR / "Redo Meeting 05012026.m4a"
     src.write_bytes(b"x")
     run = dict(dest_dir=config.MEETINGS_DIR, do_verify=False, track_unknowns=False)
@@ -147,7 +145,6 @@ def _channel_fakes(monkeypatch, mic_matches=True, sanity=None, spans=None):
                         lambda src, wav, ch: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "probe_channels", lambda src: 2)
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(channels, "sanity", lambda m, s: sanity or {
         "dual_mono": False, "sys_dead": False, "mic_dead": False,
         "mic_rms_db": -10.0, "sys_rms_db": -20.0})
@@ -297,7 +294,6 @@ def test_no_sidecar_is_pure_mono(sandbox, monkeypatch):
     monkeypatch.setattr(diarize, "diarize", lambda *a, **k: _fake_diar_sys())
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     def _boom(*a, **k):
         raise AssertionError("mono path must never split channels")
     monkeypatch.setattr(audio, "to_wav16k_channel", _boom)
@@ -391,7 +387,6 @@ def test_redo_of_a_meeting_json_that_is_not_an_object(sandbox, monkeypatch, stor
     AttributeError from the channel, date, owner or carry-forward reads."""
     import json
     monkeypatch.setattr(config, "STRICT", False)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
     seen = {}
@@ -435,7 +430,6 @@ def test_a_long_source_name_gets_a_folder_name_that_fits(sandbox, monkeypatch, s
     import json
 
     from stt import dates
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())
@@ -482,7 +476,6 @@ def test_verify_runs_only_when_a_second_local_engine_exists(
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr_engine(primary))
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     ran = []
 
     def _run(wav, words, engine, progress=None):

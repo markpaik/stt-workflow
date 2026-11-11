@@ -10,9 +10,9 @@ This is the replacement: ONE daemon thread inside the panel process, running
 one job at a time, with a queue in front of it that coalesces.
 
 Why a thread and not a child process. `gui/server._relabel_now` already imports
-`relabel` and runs `relabel_one` inside the request, so the punctuator and the
-speaker models are ALREADY resident here — a child would load a second copy of
-them (~1 GB) to do work this process can do warm. The thread also makes
+`relabel` and runs `relabel_one` inside the request, so the speaker models
+are ALREADY resident here — a child would load a second copy of them to do
+work this process can do warm. The thread also makes
 progress a plain attribute read instead of a pipe protocol.
 
 Exclusion is unchanged. A job holds `control.relabel_lock_path()` with a
@@ -231,7 +231,7 @@ class RelabelQueue:
 
     def _execute(self, job):
         # imported here, not at module import: `relabel` pulls the whole
-        # pipeline (torch, the punctuator) in, and the panel must start fast
+        # pipeline (torch, the speaker models) in, and the panel must start fast
         # and must still import in a test process that never runs a job.
         import relabel
 

@@ -1609,7 +1609,6 @@ def gather_state():
             "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir),
                       "source_exists": _dir_present(src_dir)},
-            "punctuate": _env_file_get()[0].get("STT_PUNCTUATE", "1") == "1",
             "mic_speaker": config.mic_speaker(),
             "recorder_ready": recorder.available(),
             "rates": rates.summary(),
@@ -3652,9 +3651,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({**r, **_relabel_targets(
                     names=[n for n in (b["name"], to) if n],
                     vector=identify.load_voiceprints().get(b["name"]))})
-            elif u.path == "/api/punctuate":
-                _env_file_set({"STT_PUNCTUATE": "1" if b.flag("on") else "0"})
-                self._json({"ok": True})
             elif u.path == "/api/mic_speaker":
                 # who "me" is on the meeting recorder's mic channel; enables the
                 # channel-aware path for new recordings (they process as mono

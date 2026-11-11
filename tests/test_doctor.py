@@ -830,7 +830,7 @@ def test_the_doctor_names_a_shell_style_line_that_sets_nothing(sandbox, monkeypa
     setting stayed at its default with no word anywhere."""
     _no_diar_env(monkeypatch)
     (sandbox / "stt.env").write_text(
-        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_PUNCTUATE=1\n_OK_2=x\n")
+        "export STT_DIARIZER=pyannote\nMY KEY=1\nSTT_VERIFY=0\n_OK_2=x\n")
     bad = {f.subject: f.detail for f in doctor.check(registry=False)
            if f.kind == "bad_setting"}
     assert set(bad) == {"export STT_DIARIZER", "MY KEY"}

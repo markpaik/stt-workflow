@@ -517,9 +517,6 @@ STRICT = os.environ.get("STT_STRICT", "0") == "1"
 # Scribe benchmark ~94% of the time, so only disagreements need human ears.
 VERIFY = os.environ.get("STT_VERIFY", "0") == "1"
 
-# --- Punctuation restoration (fixes Parakeet's lowercase run-ons; word-preserving) ---
-PUNCTUATE = os.environ.get("STT_PUNCTUATE", "1") == "1"
-
 # --- Channel-aware diarization (stereo recordings from the meeting recorder:
 # LEFT = mic/"me", RIGHT = system/"them"). Only engages when a recording
 # declares its layout AND names the mic speaker, who must be enrolled. Every
@@ -560,7 +557,7 @@ EST_RATES = {
     # keyed by the engine that will actually run (rates.effective_diarizer):
     # pyannote on CPU ~2.25x
     "diarize": {"pyannote": 2.25, "speakrs": 108.0},
-    "writing_fixed_sec": 20.0,  # merge + punctuation + output, roughly flat
+    "writing_fixed_sec": 20.0,  # merge + output, roughly flat
 }
 
 # --- HuggingFace token (needed for the gated pyannote model) ---

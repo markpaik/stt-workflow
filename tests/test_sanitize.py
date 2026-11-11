@@ -57,14 +57,10 @@ def test_two_separate_loops_both_flagged():
     assert texts.count("yes") == 3 and texts.count("right") == 3 and "middle" in texts
 
 
-def test_unk_between_letters_becomes_hyphen():
-    """Parakeet emits <unk> for out-of-vocab symbols — nearly always a dash."""
-    words = [_w(0, "a"), _w(1, "two<unk>year"), _w(2, "self<unk>management")]
-    out, _ = sanitize.collapse_repeats(words)
-    assert [w["word"] for w in out] == ["a", "two-year", "self-management"]
-
-
-def test_unk_elsewhere_is_dropped():
-    words = [_w(0, "tag"), _w(1, "<unk>team"), _w(2, "<unk>"), _w(3, "people.")]
-    out, _ = sanitize.collapse_repeats(words)
-    assert [w["word"] for w in out] == ["tag", "team", "people."]
+def test_words_pass_through_letter_for_letter():
+    """The "<unk>" repair went with Parakeet, the one engine that emitted
+    it: a word is never rewritten, only a loop is cut."""
+    assert not hasattr(sanitize, "strip_unk")
+    words = [_w(0, "two-year"), _w(1, "self-management"), _w(2, "people.")]
+    out, spans = sanitize.collapse_repeats(words)
+    assert out == words and spans == []

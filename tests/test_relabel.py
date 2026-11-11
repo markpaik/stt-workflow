@@ -138,7 +138,6 @@ def test_relabel_recovers_mic_attribution_after_late_enrollment(sandbox, monkeyp
     monkeypatch.setattr(identify, "score_against", lambda vec, samples: 0.99)
     monkeypatch.setattr(refine, "resolve_split_clusters", lambda cn, ce, vps: cn)
     monkeypatch.setattr(config, "REFINE", False)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     assert relabel.relabel_one(base) is True
     after = json.loads(mfile(base, ".json").read_text())
@@ -182,7 +181,6 @@ def test_known_voice_attributed_end_to_end_from_cache(sandbox, monkeypatch):
     import relabel
     from stt import identify, unknowns
 
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     base = "Known Voice Mtg"
     rng = np.random.default_rng(17)
     alice = rng.normal(size=256)
@@ -233,7 +231,6 @@ def test_relabel_all_takes_the_relabel_lock(sandbox, monkeypatch):
 
     import relabel
 
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     _seed_meeting("Mtg")
     touched = []
     real_one = relabel.relabel_one
@@ -275,7 +272,6 @@ def test_naming_queued_during_a_pass_survives_it_and_both_names_land(sandbox, mo
     _seed_meeting("Mtg")
     rng = np.random.default_rng(3)                      # _seed_meeting's vectors
     va, vb = rng.normal(size=256), rng.normal(size=256)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     identify.enroll("Alice", va, source="Mtg")          # naming #1 -> pass A spawns
 
@@ -362,7 +358,6 @@ def test_a_relabel_pass_publishes_itself_for_the_whole_run(sandbox, monkeypatch)
     import relabel
     from stt import control
 
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     _seed_meeting("Mtg")
     seen = []
     real_one = relabel.relabel_one
@@ -395,7 +390,6 @@ def test_relabel_all_publishes_itself_too(sandbox, monkeypatch):
     import relabel
     from stt import control
 
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     _seed_meeting("Mtg")
     seen = []
     real_one = relabel.relabel_one
@@ -613,7 +607,6 @@ def test_a_rename_mid_pass_is_processed_under_its_new_name(sandbox, monkeypatch)
 
     for base in ("A Mtg", "B Mtg", "C Mtg"):
         _seed_meeting(base)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
 
     touched = []
 
@@ -644,7 +637,6 @@ def test_a_raising_meeting_cannot_spin_the_re_listing_pass(sandbox, monkeypatch)
 
     for base in ("A Mtg", "B Mtg"):
         _seed_meeting(base)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     touched = []
 
     def boom(base, **kw):
@@ -665,7 +657,6 @@ def test_bases_from_reads_one_name_per_line_in_order(sandbox, monkeypatch):
 
     for base in ("A Mtg", "B Mtg", "C Mtg"):
         _seed_meeting(base)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     touched = []
     monkeypatch.setattr(relabel, "relabel_one",
                         lambda base, **kw: touched.append(base) or True)
@@ -727,7 +718,6 @@ def test_a_typed_meeting_that_is_missing_or_archived_exits_1(sandbox, monkeypatc
     arch = config.meetings_dir() / config.ARCHIVE_DIRNAME / "Old Mtg"
     arch.mkdir(parents=True)
     (arch / "Old Mtg.json").write_text("{}")
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     touched = []
     monkeypatch.setattr(relabel, "relabel_one",
                         lambda base, **kw: touched.append(base) or True)
@@ -792,3 +782,53 @@ def test_relabel_strict_request_marks_a_plain_meeting_strict(sandbox, monkeypatc
     assert json.loads(mfile("Mtg", ".json").read_text())["strict"] is True
     assert relabel.relabel_one("Mtg") is True
     assert json.loads(mfile("Mtg", ".json").read_text())["strict"] is True
+
+
+def test_relabel_keeps_the_stored_text_of_a_meeting_the_punctuator_cleaned(sandbox):
+    """A Parakeet meeting stored its capitals and stops in its lines only:
+    its words kept Parakeet's lowercase forms, and relabel ran the
+    punctuator again on every rebuild. With the punctuator gone, relabel
+    carries the stored text onto the words, so the rebuild keeps it, the
+    next one too, and a line a person edited keeps its edit."""
+    import relabel
+
+    words = [{"start": 0.5 * i, "end": 0.5 * i + 0.4, "word": w}
+             for i, w in enumerate("we met at nine the budget is fine".split())]
+    words += [{"start": 5.0 + 0.5 * i, "end": 5.4 + 0.5 * i, "word": w}
+              for i, w in enumerate("u.s. rates rose 3.5 percent".split())]
+    segs = [{"start": 0.0, "end": 3.9, "speaker": "SPEAKER_00",
+             "text": "We met at nine. The budget is fine.", "flags": []},
+            {"start": 5.0, "end": 7.4, "speaker": "SPEAKER_01",
+             "text": "U.S. rates rose 3.5 percent.", "flags": []}]
+    data = {"source_file": "Old.m4a", "duration_sec": 9.0, "strict": False,
+            "asr_engine": "mlx-community/parakeet-tdt-0.6b-v3", "punctuated": True,
+            "speakers": [{"id": "SPEAKER_00", "name": None, "display": "Speaker 1"},
+                         {"id": "SPEAKER_01", "name": None, "display": "Speaker 2"}],
+            "segments": segs, "words": words}
+    mfile("Old", ".json").write_text(json.dumps(data))
+    mfile("Old", ".txt").write_text("stub")
+    rng = np.random.default_rng(3)
+    diarcache.save(mfile("Old", ".diar.npz"),
+                   [{"start": 0.0, "end": 5.0, "cluster": "SPEAKER_00"},
+                    {"start": 5.0, "end": 9.0, "cluster": "SPEAKER_01"}],
+                   [None, None],
+                   {"SPEAKER_00": rng.normal(size=256), "SPEAKER_01": rng.normal(size=256)})
+
+    assert relabel.relabel_one("Old") is True
+    after = json.loads(mfile("Old", ".json").read_text())
+    assert [s["text"] for s in after["segments"]] == [
+        "We met at nine. The budget is fine.", "U.S. rates rose 3.5 percent."]
+    assert after["words"][0]["word"] == "We" and after["words"][3]["word"] == "nine."
+    # the same words, letter for letter: only case and stops moved
+    assert [w["word"].lower().strip(".,") for w in after["words"]] == \
+        [w["word"].strip(".,") for w in words]
+    assert after["punctuated"] is True and after["asr_engine"] == data["asr_engine"]
+    assert "We met at nine. The budget is fine." in mfile("Old", ".txt").read_text()
+
+    # a person edits the second line; the next relabel keeps both texts
+    r = review.apply("Old", 1, "edit", start=5.0, text="US rates rose 3.5%.")
+    assert r["ok"]
+    assert relabel.relabel_one("Old") is True
+    again = json.loads(mfile("Old", ".json").read_text())
+    assert [s["text"] for s in again["segments"]] == [
+        "We met at nine. The budget is fine.", "US rates rose 3.5%."]

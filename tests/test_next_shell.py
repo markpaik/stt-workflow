@@ -454,7 +454,7 @@ def test_writes_from_the_frame_are_posts():
               "restore_meeting", "delete_meeting", "export", "run", "stop", "pause", "resume",
               "queue_hold", "queue_delete", "name", "hide_unknown", "merge_speakers",
               "rename_speaker", "remove_speaker", "remove_sample", "reassign_sample",
-              "cloud_keys", "llm_backend", "automation", "schedule", "model", "punctuate",
+              "cloud_keys", "llm_backend", "automation", "schedule", "model",
               "mic_speaker", "seen", "suggest", "review", "ask", "forget", "dismiss_voice",
               "name_preview", "retranscribe")
     for w in writes:

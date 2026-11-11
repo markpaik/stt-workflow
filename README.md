@@ -707,7 +707,6 @@ where it is.
 | `STT_SPEAKRS_TIMEOUT_SEC` | `3600` | How long the speakrs helper may run on one file. A value that is not a whole number above 0 uses the default |
 | `STT_RECLUSTER` | `1` | After speakrs, moves a turn whose voice fits another speaker in the meeting better than its own. `0` turns it off |
 | `STT_STRICT`, `STT_VERIFY` | `0` | Make strict or verify the default for every run |
-| `STT_PUNCTUATE` | `1` | Punctuation cleanup. It does not run on `qwen3` transcripts, which keep Qwen's own punctuation and casing: on 7 meetings scored against Scribe, the cleanup lowered Qwen's sentence-end, comma and question-mark scores and its casing |
 | `STT_NAMING_THRESHOLD`, `STT_NAMING_MARGIN` | `0.60`, `0.15` | The score and margin a voice needs to get a name |
 | `STT_ELEVENLABS_KEY`, `STT_OPENAI_KEY`, `STT_MISTRAL_KEY` | empty | Cloud transcription keys |
 | `STT_LLM_BACKEND` | `local` | `anthropic` or `openai` sends transcript text to that service for descriptions and Ask |
@@ -912,7 +911,7 @@ recorder / Voice Memos sync / watched folder / drop
         ├─► turn recluster (speakrs only)
         ├─► voiceprint matching and identity refinement
         ▼
-   words matched to speakers ─► punctuation (Parakeet and cloud text) ─► .txt + .json + cached embeddings
+   words matched to speakers ─► .txt + .json + cached embeddings
         │
         ▼
    description and title: Qwen 3.8 on Ollama (Qwen3-8B on MLX if installed)

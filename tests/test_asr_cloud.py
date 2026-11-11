@@ -152,7 +152,6 @@ def test_a_strict_meeting_never_reaches_a_cloud_engine(sandbox, monkeypatch):
     from stt import asr_qwen3, audio
     monkeypatch.setattr(config, "ASR_BACKEND", "cloud:scribe")
     monkeypatch.setenv("STT_ELEVENLABS_KEY", "synthetic-key")
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(asr_cloud, "transcribe",
                         lambda *a, **k: pytest.fail("a strict file reached the cloud"))
     monkeypatch.setattr(audio, "to_wav16k", lambda src, wav: wav.write_bytes(b"RIFF0000WAVE"))

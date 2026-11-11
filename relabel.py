@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from stt import (channels, config, control, diarcache, diarize, identify, merge,
-                 output, punctuate, refine, unknowns)
+                 output, refine, unknowns)
 
 
 def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
@@ -64,6 +64,10 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                   "segments": [{"start": x.get("start"), "end": x.get("end"),
                                 "speaker": x.get("speaker")}
                                for x in data.get("segments") or []]}
+        # the stored text stays: a meeting the removed punctuator cleaned up
+        # holds its capitals and stops in its lines, not in its words, and
+        # the rebuild below starts from the words
+        merge.carry_text(words, data.get("segments"))
         # heal ASR hallucination loops in transcripts processed before the guard
         from stt import sanitize
         words, loop_spans = sanitize.collapse_repeats(words)
@@ -155,9 +159,6 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
             words, turns, names, overlaps=overlaps,
             spans=stats.get("spans", []) + loop_spans,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
-        punctuated = punctuate.runs_on(data.get("asr_engine"))
-        if punctuated:
-            punctuate.restore_segments(segments)
         # engine-disagreement flags outlive the rebuild too (sidecar from verify mode)
         from stt import verify
         vc = verify.load_sidecar(base)
@@ -194,7 +195,6 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
         speaker_text.rerender(data, raw_turns=raw_turns, before=before)
         data["refine_stats"] = {k: v for k, v in stats.items() if k != "spans"}
         data["strict"] = strict
-        data["punctuated"] = punctuated
         data["overlap_spans"] = [[s, e] for s, e in overlaps]
 
         header = output.txt_header(output.header_name(base, data),

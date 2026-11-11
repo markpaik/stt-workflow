@@ -70,7 +70,6 @@ def _describe(base):
 
 def test_only_the_cluster_id_is_stable_across_naming_rename_and_local_names(sandbox, monkeypatch):
     import relabel
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     base, a, b = _seed()
     assert relabel.relabel_one(base)
     d0 = _load(base)
@@ -107,7 +106,6 @@ def test_only_the_cluster_id_is_stable_across_naming_rename_and_local_names(sand
 
 def test_the_description_follows_a_naming_and_a_rename_with_no_model_call(sandbox, monkeypatch):
     import relabel
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(summarize, "_generate",
                         lambda *a, **k: pytest.fail("no model call on a speaker change"))
     base, a, b = _seed()
@@ -137,7 +135,6 @@ def test_the_description_follows_a_naming_and_a_rename_with_no_model_call(sandbo
 
 def test_a_registry_merge_renumbers_the_unknown_and_the_text_follows(sandbox, monkeypatch):
     import relabel
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     base, a, b = _seed()
     assert relabel.relabel_one(base)
     _describe(base)
@@ -158,7 +155,6 @@ def test_a_registry_merge_renumbers_the_unknown_and_the_text_follows(sandbox, mo
 
 def test_a_description_from_before_templates_is_templated_once_on_relabel(sandbox, monkeypatch):
     import relabel
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     base, a, b = _seed()
     assert relabel.relabel_one(base)
     d = _load(base)

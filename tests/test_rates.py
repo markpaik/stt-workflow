@@ -192,7 +192,7 @@ def test_each_model_carries_a_tail_from_its_own_residuals(sandbox):
 
 def test_writing_stays_flat_so_long_meetings_do_not_inflate_it(
         sandbox, monkeypatch):
-    """Writing is merge + punctuation + output, roughly flat by design
+    """Writing is merge + output, roughly flat by design
     (config writing_fixed_sec). The power law's slope is floored at 0.8, so
     it cannot say "flat": fitted, a 4.5 h meeting's writing estimate came out
     near five times the median on the real rates.jsonl. Writing keeps its

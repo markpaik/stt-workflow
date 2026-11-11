@@ -199,7 +199,6 @@ def build_meeting(home: Path, spec: dict, sources_seen: dict) -> dict:
         "n_speakers": len(speakers),
         "strict": strict,
         "one_time_speakers": False,
-        "punctuated": True,
         "verify_engine": spec.get("verify_engine"),
         "overlap_spans": [[s["start"], s["end"]] for s in segments if s["overlap"]],
         "refine_stats": {"reassigned": 0, "smoothed": 0, "flagged": sum(1 for s in segments if s["flags"])},
@@ -324,8 +323,7 @@ def write_state(home: Path, built: list, queue_files: list, held: list,
     (home / "holds.json").write_text(json.dumps(sorted(held), indent=2))
     (home / "queued_jobs.json").write_text("[]")   # empty: nothing auto-spawns
     (home / "stt.env").write_text(
-        "# synthetic demo home — settings the panel reads via config._env_file()\n"
-        "STT_PUNCTUATE=1\n")
+        "# synthetic demo home — settings the panel reads via config._env_file()\n")
     (home / "work").mkdir(exist_ok=True)
     (home / "logs").mkdir(exist_ok=True)
 

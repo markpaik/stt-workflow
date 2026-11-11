@@ -507,7 +507,6 @@ def _spawn_stage(stage, corpus, home, force=False):
               "STT_STRICT", "STT_VERIFY"):
         env.pop(k, None)
     env["STT_HOME"] = str(home)
-    env["STT_PUNCTUATE"] = "0"
     env["PYTHONPATH"] = str(REPO)
     if not env.get("HF_TOKEN"):
         tok = _hf_token_from_env_file()

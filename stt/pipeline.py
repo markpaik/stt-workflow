@@ -1,4 +1,4 @@
-"""Process one audio file: transcribe -> diarize -> name -> merge -> punctuate -> write.
+"""Process one audio file: transcribe -> diarize -> name -> merge -> write.
 
 This never touches the iCloud original; the batch orchestrator owns the
 copy/move/delete lifecycle. Output writes are atomic (see output._atomic_write).
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from . import (audio, channels, config, diarcache, diarize, identify, merge,
-               output, sanitize, punctuate, unknowns, verify)
+               output, sanitize, unknowns, verify)
 
 
 def _load_asr(strict=False):
@@ -494,9 +494,8 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
         segments, labeled_words = merge.assign_and_group(
             words, turns, names, overlaps=overlaps, spans=spans,
             overlap_min_sec=0.0 if strict else config.OVERLAP_FLAG_MIN_SEC)
-        punctuated = punctuate.runs_on(asr_out["engine"])
-        if punctuated:
-            punctuate.restore_segments(segments)
+        # no punctuation pass: Qwen3-ASR and the cloud engines write their
+        # own punctuation and casing, and the words carry it
         if not do_diarize:
             for seg in segments:
                 seg["display"] = output.NOT_SEPARATED
@@ -598,7 +597,6 @@ def process_file(src, dest_dir=None, do_diarize=True, save_embeddings=True,
             "n_speakers": len(labels),
             "strict": strict,
             "one_time_speakers": not track_unknowns,
-            "punctuated": punctuated,
             "verify_engine": verify_engine,
             "overlap_spans": [[s, e] for s, e in overlaps],
             "refine_stats": diar["refine_stats"] if diar else None,

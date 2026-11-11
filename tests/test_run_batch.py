@@ -1604,7 +1604,6 @@ def test_qwen3_not_set_up_fails_each_file_with_the_fix_and_sets_none_aside(
             w.writeframes(b"\0\0" * 16000 * 2)
     monkeypatch.setattr(audio, "to_wav16k", _wav)
     monkeypatch.setattr(audio, "duration_sec", lambda p: 120.0)
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     for _ in range(manifest.FAIL_PARK_AFTER + 2):
         assert _run_main(monkeypatch) == 1
     err = capsys.readouterr().err
@@ -1697,7 +1696,6 @@ def test_a_long_named_source_processes_and_moves(sandbox, monkeypatch):
     from test_pipeline import _fake_asr
 
     from stt import audio, config, icloud, pipeline
-    monkeypatch.setattr(config, "PUNCTUATE", False)
     monkeypatch.setattr(audio, "to_wav16k", lambda s, d: d.write_bytes(b"x"))
     monkeypatch.setattr(audio, "duration_sec", lambda p: 10.0)
     monkeypatch.setattr(pipeline, "_load_asr", lambda strict=False: _fake_asr())

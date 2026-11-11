@@ -6,7 +6,6 @@ torchaudio>=2.11
 soundfile>=0.14
 numpy>=2.2,<2.3
 numba>=0.60
-punctuators>=0.0.7
 
 # Export + menu-bar app
 python-docx>=1.2
