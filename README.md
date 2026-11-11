@@ -556,7 +556,7 @@ local model. When the queue is empty, it does two more things:
 The Activity page holds the machinery: Process all new, Import files, Pause
 or Resume, Stop, queued runs, waiting files (Process, Hold, Delete), failures
 with their full error text (Retry, Dismiss), history, and duplicates. The
-four run options apply to the next manual run:
+run options apply to the next manual run:
 
 - **Two at a time** runs two workers, for a backlog.
 - **Strict**, for confidential conversations, never guesses an uncertain
@@ -567,8 +567,9 @@ four run options apply to the next manual run:
   every place the two disagree, with both readings. A cloud engine is never
   the second engine. Parakeet is the only local engine, so Verify does
   nothing on a Parakeet transcript and checks a cloud transcript with
-  Parakeet. With `STT_VERIFY=1` and Parakeet, the doctor reports
-  `verify_no_second_engine`.
+  Parakeet. The Activity page shows Verify only while the current engine
+  has a second local engine, so not with Parakeet. With `STT_VERIFY=1`
+  and Parakeet, the doctor reports `verify_no_second_engine`.
 - **One-time speakers**, for focus groups, never adds unnamed voices to the
   speaker library and keeps no samples of them.
 

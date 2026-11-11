@@ -597,8 +597,10 @@ def test_additive_keys(sandbox):
     # and `jobs` after it (the relabel queue's own running/queued/last report),
     # and `needs_you` (the one short list, unified plan Phase 1 step 8),
     # and `voicememos` (sync on or off and its go-live day, for /next Settings)
+    # and `verify_engine` (the Activity page offers Verify only with one)
     assert set(st) == BASELINE_KEYS | {"timeline", "tray", "relabel_running",
-                                       "jobs", "needs_you", "voicememos"}
+                                       "jobs", "needs_you", "voicememos",
+                                       "verify_engine"}
     # plus the delete after ingest: on or off, recent removals, manual
     # deletes waiting, and a stop
     assert set(st["voicememos"]) == {"enabled", "since", "delete", "removed",
@@ -1178,3 +1180,16 @@ def test_the_panel_reads_lengths_from_the_shared_helper(sandbox, monkeypatch):
     _source("one.m4a")
     monkeypatch.setattr(queue_order, "duration", lambda p: 1234.0)
     assert srv._est_duration(config.source_dir() / "one.m4a") == 1234.0
+
+
+def test_the_state_names_the_second_engine_verify_would_use(sandbox):
+    """The Activity page hides Verify while this is None: with Parakeet,
+    the only local engine, a verify run does nothing. A cloud engine has
+    Parakeet to compare with."""
+    _meeting("Some Meeting 05012026")
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=parakeet\n")
+    assert srv.gather_state()["verify_engine"] is None
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=mlxwhisper\n")
+    assert srv.gather_state()["verify_engine"] is None      # the removed engine runs Parakeet
+    (config.PROJECT_DIR / "stt.env").write_text("STT_ASR_BACKEND=cloud:scribe\n")
+    assert srv.gather_state()["verify_engine"] == "parakeet"

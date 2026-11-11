@@ -165,6 +165,14 @@ def current_model():
     return rates.current_asr_key()  # single source of truth for the model key
 
 
+def _verify_engine():
+    """The local engine a verify run would compare with under the current
+    engine setting, or None (stt.verify.secondary_engine). With Parakeet,
+    the only local engine, it is None."""
+    from stt import verify
+    return verify.secondary_engine(current_model())
+
+
 def read_schedule():
     """The agent's automation triggers, straight from the plist: `watch`
     (event-triggered runs when a file lands) and `nightly` (the scheduled
@@ -1591,6 +1599,9 @@ def gather_state():
             "enrolled": enrolled, "unknowns": unknown_list,
             "max_samples": identify.MAX_SAMPLES,
             "schedule": read_schedule(), "model": current_model(),
+            # the second engine a verify run would use with the current
+            # engine, or None: the Activity page hides Verify while it is None
+            "verify_engine": _verify_engine(),
             "asr_choices": ASR_CHOICES, "battery": battery,
             "cloud_keys": _cloud_key_status(),
             "paths": {"source": str(src_dir), "dest": str(dst_dir),

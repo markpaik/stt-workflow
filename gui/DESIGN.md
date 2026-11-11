@@ -175,7 +175,8 @@ assistant set, strict meetings are left out and the answer says how many.
 two-step.
 
 **Activity.** Process all new, Import files, Pause or Resume, Stop
-(two-step), the four run options for the next manual run, then Needs
+(two-step), the run options for the next manual run (Verify only while
+the current engine has a second local engine, `verify_engine`), then Needs
 attention, Running now, Queued runs with Cancel, Waiting (Process, Hold,
 two-step Delete), Failed (full error text, Retry, Dismiss), Finished
 recently, and Removed from Voice Memos (the memos the delete after ingest
