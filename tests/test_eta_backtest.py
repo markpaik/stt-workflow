@@ -45,3 +45,52 @@ def test_each_prediction_sees_only_the_samples_before_it(sandbox, tmp_path):
     assert recs[0]["old"] == recs[0]["new"]
     # with one sample behind it the fit is not posed yet: still the median
     assert recs[1]["old"] == recs[1]["new"]
+
+
+# ---------- --midrun: the countdown during a file ----------
+
+def _row(asr, d, asr_rate, diar_rate, at="2026-11-11T10:00:00"):
+    return {"at": at, "duration": d, "asr": asr, "n": 1, "diar": "speakrs",
+            "secs": {"transcribing": d / asr_rate, "diarizing": d / diar_rate,
+                     "writing": 20.0}}
+
+
+def test_the_midrun_entry_follows_the_stages_in_order():
+    row = _row("qwen3", 3600, 16.0, 110.0)
+    e = eta_backtest.entry_at(row, 100.0)
+    assert e["stage"] == "transcribing" and e["progress"] == round(100 / 225, 3)
+    e = eta_backtest.entry_at(row, 225.0 + 10)
+    assert e["stage"] == "diarizing" and e["stage_since"] == 1000.0 - 10
+    assert eta_backtest.entry_at(row, 1e6)["stage"] == "writing"
+
+
+def test_a_file_that_runs_at_the_default_rates_counts_down_exactly(sandbox, monkeypatch):
+    """With the config defaults and a file that runs at exactly those rates,
+    the time left the panel shows is the real time left, at every point."""
+    from stt import config
+    monkeypatch.setitem(config.EST_RATES, "writing_fixed_sec", 20.0)
+    asr, diar = config.EST_RATES["asr"]["qwen3"], config.EST_RATES["diarize"]["speakrs"]
+    row = _row("qwen3", 3600, asr, diar)
+    row["secs"]["downloading"] = 5.0            # the panel budgets 5 s for it
+    recs = eta_backtest.midrun([row], learned=False)
+    assert [r["point"] for r in recs] == [0.1, 0.5, 0.9]
+    assert all(abs(r["err_pct"]) < 0.5 for r in recs), recs
+
+
+def test_a_slower_file_shows_too_little_time_left_and_the_report_names_each_engine(
+        sandbox, capsys, tmp_path):
+    from stt import config
+    slow = _row("qwen3", 3600, config.EST_RATES["asr"]["qwen3"] / 2,
+                config.EST_RATES["diarize"]["speakrs"])
+    recs = eta_backtest.midrun([slow], learned=False)
+    assert recs[0]["err_pct"] < -10            # half the speed: the panel is short
+    p = tmp_path / "rates.jsonl"
+    p.write_text("".join(json.dumps(r) + "\n" for r in (
+        _row("parakeet", 3600, 80, 110, at="2026-11-11T10:00:00"),
+        _row("qwen3", 3600, 16, 110, at="2026-11-11T11:00:00"),
+        _row("qwen3", 7200, 16, 110, at="2026-11-11T12:00:00"))))
+    assert eta_backtest.main(["--midrun", str(p)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [ln.split()[:3] for ln in out[1:]] == [
+        ["defaults", "only", "parakeet"], ["defaults", "only", "qwen3"],
+        ["learned", "parakeet", "n=1"], ["learned", "qwen3", "n=2"]]

@@ -543,18 +543,22 @@ CALIBRATION_LOG = PROJECT_DIR / "calibration.jsonl"
 BATTERY_FLOOR = env_int("STT_BATTERY_FLOOR", 20)
 
 # --- Progress/ETA model: measured realtime multiples on this M5 Pro ---
-# (speed = audio_seconds / wall_seconds; diarization is CPU-bound and dominates)
+# (speed = audio_seconds / wall_seconds). These are the FIRST-RUN defaults:
+# each engine's own samples in rates.jsonl replace them (stt/rates.py), and
+# a qwen3 sample never teaches the parakeet estimate or the other way round.
+# Measured 2026-11-11 on 6 meetings, 10.9 h of audio, nothing else on the GPU
+# (qa/asr-trial): Qwen3-ASR with its aligner repair 14.3x (2734 s of ASR),
+# Parakeet 85.6x (457 s), speakrs separation 108.7x (360 s), the same with
+# either engine. So a Qwen run spends about 88 percent of its time in ASR.
+# Parakeet's old default (30x) and speakrs' (30x, from a 24-minute meeting
+# before the per-turn pass got faster) made the panel say 2 to 3 times the
+# real time left on a first run.
 EST_RATES = {
     "convert": 80.0,
-    # qwen3: decode + forced alignment in its child, model load included.
-    # Measured 2026-11-11 on 6 meetings (10.9 h, no other GPU job): 16.1x
-    # real time, against 86x for Parakeet in the same runs
-    "asr": {"parakeet": 30.0, "qwen3": 16.0},
+    "asr": {"qwen3": 14.3, "parakeet": 85.0},
     # keyed by the engine that will actually run (rates.effective_diarizer):
-    # pyannote on CPU ~2.25x. speakrs on Core ML ran 130-160x in the bench,
-    # but the pyannote-embedder turn pass and model load dominate after it:
-    # 31.6x end to end on a 24-minute meeting. Learned rates replace this.
-    "diarize": {"pyannote": 2.25, "speakrs": 30.0},
+    # pyannote on CPU ~2.25x
+    "diarize": {"pyannote": 2.25, "speakrs": 108.0},
     "writing_fixed_sec": 20.0,  # merge + punctuation + output, roughly flat
 }
 
