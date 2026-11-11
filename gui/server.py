@@ -94,8 +94,6 @@ def _known_base(base) -> bool:
 
 ASR_CHOICES = [
     {"id": "parakeet", "label": "Parakeet TDT 0.6B v3", "note": "fastest · local · keeps fillers"},
-    {"id": "mlxwhisper:large-v3", "label": "Whisper large-v3 (MLX)", "note": "best punctuation robustness · ~4x realtime"},
-    {"id": "mlxwhisper:turbo", "label": "Whisper large-v3-turbo (MLX)", "note": "Whisper punctuation · ~9x realtime"},
     # cloud engines: shown only once their key is set; words are transcribed
     # off-device, but diarization + speaker naming stay local — and strict
     # mode ALWAYS forces the local engine (sensitive audio never uploads)
@@ -108,8 +106,6 @@ ASR_CHOICES = [
 ]
 MODEL_REPOS = {
     "Parakeet TDT 0.6B v3": "mlx-community/parakeet-tdt-0.6b-v3",
-    "Whisper large-v3 (MLX)": "mlx-community/whisper-large-v3-mlx",
-    "Whisper large-v3-turbo (MLX)": "mlx-community/whisper-large-v3-turbo",
     "pyannote community-1": "pyannote/speaker-diarization-community-1",
     "Qwen3-8B (rename/summary)": "mlx-community/Qwen3-8B-4bit",
 }
@@ -2718,12 +2714,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not asr_cloud.available(prov):
                         self._json({"ok": False, "error": "Add this provider's API key first (Cloud keys… in Settings)."})
                         return
-                if choice.startswith("mlxwhisper"):
-                    variant = choice.split(":", 1)[1] if ":" in choice else "large-v3"
-                    _env_file_set({"STT_ASR_BACKEND": "mlxwhisper",
-                                   "STT_WHISPER_MLX_MODEL": variant})
-                else:
-                    _env_file_set({"STT_ASR_BACKEND": choice})
+                _env_file_set({"STT_ASR_BACKEND": choice})
                 self._json({"ok": True, "model": current_model()})
             elif u.path == "/api/name_preview":
                 # What a save from the naming panel would DO, before it does

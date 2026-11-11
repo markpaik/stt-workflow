@@ -31,10 +31,11 @@ REF_DIR = config.PROJECT_DIR / "qa" / "scribe_refs"
 CACHE = config.PROJECT_DIR / "qa" / "tune_cache"
 CACHE.mkdir(parents=True, exist_ok=True)
 
+# (engine, env) per run: the engine names a module stt.asr_<engine>, and
+# env holds the settings that pick its variant. Parakeet is the only local
+# engine; a new one is one more row.
 STT_ENGINES = [
     ("parakeet", {}),
-    ("mlxwhisper", {"STT_WHISPER_MLX_MODEL": "large-v3"}),
-    ("mlxwhisper", {"STT_WHISPER_MLX_MODEL": "turbo"}),
 ]
 DIAR_GRID = {
     "clustering_threshold": [0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
@@ -99,7 +100,7 @@ def stage_stt(refs):
     for base, ref, m4a in refs:
         wav = _wav_for(m4a)
         for engine, env in STT_ENGINES:
-            tag = engine + ("_" + env.get("STT_WHISPER_MLX_MODEL", "") if env else "")
+            tag = engine + "".join("_" + v for v in env.values())
             cf = CACHE / f"stt.{base}.{tag}.json"
             if cf.exists():
                 hyp = json.loads(cf.read_text())

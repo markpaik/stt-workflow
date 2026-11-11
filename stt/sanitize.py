@@ -1,7 +1,7 @@
 """Clean raw ASR output: collapse hallucination loops, strip vocab artifacts.
 
-Loops: on silence or crosstalk Whisper can get stuck emitting one token — "now
-now now now…" for hundreds of words — or a short phrase on repeat. We collapse
+Loops: on silence or crosstalk an ASR engine can get stuck emitting one token —
+"now now now now…" for hundreds of words — or a short phrase on repeat. We collapse
 any run of the same 1-3 word pattern beyond a small natural limit, keep a couple
 of repeats (people really do say "no no no"), and flag the span for human review
 ("possible:asr_loop").

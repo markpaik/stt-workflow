@@ -30,11 +30,8 @@ def _load_asr(strict=False):
         else:
             from . import asr_cloud
             return asr_cloud
-    if backend == "mlxwhisper":
-        from . import asr_mlxwhisper as asr
-    else:
-        from . import asr_parakeet as asr
-    return asr
+    from . import asr_parakeet
+    return asr_parakeet
 
 
 def _transcribe_with_fallback(asr, wav, progress=None) -> dict:

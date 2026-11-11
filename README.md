@@ -676,8 +676,7 @@ where it is.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `mlxwhisper`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. The Settings page writes it |
-| `STT_WHISPER_MLX_MODEL` | `large-v3` | The Whisper variant for `mlxwhisper`: `large-v3` or `turbo` |
+| `STT_ASR_BACKEND` | `parakeet` | The transcription engine: `parakeet`, `cloud:scribe`, `cloud:openai`, or `cloud:voxtral`. Any other value prints a warning and runs Parakeet. `mlxwhisper`, the removed Whisper engine, does the same, and the doctor lists it as `bad_setting`. The Settings page writes it |
 | `STT_DIARIZER` | `speakrs` | `pyannote` forces the CPU path. Any other value prints a warning and keeps speakrs |
 | `STT_SPEAKRS_AHC` | `0.55` | The speakrs merge threshold. A value that is not a number 0 or above uses the default |
 | `STT_SPEAKRS_TIMEOUT_SEC` | `3600` | How long the speakrs helper may run on one file. A value that is not a whole number above 0 uses the default |

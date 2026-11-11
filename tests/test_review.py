@@ -523,6 +523,7 @@ def test_retranscribe_loads_no_model_it_does_not_list(sandbox, monkeypatch):
     every Whisper name, and any other engine not listed, is unknown."""
     from stt import retranscribe
     _no_cloud_keys(monkeypatch)
+    monkeypatch.delenv("STT_WHISPER_MLX_MODEL", raising=False)
     for engine in ("mlxwhisper:example-org/model", "mlxwhisper:", "mlxwhisper",
                    "mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper:/tmp/folder",
                    "Parakeet", "cloud:", "cloud:bogus"):

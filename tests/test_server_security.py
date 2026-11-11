@@ -1577,6 +1577,22 @@ def test_the_model_endpoint_accepts_only_a_listed_choice(running_server):
     assert "STT_ASR_BACKEND=parakeet" in envp.read_text()
 
 
+def test_the_settings_page_offers_no_whisper_engine(running_server):
+    """The Whisper engine is gone: the engine list and the update check
+    name no Whisper model, and a Whisper choice is refused like any
+    unlisted one. Only the OpenAI cloud engine's own model is Whisper."""
+    envp = config.PROJECT_DIR / "stt.env"
+    local = [c["id"] for c in srv.ASR_CHOICES if not c.get("cloud")]
+    assert local == ["parakeet"]
+    assert not [c for c in srv.ASR_CHOICES if c["id"].startswith("mlxwhisper")]
+    assert not [r for r in srv.MODEL_REPOS.values() if "whisper" in r]
+    for choice in ("mlxwhisper:large-v3", "mlxwhisper:turbo", "mlxwhisper"):
+        st, body = _post(running_server, "/api/model", {"model": choice})
+        assert st == 200 and body["ok"] is False, choice
+    assert not envp.exists() or "mlxwhisper" not in envp.read_text()
+    assert not envp.exists() or "STT_WHISPER_MLX_MODEL" not in envp.read_text()
+
+
 def test_deleting_a_queued_file_reports_the_twin_in_the_other_folder(running_server):
     """W11: a name that exists in BOTH watched folders resolves to the
     first-folder copy everywhere in the GUI, and queue_delete unlinked that one
