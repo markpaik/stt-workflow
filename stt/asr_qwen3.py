@@ -40,7 +40,8 @@ The steps, measured on 7 meetings against Scribe v2 (qa/asr-bench):
   once more with REPAIR_WIDEN words more on each side. Two passes. Scored
   on two meetings (qa/asr-trial): words 1 s or more off fell 45 percent
   (780 to 429), and the share with the right speaker rose 0.16 and 0.23
-  points, for about 3 percent more run time. Much of the rest is speech
+  points. On 7 meetings it adds about 13 percent to the ASR stage (2426 s
+  to 2734 s over six of them). Much of the rest is speech
   that Qwen did not transcribe: the aligner cannot skip it, so it pulls
   the next words into it.
 - Neighbouring chunks are joined by word time: inside the overlap, the
