@@ -48,8 +48,9 @@ log({{"cmd": "run", "name": name, "title": title, "argv": args}})
 if sc.get("sleep"):
     time.sleep(sc["sleep"])
 db = sqlite3.connect(sc["db"])
-# what the owner's Shortcut does: Find Recordings where Name is the input,
-# count them, delete only when there is exactly one, output the count
+# what the owner's Shortcut does: Find Recordings where Recording Name is
+# the Shortcut Input, count them, delete the Find result only when there is
+# exactly one, and output the count
 live = [r[0] for r in db.execute(
     "SELECT ZUNIQUEID FROM ZCLOUDRECORDING WHERE ZENCRYPTEDTITLE = ? "
     "AND ZEVICTIONDATE IS NULL", (title,))]

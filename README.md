@@ -262,18 +262,30 @@ change itself. Build it once:
 1. Open the Shortcuts app and make a new shortcut. Name it
    `STT Delete Voice Memo`. Another name works if you set
    `STT_VM_DELETE_SHORTCUT` to it.
-2. In the shortcut's details, turn on input so the first block reads
-   **Receive Text input**. The batch passes the memo's title as a text file.
-3. Add **Get Text from Input**, with **Shortcut Input** as its input.
-4. Add **Find Recordings** (Voice Memos). Add the filter **Name** **is**,
-   and choose the **Text** from step 3 as its value. Leave sorting and the
-   limit off.
-5. Add **Count**, counting **Items** in **Recordings** from step 4.
-6. Add **If**: **Count** **is** **1**. Inside the If, add
-   **Delete Recording** (Voice Memos) with **Recordings** from step 4. Leave
-   the Otherwise branch empty.
-7. After **End If**, add **Text** holding only the **Count** variable, then
-   **Stop and Output** that **Text**.
+2. **Receive** input: in the shortcut's details, turn on input. The batch
+   passes the memo's title as a text file. Under **If there's no input**,
+   choose **Stop and Respond**.
+3. Add **Find Recordings** (Voice Memos). Add the filter **Recording Name**
+   **is**, and choose **Shortcut Input** as its value. Leave sorting and
+   the limit off.
+4. Add **Count**, counting **Items** in **Recordings** (the result of
+   step 3).
+5. Add **If**: **Count** **is** **1**. Inside the If, add
+   **Delete Recordings** (Voice Memos), with the **Recordings** variable from
+   step 3 as its input.
+
+   > **Pick the variable, never a memo.** Tap the input field and choose
+   > the **Recordings** variable. It shows the Voice Memos icon. Do not
+   > choose a recording from the list of memos that opens there: a memo
+   > picked from that list is fixed into the Shortcut, and every run then
+   > deletes that one recording, whatever title the batch passes.
+6. Leave **Otherwise** empty, then **End If**.
+7. After **End If**, add **Stop and Output** with the **Count** variable.
+
+The Shortcut then reads, top to bottom: Receive input (Stop and Respond if
+there is none), Find Recordings where Recording Name is Shortcut Input,
+Count Items in Recordings, If Count is 1: Delete Recordings, Otherwise,
+End If, Stop and Output Count.
 
 Then let it run without a prompt, and keep deleted memos recoverable:
 

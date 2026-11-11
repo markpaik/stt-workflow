@@ -146,3 +146,19 @@ def test_no_published_file_installs_or_offers_the_removed_parakeet_engine():
     assert "STT_PUNCTUATE" not in README
     notice = (REPO / "NOTICE.md").read_text(encoding="utf-8")
     assert "no longer uses" in notice and "parakeet-mlx" not in notice
+
+
+def test_the_shortcut_steps_match_the_working_build():
+    """The README builds the delete Shortcut the way the owner's working
+    build does: Shortcut Input straight into Find Recordings, Delete
+    Recordings fed the Find result as a variable, never a memo picked from
+    the list, and the count as the output. Examples use synthetic titles."""
+    text = " ".join(_section("Removing memos from Voice Memos").split())
+    for step in ("**Stop and Respond**", "**Recording Name** **is**",
+                 "choose **Shortcut Input** as its value",
+                 "**Delete Recordings** (Voice Memos), with the **Recordings** variable",
+                 "**Pick the variable, never a memo.**", "the Voice Memos icon",
+                 "**Stop and Output** with the **Count** variable"):
+        assert step in text, step
+    assert "Get Text from Input" not in text
+    assert "STT delete test" in text
