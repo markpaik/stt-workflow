@@ -151,6 +151,19 @@ def test_a_new_meeting_lands_under_its_final_title_after_the_descriptions(
                                        order.index("stale"))
 
 
+def test_a_redo_updates_the_copy(drive, monkeypatch):
+    """A Redo is a batch run over one stored meeting (--force --files): the
+    pipeline rewrites its .txt, and the copy follows."""
+    base = "2026-08-05 Staff Huddle"
+    _tone(config.ICLOUD_DIR / f"{base}.m4a")
+    _meeting(base, line="Alex Rivera: the first pass.")
+    mirror.reconcile()
+    assert "the first pass." in (drive / f"{base}.txt").read_text()
+    assert _batch(monkeypatch, "--force", "--files", f"{base}.m4a") == 0
+    assert "Jordan Lee: new." in (drive / f"{base}.txt").read_text()
+    assert _names(drive) == [f"{base}.txt"]
+
+
 def test_a_dry_run_never_mirrors(drive, monkeypatch):
     _meeting(WEEKLY)
     assert _batch(monkeypatch, "--dry-run") == 0
