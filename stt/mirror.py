@@ -328,6 +328,7 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
     keep     ours and current
     blocked  a file the mirror did not write holds the meeting's name
     changed  ours, changed after the mirror wrote it: left as it is
+    strict   a strict meeting, which stays on this Mac (no file action)
 
     `bases` limits the pass to those meetings, matched by name and by
     meeting_id, so a rename finds the old file by the id. None is the
@@ -352,6 +353,7 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
     ops, desired = [], {}
     for m in metas:
         if m["strict"]:
+            ops.append(_op("strict", m["name"], base=m["base"]))
             continue
         cf = m["name"].casefold()
         if cf in desired:      # two names that differ in case only
