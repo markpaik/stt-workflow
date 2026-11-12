@@ -67,14 +67,18 @@ memo is a candidate only when all of these hold:
 - the memo is still live in the database (not in Recently Deleted).
 
 Before each delete, a fresh private copy of the database is read again. The
-Shortcut runs only when the memo is still live, its title is not blank, and
-no other memo, live or in Recently Deleted, has the same title (compared
-without case or extra spaces). Otherwise the memo is recorded as "needs a
-manual delete" with the reason. The Shortcut (STT_VM_DELETE_SHORTCUT, by
-default "STT Delete Voice Memo", built once by the owner) finds the
-recordings whose name is the title, deletes them only when it finds exactly
-one, and outputs the count. The code runs it with `/usr/bin/shortcuts run`
-and a timeout. No UI scripting, no AppleScript, and no write to the database.
+Shortcut runs only when the memo is still live, its title is not blank, its
+ZDURATION is a positive number, and no other memo, live or in Recently
+Deleted, has the same title (compared without case or extra spaces).
+Otherwise the memo is recorded as "needs a manual delete" with the reason.
+The Shortcut (STT_VM_DELETE_SHORTCUT, by default "STT Delete Voice Memo v2",
+built once by the owner) reads match.json: {"title", "min", "max"}, where
+min and max are the memo's ZDURATION minus and plus MATCH_WINDOW_SEC. It
+finds the recordings whose name is the title and whose length is greater
+than min and less than max (Find Recordings also finds memos in Recently
+Deleted), deletes them only when it finds exactly one, and outputs the
+count. The code runs it with `/usr/bin/shortcuts run` and a timeout. No UI
+scripting, no AppleScript, and no write to the database.
 
 After the Shortcut runs, a fresh copy is read again. Success means the
 memo's row now has ZEVICTIONDATE set (Recently Deleted), and no other memo
@@ -676,7 +680,12 @@ def doctor_findings() -> list:
 
 DELETE_SETTING = "STT_VM_DELETE_AFTER_INGEST"
 SHORTCUT_SETTING = "STT_VM_DELETE_SHORTCUT"
-SHORTCUT_DEFAULT = "STT Delete Voice Memo"
+SHORTCUT_DEFAULT = "STT Delete Voice Memo v2"
+# the Shortcut finds the recordings whose name is the title and whose length
+# lies strictly between min and max: the memo's ZDURATION minus and plus
+# this many seconds. Voice Memos reuses names, and Find Recordings also finds
+# memos in Recently Deleted, so a title alone often finds two.
+MATCH_WINDOW_SEC = 3.0
 _REAL_SHORTCUTS = Path("/usr/bin/shortcuts")
 # the binary that runs the Shortcut. Tests point this at a fake. The real one
 # acts on the REAL Voice Memos library, so _sandbox_refusal lets it run only
@@ -916,14 +925,27 @@ def _stored_duration(path):
     return provenance.probe_tags(path).get("duration")
 
 
+def _memo_length(row: dict):
+    """The memo's ZDURATION in seconds, or None when it is missing,
+    unreadable, or not positive."""
+    try:
+        d = float(row.get("duration"))
+    except (TypeError, ValueError):
+        return None
+    return d if math.isfinite(d) and d > 0 else None
+
+
 def _title_problem(row: dict, rows: list):
-    """Why the Shortcut must not run for this memo's title, or None. It
-    finds recordings by name, so the title must be one only this memo
-    holds. A memo in Recently Deleted counts too: a Shortcut that reached
-    it could erase it for good."""
+    """Why the Shortcut must not run for this memo, or None. It finds
+    recordings by name and length, so the title must not be blank and the
+    length must be known. The title must be one only this memo holds. A
+    memo in Recently Deleted counts too: a Shortcut that reached it could
+    erase it for good."""
     t = _norm_title(row.get("title"))
     if not t:
         return "blank_title"
+    if _memo_length(row) is None:
+        return "no_duration"
     same = [r for r in rows if r.get("uuid") != row.get("uuid")
             and _norm_title(r.get("title")) == t]
     if any(not r.get("deleted") for r in same):
@@ -935,6 +957,8 @@ def _title_problem(row: dict, rows: list):
 
 MANUAL_REASONS = {
     "blank_title": "the memo has no title, so the Shortcut cannot find it",
+    "no_duration": "Voice Memos has no length for the memo, so the Shortcut "
+                   "cannot find it by length",
     "duplicate_title": "another live memo has the same title",
     "title_in_recently_deleted": "a memo in Recently Deleted has the same title",
     "tries": "the Shortcut did not move it after several tries",
@@ -1003,15 +1027,27 @@ def _evaluate(uuid, ent, rec, row, store, library, now):
     return item
 
 
-def _run_shortcut(title: str) -> dict:
-    """Run the delete Shortcut once with the title as its input file.
-    Returns {outcome, output, detail}: outcome is ok (it output "1"),
-    output (it output something else), exit (non-zero exit), timeout, or
-    no_shortcuts (the binary could not start)."""
+def _match_input(title, duration) -> dict:
+    """What the Shortcut gets: the title, and the window around the memo's
+    length (ZDURATION) in seconds, rounded to 0.1 s. Its two Duration rows
+    are strict, so min and max themselves never match."""
+    d = float(duration)
+    return {"title": str(title), "min": round(d - MATCH_WINDOW_SEC, 1),
+            "max": round(d + MATCH_WINDOW_SEC, 1)}
+
+
+def _run_shortcut(title: str, duration) -> dict:
+    """Run the delete Shortcut once. Its input file is match.json (mode
+    600): {"title", "min", "max"} from _match_input. Returns {outcome,
+    output, detail}: outcome is ok (it output "1"), output (it output
+    something else), exit (non-zero exit), timeout, or no_shortcuts (the
+    binary could not start)."""
     with tempfile.TemporaryDirectory(prefix="stt-vmdel-") as tmp:
         os.chmod(tmp, 0o700)
-        inp, outp = Path(tmp) / "title.txt", Path(tmp) / "count.txt"
-        inp.write_text(str(title), encoding="utf-8")
+        inp, outp = Path(tmp) / "match.json", Path(tmp) / "count.txt"
+        fd = os.open(inp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_match_input(title, duration), ensure_ascii=False))
         os.chmod(inp, 0o600)
         cmd = [str(SHORTCUTS_BIN), "run", shortcut_name(),
                "--input-path", str(inp), "--output-path", str(outp)]
@@ -1288,7 +1324,7 @@ def _pass(out, store, dry_run, now, log, warn):
         _set_delete(u, {"status": "running", "at": _now_iso(), "tries": tries,
                         "title": title, "base": item["base"],
                         "next_at": now + BACKOFF_SEC[0]})
-        res = _run_shortcut(title)
+        res = _run_shortcut(title, row.get("duration"))
         verdict, vdetail = _verify(u, fresh, container,
                                    wait=res["outcome"] in ("ok", "timeout"))
         if verdict == "halt":
