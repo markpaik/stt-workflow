@@ -15,8 +15,8 @@ The dry run never runs the Shortcut and writes nothing. It may run
 
 --apply runs one pass even while the setting is off. It runs the same rules
 as the batch: a fresh read of the database before each delete, the title
-checks, the Shortcut, and the check afterwards. It refuses while a batch
-runs. A memo moves to Recently Deleted, never further.
+and length checks, the Shortcut, and the check afterwards. It refuses while
+a batch runs. A memo moves to Recently Deleted, never further.
 
 After a stop (a delete that left another memo missing, or a memo that left
 the database), look at Voice Memos and its Recently Deleted first, then run

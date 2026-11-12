@@ -236,16 +236,21 @@ memo only when all of these hold:
 - its meeting is still in the library, and the stored audio is there and
   runs within 2 seconds of the memo's own length;
 - the memo is still in Voice Memos and not in Recently Deleted;
-- its title is not blank, and no other memo has the same title, either live
-  or in Recently Deleted (letter case and extra spaces do not count).
+- its title is not blank, and Voice Memos has a length for it;
+- no other memo, live or in Recently Deleted, has the same title and a
+  length within 3.5 seconds of this memo's (letter case and extra spaces in
+  the title do not count). A memo with the same title and a clearly
+  different length does not stop the delete.
 
 The batch reads a fresh copy of the Voice Memos database right before each
 delete and again after it. A delete counts only when that memo is now in
-Recently Deleted and every other memo is where it was. A memo whose title
-is blank or shared waits for you to delete it by hand. A failed try waits
-30 minutes, then 2 hours, then 8 hours. After the fourth failure the memo
-waits for you too. If any other memo goes missing during a delete, every
-delete stops until you check Voice Memos and run
+Recently Deleted and every other memo is where it was. A memo with a blank
+title, with no length, or with a same-named twin of about the same length
+waits for you to delete it by hand. The batch checks it again on every
+run, so it moves by itself once the twin is gone or renamed. A failed try
+waits 30 minutes, then 2 hours, then 8 hours. After the fourth failure the
+memo waits for you too. If any other memo goes missing during a delete,
+every delete stops until you check Voice Memos and run
 `./run.sh py tools/vm_delete.py --clear-halt`.
 
 The batch log (`logs/stt.out.log`) gets one line for each memo it moves,
@@ -257,35 +262,82 @@ The real Shortcut runs only when the sync reads this Mac's own Voice Memos
 library, so a demo home under `STT_HOME` never deletes either.
 
 The batch deletes through a Shortcut, so the Voice Memos app makes each
-change itself. Build it once:
+change itself. The Shortcut finds the memo by its title and its length.
+Voice Memos names a new memo after the place where you record it, such as
+a street name and a number, so many memos share a name. Find Recordings
+also finds memos in Recently Deleted. A search by title alone often finds
+a processed memo and its same-named twin in Recently Deleted, counts 2,
+and deletes nothing. The length tells the two apart.
+
+For each memo, the batch passes the Shortcut a JSON file with the title and
+a window of 3 seconds on each side of the memo's length:
+
+```json
+{"title": "Budget Review", "min": 1197.0, "max": 1203.0}
+```
+
+Build the Shortcut once:
 
 1. Open the Shortcuts app and make a new shortcut. Name it
-   `STT Delete Voice Memo`. Another name works if you set
+   `STT Delete Voice Memo v2`. Another name works if you set
    `STT_VM_DELETE_SHORTCUT` to it.
-2. **Receive** input: in the shortcut's details, turn on input. The batch
-   passes the memo's title as a text file. Under **If there's no input**,
-   choose **Stop and Respond**.
-3. Add **Find Recordings** (Voice Memos). Add the filter **Recording Name**
-   **is**, and choose **Shortcut Input** as its value. Leave sorting and
-   the limit off.
-4. Add **Count**, counting **Items** in **Recordings** (the result of
-   step 3).
-5. Add **If**: **Count** **is** **1**. Inside the If, add
+2. **Receive** input: in the shortcut's details, turn on input. Under
+   **If there's no input**, choose **Stop and Respond**.
+3. Add **Get Dictionary from Input**, with **Shortcut Input** as its input.
+4. Add **Get Dictionary Value** three times, each set to **Value** for a
+   key in the **Dictionary** from step 3. The keys are `title`, `min` and
+   `max`, one per action. The key is the only text you type in the
+   Shortcut.
+5. Add **Find Recordings** (Voice Memos). Set it to **All** of the
+   following are true, and add three filters:
+   - **Recording Name** **is** the `title` value;
+   - **Duration** **is greater than** the `min` value, in **seconds**;
+   - **Duration** **is less than** the `max` value, in **seconds**.
+
+   Leave sorting and the limit off.
+
+   > **Use two Duration rows, never "is between".**
+   > **Duration** **is between** does not work in this action: the run
+   > stops with an error. The two rows work. Their limits are strict, so a
+   > length equal to `min` or `max` does not match.
+
+   > **Pick each value with Select Variable, never by typing.** Tap the
+   > value field, choose **Select Variable**, then tap the
+   > **Get Dictionary Value** block for that key (`title`, `min` or `max`).
+   > The field then shows that block's name, **Dictionary Value**. A value
+   > typed into the field is fixed into the Shortcut, and every run then
+   > searches for that text or number, whatever the batch passes.
+6. Add **Count**, counting **Items** in **Recordings** (the result of
+   step 5).
+7. Add **If**: **Count** **is** **1**. Inside the If, add
    **Delete Recordings** (Voice Memos), with the **Recordings** variable from
-   step 3 as its input.
+   step 5 as its input.
 
    > **Pick the variable, never a memo.** Tap the input field and choose
    > the **Recordings** variable. It shows the Voice Memos icon. Do not
    > choose a recording from the list of memos that opens there: a memo
    > picked from that list is fixed into the Shortcut, and every run then
    > deletes that one recording, whatever title the batch passes.
-6. Leave **Otherwise** empty, then **End If**.
-7. After **End If**, add **Stop and Output** with the **Count** variable.
+8. Leave **Otherwise** empty, then **End If**.
+9. After **End If**, add **Stop and Output** with the **Count** variable.
 
 The Shortcut then reads, top to bottom: Receive input (Stop and Respond if
-there is none), Find Recordings where Recording Name is Shortcut Input,
-Count Items in Recordings, If Count is 1: Delete Recordings, Otherwise,
-End If, Stop and Output Count.
+there is none), Get Dictionary from Input, Get Dictionary Value for
+`title`, `min` and `max`, Find Recordings where all of these are true
+(Recording Name is `title`, Duration is greater than `min` seconds,
+Duration is less than `max` seconds), Count Items in Recordings, If Count
+is 1: Delete Recordings, Otherwise, End If, Stop and Output Count.
+
+`shortcuts run` prints the count on standard output, and the batch reads it
+there. Only `1` counts as a delete. The batch passes no `--output-path`:
+with one, the Shortcut's output step failed and wrote no file, though the
+run still reported success. An input the Shortcut cannot read leaves every
+filter empty, so Find Recordings returns every recording. The count is
+then not 1, and nothing is deleted.
+
+If `stt.env` sets `STT_VM_DELETE_SHORTCUT` to the first build's name,
+`STT Delete Voice Memo`, remove that line. The first build reads a plain
+title, not the JSON file.
 
 Then let it run without a prompt, and keep deleted memos recoverable:
 
@@ -294,16 +346,26 @@ Then let it run without a prompt, and keep deleted memos recoverable:
 2. In Voice Memos, open Settings and check that **Clear Deleted** is a
    number of days. With **Immediately**, a delete erases the memo at once,
    and the batch stops every delete when it sees a memo leave the database.
-3. Test it once on a throwaway memo. Record a few seconds in Voice Memos,
-   title it `STT delete test`, and run:
+3. Test it once on a throwaway memo. Record about 10 seconds in Voice
+   Memos and title it `STT delete test v2`. First run a window that misses
+   its length:
 
    ```bash
-   printf 'STT delete test' > /tmp/stt-title.txt
-   shortcuts run "STT Delete Voice Memo" --input-path /tmp/stt-title.txt --output-path /tmp/stt-count.txt
-   cat /tmp/stt-count.txt
+   printf '{"title": "STT delete test v2", "min": 100, "max": 200}' > /tmp/stt-match.json
+   shortcuts run "STT Delete Voice Memo v2" --input-path /tmp/stt-match.json
    ```
 
-   It should print `1`, and the memo should be in Recently Deleted. If
+   It should print `0`, and the memo should stay. Then run a window around
+   its length:
+
+   ```bash
+   printf '{"title": "STT delete test v2", "min": 2, "max": 30}' > /tmp/stt-match.json
+   shortcuts run "STT Delete Voice Memo v2" --input-path /tmp/stt-match.json
+   ```
+
+   It should print `1`, and the memo should be in Recently Deleted. A `2`
+   means another memo with that title and a length in the window is in
+   Voice Memos or its Recently Deleted. Erase it, or use another title. If
    Shortcuts or Voice Memos asks for permission, choose **Always Allow**. A
    prompt that nobody answers makes the batch time out after 60 seconds.
 4. Preview the step with `./run.sh py tools/vm_delete.py`. It lists every
@@ -697,7 +759,7 @@ plain characters. A later line for the same key wins.
 | `STT_VOICEMEMOS_SINCE` | `2026-11-02` | The sync copies memos recorded on or after this day |
 | `STT_VOICEMEMOS_PLACES` | empty | Comma-separated place names that Voice Memos uses as default titles here, so they are not read as typed titles |
 | `STT_VM_DELETE_AFTER_INGEST` | `0` | `1` moves each memo the batch has stored to Recently Deleted in Voice Memos ([Removing memos from Voice Memos](#removing-memos-from-voice-memos)). Any value other than `0` or `1` prints a warning and stays off. `STT_VOICEMEMOS_SYNC=0` turns it off too |
-| `STT_VM_DELETE_SHORTCUT` | `STT Delete Voice Memo` | The name of the Shortcut that does the delete |
+| `STT_VM_DELETE_SHORTCUT` | `STT Delete Voice Memo v2` | The name of the Shortcut that does the delete. It matches a memo by title and length ([Removing memos from Voice Memos](#removing-memos-from-voice-memos)) |
 | `STT_MOVE_AFTER_SUCCESS` | `1` | `0` keeps the originals in the watched folder |
 | `STT_MIC_SPEAKER` | empty | Your name, so the recorder's microphone channel is labeled as you |
 
@@ -859,7 +921,8 @@ line that reverses them.
   tools/vm_delete.py` to see why. A `voicememos_shortcut_missing` finding
   from the doctor means the Shortcut is not installed under its name. A
   `voicememos_manual_delete` finding counts memos to delete by hand, most
-  often because two memos share a title. A `voicememos_delete_halted`
+  often because two memos share a title and about the same length
+  (`duplicate_title_and_length`). A `voicememos_delete_halted`
   finding means a delete left another memo missing: check Voice Memos and
   its Recently Deleted, then run `tools/vm_delete.py --clear-halt`.
 - **Every file fails with "Qwen3-ASR cannot run on this Mac".** The

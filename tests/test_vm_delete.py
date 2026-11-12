@@ -1,8 +1,8 @@
 """Voice Memos delete after ingest against a SYNTHETIC library and a FAKE
-`shortcuts` binary: the setting, every candidate rule, the title checks, the
-Shortcut's outcomes, the check afterwards, the stop, the doctor, the dry
-run, and the batch's end-of-run step. No test runs the real `shortcuts`.
-Every name and title here is synthetic."""
+`shortcuts` binary: the setting, every candidate rule, the title and length
+checks, the Shortcut's outcomes, the check afterwards, the stop, the
+doctor, the dry run, and the batch's end-of-run step. No test runs the
+real `shortcuts`. Every name and title here is synthetic."""
 import json
 import os
 import shutil
@@ -42,21 +42,53 @@ if args[:1] == ["list"]:
 if args[:1] != ["run"]:
     sys.exit(64)
 name = args[1]
-title = open(args[args.index("--input-path") + 1], encoding="utf-8").read()
-outp = args[args.index("--output-path") + 1]
-log({{"cmd": "run", "name": name, "title": title, "argv": args}})
+inp = args[args.index("--input-path") + 1]
+raw = open(inp, encoding="utf-8").read()
+# what the owner's v2 Shortcut does: Get Dictionary from Input, then Get
+# Dictionary Value for "title", "min" and "max". A value it cannot read
+# leaves that filter empty, so a malformed input finds every recording.
+try:
+    d = json.loads(raw)
+except ValueError:
+    d = None
+d = d if isinstance(d, dict) else {{}}
+def num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+title = d.get("title") if isinstance(d.get("title"), str) else None
+lo, hi = num(d.get("min")), num(d.get("max"))
+log({{"cmd": "run", "name": name, "title": title, "min": lo, "max": hi,
+      "raw": raw, "mode": oct(os.stat(inp).st_mode & 0o777), "argv": args}})
+if "--output-path" in args:
+    # what the real one did on the owner's Mac: the output action fails,
+    # no file is written, nothing is printed, and the run still exits 0
+    sys.exit(0)
 if sc.get("sleep"):
     time.sleep(sc["sleep"])
 db = sqlite3.connect(sc["db"])
-# what the owner's Shortcut does: Find Recordings where Recording Name is
-# the Shortcut Input, count them, delete the Find result only when there is
-# exactly one, and output the count
-live = [r[0] for r in db.execute(
-    "SELECT ZUNIQUEID FROM ZCLOUDRECORDING WHERE ZENCRYPTEDTITLE = ? "
-    "AND ZEVICTIONDATE IS NULL", (title,))]
-if len(live) == 1 and not sc.get("no_evict"):
-    db.execute("UPDATE ZCLOUDRECORDING SET ZEVICTIONDATE = ? WHERE ZUNIQUEID = ?",
-               ({evicted}, live[0]))
+# Find Recordings where ALL of these are true: Recording Name is title,
+# Duration is greater than min seconds, Duration is less than max seconds.
+# The limits are strict, and the search also finds memos in Recently
+# Deleted. Count them, delete the Find result only when there is exactly
+# one, and output the count.
+found = []
+for u, t, dur, ev in db.execute(
+        "SELECT ZUNIQUEID, ZENCRYPTEDTITLE, ZDURATION, ZEVICTIONDATE "
+        "FROM ZCLOUDRECORDING"):
+    if title is not None and t != title:
+        continue
+    if lo is not None and not (dur is not None and dur > lo):
+        continue
+    if hi is not None and not (dur is not None and dur < hi):
+        continue
+    found.append((u, ev))
+if len(found) == 1 and not sc.get("no_evict"):
+    u, ev = found[0]
+    if ev is None:
+        db.execute("UPDATE ZCLOUDRECORDING SET ZEVICTIONDATE = ? WHERE ZUNIQUEID = ?",
+                   ({evicted}, u))
+    else:
+        # the worst case: a memo in Recently Deleted is erased for good
+        db.execute("DELETE FROM ZCLOUDRECORDING WHERE ZUNIQUEID = ?", (u,))
 for u in sc.get("evict_also", []):
     db.execute("UPDATE ZCLOUDRECORDING SET ZEVICTIONDATE = ? WHERE ZUNIQUEID = ?",
                ({evicted}, u))
@@ -64,9 +96,10 @@ for u in sc.get("erase", []):
     db.execute("DELETE FROM ZCLOUDRECORDING WHERE ZUNIQUEID = ?", (u,))
 db.commit()
 db.close()
-out = sc.get("output", str(len(live)))
-if out is not None:
-    open(outp, "w").write(out)
+# the count goes to stdout, never to a file
+out = sc.get("output", str(len(found)))
+if out:
+    sys.stdout.write(out + "\n")
 sys.exit(sc.get("rc", 0))
 '''
 
@@ -228,8 +261,8 @@ def test_a_stored_memo_moves_to_recently_deleted(vm):
     runs = vm.calls()
     assert len(runs) == 1
     a = runs[0]["argv"]
-    assert a[:2] == ["run", "STT Delete Voice Memo"]
-    assert a[2] == "--input-path" and a[4] == "--output-path" and len(a) == 6
+    assert a[:2] == ["run", "STT Delete Voice Memo v2"]
+    assert a[2] == "--input-path" and len(a) == 4 and "--output-path" not in a
     assert runs[0]["title"] == "Budget Review"
     rows = _rows()
     assert rows["U-1"]["deleted"] and not rows["U-2"]["deleted"]
@@ -251,11 +284,59 @@ def test_the_shortcut_name_is_a_setting(vm, monkeypatch):
     assert vm.calls()[0]["name"] == "Sample Delete Memo"
 
 
-def test_the_input_file_holds_the_title_and_nothing_else(vm):
+def test_the_default_shortcut_is_v2(vm):
+    """The v2 Shortcut matches by title and length. With no setting, the
+    pass runs it under that name."""
+    assert voicememos.SHORTCUT_DEFAULT == "STT Delete Voice Memo v2"
+    assert voicememos.shortcut_name() == "STT Delete Voice Memo v2"
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    assert _pass()["deleted"]
+    assert vm.calls()[0]["name"] == "STT Delete Voice Memo v2"
+
+
+def test_the_input_file_is_json_with_the_title_and_the_window(vm):
     _lib([{"uuid": "U-1", "title": "Café Planning – Q3"}])
     _stored("U-1", "Café Planning – Q3")
     assert _pass()["deleted"]
-    assert vm.calls()[0]["title"] == "Café Planning – Q3"
+    run = vm.calls()[0]
+    assert json.loads(run["raw"]) == {"title": "Café Planning – Q3",
+                                      "min": 1197.0, "max": 1203.0}
+    assert run["title"] == "Café Planning – Q3"
+    assert run["mode"] == "0o600"
+    assert run["argv"][3].endswith("match.json")
+
+
+@pytest.mark.parametrize("dur,lo,hi", [(2064.2, 2061.2, 2067.2),
+                                       (1464.4, 1461.4, 1467.4),
+                                       (1200.04, 1197.0, 1203.0),
+                                       (1834.56, 1831.6, 1837.6)])
+def test_the_window_is_the_memo_length_plus_and_minus_three_seconds(vm, dur, lo, hi):
+    """min and max are ZDURATION minus and plus MATCH_WINDOW_SEC, rounded
+    to 0.1 s. The Shortcut's two Duration rows are strict, and the memo's
+    own length lies inside them."""
+    assert voicememos.MATCH_WINDOW_SEC == 3.0
+    assert voicememos._match_input("Budget Review", dur) == {
+        "title": "Budget Review", "min": lo, "max": hi}
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": dur}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = dur
+    assert _pass()["deleted"]
+    run = vm.calls()[0]
+    assert (run["min"], run["max"]) == (lo, hi) and lo < dur < hi
+
+
+def test_an_input_the_shortcut_cannot_read_deletes_nothing(vm, monkeypatch):
+    """A malformed input leaves every filter empty, so Find Recordings
+    returns every recording. The count is not 1, and nothing moves."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"},
+          {"uuid": "U-2", "title": "Staff Huddle"}])
+    _stored("U-1", "Budget Review")
+    monkeypatch.setattr(voicememos, "_match_input", lambda t, d: "not a dictionary")
+    r = _pass()
+    assert r["failed"] and _rec("U-1")["reason"] == "output"
+    assert "'2'" in _rec("U-1")["detail"]
+    assert not any(x["deleted"] for x in _rows().values())
 
 
 def test_a_renamed_meeting_is_found_by_its_id(vm):
@@ -469,7 +550,7 @@ def test_a_schema_without_the_recently_deleted_column_stops_the_delete(vm):
 # ---------- the title checks before each delete ----------
 
 @pytest.mark.parametrize("other", ["Budget Review", "budget  review", " Budget Review "])
-def test_a_duplicate_title_needs_a_manual_delete(vm, other):
+def test_a_live_twin_of_the_same_length_needs_a_manual_delete(vm, other):
     _lib([{"uuid": "U-1", "title": "Budget Review"}, {"uuid": "U-2", "title": other}])
     _stored("U-1", "Budget Review")
     r = _pass()
@@ -477,17 +558,90 @@ def test_a_duplicate_title_needs_a_manual_delete(vm, other):
     rows = _rows()
     assert not rows["U-1"]["deleted"] and not rows["U-2"]["deleted"]
     rec = _rec("U-1")
-    assert (rec["status"], rec["reason"]) == ("manual", "duplicate_title")
-    assert any("needs a manual delete" in ln for ln in r["lines"])
+    assert (rec["status"], rec["reason"]) == ("manual", "duplicate_title_and_length")
+    assert rec["retry"] is True
+    assert any("needs a manual delete: another memo, live or in Recently Deleted, "
+               "has the same title and about the same length" in ln for ln in r["lines"])
 
 
-def test_a_same_title_in_recently_deleted_needs_a_manual_delete(vm):
-    _lib([{"uuid": "U-1", "title": "Budget Review"},
-          {"uuid": "U-OLD", "title": "Budget Review", "evicted": True}])
+@pytest.mark.parametrize("twin", [1200.0, 1202.0, 1197.0, 1203.5, 1196.5, None])
+@pytest.mark.parametrize("evicted", [True, False])
+def test_a_twin_of_about_the_same_length_needs_a_manual_delete(vm, twin, evicted):
+    """A same-named memo whose length lies within MATCH_WINDOW_SEC + 0.5 s
+    of this memo's could fall inside the Shortcut's window, live or in
+    Recently Deleted. A twin with no length counts too. No Shortcut runs."""
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": 1200.0},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": twin, "evicted": evicted}])
     _stored("U-1", "Budget Review")
     _pass()
     assert vm.calls() == []
-    assert _rec("U-1")["reason"] == "title_in_recently_deleted"
+    rows = _rows()
+    assert not rows["U-1"]["deleted"] and rows["U-OLD"]["deleted"] is evicted
+    assert (_rec("U-1")["status"], _rec("U-1")["reason"]) == (
+        "manual", "duplicate_title_and_length")
+
+
+@pytest.mark.parametrize("twin", [1464.4, 1203.6, 1196.4, 600.0])
+@pytest.mark.parametrize("evicted", [True, False])
+def test_a_twin_of_a_different_length_no_longer_blocks_the_delete(vm, twin, evicted):
+    """The owner's case: a live memo of 2064.2 s and a Recently Deleted twin
+    of 1464.4 s, both named after one place. The Shortcut's window finds
+    only the live memo, so the delete goes ahead and the twin stays where
+    it was."""
+    dur = 2064.2 if twin == 1464.4 else 1200.0
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": dur},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": twin, "evicted": evicted}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = dur
+    r = _pass()
+    assert r["status"] == "ok" and [d["title"] for d in r["deleted"]] == ["Budget Review"]
+    run = vm.calls()
+    assert len(run) == 1 and (run[0]["min"], run[0]["max"]) == (
+        round(dur - 3.0, 1), round(dur + 3.0, 1))
+    rows = _rows()
+    assert rows["U-1"]["deleted"] and rows["U-OLD"]["deleted"] is evicted
+    assert _rec("U-1")["status"] == "deleted"
+
+
+@pytest.mark.parametrize("old", ["duplicate_title", "title_in_recently_deleted"])
+@pytest.mark.parametrize("retry", [True, None])
+def test_a_manual_delete_under_the_old_title_rule_is_checked_again(vm, capsys, old, retry):
+    """A state record from the title-only rule still shows its reason, and
+    the next pass checks the memo again under the title and length rule.
+    Its twin has a clearly different length now, so the memo moves."""
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": 2064.2},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": 1464.4,
+           "evicted": old == "title_in_recently_deleted"}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = 2064.2
+    rec = {"status": "manual", "reason": old, "detail": voicememos.MANUAL_REASONS[old],
+           "at": "2026-11-10T12:00:00", "title": "Budget Review", "base": base}
+    if retry:
+        rec["retry"] = True
+    voicememos._set_delete("U-1", rec)
+    found = [f for f in doctor.check(registry=False) if f.kind == "voicememos_manual_delete"]
+    assert found and f"{old} 1" in found[0].detail
+    assert _tool("--dry-run") == 0
+    assert "Budget Review: would move to Recently Deleted" in capsys.readouterr().out
+    r = _pass()
+    assert [d["title"] for d in r["deleted"]] == ["Budget Review"]
+    assert _rec("U-1")["status"] == "deleted" and _rows()["U-1"]["deleted"]
+    assert "voicememos_manual_delete" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_manual_delete_under_the_old_rule_takes_the_new_reason(vm):
+    """The twin still has the same length: the memo stays a manual delete,
+    now under the new reason, and the owner is told once."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"},
+          {"uuid": "U-OLD", "title": "Budget Review", "evicted": True}])
+    base = _stored("U-1", "Budget Review")
+    voicememos._set_delete("U-1", {"status": "manual", "reason": "title_in_recently_deleted",
+                                   "at": "2026-11-10T12:00:00", "title": "Budget Review",
+                                   "base": base})
+    r = _pass()
+    assert vm.calls() == [] and r["manual"]
+    assert (_rec("U-1")["reason"], _rec("U-1")["retry"]) == ("duplicate_title_and_length", True)
+    assert _pass()["manual"] == []
 
 
 @pytest.mark.parametrize("title", ["", "   ", None])
@@ -497,6 +651,38 @@ def test_a_blank_title_needs_a_manual_delete(vm, title):
     _pass()
     assert vm.calls() == []
     assert (_rec("U-1")["status"], _rec("U-1")["reason"]) == ("manual", "blank_title")
+
+
+@pytest.mark.parametrize("dur", [0.0, -1.0])
+def test_a_memo_with_no_length_needs_a_manual_delete(vm, dur):
+    """The Shortcut finds the memo by its length, so a length that is not
+    positive leaves it nothing to match."""
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": dur}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = dur                  # the stored copy agrees, so it is a candidate
+    r = _pass()
+    assert vm.calls() == [] and not _rows()["U-1"]["deleted"]
+    rec = _rec("U-1")
+    assert (rec["status"], rec["reason"], rec["retry"]) == ("manual", "no_duration", True)
+    assert any("Voice Memos has no length for the memo" in ln for ln in r["lines"])
+
+
+def test_a_length_lost_in_the_fresh_read_blocks_the_delete(vm, monkeypatch):
+    """ZDURATION reads NULL in the copy right before the delete: no
+    Shortcut runs, and the memo needs a manual delete."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    real = voicememos.read_rows
+    reads = []
+
+    def rows(*a, **k):
+        reads.append(1)
+        if len(reads) == 2:
+            _lib([{"uuid": "U-1", "title": "Budget Review", "dur": None}])
+        return real(*a, **k)
+    monkeypatch.setattr(voicememos, "read_rows", rows)
+    _pass()
+    assert vm.calls() == [] and _rec("U-1")["reason"] == "no_duration"
 
 
 def test_a_title_problem_found_in_the_fresh_read_blocks_the_delete(vm, monkeypatch):
@@ -515,7 +701,7 @@ def test_a_title_problem_found_in_the_fresh_read_blocks_the_delete(vm, monkeypat
         return real(*a, **k)
     monkeypatch.setattr(voicememos, "read_rows", rows)
     _pass()
-    assert vm.calls() == [] and _rec("U-1")["reason"] == "duplicate_title"
+    assert vm.calls() == [] and _rec("U-1")["reason"] == "duplicate_title_and_length"
 
 
 def test_a_manual_delete_clears_once_the_title_is_unique_again(vm):
@@ -572,6 +758,36 @@ def test_an_output_that_is_not_one_is_a_failure_with_a_backoff(vm, output):
     vm.set(no_evict=False)
     assert _pass(now=t0 + voicememos.BACKOFF_SEC[0] + 1)["deleted"]
     assert _rec("U-1")["tries"] == 2
+
+
+def test_an_empty_stdout_with_exit_zero_is_a_failure(vm):
+    """The run exits 0 and prints nothing, and the memo has not moved. That
+    is no success: the memo is a failure with a backoff, never deleted."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    vm.set(output="", no_evict=True)
+    t0 = 1_900_000_000.0
+    r = _pass(now=t0)
+    assert len(vm.calls()) == 1 and r["failed"] and r["deleted"] == []
+    rec = _rec("U-1")
+    assert (rec["status"], rec["reason"], rec["tries"]) == ("failed", "output", 1)
+    assert rec["detail"] == "the Shortcut printed nothing on stdout, not '1'"
+    assert rec["next_at"] == t0 + voicememos.BACKOFF_SEC[0]
+    assert not _rows()["U-1"]["deleted"]
+    assert any("printed nothing on stdout" in ln for ln in r["lines"])
+
+
+def test_the_count_is_read_from_stdout_and_no_output_file_is_asked_for(vm):
+    """The fake prints the count, as the real one does, and writes no file.
+    It also acts as the real one did with --output-path: it prints nothing,
+    so a command that asked for an output file would fail here."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    r = _pass()
+    assert r["deleted"] and _rec("U-1")["status"] == "deleted"
+    assert "--output-path" not in vm.calls()[0]["argv"]
+    assert sorted(p.name for p in vm.dir.iterdir()) == ["calls.jsonl", "scenario.json",
+                                                        "shortcuts"]
 
 
 def test_a_timeout_is_a_failure_and_ends_the_pass(vm, monkeypatch):
@@ -734,7 +950,8 @@ def test_the_doctor_counts_manual_deletes_without_titles(vm):
     found = [f for f in doctor.check(registry=False) if f.kind == "voicememos_manual_delete"]
     assert len(found) == 1
     assert found[0].detail.startswith("2 memo(s) to delete by hand")
-    assert "blank_title 1" in found[0].detail and "duplicate_title 1" in found[0].detail
+    assert "blank_title 1" in found[0].detail
+    assert "duplicate_title_and_length 1" in found[0].detail
     assert "Budget Review" not in found[0].detail
 
 
@@ -768,8 +985,9 @@ def test_the_dry_run_lists_what_would_happen_and_writes_nothing(vm, capsys):
     assert voicememos.state_path().read_bytes() == before
     assert not any(r["deleted"] for r in _rows().values())
     assert "would delete (1):" in out and "Budget Review: would move to Recently Deleted" in out
-    assert "Staff Huddle: needs a manual delete: another live memo has the same title" in out
-    assert 'Shortcut "STT Delete Voice Memo": installed' in out
+    assert ("Staff Huddle: needs a manual delete: another memo, live or in Recently "
+            "Deleted, has the same title and about the same length") in out
+    assert 'Shortcut "STT Delete Voice Memo v2": installed' in out
 
 
 def test_the_dry_run_works_with_the_setting_off(vm, monkeypatch, capsys):
