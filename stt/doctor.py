@@ -49,8 +49,12 @@ stt.env value that cannot be read and is replaced by its default
 speakrs helper, model set or sandbox-exec that is missing so pyannote
 runs instead (`diarizer_fallback`), STT_VERIFY=1 with no second local
 engine to compare with (`verify_no_second_engine`), Qwen3-ASR, the local
-engine, not able to run here, so its files fail (`asr_unavailable`), and
-(with deep=True) a stored duration longer than the audio.
+engine, not able to run here, so its files fail (`asr_unavailable`), a
+transcript mirror folder (STT_MIRROR_DIR) that is set but missing or not
+writable (`mirror_unavailable`), a file the mirror wrote that changed
+after (`mirror_changed`), a file the mirror did not write that holds a
+meeting's name (`mirror_blocked`), and (with deep=True) a stored duration
+longer than the audio.
 """
 import hashlib
 import json
@@ -533,6 +537,13 @@ def check(store=None, voiceprints_dir=None, deep=False, registry=True) -> list:
         out.append(Finding(kind, "STT_VERIFY", detail, False))
     for kind, detail in asr_findings():
         out.append(Finding(kind, "STT_ASR_BACKEND", detail, False))
+    from . import mirror
+    try:
+        for kind, subject, detail in mirror.doctor_findings():
+            out.append(Finding(kind, subject, detail, False))
+    except Exception as e:
+        out.append(Finding("mirror_unavailable", mirror.SETTING,
+                           f"the mirror could not be checked ({type(e).__name__})", False))
     return out
 
 

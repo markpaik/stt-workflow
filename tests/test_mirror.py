@@ -458,3 +458,72 @@ def test_the_summary_line(drive):
     r = mirror.reconcile()
     assert mirror.summary_line(r) == "mirror: 1 written, 0 updated, 0 removed"
     assert mirror.summary_line(mirror.reconcile()) is None
+
+
+# ---------- the doctor ----------
+
+def _mirror_findings():
+    from stt import doctor
+    return [f for f in doctor.check(registry=False)
+            if f.kind.startswith("mirror_") or f.subject == "STT_MIRROR_DIR"]
+
+
+def test_the_doctor_says_nothing_while_the_mirror_is_off(sandbox):
+    _meeting(WEEKLY)
+    assert _mirror_findings() == []
+
+
+def test_the_doctor_reports_a_set_folder_that_is_missing(sandbox, tmp_path_factory):
+    d = tmp_path_factory.mktemp("away") / "Meeting Transcripts"
+    (sandbox / "stt.env").write_text(f"STT_MIRROR_DIR={d}\n")
+    (f,) = _mirror_findings()
+    assert (f.kind, f.subject, f.fixable) == ("mirror_unavailable", "STT_MIRROR_DIR", False)
+    assert "is missing or not a folder" in f.detail
+
+
+def test_the_doctor_reports_a_folder_that_is_not_writable(drive):
+    os.chmod(drive, 0o500)
+    try:
+        (f,) = _mirror_findings()
+    finally:
+        os.chmod(drive, 0o700)
+    assert f.kind == "mirror_unavailable" and "not writable" in f.detail
+
+
+def test_the_doctor_reports_a_bad_value_as_a_bad_setting(sandbox):
+    (sandbox / "stt.env").write_text(f"STT_MIRROR_DIR={sandbox / 'meetings'}\n")
+    (f,) = _mirror_findings()
+    assert f.kind == "bad_setting" and "inside the meetings library" in f.detail
+
+
+def test_the_doctor_reports_changed_and_blocked_files_and_writes_nothing(drive, sandbox):
+    _meeting(WEEKLY)
+    _meeting(BUDGET)
+    (drive / f"{BUDGET}.txt").write_text("typed by hand")
+    mirror.reconcile()
+    (drive / f"{WEEKLY}.txt").write_text("edited in Drive")
+    config.meeting_file(WEEKLY, ".txt").write_text(_txt(WEEKLY, "Alex Rivera: v2."))
+    state = (sandbox / mirror.STATE_NAME).read_bytes()
+    files = {n: (drive / n).read_bytes() for n in _names(drive)}
+    got = {(f.kind, f.subject) for f in _mirror_findings()}
+    assert got == {("mirror_changed", f"{WEEKLY}.txt"),
+                   ("mirror_blocked", f"{BUDGET}.txt")}
+    assert (sandbox / mirror.STATE_NAME).read_bytes() == state
+    assert {n: (drive / n).read_bytes() for n in _names(drive)} == files
+
+
+def test_a_clean_mirror_has_no_finding(drive):
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    assert _mirror_findings() == []
+
+
+def test_the_doctor_cli_prints_the_mirror_findings(drive, capsys, monkeypatch):
+    from pathlib import Path
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "tools"))
+    import doctor as doctor_cli
+    _meeting(WEEKLY)
+    (drive / f"{WEEKLY}.txt").write_text("typed by hand")
+    doctor_cli.main(["check"])
+    out = capsys.readouterr().out
+    assert f"mirror_blocked       {WEEKLY}.txt: a file the mirror did not write" in out
