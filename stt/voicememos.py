@@ -69,8 +69,14 @@ memo is a candidate only when all of these hold:
 Before each delete, a fresh private copy of the database is read again. The
 Shortcut runs only when the memo is still live, its title is not blank, its
 ZDURATION is a positive number, and no other memo, live or in Recently
-Deleted, has the same title (compared without case or extra spaces).
-Otherwise the memo is recorded as "needs a manual delete" with the reason.
+Deleted, has the same title (compared without case or extra spaces) and a
+length within TWIN_SLACK_SEC (MATCH_WINDOW_SEC + 0.5 s) of this memo's. A
+same-named memo of a clearly different length does not block the delete:
+the Shortcut's length window leaves it out. Otherwise the memo is recorded
+as "needs a manual delete" with the reason (duplicate_title_and_length,
+blank_title, or no_duration), and every pass checks it again. A manual
+delete recorded under the old title-only reasons (duplicate_title,
+title_in_recently_deleted) is checked again under this rule.
 The Shortcut (STT_VM_DELETE_SHORTCUT, by default "STT Delete Voice Memo v2",
 built once by the owner) reads match.json: {"title", "min", "max"}, where
 min and max are the memo's ZDURATION minus and plus MATCH_WINDOW_SEC. It
@@ -672,8 +678,9 @@ def doctor_findings() -> list:
 #   gone     no longer in the database at all. Never touched again
 #   failed   a try that did not verify; retried after `next_at`
 #   manual   needs a manual delete in Voice Memos, with the reason. A title
-#            problem is checked again on every pass (retry=True). A memo that
-#            failed MAX_DELETE_TRIES times, or whose try stopped every delete,
+#            or length problem is checked again on every pass (retry=True,
+#            or a reason in RECHECK_REASONS). A memo that failed
+#            MAX_DELETE_TRIES times, or whose try stopped every delete,
 #            waits for the owner (retry=False)
 #
 # `delete_halt` (top level) stops every delete until the owner clears it.
@@ -686,6 +693,9 @@ SHORTCUT_DEFAULT = "STT Delete Voice Memo v2"
 # this many seconds. Voice Memos reuses names, and Find Recordings also finds
 # memos in Recently Deleted, so a title alone often finds two.
 MATCH_WINDOW_SEC = 3.0
+# another memo with the same title and a length this close could fall inside
+# that window (min and max are rounded to 0.1 s), so the delete is refused
+TWIN_SLACK_SEC = MATCH_WINDOW_SEC + 0.5
 _REAL_SHORTCUTS = Path("/usr/bin/shortcuts")
 # the binary that runs the Shortcut. Tests point this at a fake. The real one
 # acts on the REAL Voice Memos library, so _sandbox_refusal lets it run only
@@ -938,20 +948,25 @@ def _memo_length(row: dict):
 def _title_problem(row: dict, rows: list):
     """Why the Shortcut must not run for this memo, or None. It finds
     recordings by name and length, so the title must not be blank and the
-    length must be known. The title must be one only this memo holds. A
-    memo in Recently Deleted counts too: a Shortcut that reached it could
-    erase it for good."""
+    length must be known. No other memo may have the same title (without
+    case or extra spaces) and a length within TWIN_SLACK_SEC of this
+    memo's: the Shortcut could find it too. A memo in Recently Deleted
+    counts too: a Shortcut that reached it could erase it for good. A
+    same-named memo with no readable length counts as a twin, because
+    nothing says it lies outside the window. A same-named memo of a
+    clearly different length does not block the delete."""
     t = _norm_title(row.get("title"))
     if not t:
         return "blank_title"
-    if _memo_length(row) is None:
+    dur = _memo_length(row)
+    if dur is None:
         return "no_duration"
-    same = [r for r in rows if r.get("uuid") != row.get("uuid")
-            and _norm_title(r.get("title")) == t]
-    if any(not r.get("deleted") for r in same):
-        return "duplicate_title"
-    if same:
-        return "title_in_recently_deleted"
+    for r in rows:
+        if r.get("uuid") == row.get("uuid") or _norm_title(r.get("title")) != t:
+            continue
+        other = _memo_length(r)
+        if other is None or abs(other - dur) <= TWIN_SLACK_SEC:
+            return "duplicate_title_and_length"
     return None
 
 
@@ -959,11 +974,28 @@ MANUAL_REASONS = {
     "blank_title": "the memo has no title, so the Shortcut cannot find it",
     "no_duration": "Voice Memos has no length for the memo, so the Shortcut "
                    "cannot find it by length",
+    "duplicate_title_and_length": "another memo, live or in Recently Deleted, has "
+                                  "the same title and about the same length",
+    # reasons of the old title-only rule. Old state records still show them,
+    # and the next pass checks such a memo again under the rule above.
     "duplicate_title": "another live memo has the same title",
     "title_in_recently_deleted": "a memo in Recently Deleted has the same title",
     "tries": "the Shortcut did not move it after several tries",
     "halt": "deletes stopped after its try; check it in Voice Memos",
 }
+
+
+# a manual delete under one of these reasons is checked again on every
+# pass, with or without retry=True: the title and length rule, and the old
+# title-only rule it replaced
+RECHECK_REASONS = ("blank_title", "no_duration", "duplicate_title_and_length",
+                   "duplicate_title", "title_in_recently_deleted")
+
+
+def _rechecked(rec: dict) -> bool:
+    """True for a manual delete that the next pass checks again."""
+    return (rec.get("status") == "manual"
+            and bool(rec.get("retry") or rec.get("reason") in RECHECK_REASONS))
 
 
 def _evaluate(uuid, ent, rec, row, store, library, now):
@@ -991,7 +1023,7 @@ def _evaluate(uuid, ent, rec, row, store, library, now):
         item["state"] = "late" if status in _TRIED else "owner"
         item["base"] = rec.get("base")
         return item
-    if status == "manual" and not rec.get("retry"):
+    if status == "manual" and not _rechecked(rec):
         item.update(state="manual", reason=rec.get("reason"), detail=rec.get("detail"))
         return item
     if status in _TRIED and now < float(rec.get("next_at") or 0):
@@ -1260,7 +1292,7 @@ def _pass(out, store, dry_run, now, log, warn):
         elif st == "gone":
             _set_delete(u, {"status": "gone", "at": _now_iso(),
                             "title": item["title"], "was": prev.get("status")})
-        elif st == "waiting" and prev.get("status") == "manual" and prev.get("retry"):
+        elif st == "waiting" and _rechecked(prev):
             # a title problem no longer matters: a candidate rule fails now
             # (the meeting left the library, say), so the memo must stay
             _forget_delete(u)

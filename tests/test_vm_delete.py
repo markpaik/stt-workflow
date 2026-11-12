@@ -1,8 +1,8 @@
 """Voice Memos delete after ingest against a SYNTHETIC library and a FAKE
-`shortcuts` binary: the setting, every candidate rule, the title checks, the
-Shortcut's outcomes, the check afterwards, the stop, the doctor, the dry
-run, and the batch's end-of-run step. No test runs the real `shortcuts`.
-Every name and title here is synthetic."""
+`shortcuts` binary: the setting, every candidate rule, the title and length
+checks, the Shortcut's outcomes, the check afterwards, the stop, the
+doctor, the dry run, and the batch's end-of-run step. No test runs the
+real `shortcuts`. Every name and title here is synthetic."""
 import json
 import os
 import shutil
@@ -546,7 +546,7 @@ def test_a_schema_without_the_recently_deleted_column_stops_the_delete(vm):
 # ---------- the title checks before each delete ----------
 
 @pytest.mark.parametrize("other", ["Budget Review", "budget  review", " Budget Review "])
-def test_a_duplicate_title_needs_a_manual_delete(vm, other):
+def test_a_live_twin_of_the_same_length_needs_a_manual_delete(vm, other):
     _lib([{"uuid": "U-1", "title": "Budget Review"}, {"uuid": "U-2", "title": other}])
     _stored("U-1", "Budget Review")
     r = _pass()
@@ -554,17 +554,90 @@ def test_a_duplicate_title_needs_a_manual_delete(vm, other):
     rows = _rows()
     assert not rows["U-1"]["deleted"] and not rows["U-2"]["deleted"]
     rec = _rec("U-1")
-    assert (rec["status"], rec["reason"]) == ("manual", "duplicate_title")
-    assert any("needs a manual delete" in ln for ln in r["lines"])
+    assert (rec["status"], rec["reason"]) == ("manual", "duplicate_title_and_length")
+    assert rec["retry"] is True
+    assert any("needs a manual delete: another memo, live or in Recently Deleted, "
+               "has the same title and about the same length" in ln for ln in r["lines"])
 
 
-def test_a_same_title_in_recently_deleted_needs_a_manual_delete(vm):
-    _lib([{"uuid": "U-1", "title": "Budget Review"},
-          {"uuid": "U-OLD", "title": "Budget Review", "evicted": True}])
+@pytest.mark.parametrize("twin", [1200.0, 1202.0, 1197.0, 1203.5, 1196.5, None])
+@pytest.mark.parametrize("evicted", [True, False])
+def test_a_twin_of_about_the_same_length_needs_a_manual_delete(vm, twin, evicted):
+    """A same-named memo whose length lies within MATCH_WINDOW_SEC + 0.5 s
+    of this memo's could fall inside the Shortcut's window, live or in
+    Recently Deleted. A twin with no length counts too. No Shortcut runs."""
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": 1200.0},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": twin, "evicted": evicted}])
     _stored("U-1", "Budget Review")
     _pass()
     assert vm.calls() == []
-    assert _rec("U-1")["reason"] == "title_in_recently_deleted"
+    rows = _rows()
+    assert not rows["U-1"]["deleted"] and rows["U-OLD"]["deleted"] is evicted
+    assert (_rec("U-1")["status"], _rec("U-1")["reason"]) == (
+        "manual", "duplicate_title_and_length")
+
+
+@pytest.mark.parametrize("twin", [1464.4, 1203.6, 1196.4, 600.0])
+@pytest.mark.parametrize("evicted", [True, False])
+def test_a_twin_of_a_different_length_no_longer_blocks_the_delete(vm, twin, evicted):
+    """The owner's case: a live memo of 2064.2 s and a Recently Deleted twin
+    of 1464.4 s, both named after one place. The Shortcut's window finds
+    only the live memo, so the delete goes ahead and the twin stays where
+    it was."""
+    dur = 2064.2 if twin == 1464.4 else 1200.0
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": dur},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": twin, "evicted": evicted}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = dur
+    r = _pass()
+    assert r["status"] == "ok" and [d["title"] for d in r["deleted"]] == ["Budget Review"]
+    run = vm.calls()
+    assert len(run) == 1 and (run[0]["min"], run[0]["max"]) == (
+        round(dur - 3.0, 1), round(dur + 3.0, 1))
+    rows = _rows()
+    assert rows["U-1"]["deleted"] and rows["U-OLD"]["deleted"] is evicted
+    assert _rec("U-1")["status"] == "deleted"
+
+
+@pytest.mark.parametrize("old", ["duplicate_title", "title_in_recently_deleted"])
+@pytest.mark.parametrize("retry", [True, None])
+def test_a_manual_delete_under_the_old_title_rule_is_checked_again(vm, capsys, old, retry):
+    """A state record from the title-only rule still shows its reason, and
+    the next pass checks the memo again under the title and length rule.
+    Its twin has a clearly different length now, so the memo moves."""
+    _lib([{"uuid": "U-1", "title": "Budget Review", "dur": 2064.2},
+          {"uuid": "U-OLD", "title": "Budget Review", "dur": 1464.4,
+           "evicted": old == "title_in_recently_deleted"}])
+    base = _stored("U-1", "Budget Review")
+    vm.durs[base] = 2064.2
+    rec = {"status": "manual", "reason": old, "detail": voicememos.MANUAL_REASONS[old],
+           "at": "2026-11-10T12:00:00", "title": "Budget Review", "base": base}
+    if retry:
+        rec["retry"] = True
+    voicememos._set_delete("U-1", rec)
+    found = [f for f in doctor.check(registry=False) if f.kind == "voicememos_manual_delete"]
+    assert found and f"{old} 1" in found[0].detail
+    assert _tool("--dry-run") == 0
+    assert "Budget Review: would move to Recently Deleted" in capsys.readouterr().out
+    r = _pass()
+    assert [d["title"] for d in r["deleted"]] == ["Budget Review"]
+    assert _rec("U-1")["status"] == "deleted" and _rows()["U-1"]["deleted"]
+    assert "voicememos_manual_delete" not in {f.kind for f in doctor.check(registry=False)}
+
+
+def test_a_manual_delete_under_the_old_rule_takes_the_new_reason(vm):
+    """The twin still has the same length: the memo stays a manual delete,
+    now under the new reason, and the owner is told once."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"},
+          {"uuid": "U-OLD", "title": "Budget Review", "evicted": True}])
+    base = _stored("U-1", "Budget Review")
+    voicememos._set_delete("U-1", {"status": "manual", "reason": "title_in_recently_deleted",
+                                   "at": "2026-11-10T12:00:00", "title": "Budget Review",
+                                   "base": base})
+    r = _pass()
+    assert vm.calls() == [] and r["manual"]
+    assert (_rec("U-1")["reason"], _rec("U-1")["retry"]) == ("duplicate_title_and_length", True)
+    assert _pass()["manual"] == []
 
 
 @pytest.mark.parametrize("title", ["", "   ", None])
@@ -624,7 +697,7 @@ def test_a_title_problem_found_in_the_fresh_read_blocks_the_delete(vm, monkeypat
         return real(*a, **k)
     monkeypatch.setattr(voicememos, "read_rows", rows)
     _pass()
-    assert vm.calls() == [] and _rec("U-1")["reason"] == "duplicate_title"
+    assert vm.calls() == [] and _rec("U-1")["reason"] == "duplicate_title_and_length"
 
 
 def test_a_manual_delete_clears_once_the_title_is_unique_again(vm):
@@ -843,7 +916,8 @@ def test_the_doctor_counts_manual_deletes_without_titles(vm):
     found = [f for f in doctor.check(registry=False) if f.kind == "voicememos_manual_delete"]
     assert len(found) == 1
     assert found[0].detail.startswith("2 memo(s) to delete by hand")
-    assert "blank_title 1" in found[0].detail and "duplicate_title 1" in found[0].detail
+    assert "blank_title 1" in found[0].detail
+    assert "duplicate_title_and_length 1" in found[0].detail
     assert "Budget Review" not in found[0].detail
 
 
@@ -877,7 +951,8 @@ def test_the_dry_run_lists_what_would_happen_and_writes_nothing(vm, capsys):
     assert voicememos.state_path().read_bytes() == before
     assert not any(r["deleted"] for r in _rows().values())
     assert "would delete (1):" in out and "Budget Review: would move to Recently Deleted" in out
-    assert "Staff Huddle: needs a manual delete: another live memo has the same title" in out
+    assert ("Staff Huddle: needs a manual delete: another memo, live or in Recently "
+            "Deleted, has the same title and about the same length") in out
     assert 'Shortcut "STT Delete Voice Memo v2": installed' in out
 
 
