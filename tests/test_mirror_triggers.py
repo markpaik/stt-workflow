@@ -308,10 +308,10 @@ def test_a_speaker_rename_from_the_panel_updates_every_copy(drive, running_serve
     _cached_meeting(BUDGET, {"SPEAKER_00": _unit(3)})
     mirror.reconcile()
     status, body = _post(running_server, "/api/rename_speaker",
-                         {"name": "Dana Cole", "new": "Dana Brooks"})
+                         {"name": "Dana Cole", "new": "Dana Ashgrove"})
     assert status == 200 and body["ok"] and body["targets"] == [WEEKLY]
     _drained(real_queue)
-    assert "Dana Brooks" in _copy(drive, WEEKLY)
+    assert "Dana Ashgrove" in _copy(drive, WEEKLY)
     assert "Dana Cole" not in _copy(drive, WEEKLY)
     assert _copy(drive, BUDGET) == "stub"       # a meeting the change missed
 
