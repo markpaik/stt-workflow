@@ -702,14 +702,16 @@ def build(home: Path) -> dict:
 # (the checkout's stt.env, else the defaults). This process's config cannot
 # say it: under STT_HOME every path it holds is inside the scratch home.
 # The Voice Memos library is left out on purpose: resolve() would stat a
-# path inside another app's container, and the seeder never reads it.
+# path inside another app's container, and the seeder never reads it. The
+# transcript mirror (STT_MIRROR_DIR) is in: a folder that syncs to the
+# cloud must never receive a demo home.
 _LIVE_DIRS_CODE = """
 import json
-from stt import config, voicememos
+from stt import config, mirror, voicememos
 print(json.dumps([str(p) for p in (
     config.meetings_dir(), config.source_dir(), config.recordings_dir(),
     config.MEETINGS_DIR, config.ICLOUD_DIR, config.RECORDINGS_DIR,
-    config.VOICEPRINTS_DIR, voicememos.staging_dir())]))
+    config.VOICEPRINTS_DIR, voicememos.staging_dir(), mirror.mirror_dir()) if p]))
 """
 
 
@@ -735,7 +737,7 @@ BATCH_PLIST_NAME = "Library/LaunchAgents/com.stt-workflow.batch.plist"
 # the stt.env settings that name a data folder, and the folder each one
 # defaults to inside its checkout (None: the default is outside it)
 _CHECKOUT_FOLDERS = (("STT_MEETINGS_DIR", None), ("STT_ICLOUD_DIR", None),
-                     ("STT_RECORDINGS_DIR", None),
+                     ("STT_RECORDINGS_DIR", None), ("STT_MIRROR_DIR", None),
                      ("STT_VOICEPRINTS_DIR", "voiceprints"),
                      ("STT_VOICEMEMOS_STAGING", "voicememos"))
 

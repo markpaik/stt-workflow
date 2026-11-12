@@ -199,3 +199,19 @@ def test_the_shortcut_steps_match_the_v2_build():
         assert isinstance(d["min"], (int, float)) and d["min"] < d["max"]
     example = json.loads(re.search(r"```json\n(.*?)\n```", section, re.S).group(1))
     assert example == voicememos._match_input("Budget Review", 1200.0)
+
+
+def test_the_readme_documents_the_mirror_and_its_doctor_kinds():
+    """The transcript mirror sends text off the Mac through a sync program,
+    so the README's 'What leaves your Mac' table must say so, and the
+    doctor kinds it names must be the code's."""
+    from stt import mirror
+    src = Path(mirror.__file__).read_text(encoding="utf-8")
+    kinds = set(re.findall(r'\("(mirror_[a-z]+)"', src))
+    assert kinds == {"mirror_unavailable", "mirror_changed", "mirror_blocked"}
+    assert set(re.findall(r"`(mirror_[a-z]+)`", README)) == kinds
+    leaves = README.split("## What leaves your Mac", 1)[1].split("\n## ", 1)[0]
+    assert "`STT_MIRROR_DIR`" in leaves
+    assert "the mirror never copies a strict transcript" in " ".join(leaves.split())
+    assert "| `STT_MIRROR_DIR` | empty (off) |" in README
+    assert "# STT_MIRROR_DIR=" in (REPO / "stt.env.example").read_text(encoding="utf-8")

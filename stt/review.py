@@ -222,6 +222,9 @@ def _rewrite(jpath, data):
                                data.get("duration_sec", 0), speakers,
                                data.get("strict", False), data.get("processed_at"))
     output.write_txt(jpath.with_suffix(".txt"), segments, header=header)
+    # the mirror copy (STT_MIRROR_DIR) follows, in the background
+    from . import mirror
+    mirror.touch(jpath.stem)
 
 
 def _resolve_speaker(data, spec):

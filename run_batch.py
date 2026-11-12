@@ -527,6 +527,38 @@ def delete_voice_memos(live_store: bool) -> dict:
         return {"status": "error"}
 
 
+def mirror_library(live_store: bool) -> dict:
+    """Once per run, after the descriptions and automatic titles: bring the
+    mirror folder (STT_MIRROR_DIR, off by default; stt/mirror.py states
+    every rule) in line with the whole library. Every run does it, an empty
+    one too, so a panel edit whose own update was missed lands within one
+    launch. A run into a folder other than the library never mirrors. One
+    line when it changed something or could not write. Never fails the
+    run."""
+    if not live_store:
+        return {"off": True}
+    try:
+        from stt import mirror
+        r = mirror.reconcile()
+    except Exception as e:
+        print(f"  mirror: not updated ({e.__class__.__name__}); the next run retries",
+              file=sys.stderr, flush=True)
+        return {"ok": False}
+    line = mirror.summary_line(r)
+    if line:
+        print(f"  {line}", file=sys.stderr if r.get("problem") else sys.stdout,
+              flush=True)
+    return r
+
+
+def mirror_meeting(base, live_store: bool):
+    """The mirror copy of one meeting this run just finished, in the
+    background, so it lands before the rest of a long backlog is done."""
+    if live_store and base:
+        from stt import mirror
+        mirror.touch(base)
+
+
 def _empty_audio(p) -> bool:
     """A 0-byte file of an audio type in a watched folder: iter_audio skips
     it until it has bytes."""
@@ -1171,6 +1203,7 @@ def _main():
                     summarize_one(res["key"], res.get("base"), track=track)
             finally:
                 succeeded.append((res["key"], track.get("base")))
+                mirror_meeting(track.get("base"), describe)
         else:
             print(f"   FAILED: {res['key']}", file=sys.stderr, flush=True)
             status.finish_file(res["key"], False, "failed")
@@ -1402,6 +1435,11 @@ def _main():
     # to Voice Memos' Recently Deleted (off unless STT_VM_DELETE_AFTER_INGEST=1)
     if not args.dry_run:
         delete_voice_memos(describe)
+
+    # the transcripts and their names are final for this run: the mirror
+    # folder follows the whole library (off unless STT_MIRROR_DIR is set)
+    if not args.dry_run:
+        mirror_library(describe)
 
     status.end_run()
     if not args.dry_run:

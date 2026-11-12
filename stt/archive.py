@@ -71,6 +71,9 @@ def purge_meeting_dir(path: Path):
     # touch() re-adds a live meeting of the same name (an archived twin).
     from . import search
     search.touch(path.name)
+    # and its mirror copy goes (a live twin of the same name keeps its own)
+    from . import mirror
+    mirror.touch(path.name)
     try:
         from . import unknowns
         unknowns.forget_meeting_refs(path.name)
@@ -157,9 +160,11 @@ def archive_meeting(base: str) -> dict:
     # store no longer holds. restore_meeting puts it back.
     config.index_drop(mid)
     manifest.retarget(old_dir, config.archive_dir() / new_base, base, new_base)
-    # search covers the live store only, as it always has
-    from . import search
+    # search covers the live store only, as it always has, and so does the
+    # mirror: the archived meeting's copy goes
+    from . import mirror, search
     search.touch(base)
+    mirror.touch(base)
     if new_base != base:
         # a collision renamed the folder, so every registry that keys meetings
         # BY NAME has to follow -- exactly as restore_meeting does for the
@@ -234,6 +239,9 @@ def restore_meeting(base: str) -> dict:
         summarize.stale_relist(new_base)
     except Exception:
         pass
+    # the mirror copy comes back, under the name the restore settled on
+    from . import mirror
+    mirror.touch(new_base)
     return {"ok": True, "base": new_base}
 
 

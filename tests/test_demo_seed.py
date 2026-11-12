@@ -345,6 +345,30 @@ def test_the_guard_sees_the_live_library_with_stt_home_exported(tmp_path):
     assert _resolve_in(co, {}, live / "demo_x")[0].startswith("REFUSED")
 
 
+def test_the_guard_refuses_the_transcript_mirror_folder(tmp_path):
+    """The mirror folder (STT_MIRROR_DIR) syncs to the cloud: a demo home
+    inside it would upload, so the seeder refuses it like a live folder,
+    from this checkout's stt.env and from another checkout's."""
+    drive = (tmp_path / "Drive" / "Meeting Transcripts").resolve()
+    co = _checkout_copy(tmp_path, f"STT_MIRROR_DIR={drive}\n")
+    out = _resolve_in(co, {}, drive / "demo_x", drive, tmp_path / "elsewhere")
+    assert out[0].startswith(f"REFUSED refusing: --dir {drive / 'demo_x'} overlaps")
+    assert out[1].startswith("REFUSED")
+    assert out[2].startswith("ACCEPTED")
+    agent_co = tmp_path / "agent checkout"
+    agent_co.mkdir()
+    (agent_co / "stt.env").write_text(f"STT_MIRROR_DIR={drive}\n")
+    import plistlib
+    fake_home = tmp_path / "user"
+    plist = fake_home / demo_seed.BATCH_PLIST_NAME
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(plistlib.dumps({"Label": "com.stt-workflow.batch",
+                                      "WorkingDirectory": str(agent_co)}))
+    bare = _checkout_copy(tmp_path / "bare", "")
+    assert _resolve_in(bare, {"HOME": str(fake_home)},
+                       drive / "demo_x")[0].startswith("REFUSED")
+
+
 def _git(*args, cwd):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
                     *args], cwd=str(cwd), check=True, capture_output=True)
