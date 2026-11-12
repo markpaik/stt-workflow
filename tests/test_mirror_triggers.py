@@ -398,3 +398,138 @@ def test_a_panel_edit_with_the_folder_missing_still_saves(sandbox, monkeypatch, 
     assert mirror.wait(10)
     assert capsys.readouterr().err.count("is missing or not a folder") == 1
     assert "Again." in config.meeting_file(WEEKLY, ".txt").read_text()
+
+
+# ---------- titles, dates, archive, restore, delete ----------
+#
+# Every title and date edit that renames a folder ends in
+# summarize._move_folder (the panel, the bulk bar, the automatic title and
+# the store repairs alike). Archive, restore and delete end in
+# stt/archive.py, and every permanent removal in purge_meeting_dir.
+
+FINANCE = "2026-08-03 Weekly Check-in with Finance"
+
+
+def test_a_title_edit_replaces_the_old_copy(drive):
+    from stt import summarize
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    r = summarize.rename_meeting(WEEKLY, "Weekly Check-in with Finance")
+    assert r["ok"] and r["base"] == FINANCE
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{FINANCE}.txt"]
+    # the header line names the new title, in the copy too
+    assert _copy(drive, FINANCE).startswith(FINANCE)
+
+
+def test_a_title_edit_through_the_panel(drive, running_server):
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/rename",
+                         {"base": WEEKLY, "new": "Weekly Check-in with Finance"})
+    assert status == 200 and body["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{FINANCE}.txt"]
+
+
+def test_a_date_edit_through_the_panel(drive, running_server):
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/set_date",
+                         {"base": WEEKLY, "date": "2026-08-10"})
+    assert status == 200 and body["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == ["2026-08-10 Weekly Check-in.txt"]
+
+
+def test_the_automatic_title_replaces_the_copy(drive):
+    from stt import summarize
+    raw = "2026-08-05 Recording 0915"
+    _meeting(raw)
+    mirror.reconcile()
+    r = summarize.apply_meeting_edits(raw, title="Staff Huddle", auto_title=True)
+    assert r["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == ["2026-08-05 Staff Huddle.txt"]
+
+
+def test_archive_and_restore(drive):
+    from stt import archive
+    _meeting(WEEKLY)
+    _meeting(BUDGET)
+    mirror.reconcile()
+    assert archive.archive_meeting(WEEKLY)["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{BUDGET}.txt"]
+    assert archive.restore_meeting(WEEKLY)["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{WEEKLY}.txt", f"{BUDGET}.txt"]
+
+
+def test_archive_restore_and_delete_through_the_panel(drive, running_server):
+    _meeting(WEEKLY)
+    _meeting(BUDGET)
+    mirror.reconcile()
+    assert _post(running_server, "/api/archive_meeting", {"base": WEEKLY})[1]["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{BUDGET}.txt"]
+    assert _post(running_server, "/api/restore_meeting", {"base": WEEKLY})[1]["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{WEEKLY}.txt", f"{BUDGET}.txt"]
+    assert _post(running_server, "/api/delete_meeting",
+                 {"base": BUDGET, "confirm": True})[1]["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{WEEKLY}.txt"]
+
+
+def test_bulk_archive_and_rename_through_the_panel(drive, running_server):
+    _meeting(WEEKLY)
+    _meeting(BUDGET)
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/bulk",
+                         {"action": "rename", "bases": [WEEKLY], "value": "Team Sync"})
+    assert status == 200 and body["ok"]
+    status, body = _post(running_server, "/api/bulk",
+                         {"action": "archive", "bases": [BUDGET]})
+    assert status == 200 and body["ok"]
+    assert mirror.wait(10)
+    assert _names(drive) == ["2026-08-03 Team Sync.txt"]
+
+
+def test_a_purge_of_an_archived_meeting_leaves_its_live_twins_copy(drive):
+    from stt import archive
+    _meeting(WEEKLY)
+    assert archive.archive_meeting(WEEKLY)["ok"]
+    _meeting(WEEKLY, line="Jordan Lee: the live twin.")
+    mirror.reconcile()
+    assert "the live twin." in _copy(drive, WEEKLY)
+    archive.purge_meeting_dir(config.archive_dir() / WEEKLY)
+    assert mirror.wait(10)
+    assert "the live twin." in _copy(drive, WEEKLY)
+
+
+def test_the_batchs_shell_sweep_and_purge_take_the_copy_too(drive):
+    """purge_meeting_dir is the one permanent removal: the panel's Delete,
+    tools/purge.py and the batch's sweep of interrupted folders."""
+    from stt import archive
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    archive.purge_meeting_dir(config.meeting_dir(WEEKLY))
+    assert mirror.wait(10)
+    assert _names(drive) == []
+
+
+def test_iso_rename_header_refresh_updates_the_copy(drive):
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "iso_rename", Path(__file__).resolve().parent.parent / "tools" / "iso_rename.py")
+    iso = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(iso)
+    _meeting(WEEKLY)
+    t = config.meeting_file(WEEKLY, ".txt")
+    t.write_text(t.read_text().replace(WEEKLY, "Weekly Check-in 08032026", 1))
+    mirror.reconcile()
+    assert iso._refresh_header(WEEKLY) is True
+    assert mirror.wait(10)
+    assert _copy(drive, WEEKLY).startswith(WEEKLY + "  |")

@@ -1581,6 +1581,10 @@ def _move_folder(base: str, new_base: str) -> list:
     # never opens the old name. A miss here is repaired by the next query.
     from . import search
     search.touch(base, new_base)
+    # the mirror copy (STT_MIRROR_DIR) follows: the new name in, the old
+    # one out, in the background. Last, after the .txt header moved.
+    from . import mirror
+    mirror.touch(base, new_base)
     return renamed
 
 

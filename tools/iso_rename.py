@@ -305,14 +305,17 @@ def _current_base(mid, base):
 
 
 def _refresh_header(base: str) -> bool:
-    from stt import review
+    from stt import mirror, review
     with review.lock_meeting(base):
         try:
             d = json.loads(config.meeting_file(base, ".json").read_text())
         except (OSError, ValueError):
             d = {}
-        return output.refresh_txt_header(config.meeting_file(base, ".txt"),
-                                         output.header_name(base, d))
+        changed = output.refresh_txt_header(config.meeting_file(base, ".txt"),
+                                            output.header_name(base, d))
+    if changed:
+        mirror.touch(base)     # the mirror copy follows the new header
+    return changed
 
 
 # ------------------------------------------------------------------ apply ---
@@ -425,6 +428,8 @@ def _restore_header(base: str, line):
     first, sep, rest = text.partition("\n")
     if output._HEADER_LINE.match(first) and first != line:
         output._atomic_write(p, m.group(1) + m.group(2) + sep + rest)
+        from stt import mirror
+        mirror.touch(base)
 
 
 def undo(dry: bool = True, log=print) -> dict:
