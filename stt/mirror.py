@@ -65,6 +65,18 @@ def _fold(p) -> str:
     return unicodedata.normalize("NFC", os.path.normpath(str(p))).casefold()
 
 
+def _key(name: str) -> str:
+    """A file name as APFS compares it: two names that differ only in
+    letter case or Unicode form ('Café' composed or decomposed) are one
+    file. A sync program may hand a name back in the other form."""
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _same(a: str, b: str) -> bool:
+    """The same name, exactly, up to its Unicode form."""
+    return unicodedata.normalize("NFC", a) == unicodedata.normalize("NFC", b)
+
+
 def _inside(p, root) -> bool:
     """True when `p` is `root` or a folder under it."""
     a, b = _fold(p), _fold(root)
@@ -333,7 +345,7 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
     `bases` limits the pass to those meetings, matched by name and by
     meeting_id, so a rename finds the old file by the id. None is the
     whole folder."""
-    disk = {n.casefold(): n for n in os.listdir(ctx.mirror)}
+    disk = {_key(n): n for n in os.listdir(ctx.mirror)}
     files, cache = st["files"], st["cache"]
     if bases is None:
         scope = config.meeting_bases(ctx.store)
@@ -355,7 +367,7 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
         if m["strict"]:
             ops.append(_op("strict", m["name"], base=m["base"]))
             continue
-        cf = m["name"].casefold()
+        cf = _key(m["name"])
         if cf in desired:      # two names that differ in case only
             ops.append(_op("blocked", m["name"], base=m["base"]))
             continue
@@ -363,11 +375,11 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
     if bases is None:
         scoped = dict(files)
     else:
-        names = {f"{b}.txt".casefold() for b in bases}
+        names = {_key(f"{b}.txt") for b in bases}
         ids = {m["id"] for m in metas if m["id"]}
         scoped = {n: e for n, e in files.items()
-                  if n.casefold() in names or (e.get("id") and e["id"] in ids)}
-    owned = {n.casefold(): n for n in files}
+                  if _key(n) in names or (e.get("id") and e["id"] in ids)}
+    owned = {_key(n): n for n in files}
     for cf, m in desired.items():
         name, rec = m["name"], owned.get(cf)
         if rec is None:
@@ -382,13 +394,13 @@ def _plan(ctx: Ctx, st: dict, bases=None) -> list:
             ops.append(_op("write", name, base=m["base"], sha=m["sha"], record=rec))
         elif not ok:
             ops.append(_op("changed", cur, base=m["base"]))
-        elif e.get("sha") == m["sha"] and cur == name and rec == name:
+        elif e.get("sha") == m["sha"] and _same(cur, name) and _same(rec, name):
             ops.append(_op("keep", name, base=m["base"]))
         else:
             ops.append(_op("update", name, base=m["base"], sha=m["sha"],
                            record=rec, cur=cur))
     for n, e in scoped.items():
-        cf = n.casefold()
+        cf = _key(n)
         if cf in desired:
             continue
         cur = disk.get(cf)
@@ -449,7 +461,7 @@ def _apply(ctx: Ctx, st: dict, ops: list) -> dict:
                     continue
                 prev = (files.get(key) or {}).get("sha")
                 cur = o.get("cur")
-                if cur and cur != name:
+                if cur and not _same(cur, name):
                     # a name that differs in case only: rename first, because
                     # a replace onto it keeps the old case on APFS
                     os.rename(ctx.mirror / cur, ctx.mirror / name)

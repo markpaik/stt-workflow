@@ -209,6 +209,26 @@ def test_a_rename_that_changes_only_the_letter_case(drive):
     assert set(rec) == {f"{new}.txt"}
 
 
+def test_a_name_handed_back_in_the_other_unicode_form_is_still_its_own(drive):
+    """APFS keeps a name in the form it was given, and a sync program may
+    give it back decomposed: the copy is the same file, so it is neither
+    written again nor renamed."""
+    import unicodedata
+    base = unicodedata.normalize("NFC", "2026-08-07 Café Planning")
+    _meeting(base)
+    mirror.reconcile()
+    nfd = unicodedata.normalize("NFD", f"{base}.txt")
+    os.rename(drive / f"{base}.txt", drive / nfd)
+    assert os.listdir(drive) == [nfd]
+    before = (drive / nfd).stat().st_mtime_ns
+    r = mirror.reconcile()
+    assert [o["op"] for o in r["ops"]] == ["keep"]
+    assert os.listdir(drive) == [nfd] and (drive / nfd).stat().st_mtime_ns == before
+    config.meeting_file(base, ".txt").write_text(_txt(base, "Alex Rivera: v2."))
+    assert mirror.reconcile()["update"] == 1
+    assert len(os.listdir(drive)) == 1 and "v2." in (drive / nfd).read_text()
+
+
 def test_a_deleted_meeting_loses_its_file(drive):
     import shutil
     _meeting(WEEKLY)
