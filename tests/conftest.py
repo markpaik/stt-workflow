@@ -65,6 +65,32 @@ def _no_real_shortcuts(monkeypatch, tmp_path):
     monkeypatch.delenv("STT_VM_DELETE_SHORTCUT", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_mirror(monkeypatch):
+    """No test may write the owner's mirror folder (STT_MIRROR_DIR, a folder
+    Google Drive syncs to the cloud). The setting starts unset. A test that
+    sets it gets a folder only under the system temp folder, where pytest's
+    tmp_path lives: a test outside the sandbox reads the checkout's
+    stt.env, which may name the real folder, and there the mirror stays
+    off. Every test ends with no mirror work in flight."""
+    import tempfile
+    from pathlib import Path
+
+    from stt import mirror
+    monkeypatch.delenv("STT_MIRROR_DIR", raising=False)
+    real = mirror.mirror_dir
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+
+    def only_temp():
+        p = real()
+        if p is None or not Path(p).resolve().is_relative_to(tmp_root):
+            return None
+        return p
+    monkeypatch.setattr(mirror, "mirror_dir", only_temp)
+    yield
+    mirror.wait(10)
+
+
 def mfile(base, suffix):
     """A meeting artifact's path in the per-meeting-folder layout, creating
     the folder — what test fixtures use to build meetings on disk."""

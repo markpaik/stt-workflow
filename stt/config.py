@@ -775,6 +775,10 @@ def setting_problems() -> list:
     why = voicememos.delete_setting_problem()
     if why:
         out.append((voicememos.DELETE_SETTING, why))
+    from . import mirror
+    why = mirror.setting_problem()
+    if why:
+        out.append((mirror.SETTING, why))
     return out
 
 
