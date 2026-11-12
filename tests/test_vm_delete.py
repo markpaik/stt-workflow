@@ -44,7 +44,6 @@ if args[:1] != ["run"]:
 name = args[1]
 inp = args[args.index("--input-path") + 1]
 raw = open(inp, encoding="utf-8").read()
-outp = args[args.index("--output-path") + 1]
 # what the owner's v2 Shortcut does: Get Dictionary from Input, then Get
 # Dictionary Value for "title", "min" and "max". A value it cannot read
 # leaves that filter empty, so a malformed input finds every recording.
@@ -59,6 +58,10 @@ title = d.get("title") if isinstance(d.get("title"), str) else None
 lo, hi = num(d.get("min")), num(d.get("max"))
 log({{"cmd": "run", "name": name, "title": title, "min": lo, "max": hi,
       "raw": raw, "mode": oct(os.stat(inp).st_mode & 0o777), "argv": args}})
+if "--output-path" in args:
+    # what the real one did on the owner's Mac: the output action fails,
+    # no file is written, nothing is printed, and the run still exits 0
+    sys.exit(0)
 if sc.get("sleep"):
     time.sleep(sc["sleep"])
 db = sqlite3.connect(sc["db"])
@@ -93,9 +96,10 @@ for u in sc.get("erase", []):
     db.execute("DELETE FROM ZCLOUDRECORDING WHERE ZUNIQUEID = ?", (u,))
 db.commit()
 db.close()
+# the count goes to stdout, never to a file
 out = sc.get("output", str(len(found)))
-if out is not None:
-    open(outp, "w").write(out)
+if out:
+    sys.stdout.write(out + "\n")
 sys.exit(sc.get("rc", 0))
 '''
 
@@ -258,7 +262,7 @@ def test_a_stored_memo_moves_to_recently_deleted(vm):
     assert len(runs) == 1
     a = runs[0]["argv"]
     assert a[:2] == ["run", "STT Delete Voice Memo v2"]
-    assert a[2] == "--input-path" and a[4] == "--output-path" and len(a) == 6
+    assert a[2] == "--input-path" and len(a) == 4 and "--output-path" not in a
     assert runs[0]["title"] == "Budget Review"
     rows = _rows()
     assert rows["U-1"]["deleted"] and not rows["U-2"]["deleted"]
@@ -754,6 +758,36 @@ def test_an_output_that_is_not_one_is_a_failure_with_a_backoff(vm, output):
     vm.set(no_evict=False)
     assert _pass(now=t0 + voicememos.BACKOFF_SEC[0] + 1)["deleted"]
     assert _rec("U-1")["tries"] == 2
+
+
+def test_an_empty_stdout_with_exit_zero_is_a_failure(vm):
+    """The run exits 0 and prints nothing, and the memo has not moved. That
+    is no success: the memo is a failure with a backoff, never deleted."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    vm.set(output="", no_evict=True)
+    t0 = 1_900_000_000.0
+    r = _pass(now=t0)
+    assert len(vm.calls()) == 1 and r["failed"] and r["deleted"] == []
+    rec = _rec("U-1")
+    assert (rec["status"], rec["reason"], rec["tries"]) == ("failed", "output", 1)
+    assert rec["detail"] == "the Shortcut printed nothing on stdout, not '1'"
+    assert rec["next_at"] == t0 + voicememos.BACKOFF_SEC[0]
+    assert not _rows()["U-1"]["deleted"]
+    assert any("printed nothing on stdout" in ln for ln in r["lines"])
+
+
+def test_the_count_is_read_from_stdout_and_no_output_file_is_asked_for(vm):
+    """The fake prints the count, as the real one does, and writes no file.
+    It also acts as the real one did with --output-path: it prints nothing,
+    so a command that asked for an output file would fail here."""
+    _lib([{"uuid": "U-1", "title": "Budget Review"}])
+    _stored("U-1", "Budget Review")
+    r = _pass()
+    assert r["deleted"] and _rec("U-1")["status"] == "deleted"
+    assert "--output-path" not in vm.calls()[0]["argv"]
+    assert sorted(p.name for p in vm.dir.iterdir()) == ["calls.jsonl", "scenario.json",
+                                                        "shortcuts"]
 
 
 def test_a_timeout_is_a_failure_and_ends_the_pass(vm, monkeypatch):

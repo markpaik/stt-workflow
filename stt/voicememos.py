@@ -83,7 +83,10 @@ min and max are the memo's ZDURATION minus and plus MATCH_WINDOW_SEC. It
 finds the recordings whose name is the title and whose length is greater
 than min and less than max (Find Recordings also finds memos in Recently
 Deleted), deletes them only when it finds exactly one, and outputs the
-count. The code runs it with `/usr/bin/shortcuts run` and a timeout. No UI
+count. The code runs it with `/usr/bin/shortcuts run` and a timeout, and
+reads the count from stdout: only the exact text "1" is a success, and an
+empty stdout is a failure. It passes no --output-path, because the
+Shortcut's output action wrote no file there on the owner's Mac. No UI
 scripting, no AppleScript, and no write to the database.
 
 After the Shortcut runs, a fresh copy is read again. Success means the
@@ -1070,39 +1073,41 @@ def _match_input(title, duration) -> dict:
 
 def _run_shortcut(title: str, duration) -> dict:
     """Run the delete Shortcut once. Its input file is match.json (mode
-    600): {"title", "min", "max"} from _match_input. Returns {outcome,
-    output, detail}: outcome is ok (it output "1"), output (it output
-    something else), exit (non-zero exit), timeout, or no_shortcuts (the
-    binary could not start)."""
+    600): {"title", "min", "max"} from _match_input. The count comes from
+    stdout. With --output-path, the Shortcut's output action failed on the
+    owner's Mac (WFActionErrorDomain code 4) and wrote no file, while the
+    run still exited 0. Only the exact text "1" is a success. Returns
+    {outcome, output, detail}: outcome is ok (it printed "1"), output (it
+    printed something else, or nothing), exit (non-zero exit), timeout, or
+    no_shortcuts (the binary could not start)."""
     with tempfile.TemporaryDirectory(prefix="stt-vmdel-") as tmp:
         os.chmod(tmp, 0o700)
-        inp, outp = Path(tmp) / "match.json", Path(tmp) / "count.txt"
+        inp = Path(tmp) / "match.json"
         fd = os.open(inp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(_match_input(title, duration), ensure_ascii=False))
         os.chmod(inp, 0o600)
-        cmd = [str(SHORTCUTS_BIN), "run", shortcut_name(),
-               "--input-path", str(inp), "--output-path", str(outp)]
+        cmd = [str(SHORTCUTS_BIN), "run", shortcut_name(), "--input-path", str(inp)]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=SHORTCUT_TIMEOUT_SEC, stdin=subprocess.DEVNULL)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=SHORTCUT_TIMEOUT_SEC,
+                               stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return {"outcome": "timeout", "output": "",
                     "detail": f"no answer in {SHORTCUT_TIMEOUT_SEC:g} s"}
         except OSError as e:
             return {"outcome": "no_shortcuts", "output": "", "detail": e.__class__.__name__}
-        try:
-            text = outp.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
-    text = text.strip().lstrip("\ufeff").strip()
+    text = (r.stdout or "").strip().lstrip("\ufeff").strip()
     if r.returncode != 0:
         err = (r.stderr or "").strip().splitlines()
         return {"outcome": "exit", "output": text[:40],
                 "detail": f"exit {r.returncode}" + (f": {err[0][:200]}" if err else "")}
+    if not text:
+        return {"outcome": "output", "output": "",
+                "detail": "the Shortcut printed nothing on stdout, not '1'"}
     if text != "1":
         return {"outcome": "output", "output": text[:40],
-                "detail": f"the Shortcut output {text[:40]!r}, not '1'"}
+                "detail": f"the Shortcut printed {text[:40]!r}, not '1'"}
     return {"outcome": "ok", "output": "1", "detail": ""}
 
 
