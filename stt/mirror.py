@@ -4,9 +4,10 @@ is off by default.
 
 The mirror folder holds one file per live meeting: "<base>.txt", a byte
 copy of the meeting's current .txt, flat in the folder. It holds no audio,
-no json and no caches. A strict meeting is never copied. A meeting whose
-json cannot be read counts as strict, and so does a .txt whose header line
-says STRICT, so a doubt keeps the text on this Mac.
+no json and no caches. A strict meeting is not copied unless
+STT_MIRROR_STRICT=1. A meeting whose json cannot be read counts as strict,
+and so does a .txt whose header line says STRICT, so a doubt keeps the text
+on this Mac. With STT_MIRROR_STRICT=1, every live meeting is copied.
 
 reconcile() brings the folder in line with the library, and it is the only
 writer:
@@ -42,6 +43,8 @@ from typing import NamedTuple
 from . import config
 
 SETTING = "STT_MIRROR_DIR"
+# "1" copies strict meetings too. The owner's choice: off by default
+STRICT_SETTING = "STT_MIRROR_STRICT"
 STATE_NAME = "mirror_state.json"
 LOCK_NAME = "mirror.lock"
 TMP_PREFIX = ".stt-mirror-"
@@ -119,6 +122,13 @@ def setting_problem():
     return None
 
 
+def copies_strict() -> bool:
+    """True when STT_MIRROR_STRICT=1 (stt.env read fresh, then the
+    environment): the mirror copies strict meetings too."""
+    v = config._env_file().get(STRICT_SETTING) or os.environ.get(STRICT_SETTING) or ""
+    return str(v).strip() == "1"
+
+
 def mirror_dir():
     """The mirror folder, or None when STT_MIRROR_DIR is unset or cannot be
     used (setting_problem warns once per process)."""
@@ -139,6 +149,7 @@ class Ctx(NamedTuple):
     mirror: Path
     store: Path
     home: Path
+    copy_strict: bool = False
 
 
 def context():
@@ -146,7 +157,8 @@ def context():
     m = mirror_dir()
     if m is None:
         return None
-    return Ctx(m, Path(config.meetings_dir()), Path(config.PROJECT_DIR))
+    return Ctx(m, Path(config.meetings_dir()), Path(config.PROJECT_DIR),
+               copies_strict())
 
 
 def folder_problem(p: Path):
@@ -290,7 +302,8 @@ def _meeting(ctx: Ctx, base: str, cache: dict, want_bytes: bool = False):
     c.update(json=jsig, strict=strict, id=mid)
     cache[base] = c
     return {"base": base, "name": base + ".txt", "sha": sha,
-            "strict": bool(strict or hstrict), "id": mid, "data": data}
+            "strict": bool(strict or hstrict) and not ctx.copy_strict,
+            "id": mid, "data": data}
 
 
 def _file_sha(p: Path):

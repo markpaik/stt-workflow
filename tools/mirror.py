@@ -9,8 +9,9 @@ The first --apply copies every meeting there: the backfill. After that the
 batch keeps the folder current at the end of each run, and each panel edit
 updates its own meeting's copy, so this tool is for the first copy and for
 a check. The rules are stt/mirror.py's: one "<base>.txt" byte copy per live
-meeting, and never one of a strict meeting. A file the mirror did not
-write, or one that changed after it wrote it, is left as it is.
+meeting, and one of a strict meeting only with STT_MIRROR_STRICT=1. A
+file the mirror did not write, or one that changed after it wrote it, is
+left as it is.
 
 It exits 1 when the mirror is off, when the setting cannot be used, or when
 the folder cannot be read or written.

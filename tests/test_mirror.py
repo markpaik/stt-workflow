@@ -314,6 +314,46 @@ def test_a_meeting_that_turns_strict_between_plan_and_write_is_not_written(drive
     assert mirror._load(mirror.context())["files"] == {}
 
 
+
+# ---------- STT_MIRROR_STRICT: the owner's choice to copy strict meetings ----------
+
+def _copy_strict(sandbox, drive, value="1"):
+    (sandbox / "stt.env").write_text(f"STT_MIRROR_DIR={drive}\nSTT_MIRROR_STRICT={value}\n")
+
+
+def test_strict_meetings_stay_home_unless_the_owner_says_so(sandbox, drive):
+    assert mirror.copies_strict() is False
+    for value, want in (("0", False), ("yes", False), ("1", True), (" 1 ", True)):
+        _copy_strict(sandbox, drive, value)
+        assert mirror.copies_strict() is want, value
+
+
+def test_with_the_setting_every_live_meeting_is_copied(sandbox, drive):
+    """A strict json, a strict header line and an unreadable json all
+    count as strict. With STT_MIRROR_STRICT=1 each is copied, byte for byte."""
+    _copy_strict(sandbox, drive)
+    _meeting(WEEKLY, strict=True)
+    _meeting(BUDGET, txt=_txt(BUDGET, strict=True))
+    third = "2026-08-05 Staff Meeting"
+    _meeting(third)
+    config.meeting_file(third, ".json").write_text("{not json")
+    r = mirror.reconcile()
+    assert r["write"] == 3 and mirror.counts(r).get("strict", 0) == 0
+    for b in (WEEKLY, BUDGET, third):
+        assert (drive / f"{b}.txt").read_bytes() == config.meeting_file(b, ".txt").read_bytes()
+
+
+def test_turning_the_setting_off_takes_the_strict_copies_away(sandbox, drive):
+    _copy_strict(sandbox, drive)
+    _meeting(WEEKLY, strict=True)
+    _meeting(BUDGET)
+    mirror.reconcile()
+    assert _names(drive) == sorted([f"{WEEKLY}.txt", f"{BUDGET}.txt"])
+    _copy_strict(sandbox, drive, "0")
+    assert mirror.reconcile()["remove"] == 1
+    assert _names(drive) == [f"{BUDGET}.txt"]
+
+
 # ---------- files the mirror did not write ----------
 
 def test_a_file_put_there_by_hand_stays(drive):

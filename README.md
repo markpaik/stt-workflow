@@ -43,9 +43,10 @@ is either a download or a feature you turn on yourself:
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
 | Transcript mirror ([The transcript mirror](#the-transcript-mirror)) | Only when you set `STT_MIRROR_DIR` to a folder that a sync program uploads, such as Google Drive for desktop | A copy of each meeting's `.txt` transcript. The code only writes the local folder: your sync program uploads it to your own account. No audio, voice data, or json |
 
-Strict meetings never upload, whatever the settings say: strict audio always
-uses a local engine, strict transcripts always use the local model, and the
-mirror never copies a strict transcript.
+Strict meetings never go to a cloud service, whatever the settings say:
+strict audio always uses a local engine, and strict transcripts always use
+the local model. The mirror does not copy a strict transcript unless you set
+`STT_MIRROR_STRICT=1`.
 
 Ollama is only ever called on a loopback address (`localhost`, `127.0.0.1`,
 or `::1`). For any other host, the code turns Ollama off with a warning. The
@@ -660,7 +661,8 @@ run options apply to the next manual run:
 - **Two at a time** runs two workers, for a backlog.
 - **Strict**, for confidential conversations, never guesses an uncertain
   speaker (it flags the line instead) and never sends audio or text to a
-  cloud service. A meeting processed in strict stays strict: a Redo or a
+  cloud service (the mirror copies it only with `STT_MIRROR_STRICT=1`). A
+  meeting processed in strict stays strict: a Redo or a
   speaker re-identify keeps it on.
 - **Verify** transcribes with a second, different local engine and flags
   every place the two disagree, with both readings. A cloud engine is never
@@ -764,7 +766,8 @@ plain characters. A later line for the same key wins.
 | `STT_VM_DELETE_SHORTCUT` | `STT Delete Voice Memo v2` | The name of the Shortcut that does the delete. It matches a memo by title and length ([Removing memos from Voice Memos](#removing-memos-from-voice-memos)) |
 | `STT_MOVE_AFTER_SUCCESS` | `1` | `0` keeps the originals in the watched folder |
 | `STT_MIC_SPEAKER` | empty | Your name, so the recorder's microphone channel is labeled as you |
-| `STT_MIRROR_DIR` | empty (off) | A folder that a sync program uploads, such as one in Google Drive for desktop. The library keeps a copy of each meeting's `.txt` there and updates it after every change ([The transcript mirror](#the-transcript-mirror)). Strict meetings are never copied. It must be an absolute path outside the transcripts folder, the other data folders, and this checkout. Any other value prints a warning and leaves the mirror off |
+| `STT_MIRROR_DIR` | empty (off) | A folder that a sync program uploads, such as one in Google Drive for desktop. The library keeps a copy of each meeting's `.txt` there and updates it after every change ([The transcript mirror](#the-transcript-mirror)). Strict meetings are not copied unless `STT_MIRROR_STRICT=1`. It must be an absolute path outside the transcripts folder, the other data folders, and this checkout. Any other value prints a warning and leaves the mirror off |
+| `STT_MIRROR_STRICT` | `0` | `1` copies strict meetings to the mirror folder too, so every live meeting is copied. Strict meetings still use only the local engine and the local model |
 
 When you pick a new transcripts folder in Settings, the panel asks before it
 uses a folder that holds other files or old flat-layout meetings. Once you
@@ -775,8 +778,8 @@ where it is.
 ### The transcript mirror
 
 Set `STT_MIRROR_DIR` to a folder that a sync program uploads, and the
-library keeps a copy of each transcript there. Strict meetings never leave
-the Mac this way either.
+library keeps a copy of each transcript there. Strict meetings stay on the
+Mac unless you also set `STT_MIRROR_STRICT=1`.
 
 - The folder holds one file per meeting, named like its folder:
   `2026-08-03 Weekly Check-in.txt`. Each one is a byte copy of the
@@ -789,8 +792,10 @@ the Mac this way either.
   too, so an update that was missed lands within about 10 minutes.
 - A file is written only when its text changed, so the sync program does
   not upload files again for nothing.
-- A strict meeting is never copied. A meeting that becomes strict loses its
-  copy.
+- A strict meeting is not copied, and a meeting that becomes strict loses
+  its copy. With `STT_MIRROR_STRICT=1`, strict meetings are copied too, so
+  every live meeting is in the folder. Setting it back to `0` removes the
+  strict copies on the next run.
 - The mirror never overwrites or removes a file it did not write. A file you
   add by hand stays. A copy you edit in the folder is left as it is, and the
   doctor reports it as `mirror_changed`. Delete it, and the next run writes

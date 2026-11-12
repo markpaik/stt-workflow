@@ -212,6 +212,10 @@ def test_the_readme_documents_the_mirror_and_its_doctor_kinds():
     assert set(re.findall(r"`(mirror_[a-z]+)`", README)) == kinds
     leaves = README.split("## What leaves your Mac", 1)[1].split("\n## ", 1)[0]
     assert "`STT_MIRROR_DIR`" in leaves
-    assert "the mirror never copies a strict transcript" in " ".join(leaves.split())
+    assert ("The mirror does not copy a strict transcript unless you set "
+            "`STT_MIRROR_STRICT=1`.") in " ".join(leaves.split())
     assert "| `STT_MIRROR_DIR` | empty (off) |" in README
-    assert "# STT_MIRROR_DIR=" in (REPO / "stt.env.example").read_text(encoding="utf-8")
+    assert "| `STT_MIRROR_STRICT` | `0` |" in README
+    assert f'"{mirror.STRICT_SETTING}"' == '"STT_MIRROR_STRICT"'
+    example = (REPO / "stt.env.example").read_text(encoding="utf-8")
+    assert "# STT_MIRROR_DIR=" in example and "\n# STT_MIRROR_STRICT=1\n" in example

@@ -78,6 +78,7 @@ def _no_real_mirror(monkeypatch):
 
     from stt import mirror
     monkeypatch.delenv("STT_MIRROR_DIR", raising=False)
+    monkeypatch.delenv("STT_MIRROR_STRICT", raising=False)
     real = mirror.mirror_dir
     tmp_root = Path(tempfile.gettempdir()).resolve()
 
