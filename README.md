@@ -41,9 +41,11 @@ is either a download or a feature you turn on yourself:
 | Model update check | Only when you press the update check in Settings | Asks Hugging Face for the newest revision of each model |
 | Cloud transcription (ElevenLabs Scribe, OpenAI, Mistral Voxtral) | Only after you add that provider's key and pick it as the transcription engine | The meeting audio, recompressed to 32 kbps MP3. Speaker separation and voice matching still run locally |
 | Cloud assistant (Anthropic or OpenAI) | Only after you add a key and pick it for summaries and Ask | Transcript text for descriptions, titles, and Ask |
+| Transcript mirror ([The transcript mirror](#the-transcript-mirror)) | Only when you set `STT_MIRROR_DIR` to a folder that a sync program uploads, such as Google Drive for desktop | A copy of each meeting's `.txt` transcript. The code only writes the local folder: your sync program uploads it to your own account. No audio, voice data, or json |
 
 Strict meetings never upload, whatever the settings say: strict audio always
-uses a local engine, and strict transcripts always use the local model.
+uses a local engine, strict transcripts always use the local model, and the
+mirror never copies a strict transcript.
 
 Ollama is only ever called on a loopback address (`localhost`, `127.0.0.1`,
 or `::1`). For any other host, the code turns Ollama off with a warning. The
@@ -737,9 +739,9 @@ appearance. The panel never displays a saved key again. It shows only that
 a key exists.
 
 An unreadable `STT_ASR_BACKEND`, `STT_DIARIZER`, `STT_SPEAKRS_AHC`,
-`STT_SPEAKRS_TIMEOUT_SEC`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`, or
-`STT_VM_DELETE_AFTER_INGEST` prints one warning that names it, and the code
-falls back as the tables below say. `./run.sh py tools/doctor.py check`
+`STT_SPEAKRS_TIMEOUT_SEC`, `STT_OLLAMA_URL`, `STT_LLM_QUIET_HOURS`,
+`STT_VM_DELETE_AFTER_INGEST`, or `STT_MIRROR_DIR` prints one warning that
+names it, and the code falls back as the tables below say. `./run.sh py tools/doctor.py check`
 lists each of them as `bad_setting`.
 
 `stt.env` holds one `KEY=VALUE` per line and is read as plain text, never
@@ -762,12 +764,55 @@ plain characters. A later line for the same key wins.
 | `STT_VM_DELETE_SHORTCUT` | `STT Delete Voice Memo v2` | The name of the Shortcut that does the delete. It matches a memo by title and length ([Removing memos from Voice Memos](#removing-memos-from-voice-memos)) |
 | `STT_MOVE_AFTER_SUCCESS` | `1` | `0` keeps the originals in the watched folder |
 | `STT_MIC_SPEAKER` | empty | Your name, so the recorder's microphone channel is labeled as you |
+| `STT_MIRROR_DIR` | empty (off) | A folder that a sync program uploads, such as one in Google Drive for desktop. The library keeps a copy of each meeting's `.txt` there and updates it after every change ([The transcript mirror](#the-transcript-mirror)). Strict meetings are never copied. It must be an absolute path outside the transcripts folder, the other data folders, and this checkout. Any other value prints a warning and leaves the mirror off |
 
 When you pick a new transcripts folder in Settings, the panel asks before it
 uses a folder that holds other files or old flat-layout meetings. Once you
 confirm, it moves each old flat-layout meeting (a transcript `.json` the
 pipeline wrote, with its `.txt`) into its own folder. Every other file stays
 where it is.
+
+### The transcript mirror
+
+Set `STT_MIRROR_DIR` to a folder that a sync program uploads, and the
+library keeps a copy of each transcript there. Strict meetings never leave
+the Mac this way either.
+
+- The folder holds one file per meeting, named like its folder:
+  `2026-08-03 Weekly Check-in.txt`. Each one is a byte copy of the
+  meeting's `.txt`. No audio, json, or caches go there.
+- A speaker name, a relabel, a merge, a line edit, a title or date edit, an
+  archive, a restore, a delete, and a Redo each update the copy within
+  seconds. A renamed meeting's old file is removed. An archived or deleted
+  meeting's file is removed, and a restore brings it back.
+- The batch checks the whole folder at the end of every run, an empty one
+  too, so an update that was missed lands within about 10 minutes.
+- A file is written only when its text changed, so the sync program does
+  not upload files again for nothing.
+- A strict meeting is never copied. A meeting that becomes strict loses its
+  copy.
+- The mirror never overwrites or removes a file it did not write. A file you
+  add by hand stays. A copy you edit in the folder is left as it is, and the
+  doctor reports it as `mirror_changed`. Delete it, and the next run writes
+  the current transcript. A file of yours with a meeting's name keeps that
+  meeting out, and the doctor reports it as `mirror_blocked`.
+- If the folder is missing or not writable (the sync program is not running,
+  or the disk is full), the batch and the panel log one line and try again
+  on the next run. The doctor reports it as `mirror_unavailable`. The
+  mirror never creates the folder.
+
+`mirror_state.json` (mode 600), beside `manifest.json`, records each file
+the mirror wrote and its hash. To start:
+
+```bash
+# in stt.env (no quotes needed around a path with spaces)
+STT_MIRROR_DIR=/Users/you/My Drive/Meeting Transcripts
+```
+
+```bash
+./run.sh py tools/mirror.py            # dry run: what it would copy
+./run.sh py tools/mirror.py --apply    # the first copy of every meeting
+```
 
 ### Engines
 
@@ -849,6 +894,7 @@ migration folder, outside the repo:
 | `fix_dates.py` | Corrects dates that a better source contradicts: a recorder start time or a short typed date ([Dates](#dates)). `--undo RUN --apply` puts them back |
 | `backfill_keys.py` | Adds missing store keys (`title`, `source_name`, `audio_fp`, `date_source`, `recorded_at`) |
 | `restamp_folders.py` | Adds the date to folders that predate the date-in-name rule |
+| `mirror.py` | Brings the transcript mirror folder (`STT_MIRROR_DIR`) in line with the library. The first `--apply` copies every meeting there ([The transcript mirror](#the-transcript-mirror)) |
 | `demo_seed.py` | Builds a synthetic library for development and screenshots |
 | `next_screens.py` | Screenshots every panel page against a running demo panel and fails on a sideways scroll |
 | `diar_eval.py`, `synth_corpus.py`, `ask_eval.py`, `eta_backtest.py` | Accuracy and estimate harnesses for tuning |
@@ -944,6 +990,12 @@ line that reverses them.
   reachable" is written when the batch is next idle after Ollama is back,
   or press Regenerate. A `bad_setting` finding from the doctor names a value
   it could not read.
+- **The mirror folder stops updating.** Run `./run.sh py tools/doctor.py
+  check`. `mirror_unavailable` means the folder is missing or not writable:
+  start the sync program, and the next batch run catches up.
+  `mirror_changed` and `mirror_blocked` name files the mirror leaves alone
+  ([The transcript mirror](#the-transcript-mirror)). `./run.sh py
+  tools/mirror.py` shows what a full pass would do.
 - **A description is out of date.** A Redo marks it so. The batch refreshes
   it when the queue is empty, or press Regenerate.
 - **The fan runs during a retitle.** Turn on quiet mode: set `STT_LLM_NICE`
