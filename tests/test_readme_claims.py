@@ -4,6 +4,7 @@ silently break: the classic page is gone, every in-page link lands on a
 heading, every tool it names exists, the registry_doctor table lists the
 finding kinds the code reports, and the numbers it gives for the date
 editor and the enroll safeguards are the code's own defaults."""
+import json
 import re
 from pathlib import Path
 
@@ -148,17 +149,53 @@ def test_no_published_file_installs_or_offers_the_removed_parakeet_engine():
     assert "no longer uses" in notice and "parakeet-mlx" not in notice
 
 
-def test_the_shortcut_steps_match_the_working_build():
-    """The README builds the delete Shortcut the way the owner's working
-    build does: Shortcut Input straight into Find Recordings, Delete
-    Recordings fed the Find result as a variable, never a memo picked from
-    the list, and the count as the output. Examples use synthetic titles."""
-    text = " ".join(_section("Removing memos from Voice Memos").split())
-    for step in ("**Stop and Respond**", "**Recording Name** **is**",
-                 "choose **Shortcut Input** as its value",
+def test_the_shortcut_steps_match_the_v2_build():
+    """The README builds the v2 delete Shortcut the way the owner's working
+    build does: Get Dictionary from Input, Get Dictionary Value for title,
+    min and max, Find Recordings by name and by two strict Duration rows in
+    seconds ("is between" does not work), each value picked with Select
+    Variable, Delete Recordings fed the Find result as a variable and never
+    a memo picked from the list, and the count as the output. The numbers
+    are the code's own, the hand test passes valid JSON, and the examples
+    use synthetic titles."""
+    from stt import voicememos
+    section = _section("Removing memos from Voice Memos")
+    text = " ".join(re.sub(r"(?m)^\s*>\s?", "", section).split())
+    for step in ("**Stop and Respond**",
+                 "Add **Get Dictionary from Input**, with **Shortcut Input** as its input",
+                 "Add **Get Dictionary Value** three times",
+                 "The keys are `title`, `min` and `max`, one per action",
+                 "Set it to **All** of the following are true",
+                 "**Recording Name** **is** the `title` value",
+                 "**Duration** **is greater than** the `min` value, in **seconds**",
+                 "**Duration** **is less than** the `max` value, in **seconds**",
+                 "**Duration** **is between** does not work in this action",
+                 "Their limits are strict",
+                 "**Pick each value with Select Variable, never by typing.**",
+                 "choose **Select Variable**, then tap the **Get Dictionary Value** block",
                  "**Delete Recordings** (Voice Memos), with the **Recordings** variable",
                  "**Pick the variable, never a memo.**", "the Voice Memos icon",
-                 "**Stop and Output** with the **Count** variable"):
+                 "**Stop and Output** with the **Count** variable",
+                 "Find Recordings also finds memos in Recently Deleted",
+                 "`shortcuts run` prints the count on standard output"):
         assert step in text, step
     assert "Get Text from Input" not in text
     assert "STT delete test" in text
+    # the window and the twin limit are the code's
+    assert f"a window of {voicememos.MATCH_WINDOW_SEC:g} seconds on each side" in text
+    assert f"a length within {voicememos.TWIN_SLACK_SEC:g} seconds" in text
+    assert f"`{voicememos.SHORTCUT_DEFAULT}`" in text
+    assert (f"| `STT_VM_DELETE_SHORTCUT` | `{voicememos.SHORTCUT_DEFAULT}` |"
+            in README)
+    # the hand test: valid JSON with the three keys and a synthetic title,
+    # and the count read from the terminal, never from an output file
+    runs = re.findall(r"^\s*shortcuts run .*$", section, re.M)
+    assert len(runs) == 2 and not any("--output-path" in r for r in runs), runs
+    inputs = [json.loads(m) for m in re.findall(r"printf '(\{.*?\})'", section)]
+    assert len(inputs) == 2
+    for d in inputs:
+        assert set(d) == {"title", "min", "max"}
+        assert d["title"].startswith("STT delete test")
+        assert isinstance(d["min"], (int, float)) and d["min"] < d["max"]
+    example = json.loads(re.search(r"```json\n(.*?)\n```", section, re.S).group(1))
+    assert example == voicememos._match_input("Budget Review", 1200.0)
