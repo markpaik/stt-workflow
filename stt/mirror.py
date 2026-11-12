@@ -473,9 +473,12 @@ def _apply(ctx: Ctx, st: dict, ops: list) -> dict:
                                "id": fresh["id"], "base": fresh["base"]}
                 done[kind] += 1
             elif kind == "remove":
-                os.unlink(ctx.mirror / name)
+                try:
+                    os.unlink(ctx.mirror / name)
+                    done["remove"] += 1
+                except FileNotFoundError:
+                    pass        # removed by someone else first: the same end
                 files.pop(o.get("record") or name, None)
-                done["remove"] += 1
             elif kind == "forget":
                 files.pop(name, None)
     finally:

@@ -240,6 +240,23 @@ def test_a_deleted_meeting_loses_its_file(drive):
     assert _names(drive) == [f"{BUDGET}.txt"]
 
 
+def test_a_copy_removed_by_hand_while_the_pass_runs_is_no_error(drive, monkeypatch):
+    import shutil
+    _meeting(WEEKLY)
+    mirror.reconcile()
+    shutil.rmtree(config.meeting_dir(WEEKLY))
+    real = mirror._plan
+
+    def plan_then_gone(ctx, st, bases=None):
+        ops = real(ctx, st, bases)
+        (drive / f"{WEEKLY}.txt").unlink()
+        return ops
+    monkeypatch.setattr(mirror, "_plan", plan_then_gone)
+    r = mirror.reconcile()
+    assert r["ok"] and r["problem"] is None and r["remove"] == 0
+    assert mirror._load(mirror.context())["files"] == {}
+
+
 def test_an_archived_meeting_loses_its_file_and_a_restore_brings_it_back(drive):
     _meeting(WEEKLY)
     mirror.reconcile()
