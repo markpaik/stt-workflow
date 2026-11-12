@@ -206,6 +206,10 @@ def relabel_one(base: str, strict=None, allowed_names=None) -> bool:
                           data["speakers"], segments, labeled_words)
         output.write_txt(tpath, segments, header=header)
 
+    # the mirror copy (STT_MIRROR_DIR) follows, in the background: every
+    # naming, rename, merge and relabel pass ends here
+    from stt import mirror
+    mirror.touch(base)
     print(f"  {base}: " + ", ".join(s["display"] for s in data["speakers"])
           + (f"  [{stats['flagged']} flagged]" if stats.get("flagged") else ""))
     return True

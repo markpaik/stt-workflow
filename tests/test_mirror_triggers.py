@@ -202,3 +202,199 @@ def test_each_finished_meeting_is_mirrored_before_the_next_one_starts(drive, mon
     assert _batch(monkeypatch, describe=describe) == 0
     assert seen == {"first": True, "second": False}
     assert _names(drive) == [f"{first}.txt", f"{second}.txt"]
+
+
+# ---------- speaker naming, relabel, merge, line edits ----------
+#
+# Every naming, speaker rename, merge, sample edit and relabel pass ends in
+# relabel.relabel_one, and every line edit, insert, delete, split and
+# accept ends in review._rewrite. Both hand the meeting to mirror.touch.
+
+from tests.test_relabel_targets import _meeting as _cached_meeting  # noqa: E402
+from tests.test_relabel_targets import _post, _unit  # noqa: E402
+
+
+@pytest.fixture
+def running_server(sandbox):
+    import threading
+
+    from gui import server as srv
+    httpd = srv.ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    yield httpd.server_address[1]
+    httpd.shutdown()
+    t.join(timeout=2)
+
+
+@pytest.fixture
+def real_queue(monkeypatch, sandbox):
+    """The panel's own relabel queue, relabeling in-process."""
+    from gui import jobqueue
+    from gui import server as srv
+    q = jobqueue.RelabelQueue().start()
+    monkeypatch.setattr(srv, "RELABEL_QUEUE", q)
+    monkeypatch.setattr(srv, "_spawn", lambda cmd: pytest.fail(f"spawned {cmd}"))
+    yield q
+    q.stop(timeout=5)
+
+
+def _drained(q):
+    from tests.test_jobqueue import _drain
+    _drain(q)
+    assert mirror.wait(10)
+
+
+def _copy(drive, base):
+    return (drive / f"{base}.txt").read_text()
+
+
+def test_a_relabel_updates_the_mirror(drive):
+    import relabel
+    from tests.test_relabel import _seed_meeting
+    _seed_meeting(WEEKLY)
+    mirror.reconcile()
+    assert _copy(drive, WEEKLY) == "stub"
+    assert relabel.relabel_one(WEEKLY) is True
+    assert mirror.wait(10)
+    assert (drive / f"{WEEKLY}.txt").read_bytes() == \
+        config.meeting_file(WEEKLY, ".txt").read_bytes()
+    assert "Voice 1" in _copy(drive, WEEKLY)
+
+
+def test_a_strict_relabel_removes_the_copy(drive):
+    import relabel
+    from tests.test_relabel import _seed_meeting
+    _seed_meeting(WEEKLY)
+    mirror.reconcile()
+    assert relabel.relabel_one(WEEKLY, strict=True) is True
+    assert mirror.wait(10)
+    assert _names(drive) == []
+
+
+def test_a_meeting_local_name_from_the_panel_updates_the_mirror(drive, running_server):
+    from tests.test_relabel import _seed_meeting
+    _seed_meeting(WEEKLY)
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/name",
+                         {"meeting": WEEKLY, "speaker": "SPEAKER_00",
+                          "name": "Alex Rivera", "local": True})
+    assert status == 200 and body["ok"] and body["applied"]
+    assert mirror.wait(10)
+    assert "Alex Rivera" in _copy(drive, WEEKLY)
+
+
+def test_a_speaker_rename_from_the_panel_updates_every_copy(drive, running_server,
+                                                            real_queue):
+    v = _unit(1)
+    from stt import identify
+    identify.enroll("Dana Cole", v, source=WEEKLY)
+    _cached_meeting(WEEKLY, {"SPEAKER_00": v},
+                    speakers=[{"id": "SPEAKER_00", "name": "Dana Cole",
+                               "display": "Dana Cole"}])
+    _cached_meeting(BUDGET, {"SPEAKER_00": _unit(3)})
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/rename_speaker",
+                         {"name": "Dana Cole", "new": "Dana Brooks"})
+    assert status == 200 and body["ok"] and body["targets"] == [WEEKLY]
+    _drained(real_queue)
+    assert "Dana Brooks" in _copy(drive, WEEKLY)
+    assert "Dana Cole" not in _copy(drive, WEEKLY)
+    assert _copy(drive, BUDGET) == "stub"       # a meeting the change missed
+
+
+def test_a_merge_from_the_panel_updates_the_copy(drive, running_server, real_queue):
+    from stt import identify
+    va, vb = _unit(1), _unit(2)
+    identify.enroll("Dana Cole", va, source=WEEKLY)
+    identify.enroll("D. Cole", vb, source=BUDGET)
+    _cached_meeting(BUDGET, {"SPEAKER_00": vb},
+                    speakers=[{"id": "SPEAKER_00", "name": "D. Cole",
+                               "display": "D. Cole"}])
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/merge_speakers",
+                         {"src": "name:D. Cole", "dst": "name:Dana Cole",
+                          "confirm": True})
+    assert status == 200 and body["ok"]
+    _drained(real_queue)
+    assert "Dana Cole" in _copy(drive, BUDGET)
+
+
+def _review_meeting(base):
+    from tests.test_review import _make_meeting
+    d = _make_meeting(None, base=base)
+    config.meeting_file(base, ".json").write_text(
+        json.dumps({"meeting_id": f"{next(_ids):016x}", **d}))
+    return d
+
+
+def test_a_line_edit_updates_the_mirror(drive):
+    from stt import review
+    _review_meeting(WEEKLY)
+    mirror.reconcile()
+    r = review.apply(WEEKLY, 1, "edit", start=5.0, text="Revised in review.")
+    assert r["ok"]
+    assert mirror.wait(10)
+    assert "Revised in review." in _copy(drive, WEEKLY)
+
+
+def test_an_inserted_and_a_deleted_line_update_the_mirror(drive):
+    from stt import review
+    _review_meeting(WEEKLY)
+    mirror.reconcile()
+    r = review.insert_segment(WEEKLY, 6.5, 7.5, "name:Jordan Lee", "One more thing.")
+    assert r["ok"]
+    assert mirror.wait(10)
+    assert "Jordan Lee: One more thing." in _copy(drive, WEEKLY)
+    assert review.delete_segment(WEEKLY, r["index"], start=6.5)["ok"]
+    assert mirror.wait(10)
+    assert "One more thing." not in _copy(drive, WEEKLY)
+
+
+def test_a_line_edit_through_the_panel_updates_the_mirror(drive, running_server):
+    _review_meeting(WEEKLY)
+    mirror.reconcile()
+    status, body = _post(running_server, "/api/review",
+                         {"base": WEEKLY, "action": "edit", "index": 0,
+                          "start": 0.0, "end": 5.0, "text": "Opening, revised."})
+    assert status == 200 and body["ok"]
+    assert mirror.wait(10)
+    assert "Opening, revised." in _copy(drive, WEEKLY)
+
+
+def test_a_panel_edit_does_not_wait_for_the_mirror(drive, monkeypatch):
+    """The copy runs after the action, in the background: a slow sync
+    folder never holds a save."""
+    import threading
+    import time
+
+    from stt import review
+    _review_meeting(WEEKLY)
+    gate = threading.Event()
+    real = mirror.reconcile
+
+    def slow(*a, **k):
+        gate.wait(10)
+        return real(*a, **k)
+    monkeypatch.setattr(mirror, "reconcile", slow)
+    t0 = time.monotonic()
+    assert review.apply(WEEKLY, 1, "accept", start=5.0)["ok"]
+    assert time.monotonic() - t0 < 2.0
+    assert _names(drive) == []
+    gate.set()
+    assert mirror.wait(10)
+    assert _names(drive) == [f"{WEEKLY}.txt"]
+
+
+def test_a_panel_edit_with_the_folder_missing_still_saves(sandbox, monkeypatch, capsys,
+                                                          tmp_path_factory):
+    from stt import review
+    d = tmp_path_factory.mktemp("away") / "Drive"
+    (sandbox / "stt.env").write_text(f"STT_MIRROR_DIR={d}\n")
+    monkeypatch.setattr(mirror, "_said", {"msg": None})
+    _review_meeting(WEEKLY)
+    assert review.apply(WEEKLY, 1, "accept", start=5.0)["ok"]
+    assert review.apply(WEEKLY, 0, "edit", start=0.0, text="Again.")["ok"]
+    assert mirror.wait(10)
+    assert capsys.readouterr().err.count("is missing or not a folder") == 1
+    assert "Again." in config.meeting_file(WEEKLY, ".txt").read_text()
